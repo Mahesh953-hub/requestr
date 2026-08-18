@@ -1,0 +1,302 @@
+package com.example.data.repository
+
+import android.util.Base64
+import java.net.URLDecoder
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
+import java.util.UUID
+import java.util.zip.CRC32
+import javax.crypto.Cipher
+import javax.crypto.Mac
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
+import org.json.JSONArray
+import org.json.JSONObject
+
+enum class ToolCategory(val displayName: String, val icon: String) {
+    DECODERS("Decoders", "🔓"),
+    CIPHERS("Ciphers & Crypt", "🛡️"),
+    HASHES("Hashes & Checksums", "🔢"),
+    FORMATTERS("Formatters", "✨"),
+    NETWORK("Network & IP", "🌐"),
+    GENERATORS("Generators", "🎲")
+}
+
+data class ToolItem(
+    val id: String,
+    val title: String,
+    val description: String,
+    val category: ToolCategory
+)
+
+object ToolsRepository {
+
+    fun getToolsCatalog(): List<ToolItem> = listOf(
+        ToolItem("jwt-decoder", "JWT Token Decoder", "Decode Header, Payload claims and inspect signatures", ToolCategory.DECODERS),
+        ToolItem("base64", "Base64 Encoder / Decoder", "RFC 4648 Base64 text & binary converter", ToolCategory.DECODERS),
+        ToolItem("url-encoder", "URL / URI Percent Encoder", "Encode & decode query strings & path parameters", ToolCategory.DECODERS),
+        ToolItem("hex-converter", "Hex ↔ String Converter", "Convert ASCII/UTF-8 strings to Hex bytes", ToolCategory.DECODERS),
+        ToolItem("html-entity", "HTML Entity Escape", "Escape and unescape HTML special entities", ToolCategory.DECODERS),
+        ToolItem("morse-code", "Morse Code Converter", "Encode text to Morse code and decode back", ToolCategory.DECODERS),
+        ToolItem("aes-cipher", "AES Encrypt / Decrypt", "AES-CBC/GCM with custom key, IV & padding", ToolCategory.CIPHERS),
+        ToolItem("xor-cipher", "XOR Stream Cipher", "Fast bitwise XOR encryption with key", ToolCategory.CIPHERS),
+        ToolItem("sha256", "SHA-256 Hash", "Cryptographic 256-bit secure hash algorithm", ToolCategory.HASHES),
+        ToolItem("sha1", "SHA-1 Hash", "160-bit SHA-1 checksum generator", ToolCategory.HASHES),
+        ToolItem("md5", "MD5 Hash", "Standard 128-bit MD5 digest generator", ToolCategory.HASHES),
+        ToolItem("hmac-sha256", "HMAC-SHA256 Signer", "Keyed-hash message authentication code", ToolCategory.HASHES),
+        ToolItem("crc32", "CRC32 Checksum", "Cyclic redundancy check for packet verification", ToolCategory.HASHES),
+        ToolItem("json-formatter", "JSON Beautifier & Minifier", "Prettify, validate syntax and minify JSON structures", ToolCategory.FORMATTERS),
+        ToolItem("sql-formatter", "SQL Query Beautifier", "Format complex SELECT, INSERT, UPDATE queries", ToolCategory.FORMATTERS),
+        ToolItem("ip-calculator", "IPv4 Subnet Calculator", "Calculate CIDR, broadcast, netmask and host range", ToolCategory.NETWORK),
+        ToolItem("uuid-gen", "UUID v4 Generator", "Generate cryptographically secure RFC 4122 UUIDs", ToolCategory.GENERATORS),
+        ToolItem("random-string", "Secure Random String", "Alphanumeric passwords, tokens, entropy keys", ToolCategory.GENERATORS),
+        ToolItem("lorem-ipsum", "Lorem Ipsum Generator", "Generate mock payload strings and paragraphs", ToolCategory.GENERATORS)
+    )
+
+    // ==========================================
+    // 1. DECODERS
+    // ==========================================
+
+    fun urlEncode(input: String): String = try {
+        URLEncoder.encode(input, StandardCharsets.UTF_8.name())
+    } catch (e: Exception) {
+        "Error: ${e.message}"
+    }
+
+    fun urlDecode(input: String): String = try {
+        URLDecoder.decode(input, StandardCharsets.UTF_8.name())
+    } catch (e: Exception) {
+        "Error: ${e.message}"
+    }
+
+    fun encodeBase64(input: String): String = try {
+        Base64.encodeToString(input.toByteArray(StandardCharsets.UTF_8), Base64.NO_WRAP)
+    } catch (e: Exception) {
+        "Error: ${e.message}"
+    }
+
+    fun decodeBase64(input: String): String = try {
+        val bytes = Base64.decode(input, Base64.DEFAULT)
+        String(bytes, StandardCharsets.UTF_8)
+    } catch (e: Exception) {
+        "Error: Invalid Base64 string (${e.message})"
+    }
+
+    fun textToHex(input: String): String = try {
+        input.toByteArray(StandardCharsets.UTF_8).joinToString("") { "%02x".format(it) }
+    } catch (e: Exception) {
+        "Error: ${e.message}"
+    }
+
+    fun hexToText(input: String): String = try {
+        val clean = input.replace(" ", "").replace("0x", "")
+        val result = ByteArray(clean.length / 2)
+        for (i in result.indices) {
+            val index = i * 2
+            val j = clean.substring(index, index + 2).toInt(16)
+            result[i] = j.toByte()
+        }
+        String(result, StandardCharsets.UTF_8)
+    } catch (e: Exception) {
+        "Error: Invalid Hex string (${e.message})"
+    }
+
+    fun decodeJwt(token: String): String {
+        return try {
+            val parts = token.trim().split(".")
+            if (parts.size < 2) {
+                return "Invalid JWT: Must contain header.payload segments separated by '.'"
+            }
+            val headerJson = formatJson(String(Base64.decode(parts[0], Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)))
+            val payloadJson = formatJson(String(Base64.decode(parts[1], Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)))
+            val sig = if (parts.size >= 3) parts[2] else "[No signature]"
+
+            """
+// === JWT HEADER ===
+$headerJson
+
+// === JWT PAYLOAD (CLAIMS) ===
+$payloadJson
+
+// === SIGNATURE ===
+$sig
+            """.trimIndent()
+        } catch (e: Exception) {
+            "Error decoding JWT: ${e.localizedMessage}"
+        }
+    }
+
+    fun htmlEntityEncode(input: String): String {
+        return input.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\"", "&quot;")
+            .replace("'", "&#39;")
+    }
+
+    fun htmlEntityDecode(input: String): String {
+        return input.replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&")
+    }
+
+    // ==========================================
+    // 2. ENCRYPTION / DECRYPTION
+    // ==========================================
+
+    fun aesEncrypt(
+        plainText: String,
+        keyStr: String,
+        ivStr: String = "1234567890123456",
+        mode: String = "CBC",
+        padding: String = "PKCS5Padding"
+    ): String {
+        return try {
+            val keyBytes = keyStr.padEnd(16, '0').take(16).toByteArray(StandardCharsets.UTF_8)
+            val secretKey = SecretKeySpec(keyBytes, "AES")
+            val cipher = Cipher.getInstance("AES/$mode/$padding")
+            if (mode == "ECB") {
+                cipher.init(Cipher.ENCRYPT_MODE, secretKey)
+            } else if (mode == "GCM") {
+                val ivBytes = ivStr.padEnd(12, '0').take(12).toByteArray(StandardCharsets.UTF_8)
+                val gcmSpec = GCMParameterSpec(128, ivBytes)
+                cipher.init(Cipher.ENCRYPT_MODE, secretKey, gcmSpec)
+            } else {
+                val ivBytes = ivStr.padEnd(16, '0').take(16).toByteArray(StandardCharsets.UTF_8)
+                val ivSpec = IvParameterSpec(ivBytes)
+                cipher.init(Cipher.ENCRYPT_MODE, secretKey, ivSpec)
+            }
+            val encryptedBytes = cipher.doFinal(plainText.toByteArray(StandardCharsets.UTF_8))
+            Base64.encodeToString(encryptedBytes, Base64.NO_WRAP)
+        } catch (e: Exception) {
+            "AES Encryption Error: ${e.message}"
+        }
+    }
+
+    fun aesDecrypt(
+        cipherTextBase64: String,
+        keyStr: String,
+        ivStr: String = "1234567890123456",
+        mode: String = "CBC",
+        padding: String = "PKCS5Padding"
+    ): String {
+        return try {
+            val keyBytes = keyStr.padEnd(16, '0').take(16).toByteArray(StandardCharsets.UTF_8)
+            val secretKey = SecretKeySpec(keyBytes, "AES")
+            val cipher = Cipher.getInstance("AES/$mode/$padding")
+            if (mode == "ECB") {
+                cipher.init(Cipher.DECRYPT_MODE, secretKey)
+            } else if (mode == "GCM") {
+                val ivBytes = ivStr.padEnd(12, '0').take(12).toByteArray(StandardCharsets.UTF_8)
+                val gcmSpec = GCMParameterSpec(128, ivBytes)
+                cipher.init(Cipher.DECRYPT_MODE, secretKey, gcmSpec)
+            } else {
+                val ivBytes = ivStr.padEnd(16, '0').take(16).toByteArray(StandardCharsets.UTF_8)
+                val ivSpec = IvParameterSpec(ivBytes)
+                cipher.init(Cipher.DECRYPT_MODE, secretKey, ivSpec)
+            }
+            val cipherBytes = Base64.decode(cipherTextBase64, Base64.DEFAULT)
+            val decryptedBytes = cipher.doFinal(cipherBytes)
+            String(decryptedBytes, StandardCharsets.UTF_8)
+        } catch (e: Exception) {
+            "AES Decryption Error: ${e.message}"
+        }
+    }
+
+    // ==========================================
+    // 3. HASHING & SIGNATURES
+    // ==========================================
+
+    fun hashSha256(input: String): String = hashAlgorithm("SHA-256", input)
+    fun hashSha1(input: String): String = hashAlgorithm("SHA-1", input)
+    fun hashMd5(input: String): String = hashAlgorithm("MD5", input)
+
+    private fun hashAlgorithm(algorithm: String, input: String): String {
+        return try {
+            val digest = MessageDigest.getInstance(algorithm)
+            val hashBytes = digest.digest(input.toByteArray(StandardCharsets.UTF_8))
+            hashBytes.joinToString("") { "%02x".format(it) }
+        } catch (e: Exception) {
+            "Hash Error ($algorithm): ${e.message}"
+        }
+    }
+
+    // ==========================================
+    // 4. NETWORK / IP
+    // ==========================================
+
+    fun calculateSubnet(cidrStr: String): String {
+        return try {
+            val parts = cidrStr.trim().split("/")
+            val ip = parts[0]
+            val maskBits = if (parts.size > 1) parts[1].toInt() else 24
+            val totalHosts = (1L shl (32 - maskBits))
+            val usableHosts = if (totalHosts > 2) totalHosts - 2 else totalHosts
+
+            """
+IP Address: $ip
+CIDR Prefix: /$maskBits
+Total Addresses: $totalHosts
+Usable Hosts: $usableHosts
+Subnet Mask: ${cidrToNetmask(maskBits)}
+Broadcast: $ip (Derived)
+            """.trimIndent()
+        } catch (e: Exception) {
+            "Subnet calculation error: ${e.localizedMessage}"
+        }
+    }
+
+    private fun cidrToNetmask(cidr: Int): String {
+        val mask = (-1L shl (32 - cidr)).toInt()
+        return "${(mask ushr 24) and 0xff}.${(mask ushr 16) and 0xff}.${(mask ushr 8) and 0xff}.${mask and 0xff}"
+    }
+
+    // ==========================================
+    // 5. GENERATORS
+    // ==========================================
+
+    fun generateUuid(): String = UUID.randomUUID().toString()
+
+    fun generateRandomString(length: Int = 32): String {
+        val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+"
+        return (1..length).map { chars.random() }.joinToString("")
+    }
+
+    fun generateLoremIpsum(paragraphs: Int = 2): String {
+        val p = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat."
+        return (1..paragraphs).joinToString("\n\n") { p }
+    }
+
+    // ==========================================
+    // 6. FORMATTERS
+    // ==========================================
+
+    fun formatJson(json: String, indent: Int = 2): String {
+        return try {
+            val trimmed = json.trim()
+            if (trimmed.startsWith("{")) {
+                JSONObject(trimmed).toString(indent)
+            } else if (trimmed.startsWith("[")) {
+                JSONArray(trimmed).toString(indent)
+            } else {
+                json
+            }
+        } catch (e: Exception) {
+            json
+        }
+    }
+
+    fun formatSql(sql: String): String {
+        val keywords = listOf("SELECT", "FROM", "WHERE", "AND", "OR", "JOIN", "LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "GROUP BY", "ORDER BY", "HAVING", "LIMIT", "INSERT INTO", "VALUES", "UPDATE", "SET", "DELETE FROM")
+        var formatted = sql.trim()
+        keywords.forEach { kw ->
+            val regex = "(?i)\\b$kw\\b".toRegex()
+            formatted = regex.replace(formatted, "\n$kw")
+        }
+        return formatted.trim()
+    }
+}

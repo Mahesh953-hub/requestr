@@ -1,0 +1,530 @@
+package com.example
+
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Notes
+import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Radar
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.Text
+import androidx.compose.material3.rememberDrawerState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.compose.rememberNavController
+import com.example.data.models.ApiRequestItem
+import com.example.data.models.CapturedTrafficItem
+import com.example.data.models.NoteItem
+import com.example.data.repository.ApiCollectionsRepository
+import com.example.data.repository.MusicRepository
+import com.example.data.repository.NotesRepository
+import com.example.data.repository.SettingsRepository
+import com.example.data.repository.TrafficInterceptorRepository
+import com.example.ui.components.AppNavigationDrawer
+import com.example.ui.components.GlassCard
+import com.example.ui.components.HoveredPillNavigationBar
+import com.example.ui.components.InPageMiniSettingsSheet
+import com.example.ui.components.MiniPlayerPersistentBar
+import com.example.ui.screens.ApiTestrScreen
+import com.example.ui.screens.ChatScreen
+import com.example.ui.screens.FlowScreen
+import com.example.ui.screens.HomeScreen
+import com.example.ui.screens.InterceptScreen
+import com.example.ui.screens.MusicScreen
+import com.example.ui.screens.NotesScreen
+import com.example.ui.screens.OnboardingScreen
+import com.example.ui.screens.SettingsScreen
+import com.example.ui.screens.ToolsScreen
+import com.example.ui.theme.AppThemeMode
+import com.example.ui.theme.MyApplicationTheme
+import com.example.ui.theme.TextMuted
+import com.example.ui.theme.TextPrimary
+import com.example.ui.theme.TextSecondary
+import kotlinx.coroutines.launch
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        setContent {
+            RequestrApp()
+        }
+    }
+}
+
+sealed class Screen(val route: String, val title: String, val icon: ImageVector) {
+    object Home : Screen("home", "Home", Icons.Default.Home)
+    object Intercept : Screen("intercept", "Intercept", Icons.Default.Radar)
+    object Apis : Screen("apis", "APIs", Icons.Default.Public)
+    object Tools : Screen("tools", "Tools", Icons.Default.Tune)
+    object Chats : Screen("chats", "Chats", Icons.Default.Chat)
+    object Notes : Screen("notes", "Notes", Icons.Default.Notes)
+    object Flow : Screen("flow", "Flow", Icons.Default.Code)
+    object Music : Screen("music", "Music", Icons.Default.MusicNote)
+    object Settings : Screen("settings", "Settings", Icons.Default.Tune)
+    object Onboarding : Screen("onboarding", "Onboarding", Icons.Default.Home)
+}
+
+@Composable
+fun RequestrApp() {
+    val settings by SettingsRepository.settings.collectAsState()
+    val themeMode = remember(settings.themeMode) {
+        when (settings.themeMode.uppercase()) {
+            "EDITORIAL_LIGHT", "LIGHT" -> AppThemeMode.EDITORIAL_LIGHT
+            "MONOCHROME_DARK", "OBSIDIAN" -> AppThemeMode.MONOCHROME_DARK
+            "MIDNIGHT_SAPPHIRE", "MIDNIGHT" -> AppThemeMode.MIDNIGHT_SAPPHIRE
+            "KYOTO_MATCHA", "MATCHA" -> AppThemeMode.KYOTO_MATCHA
+            "CYBER_TERMINAL", "TERMINAL" -> AppThemeMode.CYBER_TERMINAL
+            "DUSK_TERRACOTTA", "DUSK" -> AppThemeMode.DUSK_TERRACOTTA
+            "SOLAR_AMBER", "AMBER" -> AppThemeMode.SOLAR_AMBER
+            else -> AppThemeMode.MIDNIGHT_SAPPHIRE
+        }
+    }
+
+    MyApplicationTheme(themeMode = themeMode) {
+        val navController = rememberNavController()
+        val navBackStackEntry by navController.currentBackStackEntryAsState()
+        val currentRoute = navBackStackEntry?.destination?.route ?: Screen.Home.route
+
+        val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+        val coroutineScope = rememberCoroutineScope()
+
+        val isMusicPlaying by MusicRepository.isPlaying.collectAsState()
+        val currentTrack by MusicRepository.currentTrack.collectAsState()
+
+        var showMiniSettingsForSection by remember { mutableStateOf<String?>(null) }
+
+        val rootRoutes = listOf(
+            Screen.Home.route,
+            Screen.Intercept.route,
+            Screen.Apis.route,
+            Screen.Tools.route,
+            Screen.Chats.route,
+            Screen.Notes.route,
+            Screen.Flow.route,
+            Screen.Music.route
+        )
+
+        var isMiniPlayerDismissed by remember { mutableStateOf(false) }
+        val showPillNav = currentRoute in rootRoutes && settings.onboardingCompleted
+
+        AppNavigationDrawer(
+            drawerState = drawerState,
+            currentRoute = currentRoute,
+            onNavigate = { route ->
+                if (currentRoute != route) {
+                    navController.navigate(route) {
+                        popUpTo(Screen.Home.route) { saveState = true }
+                        launchSingleTop = true
+                        restoreState = true
+                    }
+                }
+            },
+            onOpenSettings = {
+                navController.navigate(Screen.Settings.route)
+            }
+        ) {
+            Scaffold(
+                modifier = Modifier.fillMaxSize(),
+                containerColor = MaterialTheme.colorScheme.background,
+                bottomBar = {
+                    if (showPillNav) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .windowInsetsPadding(WindowInsets.navigationBars)
+                        ) {
+                            // Persistent Mini Player above hovered pill dock
+                            if (currentRoute != Screen.Music.route && !isMiniPlayerDismissed) {
+                                MiniPlayerPersistentBar(
+                                    track = currentTrack,
+                                    isPlaying = isMusicPlaying,
+                                    onTogglePlay = { MusicRepository.togglePlayPause() },
+                                    onNext = { MusicRepository.nextTrack() },
+                                    onClose = {
+                                        MusicRepository.stopMusic()
+                                        isMiniPlayerDismissed = true
+                                    },
+                                    onExpand = { navController.navigate(Screen.Music.route) }
+                                )
+                            }
+
+                            // Hovered Floating Pill Style Navigation Bar
+                            HoveredPillNavigationBar(
+                                currentRoute = currentRoute,
+                                onNavigate = { route ->
+                                    if (currentRoute != route) {
+                                        navController.navigate(route) {
+                                            popUpTo(Screen.Home.route) { saveState = true }
+                                            launchSingleTop = true
+                                            restoreState = true
+                                        }
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
+            ) { innerPadding ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(innerPadding)
+                ) {
+                    NavHost(
+                        navController = navController,
+                        startDestination = if (settings.onboardingCompleted) Screen.Home.route else Screen.Onboarding.route
+                    ) {
+                        composable(Screen.Onboarding.route) {
+                            OnboardingScreen(
+                                onFinishOnboarding = { name, theme ->
+                                    SettingsRepository.updateUserName(name)
+                                    SettingsRepository.updateTheme(theme)
+                                    SettingsRepository.setOnboardingCompleted(true)
+                                    navController.navigate(Screen.Home.route) {
+                                        popUpTo(Screen.Onboarding.route) { inclusive = true }
+                                    }
+                                }
+                            )
+                        }
+
+                        composable(Screen.Home.route) {
+                            HomeScreen(
+                                onNavigateToSection = { section ->
+                                    when (section) {
+                                        "home" -> navController.navigate(Screen.Home.route)
+                                        "intercept" -> navController.navigate(Screen.Intercept.route)
+                                        "apis" -> navController.navigate(Screen.Apis.route)
+                                        "tools" -> navController.navigate(Screen.Tools.route)
+                                        "chats" -> navController.navigate(Screen.Chats.route)
+                                        "notes" -> navController.navigate(Screen.Notes.route)
+                                        "flow" -> navController.navigate(Screen.Flow.route)
+                                        "music" -> navController.navigate(Screen.Music.route)
+                                        "settings" -> navController.navigate(Screen.Settings.route)
+                                    }
+                                },
+                                onOpenApiRequest = { req ->
+                                    ApiCollectionsRepository.setActiveRequest(req)
+                                    navController.navigate(Screen.Apis.route)
+                                },
+                                onOpenTrafficDetail = {
+                                    navController.navigate(Screen.Intercept.route)
+                                },
+                                onOpenNote = {
+                                    navController.navigate(Screen.Notes.route)
+                                },
+                                onOpenSettings = {
+                                    navController.navigate(Screen.Settings.route)
+                                }
+                            )
+                        }
+
+                        composable(Screen.Intercept.route) {
+                            InterceptScreen(
+                                onSendToTestr = { reqItem ->
+                                    ApiCollectionsRepository.saveRequest(reqItem)
+                                    ApiCollectionsRepository.setActiveRequest(reqItem)
+                                    navController.navigate(Screen.Apis.route)
+                                },
+                                onMiniSettings = { showMiniSettingsForSection = "Intercept" },
+                                onNavigateFullSettings = { navController.navigate(Screen.Settings.route) }
+                            )
+                        }
+
+                        composable(Screen.Apis.route) {
+                            ApiTestrScreen(
+                                onMiniSettings = { showMiniSettingsForSection = "APIs" },
+                                onSendToIntercept = { reqItem ->
+                                    navController.navigate(Screen.Intercept.route)
+                                }
+                            )
+                        }
+
+                        composable(Screen.Tools.route) {
+                            ToolsScreen(
+                                onMiniSettings = { showMiniSettingsForSection = "Tools" }
+                            )
+                        }
+
+                        composable(Screen.Chats.route) {
+                            ChatScreen(
+                                onMiniSettings = { showMiniSettingsForSection = "AI Chat" }
+                            )
+                        }
+
+                        composable(Screen.Notes.route) {
+                            NotesScreen(
+                                onMiniSettings = { showMiniSettingsForSection = "Notes" }
+                            )
+                        }
+
+                        composable(Screen.Flow.route) {
+                            FlowScreen(
+                                onMiniSettings = { showMiniSettingsForSection = "Flow Automation" }
+                            )
+                        }
+
+                        composable(Screen.Music.route) {
+                            MusicScreen(
+                                onBack = { navController.popBackStack() },
+                                onMiniSettings = { showMiniSettingsForSection = "Music Lounge" }
+                            )
+                        }
+
+                        composable(Screen.Settings.route) {
+                            SettingsScreen(
+                                onBack = { navController.popBackStack() }
+                            )
+                        }
+                    }
+
+                    // In-Page Mini Settings Quick Sheet with Section Specific Controls
+                    if (showMiniSettingsForSection != null) {
+                        val sec = showMiniSettingsForSection!!
+                        InPageMiniSettingsSheet(
+                            title = "$sec Settings",
+                            onDismiss = { showMiniSettingsForSection = null },
+                            onNavigateFullSettings = {
+                                showMiniSettingsForSection = null
+                                navController.navigate(Screen.Settings.route)
+                            }
+                        ) {
+                            SectionSpecificMiniSettings(
+                                section = sec,
+                                onOpenFullSettings = {
+                                    showMiniSettingsForSection = null
+                                    navController.navigate(Screen.Settings.route)
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun SectionSpecificMiniSettings(
+    section: String,
+    onOpenFullSettings: () -> Unit
+) {
+    val isVpnActive by TrafficInterceptorRepository.isVpnActive.collectAsState()
+    val isSslBypass by TrafficInterceptorRepository.isSslPinningBypassed.collectAsState()
+    val isRoot by TrafficInterceptorRepository.isRootAvailable.collectAsState()
+
+    var autoFollowRedirects by remember { mutableStateOf(true) }
+    var strictSsl by remember { mutableStateOf(false) }
+    var codeHighlighting by remember { mutableStateOf(true) }
+    var markdownPreview by remember { mutableStateOf(true) }
+    var stopFlowOnError by remember { mutableStateOf(true) }
+    var musicLoFiLoop by remember { mutableStateOf(true) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        when (section) {
+            "Intercept" -> {
+                MiniSettingToggleRow(
+                    title = "Local VPN Engine",
+                    subtitle = "Capture system packets on loopback port 8080",
+                    checked = isVpnActive,
+                    onCheckedChange = { TrafficInterceptorRepository.toggleVpn() }
+                )
+                MiniSettingToggleRow(
+                    title = "Frida SSL Pinning Bypass",
+                    subtitle = "Dynamic runtime hook injection for HTTPS",
+                    checked = isSslBypass,
+                    onCheckedChange = { TrafficInterceptorRepository.toggleSslPinningBypass() }
+                )
+                MiniSettingToggleRow(
+                    title = "Magisk Root Mode",
+                    subtitle = "Direct iptables transparent proxy routing",
+                    checked = isRoot,
+                    onCheckedChange = { TrafficInterceptorRepository.toggleRootMode() }
+                )
+            }
+            "APIs" -> {
+                MiniSettingToggleRow(
+                    title = "Auto-Follow Redirects",
+                    subtitle = "Follow 301, 302, 307 HTTP response headers",
+                    checked = autoFollowRedirects,
+                    onCheckedChange = { autoFollowRedirects = it }
+                )
+                MiniSettingToggleRow(
+                    title = "Strict TLS Verification",
+                    subtitle = "Require trusted root CA for outgoing requests",
+                    checked = strictSsl,
+                    onCheckedChange = { strictSsl = it }
+                )
+            }
+            "AI Chat" -> {
+                MiniSettingToggleRow(
+                    title = "Code Syntax Highlighting",
+                    subtitle = "Format code blocks with editorial luxury styles",
+                    checked = codeHighlighting,
+                    onCheckedChange = { codeHighlighting = it }
+                )
+                GlassCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    cornerRadius = 10.dp,
+                    backgroundColor = MaterialTheme.colorScheme.surfaceVariant
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Text("Active AI Engine", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        Text("Gemini 2.5 Flash • Server-Side API Protocol", fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
+                    }
+                }
+            }
+            "Notes" -> {
+                MiniSettingToggleRow(
+                    title = "Real-Time Markdown Preview",
+                    subtitle = "Render live headers, bold text and monospace blocks",
+                    checked = markdownPreview,
+                    onCheckedChange = { markdownPreview = it }
+                )
+            }
+            "Flow Automation" -> {
+                MiniSettingToggleRow(
+                    title = "Halt Pipeline On Error",
+                    subtitle = "Stop execution if any node returns non-2xx status",
+                    checked = stopFlowOnError,
+                    onCheckedChange = { stopFlowOnError = it }
+                )
+            }
+            "Music Lounge" -> {
+                MiniSettingToggleRow(
+                    title = "Continuous Lo-Fi Loop",
+                    subtitle = "Seamlessly repeat ambient coding tracks",
+                    checked = musicLoFiLoop,
+                    onCheckedChange = { musicLoFiLoop = it }
+                )
+            }
+            else -> {
+                Text(
+                    text = "Quick configuration options for $section.",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // Full App Settings Link Button
+        Button(
+            onClick = onOpenFullSettings,
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.primary
+            ),
+            shape = MaterialTheme.shapes.medium
+        ) {
+            Icon(
+                imageVector = Icons.Default.Settings,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Open Full App Settings", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+@Composable
+fun MiniSettingToggleRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    GlassCard(
+        modifier = Modifier.fillMaxWidth(),
+        cornerRadius = 12.dp,
+        backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = subtitle,
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Switch(
+                checked = checked,
+                onCheckedChange = onCheckedChange,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
+                    checkedTrackColor = MaterialTheme.colorScheme.primary
+                )
+            )
+        }
+    }
+}
