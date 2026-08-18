@@ -6,8 +6,25 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+
+    <!--
+      Interception requirements.
+      WAKE_LOCK keeps the capture pump alive while the device sleeps; without it the tun read
+      loop is suspended by Doze and traffic is silently lost.
+    -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!--
+      Needed to enumerate installed apps for the per-app capture filter (Android 11+ package
+      visibility). Genuinely required: the filter maps packages to UIDs for
+      VpnService.Builder.addAllowedApplication().
+    -->
+    <uses-permission
+        android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
 
     <application
         android:allowBackup="true"
@@ -39,6 +56,34 @@
                 <data android:scheme="requestr" />
             </intent-filter>
         </activity>
+
+        <!--
+          Real traffic capture service. Declared with BIND_VPN_SERVICE so the system will bind
+          it, and typed as a VPN foreground service so it survives backgrounding.
+          Implementation lives in RequestrVpnService.
+        -->
+        <service
+            android:name=".interception.RequestrVpnService"
+            android:exported="false"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="specialUse">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Local VPN used to intercept and inspect this device's own HTTP(S) traffic for debugging and security analysis." />
+        </service>
+
+        <!-- Shizuku provider, for the Shizuku capture tier. -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
     </application>
 
 </manifest>

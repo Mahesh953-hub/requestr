@@ -1,8 +1,17 @@
 package com.example.ui.screens
 
+import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -27,7 +36,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ClearAll
@@ -41,7 +52,9 @@ import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SettingsInputAntenna
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Terminal
@@ -72,17 +85,42 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.painter.BitmapPainter
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.graphics.drawable.toBitmap
+import com.example.data.interception.CapabilityState
+import com.example.data.interception.CaState
+import com.example.data.interception.CaptureLogRepository
+import com.example.data.interception.FridaState
+import com.example.data.interception.InterceptionStateRepository
+import com.example.data.interception.InterceptionStatus
+import com.example.data.interception.RootState
+import com.example.data.interception.ShizukuState
+import com.example.data.interception.TrafficExporter
+import com.example.data.local.RuleAction as PersistedRuleAction
+import com.example.data.prefs.AppFilterMode
+import com.example.data.prefs.SettingsDataStore
+import com.example.interception.CapabilityProbe
+import com.example.interception.CertificateAuthority
 import com.example.data.models.ApiRequestItem
 import com.example.data.models.CapturedTrafficItem
 import com.example.data.models.HttpMethod
@@ -95,18 +133,24 @@ import com.example.data.repository.FridaScript
 import com.example.data.repository.TrafficInterceptorRepository
 import com.example.ui.components.ContextActionItem
 import com.example.ui.components.ContextualActionMenuDialog
+import com.example.ui.components.ConfirmActionDialog
 import com.example.ui.components.GlassCard
 import com.example.ui.components.MethodBadge
 import com.example.ui.components.ProtocolBadge
 import com.example.ui.components.SearchInputField
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.StatusCodeBadge
+import com.example.ui.components.formatByteCount
 import com.example.ui.theme.InterceptorActiveGreen
 import com.example.ui.theme.InterceptorIdleAmber
 import com.example.ui.theme.InterceptorInactiveRed
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import kotlinx.coroutines.launch
+import java.security.MessageDigest
+import java.text.SimpleDateFormat
+import java.util.Locale
 import java.util.UUID
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -116,19 +160,54 @@ fun InterceptScreen(
     onMiniSettings: () -> Unit,
     onNavigateFullSettings: () -> Unit
 ) {
-    val isCapturing by TrafficInterceptorRepository.isCapturing.collectAsState()
-    val capturedTraffic by TrafficInterceptorRepository.capturedTraffic.collectAsState()
+    val screenContext = LocalContext.current
+    val screenScope = rememberCoroutineScope()
+    val clipboardManager = LocalClipboardManager.current
+
+    // Real interception state: single source of truth shared with the wordmark dot.
+    val interceptionState by InterceptionStateRepository.state.collectAsState()
+    // Real capability results. Every field is UNKNOWN until an actual probe runs.
+    val capabilities by InterceptionStateRepository.capabilities.collectAsState()
+
+    // The traffic log now comes exclusively from Room, written only by the real capture engine.
+    // v2.1 read an in-memory list that was seeded with fake rows and topped up by a Random
+    // generator (APP_v2.md Bug 3.2), so a fresh install looked like it had captured traffic.
+    val capturedTraffic by remember(screenContext) {
+        CaptureLogRepository.observeTraffic(screenContext)
+    }.collectAsState(initial = emptyList())
+
     val installedApps by TrafficInterceptorRepository.installedApps.collectAsState()
     val trafficRules by TrafficInterceptorRepository.trafficRules.collectAsState()
 
-    val isVpnActive by TrafficInterceptorRepository.isVpnActive.collectAsState()
-    val vpnPort by TrafficInterceptorRepository.vpnPort.collectAsState()
-    val vpnPacketsCount by TrafficInterceptorRepository.vpnPacketsCount.collectAsState()
-    val vpnBytesTransferred by TrafficInterceptorRepository.vpnBytesTransferred.collectAsState()
-    val isShizukuGranted by TrafficInterceptorRepository.isShizukuPermissionGranted.collectAsState()
-    val isRootAvailable by TrafficInterceptorRepository.isRootAvailable.collectAsState()
-    val isSslPinningBypassed by TrafficInterceptorRepository.isSslPinningBypassed.collectAsState()
-    val certDetails by TrafficInterceptorRepository.certificateDetails.collectAsState()
+    // Persisted capture settings. These are the same values the VpnService reads, so what the
+    // picker shows is exactly what gets applied.
+    val settings = remember(screenContext) { SettingsDataStore.get(screenContext) }
+    val appFilterMode by settings.appFilterMode.collectAsState(initial = AppFilterMode.ALL_APPS)
+    val selectedPackages by settings.selectedPackages.collectAsState(initial = emptySet())
+    val configuredPort by settings.proxyPort.collectAsState(initial = SettingsDataStore.DEFAULT_PROXY_PORT)
+
+    // isCapturing is now derived from the real engine status rather than a free-floating boolean.
+    val isCapturing = interceptionState.isActive
+    val isArmed = interceptionState.isArmed
+    val vpnPort = if (interceptionState.port > 0) interceptionState.port else configuredPort
+    val vpnPacketsCount = interceptionState.packetCount
+    val vpnBytesTransferred = interceptionState.bytesTransferred
+
+    // Pre-flight outcome to surface (CA missing, no apps chosen, real failure reason).
+    var startPrompt by remember { mutableStateOf<CaptureStartPrompt?>(null) }
+    val captureController = rememberCaptureController(onPrompt = { startPrompt = it })
+
+    // CA install result: the trust store is always re-probed afterwards, never assumed.
+    val caInstallLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { captureController.reprobeAfterCaInstall() }
+
+    // Probe real device capabilities when the screen is first shown, so chips reflect
+    // this device rather than optimistic defaults. Also enumerate genuinely installed apps.
+    LaunchedEffect(Unit) {
+        CapabilityProbe.probeAll(screenContext)
+        TrafficInterceptorRepository.loadInstalledApps(screenContext)
+    }
     val fridaScripts = TrafficInterceptorRepository.fridaScripts
 
     var searchQuery by remember { mutableStateOf("") }
@@ -141,6 +220,7 @@ fun InterceptScreen(
     var showFridaSheet by remember { mutableStateOf(false) }
     var showCertSheet by remember { mutableStateOf(false) }
     var showRootShizukuSheet by remember { mutableStateOf(false) }
+    var showCaptureSetupSheet by remember { mutableStateOf(false) }
 
     val filteredTraffic = remember(capturedTraffic, searchQuery, selectedMethodFilter) {
         capturedTraffic.filter { item ->
@@ -149,8 +229,15 @@ fun InterceptScreen(
         }
     }
 
+    // FAB colour is driven by the real engine status, and the three states are genuinely
+    // distinct (APP_v2.md Bug 3.5): green = actively capturing, yellow/amber = armed but not
+    // yet streaming, muted = idle/off.
     val fabColor by animateColorAsState(
-        targetValue = if (isCapturing) InterceptorActiveGreen else InterceptorIdleAmber,
+        targetValue = when {
+            isCapturing -> InterceptorActiveGreen
+            isArmed -> InterceptorIdleAmber
+            else -> MaterialTheme.colorScheme.surfaceVariant
+        },
         animationSpec = tween(300),
         label = "fabColor"
     )
@@ -161,36 +248,25 @@ fun InterceptScreen(
             .background(MaterialTheme.colorScheme.background)
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Header
+            // Decluttered header (APP_v2.md Bug 3.7): title plus a single setup entry point.
+            // The four capability chips and the app/rule/clear actions moved into the
+            // "Capture setup" sheet rather than competing for the top bar.
             SectionHeader(
                 title = "HTTP(S) Interceptor",
                 onMiniSettings = onMiniSettings,
                 actions = {
-                    IconButton(onClick = { showAppFilterSheet = true }) {
-                        Icon(
-                            imageVector = Icons.Default.Apps,
-                            contentDescription = "Select Apps",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                    IconButton(onClick = { showRulesConfigSheet = true }) {
+                    IconButton(onClick = { showCaptureSetupSheet = true }) {
                         Icon(
                             imageVector = Icons.Default.Tune,
-                            contentDescription = "Rules & Modifiers",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    IconButton(onClick = { TrafficInterceptorRepository.clearTraffic() }) {
-                        Icon(
-                            imageVector = Icons.Default.ClearAll,
-                            contentDescription = "Clear Traffic",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            contentDescription = "Capture setup",
+                            tint = MaterialTheme.colorScheme.primary
                         )
                     }
                 }
             )
 
-            // Security & Intercept Engine Control Banner
+            // Live status readout. Every value here is real: status, tier, port and the packet
+            // counter written by the capture engine.
             GlassCard(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -209,11 +285,25 @@ fun InterceptScreen(
                                 modifier = Modifier
                                     .size(8.dp)
                                     .clip(CircleShape)
-                                    .background(if (isVpnActive && isCapturing) InterceptorActiveGreen else InterceptorInactiveRed)
+                                    .background(
+                                        when (interceptionState.status) {
+                                            InterceptionStatus.ACTIVE -> InterceptorActiveGreen
+                                            InterceptionStatus.ARMED -> InterceptorIdleAmber
+                                            InterceptionStatus.ERROR -> InterceptorInactiveRed
+                                            else -> TextMuted
+                                        }
+                                    )
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = if (isVpnActive) "LOCAL VPN :$vpnPort (ONLINE)" else "LOCAL VPN PAUSED",
+                                text = when (interceptionState.status) {
+                                    InterceptionStatus.ACTIVE ->
+                                        "CAPTURING :$vpnPort - ${interceptionState.tierLabel}"
+                                    InterceptionStatus.ARMED -> "ARMED :$vpnPort - waiting for traffic"
+                                    InterceptionStatus.ERROR -> "ERROR"
+                                    InterceptionStatus.CONFIGURED_IDLE -> "IDLE - not capturing"
+                                    InterceptionStatus.NEVER_CONFIGURED -> "NOT CONFIGURED"
+                                },
                                 fontFamily = FontFamily.Monospace,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
@@ -221,57 +311,21 @@ fun InterceptScreen(
                             )
                         }
 
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = "$vpnPacketsCount pkts",
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 10.sp,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Switch(
-                                checked = isVpnActive,
-                                onCheckedChange = { TrafficInterceptorRepository.toggleVpn() },
-                                modifier = Modifier.scale(0.7f),
-                                colors = SwitchDefaults.colors(
-                                    checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
-                                    checkedTrackColor = MaterialTheme.colorScheme.primary
-                                )
-                            )
-                        }
+                        Text(
+                            text = "$vpnPacketsCount pkts / ${formatByteCount(vpnBytesTransferred)}",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
                     }
 
-                    Spacer(modifier = Modifier.height(6.dp))
-
-                    // Tool chips: Frida, MITM Cert, Root, Shizuku
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        EngineChip(
-                            label = if (isSslPinningBypassed) "🛡️ Frida (Active)" else "🛡️ Frida SSL",
-                            isActive = isSslPinningBypassed,
-                            onClick = { showFridaSheet = true }
-                        )
-
-                        EngineChip(
-                            label = "📜 MITM CA Root",
-                            isActive = certDetails.isInstalledSystem,
-                            onClick = { showCertSheet = true }
-                        )
-
-                        EngineChip(
-                            label = if (isRootAvailable) "⚡ Root (Granted)" else "⚡ Root Mode",
-                            isActive = isRootAvailable,
-                            onClick = { showRootShizukuSheet = true }
-                        )
-
-                        EngineChip(
-                            label = if (isShizukuGranted) "⛩️ Shizuku (Ready)" else "⛩️ Shizuku",
-                            isActive = isShizukuGranted,
-                            onClick = { showRootShizukuSheet = true }
+                    // A real error is shown verbatim instead of being swallowed.
+                    interceptionState.errorText?.let { error ->
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = error,
+                            fontSize = 10.sp,
+                            color = InterceptorInactiveRed
                         )
                     }
                 }
@@ -343,28 +397,65 @@ fun InterceptScreen(
                 Box(
                     modifier = Modifier
                         .weight(1f)
-                        .fillMaxWidth(),
+                        .fillMaxWidth()
+                        .padding(horizontal = 32.dp),
                     contentAlignment = Alignment.Center
                 ) {
+                    // Real empty states (APP_v2.md Bug 3.3). Three genuinely different cases:
+                    // filters hid everything, capture is running but nothing arrived yet, or
+                    // nothing has ever been captured.
+                    val hasFilter = searchQuery.isNotBlank() || selectedMethodFilter != null
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Icon(
-                            imageVector = Icons.Default.Radar,
+                            imageVector = if (hasFilter) Icons.Default.FilterList else Icons.Default.Radar,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
                             modifier = Modifier.size(48.dp)
                         )
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
-                            text = if (isCapturing) "Listening for packets on 127.0.0.1:$vpnPort..." else "Interceptor is paused",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontSize = 14.sp
+                            text = when {
+                                hasFilter -> "No captured request matches this filter."
+                                isCapturing -> "Capturing on port $vpnPort. No HTTP transaction decoded yet."
+                                else -> "Nothing captured yet."
+                            },
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            textAlign = TextAlign.Center
                         )
-                        Spacer(modifier = Modifier.height(4.dp))
+                        Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "Tap the telegraph toggle FAB below to ${if (isCapturing) "pause" else "start"} live recording",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                            fontSize = 12.sp
+                            text = when {
+                                hasFilter -> "Clear the search box or the method filter to see the full log."
+                                isCapturing -> "Traffic appears here as soon as the engine decodes a request."
+                                else -> "Tap the button below to start recording traffic."
+                            },
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 12.sp,
+                            textAlign = TextAlign.Center
                         )
+
+                        // Point explicitly at the FAB when the user has never captured anything,
+                        // so the empty screen tells them what to do next.
+                        if (!hasFilter && !isCapturing) {
+                            Spacer(modifier = Modifier.height(14.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "Start here",
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Icon(
+                                    imageVector = Icons.Default.ArrowDownward,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
+                        }
                     }
                 }
             } else {
@@ -387,64 +478,203 @@ fun InterceptScreen(
             }
         }
 
-        // Bottom-Right Telegraph Toggle FAB
+        // Bottom-right capture FAB (APP_v2.md Bug 3.5).
+        // Colour encodes the real engine state and the icon cross-fades between states.
+        // A slow scale-pulse runs only while genuinely capturing.
+        val pulseTransition = rememberInfiniteTransition(label = "fabPulse")
+        val pulseScale by pulseTransition.animateFloat(
+            initialValue = 1f,
+            targetValue = if (isCapturing) 1.08f else 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(900),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "fabPulseScale"
+        )
+
         FloatingActionButton(
-            onClick = { TrafficInterceptorRepository.toggleCapture() },
+            onClick = {
+                // Never a bare boolean flip: starting runs the full pre-flight gate, and
+                // stopping tears down the real foreground service.
+                if (isCapturing || isArmed) {
+                    captureController.requestStop()
+                } else {
+                    captureController.requestStart()
+                }
+            },
             containerColor = fabColor,
-            contentColor = Color.Black,
+            contentColor = if (isCapturing || isArmed) Color.Black else MaterialTheme.colorScheme.onSurfaceVariant,
             shape = CircleShape,
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(bottom = 76.dp, end = 20.dp)
+                .scale(pulseScale)
                 .size(56.dp)
         ) {
-            Icon(
-                imageVector = Icons.Default.Radar,
-                contentDescription = if (isCapturing) "Stop Interceptor" else "Start Interceptor",
-                modifier = Modifier.size(26.dp)
-            )
+            Crossfade(targetState = isCapturing || isArmed, label = "fabIcon") { running ->
+                Icon(
+                    // Telegraph/radio metaphor rather than a generic play/stop glyph.
+                    imageVector = if (running) Icons.Default.SettingsInputAntenna else Icons.Default.Sensors,
+                    contentDescription = if (running) "Stop capture" else "Start capture",
+                    modifier = Modifier.size(26.dp)
+                )
+            }
         }
     }
 
-    // Frida Script Settings Sheet
+    // Pre-flight outcomes. Each one is a real blocking condition, surfaced with the exact
+    // remedy rather than a silent no-op.
+    when (val prompt = startPrompt) {
+        is CaptureStartPrompt.CaInstallRequired -> {
+            ConfirmActionDialog(
+                title = "Install the requestr CA certificate",
+                message = "HTTPS traffic cannot be decrypted until the requestr root certificate " +
+                    "is trusted by this device. Android will ask you to name the certificate and " +
+                    "confirm your screen lock.",
+                confirmLabel = "Install now",
+                onConfirm = {
+                    startPrompt = null
+                    caInstallLauncher.launch(prompt.installIntent)
+                },
+                onDismiss = { startPrompt = null }
+            )
+        }
+
+        CaptureStartPrompt.AppSelectionRequired -> {
+            ConfirmActionDialog(
+                title = "Choose what to capture",
+                message = "Capture is limited to selected apps, but no app is selected yet. " +
+                    "Pick at least one app, or switch to \"All apps\".",
+                confirmLabel = "Choose apps",
+                onConfirm = {
+                    startPrompt = null
+                    showAppFilterSheet = true
+                },
+                onDismiss = { startPrompt = null }
+            )
+        }
+
+        is CaptureStartPrompt.Failed -> {
+            ConfirmActionDialog(
+                title = "Capture could not start",
+                message = prompt.reason,
+                confirmLabel = "OK",
+                onConfirm = { startPrompt = null },
+                onDismiss = { startPrompt = null }
+            )
+        }
+
+        null -> Unit
+    }
+
+    // Capture setup sheet: the chips and controls that used to crowd the top bar.
+    if (showCaptureSetupSheet) {
+        CaptureSetupBottomSheet(
+            capabilities = capabilities,
+            port = vpnPort,
+            appFilterMode = appFilterMode,
+            selectedCount = selectedPackages.size,
+            trafficCount = capturedTraffic.size,
+            onOpenApps = {
+                showCaptureSetupSheet = false
+                showAppFilterSheet = true
+            },
+            onOpenRules = {
+                showCaptureSetupSheet = false
+                showRulesConfigSheet = true
+            },
+            onOpenCert = {
+                showCaptureSetupSheet = false
+                showCertSheet = true
+            },
+            onOpenFrida = {
+                showCaptureSetupSheet = false
+                showFridaSheet = true
+            },
+            onOpenPrivileges = {
+                showCaptureSetupSheet = false
+                showRootShizukuSheet = true
+            },
+            onReprobe = { captureController.refreshCapabilities() },
+            onClearTraffic = {
+                // Clears the real persisted rows; the Room Flow drives the list back to empty.
+                screenScope.launch { CaptureLogRepository.clearAll(screenContext) }
+                showCaptureSetupSheet = false
+            },
+            onDismiss = { showCaptureSetupSheet = false }
+        )
+    }
+
+    // Frida sheet. Read-only: frida-server runs outside the app, so we report the probe result.
     if (showFridaSheet) {
         FridaScriptsBottomSheet(
             scripts = fridaScripts,
-            isBypassed = isSslPinningBypassed,
-            onToggleBypass = { TrafficInterceptorRepository.toggleSslPinningBypass() },
+            fridaState = capabilities.frida,
+            isProbing = capabilities.isProbing,
+            onReprobe = { captureController.refreshCapabilities() },
             onDismiss = { showFridaSheet = false }
         )
     }
 
-    // MITM CA Certificate Sheet
+    // MITM CA sheet, backed by the real generated CA and a real trust-store probe.
     if (showCertSheet) {
         MitmCertificateBottomSheet(
-            details = certDetails,
-            onRegenerate = { TrafficInterceptorRepository.regenerateCaCertificate() },
+            caState = capabilities.ca,
+            isProbing = capabilities.isProbing,
+            onInstall = {
+                // Launches the genuine KeyChain install intent, then re-probes on return.
+                screenScope.launch {
+                    caInstallLauncher.launch(CertificateAuthority.buildInstallIntent(screenContext))
+                }
+            },
+            onReprobe = { captureController.reprobeAfterCaInstall() },
+            onExportPem = {
+                screenScope.launch {
+                    val pem = CertificateAuthority.exportPem(screenContext)
+                    val send = Intent(Intent.ACTION_SEND).apply {
+                        type = "application/x-pem-file"
+                        putExtra(Intent.EXTRA_SUBJECT, "requestr Root CA (PEM)")
+                        putExtra(Intent.EXTRA_TEXT, pem)
+                    }
+                    screenContext.startActivity(Intent.createChooser(send, "Export CA as PEM"))
+                }
+            },
             onDismiss = { showCertSheet = false }
         )
     }
 
-    // Root & Shizuku System Integration Sheet
+    // Root & Shizuku status sheet. Read-only: both privileges are granted outside the app.
     if (showRootShizukuSheet) {
         SystemIntegrationBottomSheet(
-            isRoot = isRootAvailable,
-            isShizuku = isShizukuGranted,
-            onToggleRoot = { TrafficInterceptorRepository.toggleRootMode() },
-            onToggleShizuku = { TrafficInterceptorRepository.toggleShizukuPermission() },
+            rootState = capabilities.root,
+            shizukuState = capabilities.shizuku,
+            isProbing = capabilities.isProbing,
+            onReprobe = { captureController.refreshCapabilities() },
             onDismiss = { showRootShizukuSheet = false }
         )
     }
 
-    // Long-Press Contextual Action Menu Dialog
+    // Long-press contextual actions (APP_v2.md Bug 3.8).
+    // "Block this domain" is disabled from a REAL query against the rules table, not a static
+    // dimmed style, so the row only looks unavailable when a block rule genuinely exists.
     itemForContextMenu?.let { item ->
+        val alreadyBlocked by produceState(initialValue = false, item.host) {
+            value = CaptureLogRepository.hasBlockRule(screenContext, item.host)
+        }
+
         ContextualActionMenuDialog(
             title = "${item.method.name} ${item.path}",
             subtitle = item.url,
             onDismiss = { itemForContextMenu = null },
             actions = listOf(
                 ContextActionItem(
-                    label = "Replay in API Testr",
+                    label = "Open detail",
+                    icon = Icons.Default.Description,
+                    iconTint = MaterialTheme.colorScheme.primary,
+                    onClick = { selectedItemForDetail = item }
+                ),
+                ContextActionItem(
+                    label = "Send to API Testr",
                     icon = Icons.Default.Send,
                     iconTint = MaterialTheme.colorScheme.primary,
                     onClick = {
@@ -461,50 +691,93 @@ fun InterceptScreen(
                     }
                 ),
                 ContextActionItem(
-                    label = "Copy as cURL Command",
+                    label = "Copy as cURL",
                     icon = Icons.Default.ContentCopy,
-                    onClick = { /* copy curl */ }
+                    onClick = {
+                        // Real clipboard write of a genuinely runnable command.
+                        clipboardManager.setText(AnnotatedString(TrafficExporter.toCurl(item)))
+                    }
                 ),
                 ContextActionItem(
-                    label = "Copy Request URL",
-                    icon = Icons.Default.ContentCopy,
-                    onClick = { /* copy url */ }
-                ),
-                ContextActionItem(
-                    label = "Create Mock Rule from Response",
+                    label = "Add intercept rule from this",
                     icon = Icons.Default.AutoAwesome,
                     onClick = {
-                        TrafficInterceptorRepository.addRule(
-                            TrafficRuleItem(
-                                id = UUID.randomUUID().toString(),
-                                name = "Mock for ${item.path}",
-                                isEnabled = true,
-                                urlPattern = ".*${item.path}.*",
-                                method = item.method,
-                                action = RuleAction.MOCK_RESPONSE,
-                                mockStatusCode = item.statusCode,
-                                mockResponseBody = item.responseBody
+                        screenScope.launch {
+                            CaptureLogRepository.addRuleFromTransaction(
+                                context = screenContext,
+                                item = item,
+                                action = PersistedRuleAction.MODIFY_RESPONSE,
                             )
+                        }
+                    }
+                ),
+                ContextActionItem(
+                    label = if (alreadyBlocked) "Domain already blocked" else "Block this domain",
+                    icon = Icons.Default.Block,
+                    iconTint = if (alreadyBlocked) null else InterceptorInactiveRed,
+                    // Genuinely non-interactive when a rule exists, per the real DB check above.
+                    enabled = !alreadyBlocked,
+                    onClick = {
+                        screenScope.launch {
+                            CaptureLogRepository.addBlockRule(screenContext, item.host)
+                        }
+                    }
+                ),
+                ContextActionItem(
+                    label = "Share (export as HAR)",
+                    icon = Icons.Default.Share,
+                    onClick = {
+                        val har = TrafficExporter.toHar(item)
+                        val send = Intent(Intent.ACTION_SEND).apply {
+                            type = "application/json"
+                            putExtra(Intent.EXTRA_SUBJECT, "requestr HAR export")
+                            putExtra(Intent.EXTRA_TEXT, har)
+                        }
+                        screenContext.startActivity(
+                            Intent.createChooser(send, "Share HAR entry")
                         )
                     }
                 ),
                 ContextActionItem(
-                    label = "Export as HAR Entry",
-                    icon = Icons.Default.Share,
-                    onClick = { /* export HAR */ }
+                    label = "Delete entry",
+                    icon = Icons.Default.Delete,
+                    iconTint = InterceptorInactiveRed,
+                    onClick = {
+                        // Deletes the real persisted row; the list updates from the Room Flow.
+                        screenScope.launch {
+                            CaptureLogRepository.deleteEntry(screenContext, item.id)
+                        }
+                    }
                 )
             )
         )
     }
 
-    // App Filter Bottom Sheet
+    // App picker. Mode and selection are persisted in DataStore, so the choice survives
+    // process death and is the same set the VpnService applies via addAllowedApplication.
     if (showAppFilterSheet) {
         AppFilterBottomSheet(
             installedApps = installedApps,
+            filterMode = appFilterMode,
+            selectedPackages = selectedPackages,
             onDismiss = { showAppFilterSheet = false },
-            onToggleApp = { pkg -> TrafficInterceptorRepository.toggleAppInterception(pkg) },
-            onSelectAll = { TrafficInterceptorRepository.setAllAppsEnabled(true) },
-            onDeselectAll = { TrafficInterceptorRepository.setAllAppsEnabled(false) }
+            onFilterModeChange = { mode ->
+                screenScope.launch { settings.setAppFilterMode(mode) }
+            },
+            onToggleApp = { pkg, selected ->
+                screenScope.launch {
+                    val next = if (selected) selectedPackages + pkg else selectedPackages - pkg
+                    settings.setSelectedPackages(next)
+                }
+            },
+            onSelectAll = {
+                screenScope.launch {
+                    settings.setSelectedPackages(installedApps.map { it.packageName }.toSet())
+                }
+            },
+            onDeselectAll = {
+                screenScope.launch { settings.setSelectedPackages(emptySet()) }
+            }
         )
     }
 
@@ -545,20 +818,31 @@ fun InterceptScreen(
 fun EngineChip(
     label: String,
     isActive: Boolean,
+    isUnavailable: Boolean = false,
     onClick: () -> Unit
 ) {
+    // Three visually distinct states so "granted" can never be confused with
+    // "unavailable" or "still checking" (APP_v2.md Bug 3.1).
+    val background = when {
+        isActive -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.8f)
+        else -> Color.Transparent
+    }
+    val borderColor = when {
+        isActive -> MaterialTheme.colorScheme.primary
+        isUnavailable -> MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)
+        else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+    }
+    val textColor = when {
+        isActive -> MaterialTheme.colorScheme.primary
+        isUnavailable -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
+        else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+    }
+
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(12.dp))
-            .background(
-                if (isActive) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.8f)
-                else MaterialTheme.colorScheme.surface
-            )
-            .border(
-                1.dp,
-                if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
-                RoundedCornerShape(12.dp)
-            )
+            .background(background)
+            .border(1.dp, borderColor, RoundedCornerShape(12.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 6.dp)
     ) {
@@ -566,7 +850,7 @@ fun EngineChip(
             text = label,
             fontSize = 11.sp,
             fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal,
-            color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+            color = textColor
         )
     }
 }
@@ -575,8 +859,9 @@ fun EngineChip(
 @Composable
 fun FridaScriptsBottomSheet(
     scripts: List<FridaScript>,
-    isBypassed: Boolean,
-    onToggleBypass: () -> Unit,
+    fridaState: FridaState,
+    isProbing: Boolean,
+    onReprobe: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -608,31 +893,45 @@ fun FridaScriptsBottomSheet(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            GlassCard(
+            // Read-only status, not a switch.
+            // v2.1 rendered a "SSL Pinning Universal Bypass" toggle here, implying the app could
+            // enable Frida hooks itself. It cannot: frida-server must be pushed and run on the
+            // device out-of-band. Flipping it only changed a local boolean, which is why the
+            // chip always read as bypassed (APP_v2.md Bug 3.1). We report the real probe result.
+            CapabilityStatusCard(
+                title = "frida-server on 127.0.0.1:27042",
+                description = when (fridaState) {
+                    FridaState.RUNNING -> "Reachable. SSL-pinning bypass scripts can be attached with the Frida CLI from your workstation."
+                    FridaState.NOT_RUNNING -> "Not reachable. Push and start frida-server on this device (requires root), then re-check."
+                    FridaState.UNKNOWN -> "Not probed yet."
+                },
+                statusLabel = when (fridaState) {
+                    FridaState.RUNNING -> "Running"
+                    FridaState.NOT_RUNNING -> "Not running"
+                    FridaState.UNKNOWN -> "Unknown"
+                },
+                isPositive = fridaState == FridaState.RUNNING,
+                isNegative = fridaState == FridaState.NOT_RUNNING
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Button(
+                onClick = onReprobe,
+                enabled = !isProbing,
                 modifier = Modifier.fillMaxWidth(),
-                cornerRadius = 12.dp,
-                backgroundColor = MaterialTheme.colorScheme.surfaceVariant
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("SSL Pinning Universal Bypass", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                        Text("Hooks TrustManagerImpl, OkHttp CertificatePinner & Conscrypt", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    Switch(
-                        checked = isBypassed,
-                        onCheckedChange = { onToggleBypass() }
-                    )
-                }
+                Icon(imageVector = Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(if (isProbing) "Checking..." else "Re-check frida-server", fontSize = 13.sp, fontWeight = FontWeight.Bold)
             }
 
             Spacer(modifier = Modifier.height(12.dp))
-            Text("AVAILABLE INJECTION SCRIPTS", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+            // Reference snippets only. requestr does not inject these; run them via the Frida
+            // CLI against frida-server. Labelled accordingly so the list does not imply
+            // in-app injection that is not implemented.
+            Text("REFERENCE SCRIPTS (run via Frida CLI)", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
             Spacer(modifier = Modifier.height(6.dp))
 
             LazyColumn(
@@ -671,11 +970,36 @@ fun FridaScriptsBottomSheet(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MitmCertificateBottomSheet(
-    details: CertificateDetails,
-    onRegenerate: () -> Unit,
+    caState: CaState,
+    isProbing: Boolean,
+    onInstall: () -> Unit,
+    onReprobe: () -> Unit,
+    onExportPem: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val certContext = LocalContext.current
+
+    // Real certificate metadata, read from the CA that actually exists in app storage.
+    // v2.1 displayed a hardcoded serial/fingerprint that matched no real key
+    // (APP_v2.md Bug 3.1), so users could not compare it against the installed certificate.
+    val material by produceState<CertificateSummary?>(initialValue = null) {
+        value = runCatching {
+            val ca = CertificateAuthority.getOrCreate(certContext)
+            val cert = ca.certificate
+            val fingerprint = MessageDigest.getInstance("SHA-256")
+                .digest(cert.encoded)
+                .joinToString(":") { "%02X".format(it) }
+            val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+            CertificateSummary(
+                subject = cert.subjectX500Principal.name,
+                serial = cert.serialNumber.toString(16).uppercase(),
+                validFrom = fmt.format(cert.notBefore),
+                validTo = fmt.format(cert.notAfter),
+                fingerprint = fingerprint
+            )
+        }.getOrNull()
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -704,51 +1028,116 @@ fun MitmCertificateBottomSheet(
 
             Spacer(modifier = Modifier.height(10.dp))
 
+            // Trust-store status from a genuine trust-store probe.
+            CapabilityStatusCard(
+                title = "Trust store status",
+                description = when (caState) {
+                    CaState.SYSTEM_STORE -> "Installed in the system store. HTTPS from most apps can be decrypted."
+                    CaState.USER_STORE -> "Installed in the user store. Apps that opt out of user CAs will still fail to decrypt."
+                    CaState.NOT_INSTALLED -> "Not installed. HTTPS traffic cannot be decrypted until this certificate is trusted."
+                    CaState.UNKNOWN -> "Not probed yet."
+                },
+                statusLabel = when (caState) {
+                    CaState.SYSTEM_STORE -> "System store"
+                    CaState.USER_STORE -> "User store"
+                    CaState.NOT_INSTALLED -> "Not installed"
+                    CaState.UNKNOWN -> "Unknown"
+                },
+                isPositive = caState == CaState.SYSTEM_STORE || caState == CaState.USER_STORE,
+                isNegative = caState == CaState.NOT_INSTALLED
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
             GlassCard(
                 modifier = Modifier.fillMaxWidth(),
                 cornerRadius = 12.dp,
                 backgroundColor = MaterialTheme.colorScheme.surfaceVariant
             ) {
                 Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Common Name: ${details.commonName}", fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
-                    Text("Organization: ${details.organization}", fontSize = 11.sp)
-                    Text("Serial: ${details.serialNumber}", fontFamily = FontFamily.Monospace, fontSize = 10.sp)
-                    Text("Valid: ${details.validFrom} -> ${details.validTo}", fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
-                    Text("SHA-256: ${details.sha256Fingerprint}", fontFamily = FontFamily.Monospace, fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    val summary = material
+                    if (summary == null) {
+                        Text("Reading certificate...", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    } else {
+                        Text("Subject: ${summary.subject}", fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                        Text("Serial: ${summary.serial}", fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                        Text(
+                            "Valid: ${summary.validFrom} -> ${summary.validTo}",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            "SHA-256: ${summary.fingerprint}",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 9.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
 
             Spacer(modifier = Modifier.height(12.dp))
 
+            Button(
+                onClick = onInstall,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+            ) {
+                Icon(imageVector = Icons.Default.Security, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Install certificate", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Button(
-                    onClick = onRegenerate,
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                ) {
-                    Text("Regenerate CA", fontSize = 12.sp)
-                }
-                Button(
-                    onClick = { /* Export Magisk zip */ },
+                    onClick = onReprobe,
+                    enabled = !isProbing,
                     modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
                 ) {
-                    Text("Magisk Module", fontSize = 12.sp)
+                    Text(if (isProbing) "Checking..." else "Re-check", fontSize = 12.sp)
+                }
+                Button(
+                    onClick = onExportPem,
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                ) {
+                    Text("Export PEM", fontSize = 12.sp)
                 }
             }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "System-store installation requires root and a writable /system. " +
+                    "Export the PEM and place it in the system trust store manually.",
+                fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
 
             Spacer(modifier = Modifier.height(16.dp))
         }
     }
 }
 
+/** Real certificate metadata read from the generated CA. */
+data class CertificateSummary(
+    val subject: String,
+    val serial: String,
+    val validFrom: String,
+    val validTo: String,
+    val fingerprint: String
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SystemIntegrationBottomSheet(
-    isRoot: Boolean,
-    isShizuku: Boolean,
-    onToggleRoot: () -> Unit,
-    onToggleShizuku: () -> Unit,
+    rootState: RootState,
+    shizukuState: ShizukuState,
+    isProbing: Boolean,
+    onReprobe: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -779,47 +1168,124 @@ fun SystemIntegrationBottomSheet(
                 }
             }
 
-            GlassCard(
+            // These are read-only status readouts, not switches.
+            // v2.1 rendered Switches here, implying the app could grant itself root or Shizuku
+            // access. It cannot: both are granted outside the app (su manager prompt, Shizuku
+            // app + ADB pairing). Flipping a switch only ever changed a local boolean, which is
+            // why the chips always looked "on" (APP_v2.md Bug 3.1). We now report what the
+            // real probe found and offer a re-check instead.
+            CapabilityStatusCard(
+                title = "Magisk / KernelSU root access",
+                description = when (rootState) {
+                    RootState.GRANTED -> "Granted. su responded with uid=0, so transparent iptables redirection and system trust-store injection are possible."
+                    RootState.AVAILABLE -> "An su binary exists but access is not confirmed yet. Approve the request in your root manager, then re-check."
+                    RootState.DENIED -> "The su request was denied. Grant requestr in your root manager (Magisk/KernelSU), then re-check."
+                    RootState.UNAVAILABLE -> "No su binary found. This device is not rooted, so root-tier capture is unavailable."
+                    RootState.UNKNOWN -> "Not probed yet."
+                },
+                statusLabel = when (rootState) {
+                    RootState.GRANTED -> "Granted"
+                    RootState.AVAILABLE -> "Available"
+                    RootState.DENIED -> "Denied"
+                    RootState.UNAVAILABLE -> "Unavailable"
+                    RootState.UNKNOWN -> "Unknown"
+                },
+                isPositive = rootState == RootState.GRANTED,
+                isNegative = rootState == RootState.UNAVAILABLE || rootState == RootState.DENIED
+            )
+
+            CapabilityStatusCard(
+                title = "Shizuku ADB service",
+                description = when (shizukuState) {
+                    ShizukuState.GRANTED -> "Granted. Elevated ADB permissions are available for non-root proxy setup."
+                    ShizukuState.PERMISSION_DENIED -> "Shizuku is running but permission was denied. Grant requestr inside the Shizuku app, then re-check."
+                    ShizukuState.NOT_RUNNING -> "Shizuku is installed but not running. Start it via ADB pairing or wireless debugging, then re-check."
+                    ShizukuState.NOT_INSTALLED -> "Shizuku is not installed. Install the Shizuku app to enable this tier."
+                    ShizukuState.UNKNOWN -> "Not probed yet."
+                },
+                statusLabel = when (shizukuState) {
+                    ShizukuState.GRANTED -> "Granted"
+                    ShizukuState.PERMISSION_DENIED -> "Denied"
+                    ShizukuState.NOT_RUNNING -> "Not running"
+                    ShizukuState.NOT_INSTALLED -> "Not installed"
+                    ShizukuState.UNKNOWN -> "Unknown"
+                },
+                isPositive = shizukuState == ShizukuState.GRANTED,
+                isNegative = shizukuState == ShizukuState.NOT_INSTALLED ||
+                    shizukuState == ShizukuState.PERMISSION_DENIED
+            )
+
+            Button(
+                onClick = onReprobe,
+                enabled = !isProbing,
                 modifier = Modifier.fillMaxWidth(),
-                cornerRadius = 12.dp,
-                backgroundColor = MaterialTheme.colorScheme.surfaceVariant
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Magisk / KernelSU Root Access", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                        Text("Allows transparent iptables redirection and system-level CA trust store injection", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    Switch(checked = isRoot, onCheckedChange = { onToggleRoot() })
-                }
+                Icon(imageVector = Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(if (isProbing) "Checking..." else "Re-check privileges", fontSize = 13.sp, fontWeight = FontWeight.Bold)
             }
 
-            GlassCard(
-                modifier = Modifier.fillMaxWidth(),
-                cornerRadius = 12.dp,
-                backgroundColor = MaterialTheme.colorScheme.surfaceVariant
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Shizuku ADB Service", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                        Text("Elevated ADB permissions for non-root proxy setup without VPN overhead", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    Switch(checked = isShizuku, onCheckedChange = { onToggleShizuku() })
-                }
-            }
+            Text(
+                text = "Capture tier is chosen automatically: root first, then Shizuku, then VPN.",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
 
             Spacer(modifier = Modifier.height(16.dp))
+        }
+    }
+}
+
+/** Read-only capability readout. Three visually distinct states, never a fake toggle. */
+@Composable
+private fun CapabilityStatusCard(
+    title: String,
+    description: String,
+    statusLabel: String,
+    isPositive: Boolean,
+    isNegative: Boolean
+) {
+    GlassCard(
+        modifier = Modifier.fillMaxWidth(),
+        cornerRadius = 12.dp,
+        backgroundColor = MaterialTheme.colorScheme.surfaceVariant
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(title, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                Spacer(modifier = Modifier.width(8.dp))
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(
+                            when {
+                                isPositive -> InterceptorActiveGreen.copy(alpha = 0.18f)
+                                isNegative -> InterceptorInactiveRed.copy(alpha = 0.15f)
+                                else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.15f)
+                            }
+                        )
+                        .padding(horizontal = 8.dp, vertical = 3.dp)
+                ) {
+                    Text(
+                        text = statusLabel,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        color = when {
+                            isPositive -> InterceptorActiveGreen
+                            isNegative -> InterceptorInactiveRed
+                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                        }
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(description, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -889,14 +1355,30 @@ fun TrafficItemCard(
     }
 }
 
+
+/**
+ * Capture setup sheet.
+ *
+ * The four capability chips and the app/rule/clear controls used to crowd the top bar
+ * (APP_v2.md Bug 3.7). They live here now, each chip reporting a genuine probe result and
+ * opening the sub-screen that can actually change it.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AppFilterBottomSheet(
-    installedApps: List<com.example.data.models.AppPackageItem>,
-    onDismiss: () -> Unit,
-    onToggleApp: (String) -> Unit,
-    onSelectAll: () -> Unit,
-    onDeselectAll: () -> Unit
+fun CaptureSetupBottomSheet(
+    capabilities: CapabilityState,
+    port: Int,
+    appFilterMode: AppFilterMode,
+    selectedCount: Int,
+    trafficCount: Int,
+    onOpenApps: () -> Unit,
+    onOpenRules: () -> Unit,
+    onOpenCert: () -> Unit,
+    onOpenFrida: () -> Unit,
+    onOpenPrivileges: () -> Unit,
+    onReprobe: () -> Unit,
+    onClearTraffic: () -> Unit,
+    onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
@@ -917,7 +1399,7 @@ fun AppFilterBottomSheet(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Select Interception Target Apps",
+                    text = "Capture setup",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface
@@ -927,57 +1409,396 @@ fun AppFilterBottomSheet(
                 }
             }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                GlassCard(
-                    modifier = Modifier.weight(1f),
-                    cornerRadius = 10.dp,
-                    backgroundColor = MaterialTheme.colorScheme.surfaceVariant,
-                    onClick = onSelectAll
-                ) {
-                    Box(modifier = Modifier.padding(10.dp), contentAlignment = Alignment.Center) {
-                        Text("Select All Apps", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                    }
-                }
-                GlassCard(
-                    modifier = Modifier.weight(1f),
-                    cornerRadius = 10.dp,
-                    backgroundColor = MaterialTheme.colorScheme.surfaceVariant,
-                    onClick = onDeselectAll
-                ) {
-                    Box(modifier = Modifier.padding(10.dp), contentAlignment = Alignment.Center) {
-                        Text("Clear Selection", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
-            }
+            Text(
+                text = "Capture tier is chosen automatically: root first, then Shizuku, then VPN.",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            LazyColumn(
+            // Each chip reflects the REAL probe result. "Unavailable"/"Not running" render in a
+            // visually distinct style so they can never be mistaken for "granted".
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(340.dp)
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                items(installedApps, key = { it.packageName }) { app ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onToggleApp(app.packageName) }
-                            .padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(text = app.appName, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
-                            Text(text = app.packageName, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, fontFamily = FontFamily.Monospace)
-                        }
-                        Checkbox(
-                            checked = app.isInterceptEnabled,
-                            onCheckedChange = { onToggleApp(app.packageName) },
-                            colors = CheckboxDefaults.colors(checkedColor = MaterialTheme.colorScheme.primary)
+                EngineChip(
+                    label = when (capabilities.ca) {
+                        CaState.SYSTEM_STORE -> "CA: System store"
+                        CaState.USER_STORE -> "CA: User store"
+                        CaState.NOT_INSTALLED -> "CA: Not installed"
+                        CaState.UNKNOWN -> "CA: Checking..."
+                    },
+                    isActive = capabilities.isCaInstalled,
+                    isUnavailable = capabilities.ca == CaState.NOT_INSTALLED,
+                    onClick = onOpenCert
+                )
+                EngineChip(
+                    label = when (capabilities.root) {
+                        RootState.GRANTED -> "Root: Granted"
+                        RootState.AVAILABLE -> "Root: Available"
+                        RootState.DENIED -> "Root: Denied"
+                        RootState.UNAVAILABLE -> "Root: Unavailable"
+                        RootState.UNKNOWN -> "Root: Checking..."
+                    },
+                    isActive = capabilities.root == RootState.GRANTED,
+                    isUnavailable = capabilities.root == RootState.UNAVAILABLE ||
+                        capabilities.root == RootState.DENIED,
+                    onClick = onOpenPrivileges
+                )
+                EngineChip(
+                    label = when (capabilities.shizuku) {
+                        ShizukuState.GRANTED -> "Shizuku: Granted"
+                        ShizukuState.PERMISSION_DENIED -> "Shizuku: Denied"
+                        ShizukuState.NOT_RUNNING -> "Shizuku: Not running"
+                        ShizukuState.NOT_INSTALLED -> "Shizuku: Not installed"
+                        ShizukuState.UNKNOWN -> "Shizuku: Checking..."
+                    },
+                    isActive = capabilities.shizuku == ShizukuState.GRANTED,
+                    isUnavailable = capabilities.shizuku == ShizukuState.NOT_INSTALLED ||
+                        capabilities.shizuku == ShizukuState.PERMISSION_DENIED,
+                    onClick = onOpenPrivileges
+                )
+                EngineChip(
+                    label = when (capabilities.frida) {
+                        FridaState.RUNNING -> "Frida: Running"
+                        FridaState.NOT_RUNNING -> "Frida: Not running"
+                        FridaState.UNKNOWN -> "Frida: Checking..."
+                    },
+                    isActive = capabilities.frida == FridaState.RUNNING,
+                    isUnavailable = capabilities.frida == FridaState.NOT_RUNNING,
+                    onClick = onOpenFrida
+                )
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            SetupRow(
+                icon = Icons.Default.Apps,
+                title = "Apps to capture",
+                // Real summary of the persisted selection.
+                subtitle = if (appFilterMode == AppFilterMode.ALL_APPS) "All apps"
+                else "$selectedCount app(s) selected",
+                onClick = onOpenApps
+            )
+            SetupRow(
+                icon = Icons.Default.Tune,
+                title = "Rules & modifiers",
+                subtitle = "Block, redirect or rewrite matched traffic",
+                onClick = onOpenRules
+            )
+            SetupRow(
+                icon = Icons.Default.Security,
+                title = "CA certificate",
+                subtitle = "Generate, install and verify the MITM root CA",
+                onClick = onOpenCert
+            )
+            SetupRow(
+                icon = Icons.Default.Bolt,
+                title = "Root & Shizuku",
+                subtitle = "Check elevated capture privileges",
+                onClick = onOpenPrivileges
+            )
+            SetupRow(
+                icon = Icons.Default.Refresh,
+                title = if (capabilities.isProbing) "Re-checking capabilities..." else "Re-check capabilities",
+                subtitle = "Probe root, Shizuku, CA trust store and Frida again",
+                onClick = onReprobe
+            )
+            SetupRow(
+                icon = Icons.Default.ClearAll,
+                title = "Clear capture log",
+                // Real row count so the action states exactly what it will delete.
+                subtitle = if (trafficCount == 0) "Nothing captured yet"
+                else "Delete all $trafficCount captured transaction(s)",
+                onClick = onClearTraffic,
+                enabled = trafficCount > 0,
+                tint = InterceptorInactiveRed
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "Local proxy port: $port",
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Spacer(modifier = Modifier.height(20.dp))
+        }
+    }
+}
+
+@Composable
+private fun SetupRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    tint: Color? = null
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(enabled = enabled) { onClick() }
+            .padding(vertical = 10.dp, horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = if (!enabled) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+            else tint ?: MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(18.dp)
+        )
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = if (enabled) MaterialTheme.colorScheme.onSurface
+                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
+            )
+            Text(
+                text = subtitle,
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (enabled) 1f else 0.5f)
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AppFilterBottomSheet(
+    installedApps: List<com.example.data.models.AppPackageItem>,
+    filterMode: AppFilterMode,
+    selectedPackages: Set<String>,
+    onDismiss: () -> Unit,
+    onFilterModeChange: (AppFilterMode) -> Unit,
+    onToggleApp: (String, Boolean) -> Unit,
+    onSelectAll: () -> Unit,
+    onDeselectAll: () -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val pm = LocalContext.current.packageManager
+    var appQuery by remember { mutableStateOf("") }
+
+    val allApps = filterMode == AppFilterMode.ALL_APPS
+    val visibleApps = remember(installedApps, appQuery) {
+        if (appQuery.isBlank()) installedApps
+        else installedApps.filter {
+            it.appName.contains(appQuery, ignoreCase = true) ||
+                it.packageName.contains(appQuery, ignoreCase = true)
+        }
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Apps to capture",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                IconButton(onClick = onDismiss) {
+                    Icon(imageVector = Icons.Default.Close, contentDescription = "Close", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+
+            // "All apps" is a real mode stored in DataStore, and while it is on the individual
+            // checkboxes below are genuinely disabled and greyed out (APP_v2.md Bug 3.6)
+            // rather than remaining tappable but ignored.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable {
+                        onFilterModeChange(
+                            if (allApps) AppFilterMode.SELECTED_APPS else AppFilterMode.ALL_APPS
                         )
+                    }
+                    .padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("All apps", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                    Text(
+                        text = "Capture every app's traffic. Turn off to choose specific apps.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = allApps,
+                    onCheckedChange = { checked ->
+                        onFilterModeChange(if (checked) AppFilterMode.ALL_APPS else AppFilterMode.SELECTED_APPS)
+                    }
+                )
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            SearchInputField(
+                query = appQuery,
+                onQueryChange = { appQuery = it },
+                placeholder = "Search installed apps...",
+                onClear = { appQuery = "" }
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Real selected count from the persisted set.
+                Text(
+                    text = if (allApps) "All apps selected"
+                    else "${selectedPackages.size} of ${installedApps.size} selected",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = "Select all",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (allApps) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                        else MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable(enabled = !allApps) { onSelectAll() }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                    Text(
+                        text = "Clear",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (allApps) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable(enabled = !allApps) { onDeselectAll() }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            if (installedApps.isEmpty()) {
+                // Real empty state: the package query genuinely returned nothing yet.
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(200.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "Reading installed apps...",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(340.dp)
+                ) {
+                    items(visibleApps, key = { it.packageName }) { app ->
+                        val checked = allApps || selectedPackages.contains(app.packageName)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(enabled = !allApps) {
+                                    onToggleApp(app.packageName, !selectedPackages.contains(app.packageName))
+                                }
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            // Real launcher icon from PackageManager, so the list is recognisable.
+                            val iconPainter = remember(app.packageName) {
+                                runCatching {
+                                    BitmapPainter(
+                                        pm.getApplicationIcon(app.packageName)
+                                            .toBitmap(96, 96)
+                                            .asImageBitmap()
+                                    )
+                                }.getOrNull()
+                            }
+                            if (iconPainter != null) {
+                                Image(
+                                    painter = iconPainter,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .size(32.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .alpha(if (allApps) 0.45f else 1f)
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .size(32.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = app.appName,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 13.sp,
+                                    maxLines = 1,
+                                    // Greyed out while "All apps" is on, matching the disabled checkbox.
+                                    color = if (allApps) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
+                                    else MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = app.packageName,
+                                    fontSize = 10.sp,
+                                    maxLines = 1,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(
+                                        alpha = if (allApps) 0.4f else 1f
+                                    ),
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                            Checkbox(
+                                checked = checked,
+                                // Genuinely non-interactive in "All apps" mode.
+                                enabled = !allApps,
+                                onCheckedChange = { value -> onToggleApp(app.packageName, value) },
+                                colors = CheckboxDefaults.colors(checkedColor = MaterialTheme.colorScheme.primary)
+                            )
+                        }
                     }
                 }
             }

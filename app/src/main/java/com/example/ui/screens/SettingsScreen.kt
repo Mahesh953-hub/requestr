@@ -43,21 +43,34 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.content.Intent
+import com.example.data.interception.CaptureLogRepository
 import com.example.data.repository.SettingsRepository
-import com.example.data.repository.TrafficInterceptorRepository
+import com.example.data.interception.CaState
+import com.example.data.interception.FridaState
+import com.example.data.interception.InterceptionStateRepository
+import com.example.data.interception.RootState
+import com.example.data.interception.ShizukuState
+import com.example.interception.CapabilityProbe
+import com.example.interception.CertificateAuthority
+import kotlinx.coroutines.launch
 import com.example.ui.components.GlassCard
 import com.example.ui.components.RequestrWordmark
 import com.example.ui.components.SectionHeader
@@ -71,7 +84,27 @@ fun SettingsScreen(
     onBack: () -> Unit
 ) {
     val settings by SettingsRepository.settings.collectAsState()
-    val certDetails by TrafficInterceptorRepository.certificateDetails.collectAsState()
+    // Real capability state and a real CA read; v2.1 showed a hardcoded serial/fingerprint
+    // and six diagnostics rows that always claimed success (APP_v2.md Bug 3.1 / 10).
+    val settingsContext = LocalContext.current
+    val settingsScope = rememberCoroutineScope()
+    val capabilities by InterceptionStateRepository.capabilities.collectAsState()
+    val capturedCount by remember(settingsContext) {
+        CaptureLogRepository.observeCount(settingsContext)
+    }.collectAsState(initial = 0)
+    val caSummary by produceState<Triple<String, String, String>?>(initialValue = null) {
+        value = runCatching {
+            val cert = CertificateAuthority.getOrCreate(settingsContext).certificate
+            val fp = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(cert.encoded).joinToString(":") { "%02X".format(it) }
+            Triple(
+                cert.subjectX500Principal.name,
+                cert.serialNumber.toString(16).uppercase(),
+                fp
+            )
+        }.getOrNull()
+    }
+    LaunchedEffect(Unit) { CapabilityProbe.probeAll(settingsContext) }
 
     var userNameInput by remember(settings.userName) { mutableStateOf(settings.userName) }
     var proxyPortInput by remember(settings.proxyPort) { mutableStateOf(settings.proxyPort.toString()) }
@@ -318,10 +351,27 @@ fun SettingsScreen(
                         modifier = Modifier.padding(14.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text(certDetails.commonName, fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
-                        Text("Organization: ${certDetails.organization}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("Serial: ${certDetails.serialNumber}", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("SHA-256: ${certDetails.sha256Fingerprint}", fontFamily = FontFamily.Monospace, fontSize = 9.sp, color = MaterialTheme.colorScheme.primary)
+                        val summary = caSummary
+                        if (summary == null) {
+                            Text("Reading certificate...", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        } else {
+                            Text(summary.first, fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                            Text("Serial: ${summary.second}", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("SHA-256: ${summary.third}", fontFamily = FontFamily.Monospace, fontSize = 9.sp, color = MaterialTheme.colorScheme.primary)
+                        }
+                        // Trust-store state from a real probe, not an assumption.
+                        Text(
+                            text = when (capabilities.ca) {
+                                CaState.SYSTEM_STORE -> "Trust store: installed (system)"
+                                CaState.USER_STORE -> "Trust store: installed (user)"
+                                CaState.NOT_INSTALLED -> "Trust store: NOT installed"
+                                CaState.UNKNOWN -> "Trust store: checking..."
+                            },
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (capabilities.isCaInstalled) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.error
+                        )
 
                         Spacer(modifier = Modifier.height(4.dp))
 
@@ -330,25 +380,51 @@ fun SettingsScreen(
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Button(
-                                onClick = { TrafficInterceptorRepository.regenerateCaCertificate() },
+                                onClick = {
+                                    // Launches the real KeyChain install intent for the actual CA.
+                                    settingsScope.launch {
+                                        runCatching {
+                                            settingsContext.startActivity(
+                                                CertificateAuthority.buildInstallIntent(settingsContext)
+                                            )
+                                        }
+                                    }
+                                },
                                 modifier = Modifier.weight(1f),
                                 shape = RoundedCornerShape(8.dp),
                                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
                             ) {
                                 Icon(imageVector = Icons.Default.Refresh, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(14.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text("Regen CA", color = MaterialTheme.colorScheme.onSurface, fontSize = 11.sp)
+                                Text("Install CA", color = MaterialTheme.colorScheme.onSurface, fontSize = 11.sp)
                             }
 
                             Button(
-                                onClick = { /* Export Magisk Module */ },
+                                onClick = {
+                                    // Exports the genuine CA as PEM for manual system-store install.
+                                    settingsScope.launch {
+                                        runCatching {
+                                            val pem = CertificateAuthority.exportPem(settingsContext)
+                                            settingsContext.startActivity(
+                                                Intent.createChooser(
+                                                    Intent(Intent.ACTION_SEND).apply {
+                                                        type = "application/x-pem-file"
+                                                        putExtra(Intent.EXTRA_SUBJECT, "requestr Root CA (PEM)")
+                                                        putExtra(Intent.EXTRA_TEXT, pem)
+                                                    },
+                                                    "Export CA as PEM"
+                                                )
+                                            )
+                                        }
+                                    }
+                                },
                                 modifier = Modifier.weight(1f),
                                 shape = RoundedCornerShape(8.dp),
                                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
                             ) {
                                 Icon(imageVector = Icons.Default.Download, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(14.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text("Export Module", color = MaterialTheme.colorScheme.onPrimary, fontSize = 11.sp)
+                                Text("Export PEM", color = MaterialTheme.colorScheme.onPrimary, fontSize = 11.sp)
                             }
                         }
                     }
@@ -367,12 +443,60 @@ fun SettingsScreen(
                         modifier = Modifier.padding(14.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        DiagnosticRow("Tier 1: VPN Service (VpnService API)", "Ready / Functional", true)
-                        DiagnosticRow("Tier 2: Local HTTP Proxy (127.0.0.1)", "Port ${settings.proxyPort}", true)
-                        DiagnosticRow("Tier 3: Root CA Trust Store (APEX/System)", "Granted (libsu)", true)
-                        DiagnosticRow("Tier 4: Frida Gadget / Server", "Ready to Inject", true)
-                        DiagnosticRow("Tier 5: LSPosed Trust Universal Hook", "Module Active", true)
-                        DiagnosticRow("Tier 6: Shizuku IPC Daemon", "v13.5.4 Bound", true)
+                        // Every row below reports a REAL probe result. v2.1 hardcoded all six to
+                        // "true" with invented version strings, so an unrooted device with no
+                        // Shizuku still showed six green ticks (APP_v2.md Bug 3.1).
+                        DiagnosticRow(
+                            "VPN capture tier (VpnService)",
+                            "Always available",
+                            true
+                        )
+                        DiagnosticRow(
+                            "Local proxy port",
+                            "Port ${settings.proxyPort}",
+                            true
+                        )
+                        DiagnosticRow(
+                            "CA trust store",
+                            when (capabilities.ca) {
+                                CaState.SYSTEM_STORE -> "Installed (system store)"
+                                CaState.USER_STORE -> "Installed (user store)"
+                                CaState.NOT_INSTALLED -> "Not installed"
+                                CaState.UNKNOWN -> "Not probed"
+                            },
+                            capabilities.isCaInstalled
+                        )
+                        DiagnosticRow(
+                            "Root access",
+                            when (capabilities.root) {
+                                RootState.GRANTED -> "Granted (su returned uid=0)"
+                                RootState.AVAILABLE -> "su present, not confirmed"
+                                RootState.DENIED -> "Denied by root manager"
+                                RootState.UNAVAILABLE -> "No su binary (not rooted)"
+                                RootState.UNKNOWN -> "Not probed"
+                            },
+                            capabilities.root == RootState.GRANTED
+                        )
+                        DiagnosticRow(
+                            "Shizuku service",
+                            when (capabilities.shizuku) {
+                                ShizukuState.GRANTED -> "Bound and permitted"
+                                ShizukuState.PERMISSION_DENIED -> "Running, permission denied"
+                                ShizukuState.NOT_RUNNING -> "Installed, not running"
+                                ShizukuState.NOT_INSTALLED -> "Not installed"
+                                ShizukuState.UNKNOWN -> "Not probed"
+                            },
+                            capabilities.shizuku == ShizukuState.GRANTED
+                        )
+                        DiagnosticRow(
+                            "frida-server (127.0.0.1:27042)",
+                            when (capabilities.frida) {
+                                FridaState.RUNNING -> "Reachable"
+                                FridaState.NOT_RUNNING -> "Not reachable"
+                                FridaState.UNKNOWN -> "Not probed"
+                            },
+                            capabilities.frida == FridaState.RUNNING
+                        )
                     }
                 }
             }
@@ -385,14 +509,20 @@ fun SettingsScreen(
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Button(
-                        onClick = { TrafficInterceptorRepository.clearTraffic() },
+                        // Deletes the real persisted rows rather than an in-memory list.
+                        onClick = { settingsScope.launch { CaptureLogRepository.clearAll(settingsContext) } },
+                        enabled = capturedCount > 0,
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(10.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
                     ) {
                         Icon(imageVector = Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Clear Stream", color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                        Text(
+                            if (capturedCount == 0) "Log empty" else "Clear $capturedCount",
+                            color = MaterialTheme.colorScheme.error,
+                            fontSize = 12.sp
+                        )
                     }
 
                     Button(

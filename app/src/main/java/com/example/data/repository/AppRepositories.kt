@@ -450,47 +450,29 @@ object ApiCollectionsRepository {
     )
     val folders: StateFlow<List<ApiFolderItem>> = _folders.asStateFlow()
 
-    private val _requests = MutableStateFlow<List<ApiRequestItem>>(
-        listOf(
-            ApiRequestItem(
-                id = "req-1",
-                name = "HttpBin JSON Echo",
-                folderId = "f-1",
-                method = HttpMethod.GET,
-                url = "https://httpbin.org/json",
-                isFavorite = true
-            ),
-            ApiRequestItem(
-                id = "req-2",
-                name = "GitHub User Profile",
-                folderId = "f-1",
-                method = HttpMethod.GET,
-                url = "https://api.github.com/users/octocat",
-                isFavorite = true
-            ),
-            ApiRequestItem(
-                id = "req-3",
-                name = "Post JSON Payload",
-                folderId = "f-1",
-                method = HttpMethod.POST,
-                url = "https://httpbin.org/post",
-                bodyType = RequestBodyType.JSON,
-                bodyContent = "{\n  \"client\": \"requestr\",\n  \"version\": \"2.0\",\n  \"active\": true\n}",
-                isFavorite = false
-            ),
-            ApiRequestItem(
-                id = "req-4",
-                name = "Echo WebSocket",
-                folderId = "f-4",
-                method = HttpMethod.WS,
-                url = "wss://echo.websocket.org",
-                isFavorite = false
-            )
-        )
-    )
+    // No seed data by design.
+    //
+    // v2.1 shipped sample requests (HttpBin JSON Echo, GitHub User Profile, Post JSON Payload)
+    // which surfaced on Home's "Recently opened" even on a fresh install (APP_v2.md Bug 1.6).
+    // A new install now genuinely has no saved requests.
+    private val _requests = MutableStateFlow<List<ApiRequestItem>>(emptyList())
     val requests: StateFlow<List<ApiRequestItem>> = _requests.asStateFlow()
 
-    private val _currentActiveRequest = MutableStateFlow(_requests.value.first())
+    /**
+     * The request currently open in the editor.
+     *
+     * v2.1 (line ~461) called `_requests.value.first()` which crashed on a fresh install
+     * with NoSuchElementException because the seed data was removed. Now defaults to an
+     * empty placeholder request so the API Testr screen opens safely.
+     */
+    private val _currentActiveRequest = MutableStateFlow(
+        ApiRequestItem(
+            id = "new-request",
+            name = "New Request",
+            method = com.example.data.models.HttpMethod.GET,
+            url = "https://httpbin.org/get",
+        )
+    )
     val currentActiveRequest: StateFlow<ApiRequestItem> = _currentActiveRequest.asStateFlow()
 
     fun setActiveRequest(req: ApiRequestItem) {
@@ -525,7 +507,7 @@ object ApiCollectionsRepository {
 object SettingsRepository {
     private val _settings = MutableStateFlow(
         UserSettingsState(
-            userName = "Kailash",
+            userName = "",
             themeMode = "MIDNIGHT",
             cornerRadiusDp = 16,
             proxyPort = 8080,

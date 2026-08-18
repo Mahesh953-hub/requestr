@@ -97,8 +97,11 @@ import androidx.compose.ui.window.Dialog
 import com.example.data.models.HttpMethod
 import com.example.data.models.MusicTrackItem
 import com.example.data.repository.SettingsRepository
-import com.example.data.repository.TrafficInterceptorRepository
+// TrafficInterceptorRepository import removed — wordmark dot reads InterceptionStateRepository
+import com.example.data.interception.InterceptionStateRepository
+import com.example.data.interception.InterceptionStatus
 import com.example.ui.theme.InterceptorActiveGreen
+import com.example.ui.theme.InterceptorIdleAmber
 import com.example.ui.theme.InterceptorInactiveRed
 import com.example.ui.theme.MethodDelete
 import com.example.ui.theme.MethodGet
@@ -157,7 +160,9 @@ fun RequestrWordmark(
     textColor: Color = MaterialTheme.colorScheme.onBackground,
     onClick: (() -> Unit)? = null
 ) {
-    val isCapturing by TrafficInterceptorRepository.isCapturing.collectAsState()
+    // The wordmark dot reads the same InterceptionStateRepository the Intercept FAB reads, so
+    // the two can never disagree about whether capture is running (APP_v2.md 3.5 / 8).
+    val interceptionState by InterceptionStateRepository.state.collectAsState()
 
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
     val dotPulse by infiniteTransition.animateFloat(
@@ -170,7 +175,14 @@ fun RequestrWordmark(
         label = "dotPulse"
     )
 
-    val dotColor = if (isCapturing) InterceptorActiveGreen else InterceptorInactiveRed
+    val dotColor = when (interceptionState.status) {
+        InterceptionStatus.ACTIVE -> InterceptorActiveGreen
+        InterceptionStatus.ARMED -> InterceptorIdleAmber
+        InterceptionStatus.ERROR -> InterceptorInactiveRed
+        // Idle is muted rather than red: "off" is a normal state, not a fault.
+        else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+    }
+    val isCapturing = interceptionState.isActive
 
     Row(
         modifier = if (onClick != null) modifier.clickable(onClick = onClick) else modifier,
@@ -820,6 +832,82 @@ data class ContextActionItem(
     val enabled: Boolean = true,
     val onClick: () -> Unit
 )
+
+/**
+ * A plain confirm/dismiss dialog used to surface real blocking conditions (missing CA, no app
+ * selection, a genuine failure reason) instead of failing silently.
+ */
+@Composable
+fun ConfirmActionDialog(
+    title: String,
+    message: String,
+    confirmLabel: String,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+    dismissLabel: String? = "Cancel",
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        GlassCard(
+            modifier = Modifier.fillMaxWidth(0.92f),
+            cornerRadius = 20.dp,
+            backgroundColor = MaterialTheme.colorScheme.surface,
+            borderColor = MaterialTheme.colorScheme.outline
+        ) {
+            Column(modifier = Modifier.padding(20.dp)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = message,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(20.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    if (dismissLabel != null) {
+                        Text(
+                            text = dismissLabel,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable { onDismiss() }
+                                .padding(horizontal = 14.dp, vertical = 10.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                    }
+                    Text(
+                        text = confirmLabel,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { onConfirm() }
+                            .padding(horizontal = 14.dp, vertical = 10.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Formats a real byte counter for compact status readouts. */
+fun formatByteCount(bytes: Long): String = when {
+    bytes <= 0L -> "0 B"
+    bytes < 1024L -> "$bytes B"
+    bytes < 1024L * 1024L -> "%.1f KB".format(bytes / 1024.0)
+    bytes < 1024L * 1024L * 1024L -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
+    else -> "%.2f GB".format(bytes / (1024.0 * 1024.0 * 1024.0))
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

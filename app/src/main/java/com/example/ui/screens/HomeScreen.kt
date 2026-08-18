@@ -41,6 +41,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -57,6 +58,9 @@ import com.example.data.repository.ChatRepository
 import com.example.data.repository.FlowRepository
 import com.example.data.repository.NotesRepository
 import com.example.data.repository.SettingsRepository
+import com.example.data.interception.CaptureLogRepository
+import com.example.data.interception.InterceptionStateRepository
+import com.example.data.interception.InterceptionStatus
 import com.example.data.repository.TrafficInterceptorRepository
 import com.example.ui.components.GlassCard
 import com.example.ui.components.MethodBadge
@@ -80,8 +84,15 @@ fun HomeScreen(
 ) {
     val settings by SettingsRepository.settings.collectAsState()
     val savedApis by ApiCollectionsRepository.requests.collectAsState()
-    val capturedTraffic by TrafficInterceptorRepository.capturedTraffic.collectAsState()
-    val isInterceptionActive by TrafficInterceptorRepository.isInterceptionActive.collectAsState()
+    // Real captured-transaction count straight from Room, so the Home badge cannot claim
+    // traffic that was never captured (APP_v2.md Bug 1.5).
+    val homeContext = LocalContext.current
+    val capturedCount by remember(homeContext) {
+        CaptureLogRepository.observeCount(homeContext)
+    }.collectAsState(initial = 0)
+    // Real interception state -- same single source of truth as the Intercept FAB.
+    val interceptionState by InterceptionStateRepository.state.collectAsState()
+    val isInterceptionActive = interceptionState.isActive
     val notes by NotesRepository.notes.collectAsState()
     val flows by FlowRepository.nodes.collectAsState()
     val assistants by ChatRepository.assistants.collectAsState()
@@ -235,22 +246,48 @@ fun HomeScreen(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Green only when genuinely capturing; muted when never configured.
                         Box(
                             modifier = Modifier
                                 .size(12.dp)
                                 .clip(CircleShape)
-                                .background(if (isInterceptionActive) Color(0xFF22C55E) else Color(0xFFEF4444))
+                                .background(
+                                    when (interceptionState.status) {
+                                        InterceptionStatus.ACTIVE -> Color(0xFF22C55E)
+                                        InterceptionStatus.ARMED -> Color(0xFFEAB308)
+                                        InterceptionStatus.ERROR -> Color(0xFFEF4444)
+                                        InterceptionStatus.CONFIGURED_IDLE -> TextMuted
+                                        InterceptionStatus.NEVER_CONFIGURED -> TextMuted
+                                    }
+                                )
                         )
                         Spacer(modifier = Modifier.width(12.dp))
                         Column {
                             Text(
-                                text = if (isInterceptionActive) "Interception: ACTIVE" else "Interception: IDLE",
+                                text = when (interceptionState.status) {
+                                    InterceptionStatus.ACTIVE -> "Interception: ACTIVE"
+                                    InterceptionStatus.ARMED -> "Interception: ARMED"
+                                    InterceptionStatus.ERROR -> "Interception: ERROR"
+                                    InterceptionStatus.CONFIGURED_IDLE -> "Interception is off"
+                                    InterceptionStatus.NEVER_CONFIGURED -> "Set up Interception"
+                                },
                                 fontWeight = FontWeight.Bold,
                                 color = TextPrimary,
                                 fontSize = 15.sp
                             )
+                            // Real port and real packet count from the live session only.
                             Text(
-                                text = if (isInterceptionActive) "VPN & Proxy running on port 8080 · ${capturedTraffic.size} packets" else "Tap to start local MITM VPN & capture device traffic",
+                                text = when (interceptionState.status) {
+                                    InterceptionStatus.ACTIVE ->
+                                        "${interceptionState.tierLabel} · port ${interceptionState.port} · " +
+                                            "${interceptionState.packetCount} packets"
+                                    InterceptionStatus.ARMED -> "Pre-flight passed · tap to confirm"
+                                    InterceptionStatus.ERROR ->
+                                        interceptionState.errorText ?: "Capture failed"
+                                    InterceptionStatus.CONFIGURED_IDLE -> "Tap to start capturing"
+                                    InterceptionStatus.NEVER_CONFIGURED ->
+                                        "Install the CA certificate to begin"
+                                },
                                 color = TextSecondary,
                                 fontSize = 12.sp
                             )
@@ -258,7 +295,11 @@ fun HomeScreen(
                     }
 
                     Text(
-                        text = if (isInterceptionActive) "Live →" else "Start →",
+                        text = when (interceptionState.status) {
+                            InterceptionStatus.ACTIVE -> "Live →"
+                            InterceptionStatus.NEVER_CONFIGURED -> "Set up →"
+                            else -> "Start →"
+                        },
                         color = MaterialTheme.colorScheme.primary,
                         fontWeight = FontWeight.Bold,
                         fontSize = 13.sp
@@ -401,7 +442,7 @@ fun HomeScreen(
                     MainSectionCard(
                         title = "Intercept",
                         subtitle = "MITM VPN, Frida & Rules",
-                        badge = "${capturedTraffic.size} captured",
+                        badge = if (capturedCount == 0) "Not set up" else "$capturedCount captured",
                         icon = "📡",
                         gradient = listOf(Color(0xFF1E3A8A), Color(0xFF0F172A)),
                         modifier = Modifier.weight(1f),

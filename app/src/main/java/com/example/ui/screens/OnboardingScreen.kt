@@ -60,7 +60,10 @@ fun OnboardingScreen(
     onFinishOnboarding: (userName: String, themeMode: String) -> Unit
 ) {
     var currentStep by remember { mutableIntStateOf(1) }
-    var userName by remember { mutableStateOf("Kailash") }
+    // Starts empty on purpose. v2.1 pre-filled the developer's own name, so every
+    // fresh install greeted the user as "Kailash" unless they noticed and retyped it.
+    // The Continue button is already gated on userName.isNotBlank().
+    var userName by remember { mutableStateOf("") }
     var selectedTheme by remember { mutableStateOf("MIDNIGHT") }
     var storageGranted by remember { mutableStateOf(true) }
     var notificationGranted by remember { mutableStateOf(true) }
@@ -183,6 +186,17 @@ fun OnboardingScreen(
                     OutlinedTextField(
                         value = userName,
                         onValueChange = { userName = it },
+                        placeholder = {
+                            Text(
+                                "your alias",
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 22.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TextSecondary,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        },
                         textStyle = TextStyle(
                             fontFamily = FontFamily.Monospace,
                             fontSize = 22.sp,

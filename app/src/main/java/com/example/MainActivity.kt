@@ -7,6 +7,11 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontFamily
+import com.example.ui.theme.InterceptorActiveGreen
+import com.example.ui.theme.InterceptorInactiveRed
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -69,7 +74,11 @@ import com.example.data.repository.ApiCollectionsRepository
 import com.example.data.repository.MusicRepository
 import com.example.data.repository.NotesRepository
 import com.example.data.repository.SettingsRepository
-import com.example.data.repository.TrafficInterceptorRepository
+import com.example.data.interception.FridaState
+import com.example.data.interception.InterceptionStateRepository
+import com.example.data.interception.InterceptionStatus
+import com.example.data.interception.RootState
+// TrafficInterceptorRepository import removed — all state flows now come from InterceptionStateRepository
 import com.example.ui.components.AppNavigationDrawer
 import com.example.ui.components.GlassCard
 import com.example.ui.components.HoveredPillNavigationBar
@@ -359,9 +368,9 @@ fun SectionSpecificMiniSettings(
     section: String,
     onOpenFullSettings: () -> Unit
 ) {
-    val isVpnActive by TrafficInterceptorRepository.isVpnActive.collectAsState()
-    val isSslBypass by TrafficInterceptorRepository.isSslPinningBypassed.collectAsState()
-    val isRoot by TrafficInterceptorRepository.isRootAvailable.collectAsState()
+    // Real interception + capability state, shared with the Intercept screen.
+    val interceptionState by InterceptionStateRepository.state.collectAsState()
+    val capabilities by InterceptionStateRepository.capabilities.collectAsState()
 
     var autoFollowRedirects by remember { mutableStateOf(true) }
     var strictSsl by remember { mutableStateOf(false) }
@@ -378,23 +387,54 @@ fun SectionSpecificMiniSettings(
     ) {
         when (section) {
             "Intercept" -> {
-                MiniSettingToggleRow(
-                    title = "Local VPN Engine",
-                    subtitle = "Capture system packets on loopback port 8080",
-                    checked = isVpnActive,
-                    onCheckedChange = { TrafficInterceptorRepository.toggleVpn() }
+                // These were toggles in v2.1, implying this sheet could start the VPN or grant
+                // root/Frida. It could not -- each switch only flipped a local boolean
+                // (APP_v2.md Bug 3.1). They are now honest read-only readouts; capture is
+                // started from the Intercept screen FAB, which runs the real pre-flight gate.
+                MiniSettingStatusRow(
+                    title = "Capture engine",
+                    subtitle = when (interceptionState.status) {
+                        InterceptionStatus.ACTIVE ->
+                            "Capturing on port ${interceptionState.port} - ${interceptionState.tierLabel}"
+                        InterceptionStatus.ARMED -> "Armed on port ${interceptionState.port}"
+                        InterceptionStatus.ERROR -> interceptionState.errorText ?: "Error"
+                        InterceptionStatus.CONFIGURED_IDLE -> "Idle. Start it from the Intercept tab."
+                        InterceptionStatus.NEVER_CONFIGURED -> "Not configured yet."
+                    },
+                    statusLabel = when (interceptionState.status) {
+                        InterceptionStatus.ACTIVE -> "Active"
+                        InterceptionStatus.ARMED -> "Armed"
+                        InterceptionStatus.ERROR -> "Error"
+                        InterceptionStatus.CONFIGURED_IDLE -> "Idle"
+                        InterceptionStatus.NEVER_CONFIGURED -> "Off"
+                    },
+                    isPositive = interceptionState.isActive,
+                    isNegative = interceptionState.status == InterceptionStatus.ERROR
                 )
-                MiniSettingToggleRow(
-                    title = "Frida SSL Pinning Bypass",
-                    subtitle = "Dynamic runtime hook injection for HTTPS",
-                    checked = isSslBypass,
-                    onCheckedChange = { TrafficInterceptorRepository.toggleSslPinningBypass() }
+                MiniSettingStatusRow(
+                    title = "frida-server",
+                    subtitle = "Checked on 127.0.0.1:27042. Runs outside the app.",
+                    statusLabel = when (capabilities.frida) {
+                        FridaState.RUNNING -> "Running"
+                        FridaState.NOT_RUNNING -> "Not running"
+                        FridaState.UNKNOWN -> "Unknown"
+                    },
+                    isPositive = capabilities.frida == FridaState.RUNNING,
+                    isNegative = capabilities.frida == FridaState.NOT_RUNNING
                 )
-                MiniSettingToggleRow(
-                    title = "Magisk Root Mode",
-                    subtitle = "Direct iptables transparent proxy routing",
-                    checked = isRoot,
-                    onCheckedChange = { TrafficInterceptorRepository.toggleRootMode() }
+                MiniSettingStatusRow(
+                    title = "Root access",
+                    subtitle = "Granted by your root manager, not by requestr.",
+                    statusLabel = when (capabilities.root) {
+                        RootState.GRANTED -> "Granted"
+                        RootState.AVAILABLE -> "Available"
+                        RootState.DENIED -> "Denied"
+                        RootState.UNAVAILABLE -> "Unavailable"
+                        RootState.UNKNOWN -> "Unknown"
+                    },
+                    isPositive = capabilities.root == RootState.GRANTED,
+                    isNegative = capabilities.root == RootState.UNAVAILABLE ||
+                        capabilities.root == RootState.DENIED
                 )
             }
             "APIs" -> {
@@ -525,6 +565,74 @@ fun MiniSettingToggleRow(
                     checkedTrackColor = MaterialTheme.colorScheme.primary
                 )
             )
+        }
+    }
+}
+
+/**
+ * Read-only status row for capabilities the app cannot itself grant (root, Frida, VPN consent).
+ *
+ * Rendering these as switches was misleading: the user could flip them and nothing changed on
+ * the device. This reports what the real probe found instead.
+ */
+@Composable
+fun MiniSettingStatusRow(
+    title: String,
+    subtitle: String,
+    statusLabel: String,
+    isPositive: Boolean,
+    isNegative: Boolean
+) {
+    GlassCard(
+        modifier = Modifier.fillMaxWidth(),
+        cornerRadius = 12.dp,
+        backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = subtitle,
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(
+                        when {
+                            isPositive -> InterceptorActiveGreen.copy(alpha = 0.18f)
+                            isNegative -> InterceptorInactiveRed.copy(alpha = 0.15f)
+                            else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.15f)
+                        }
+                    )
+                    .padding(horizontal = 8.dp, vertical = 3.dp)
+            ) {
+                Text(
+                    text = statusLabel,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    color = when {
+                        isPositive -> InterceptorActiveGreen
+                        isNegative -> InterceptorInactiveRed
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                )
+            }
         }
     }
 }

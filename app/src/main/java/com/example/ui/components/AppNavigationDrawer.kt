@@ -58,10 +58,13 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.interception.InterceptionStateRepository
+import com.example.data.interception.InterceptionStatus
 import com.example.data.repository.SettingsRepository
-import com.example.data.repository.TrafficInterceptorRepository
+// TrafficInterceptorRepository import removed — capture state reads InterceptionStateRepository
 import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.InterceptorActiveGreen
+import com.example.ui.theme.InterceptorIdleAmber
 import com.example.ui.theme.InterceptorInactiveRed
 import kotlinx.coroutines.launch
 
@@ -75,7 +78,9 @@ fun AppNavigationDrawer(
 ) {
     val coroutineScope = rememberCoroutineScope()
     val settings by SettingsRepository.settings.collectAsState()
-    val isCapturing by TrafficInterceptorRepository.isCapturing.collectAsState()
+    // Real engine state, the same source the Intercept FAB and wordmark dot read.
+    val interceptionState by InterceptionStateRepository.state.collectAsState()
+    val isCapturing = interceptionState.isActive
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -138,31 +143,48 @@ fun AppNavigationDrawer(
                                         modifier = Modifier
                                             .size(8.dp)
                                             .clip(CircleShape)
-                                            .background(if (isCapturing) InterceptorActiveGreen else InterceptorInactiveRed)
+                                            .background(
+                                                when (interceptionState.status) {
+                                                    InterceptionStatus.ACTIVE -> InterceptorActiveGreen
+                                                    InterceptionStatus.ARMED -> InterceptorIdleAmber
+                                                    InterceptionStatus.ERROR -> InterceptorInactiveRed
+                                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                                }
+                                            )
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text(
-                                        text = if (isCapturing) "Proxy Active" else "Proxy Paused",
+                                        text = when (interceptionState.status) {
+                                            InterceptionStatus.ACTIVE -> "Capturing"
+                                            InterceptionStatus.ARMED -> "Armed"
+                                            InterceptionStatus.ERROR -> "Error"
+                                            else -> "Not capturing"
+                                        },
                                         fontWeight = FontWeight.Bold,
                                         fontSize = 12.sp,
                                         color = MaterialTheme.colorScheme.onSurface
                                     )
                                 }
                                 Text(
-                                    text = "Port ${settings.proxyPort} · 127.0.0.1",
+                                    text = if (interceptionState.port > 0)
+                                        "Port ${interceptionState.port} · ${interceptionState.tierLabel}"
+                                    else "Port ${settings.proxyPort} · 127.0.0.1",
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     fontSize = 10.sp,
                                     fontFamily = FontFamily.Monospace
                                 )
                             }
 
-                            Switch(
-                                checked = isCapturing,
-                                onCheckedChange = { TrafficInterceptorRepository.toggleCapture() },
-                                colors = SwitchDefaults.colors(
-                                    checkedThumbColor = Color.White,
-                                    checkedTrackColor = InterceptorActiveGreen
-                                )
+                            // No toggle here on purpose. Starting capture requires the real
+                            // pre-flight gate plus a VPN-consent activity result, which this
+                            // drawer cannot host. v2.1's switch flipped a boolean and claimed
+                            // capture had started (APP_v2.md Bug 3.5). We show live counters
+                            // instead and leave starting to the Intercept FAB.
+                            Text(
+                                text = if (isCapturing) "${interceptionState.packetCount} pkts" else "Use Intercept tab",
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
