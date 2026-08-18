@@ -148,20 +148,21 @@ fun GlassCard(
 }
 
 /**
- * Editorial Luxury Wordmark for "requestr."
- * captures Lumora's elegant editorial personality:
- * high-contrast serif, slightly italic, narrow proportions, generous rhythm,
- * soft curves, sharp hairlines, and an alive signature dot tied to interceptor state.
+ * requestr wordmark with live interception-status indicator.
+ *
+ * Renders the brand name in a geometric mono/sans-serif style with the
+ * "r" repeated as a subtle visual motif. The trailing dot is alive —
+ * it pulses green when capturing, glows amber when armed, and sits
+ * muted when idle.  The dot reads [InterceptionStateRepository] so it
+ * can never disagree with the Intercept screen's FAB.
  */
 @Composable
 fun RequestrWordmark(
     modifier: Modifier = Modifier,
     fontSize: Int = 22,
     textColor: Color = MaterialTheme.colorScheme.onBackground,
-    onClick: (() -> Unit)? = null
+    onClick: (() -> Unit)? = null,
 ) {
-    // The wordmark dot reads the same InterceptionStateRepository the Intercept FAB reads, so
-    // the two can never disagree about whether capture is running (APP_v2.md 3.5 / 8).
     val interceptionState by InterceptionStateRepository.state.collectAsState()
 
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
@@ -170,44 +171,44 @@ fun RequestrWordmark(
         targetValue = 1.25f,
         animationSpec = infiniteRepeatable(
             animation = tween(900, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
+            repeatMode = RepeatMode.Reverse,
         ),
-        label = "dotPulse"
+        label = "dotPulse",
     )
 
     val dotColor = when (interceptionState.status) {
         InterceptionStatus.ACTIVE -> InterceptorActiveGreen
         InterceptionStatus.ARMED -> InterceptorIdleAmber
         InterceptionStatus.ERROR -> InterceptorInactiveRed
-        // Idle is muted rather than red: "off" is a normal state, not a fault.
         else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
     }
     val isCapturing = interceptionState.isActive
 
     Row(
         modifier = if (onClick != null) modifier.clickable(onClick = onClick) else modifier,
-        verticalAlignment = Alignment.CenterVertically
+        verticalAlignment = Alignment.CenterVertically,
     ) {
+        // The name in a clean geometric style: "requestr" with the final "r"
+        // sharing the weight of the dot so the brand feels balanced.
         Text(
             text = "requestr",
-            fontFamily = FontFamily.Serif,
-            fontStyle = FontStyle.Italic,
-            fontWeight = FontWeight.Medium,
-            fontSize = fontSize.sp,
-            letterSpacing = 0.8.sp,
-            color = textColor
+            fontFamily = FontFamily.SansSerif,
+            fontWeight = FontWeight.Bold,
+            fontSize = (fontSize * 1.08f).sp,
+            letterSpacing = (-0.5).sp,
+            color = textColor,
         )
 
-        Spacer(modifier = Modifier.width(2.dp))
+        Spacer(modifier = Modifier.width((fontSize * 0.18f).dp))
 
-        // Signature Alive Dot
+        // Alive dot — colour + pulse driven by real interception state.
         Box(
             modifier = Modifier
-                .padding(top = (fontSize * 0.25).dp)
-                .size((fontSize * 0.24).coerceAtLeast(5.0).dp)
+                .padding(top = (fontSize * 0.22f).dp)
+                .size((fontSize * 0.28f).coerceAtLeast(6f).dp)
                 .scale(if (isCapturing) dotPulse else 1.0f)
                 .clip(CircleShape)
-                .background(dotColor)
+                .background(dotColor),
         )
     }
 }
@@ -217,22 +218,34 @@ fun ThemeToggleButton(
     modifier: Modifier = Modifier
 ) {
     val settings by SettingsRepository.settings.collectAsState()
-    val isLight = settings.themeMode.equals("EDITORIAL_LIGHT", ignoreCase = true) || settings.themeMode.equals("LIGHT", ignoreCase = true)
+
+    // 7-theme cycle in display order.  Tap advances through all
+    // of them instead of the v2.1 binary light/dark flip that hid
+    // Midnight Sapphire, Kyoto Matcha, Cyber Terminal, Dusk
+    // Terracotta, and Solar Amber.
+    val cycle = listOf(
+        "EDITORIAL_LIGHT" to true,
+        "MONOCHROME_DARK" to false,
+        "MIDNIGHT_SAPPHIRE" to false,
+        "KYOTO_MATCHA" to true,
+        "CYBER_TERMINAL" to false,
+        "DUSK_TERRACOTTA" to false,
+        "SOLAR_AMBER" to false,
+    )
+    val currentIdx = cycle.indexOfFirst { it.first.equals(settings.themeMode, ignoreCase = true) }
+    val (currentThemeKey, isCurrentLight) = if (currentIdx >= 0) cycle[currentIdx] else cycle[0]
 
     IconButton(
         onClick = {
-            if (isLight) {
-                SettingsRepository.updateTheme("MONOCHROME_DARK")
-            } else {
-                SettingsRepository.updateTheme("EDITORIAL_LIGHT")
-            }
+            val next = cycle[(currentIdx.coerceAtLeast(0) + 1) % cycle.size]
+            SettingsRepository.updateTheme(next.first)
         },
-        modifier = modifier.size(36.dp)
+        modifier = modifier.size(36.dp),
     ) {
         Icon(
-            imageVector = if (isLight) Icons.Default.DarkMode else Icons.Default.LightMode,
-            contentDescription = if (isLight) "Switch to Dark Theme" else "Switch to Light Theme",
-            tint = MaterialTheme.colorScheme.onSurfaceVariant
+            imageVector = if (isCurrentLight) Icons.Default.DarkMode else Icons.Default.LightMode,
+            contentDescription = "Cycle theme (current: $currentThemeKey)",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }

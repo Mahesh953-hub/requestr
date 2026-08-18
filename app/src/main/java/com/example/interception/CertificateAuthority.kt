@@ -108,12 +108,15 @@ object CertificateAuthority {
             JcaX509ExtensionUtils().createSubjectKeyIdentifier(keyPair.public),
         )
 
+        // Do NOT pin to a named provider.  On Android the platform already ships a
+        // stripped BouncyCastle instance, so `.setProvider("BC")` resolves to the
+        // platform copy which does NOT expose SHA256withRSA under that alias.
+        // Letting the JCA choose (with our full BC provider registered first) avoids
+        // the "no such algorithm: SHA256WITHRSA for provider BC" crash.
         val signer = JcaContentSignerBuilder("SHA256withRSA")
-            .setProvider(BouncyCastleProvider.PROVIDER_NAME)
             .build(keyPair.private)
 
         val certificate = JcaX509CertificateConverter()
-            .setProvider(BouncyCastleProvider.PROVIDER_NAME)
             .getCertificate(builder.build(signer))
 
         persist(context, certificate, keyPair)

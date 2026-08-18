@@ -104,6 +104,12 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Load persisted user settings before the UI tree reads them.
+        // Fix: v2.1 initialised SettingsRepository with fake true defaults
+        // (isRootDetected, isShizukuAvailable, isLsposedInstalled) and
+        // never persisted theme choice, so the app lost its theme on restart
+        // and briefly rendered a blank screen before the Compose tree settled.
+        SettingsRepository.init(applicationContext)
         enableEdgeToEdge()
         setContent {
             RequestrApp()

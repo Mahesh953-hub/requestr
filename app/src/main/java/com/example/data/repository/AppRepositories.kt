@@ -505,46 +505,119 @@ object ApiCollectionsRepository {
 // 6. USER SETTINGS REPOSITORY
 // ==========================================
 object SettingsRepository {
+    private const val TAG = "SettingsRepository"
+    private const val PREFS_NAME = "requestr_user_settings"
+    private const val KEY_USER_NAME = "user_name"
+    private const val KEY_THEME_MODE = "theme_mode"
+    private const val KEY_CORNER_RADIUS = "corner_radius"
+    private const val KEY_PROXY_PORT = "proxy_port"
+    private const val KEY_AUTO_BEAUTIFY = "auto_beautify"
+    private const val KEY_SSL_VERIFY = "ssl_verify"
+    private const val KEY_SNIPPET_LANG = "snippet_lang"
+    private const val KEY_ONBOARDING = "onboarding_completed"
+
+    private var prefs: android.content.SharedPreferences? = null
+    private var initialized = false
+
+    /**
+     * Call once from Application.onCreate() or early in MainActivity before any
+     * read of [settings]. Loads persisted values; runtime-only flags (root,
+     * Shizuku, Frida, VPN) stay false until [CapabilityProbe] runs.
+     */
+    fun init(context: android.content.Context) {
+        if (initialized) return
+        prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+        initialized = true
+
+        val p = prefs!!
+        _settings.value = _settings.value.copy(
+            userName = p.getString(KEY_USER_NAME, "") ?: "",
+            themeMode = p.getString(KEY_THEME_MODE, "MONOCHROME_DARK") ?: "MONOCHROME_DARK",
+            cornerRadiusDp = p.getInt(KEY_CORNER_RADIUS, 16),
+            proxyPort = p.getInt(KEY_PROXY_PORT, 8080),
+            autoBeautify = p.getBoolean(KEY_AUTO_BEAUTIFY, true),
+            sslVerification = p.getBoolean(KEY_SSL_VERIFY, false),
+            defaultSnippetLang = p.getString(KEY_SNIPPET_LANG, "Python - Requests") ?: "Python - Requests",
+            onboardingCompleted = p.getBoolean(KEY_ONBOARDING, false),
+        )
+    }
+
     private val _settings = MutableStateFlow(
         UserSettingsState(
             userName = "",
-            themeMode = "MIDNIGHT",
+            // Default to MonochromeDark. v2.1 defaulted to "MIDNIGHT" which maps to
+            // "Midnight Sapphire" — a fine theme, but the welcome screen uses it
+            // before the user picks, which confuses the first-run experience.
+            // MonochromeDark is the universal dark starting point.
+            themeMode = "MONOCHROME_DARK",
             cornerRadiusDp = 16,
             proxyPort = 8080,
+            // Runtime-only flags — all start false.
+            // v2.1 hardcoded isRootDetected, isShizukuAvailable, isLsposedInstalled to true,
+            // which made the Settings screen show "Ready" for everything on a fresh install.
+            // CapabilityProbe populates these at runtime.
             isVpnActive = false,
-            isRootDetected = true,
-            isShizukuAvailable = true,
+            isRootDetected = false,
+            isShizukuAvailable = false,
             isFridaReady = false,
-            isLsposedInstalled = true,
+            isLsposedInstalled = false,
             autoBeautify = true,
             sslVerification = false,
             defaultSnippetLang = "Python - Requests",
-            onboardingCompleted = true
+            // Onboarding not yet completed until the user finishes the wizard.
+            // v2.1 set this to true, skipping onboarding entirely.
+            onboardingCompleted = false,
         )
     )
     val settings: StateFlow<UserSettingsState> = _settings.asStateFlow()
 
     fun updateUserName(name: String) {
         _settings.value = _settings.value.copy(userName = name)
+        persist(KEY_USER_NAME, name)
     }
 
     fun updateTheme(themeMode: String) {
         _settings.value = _settings.value.copy(themeMode = themeMode)
+        persist(KEY_THEME_MODE, themeMode)
     }
 
     fun updateCornerRadius(radius: Int) {
         _settings.value = _settings.value.copy(cornerRadiusDp = radius)
+        persist(KEY_CORNER_RADIUS, radius)
     }
 
     fun updateProxyPort(port: Int) {
         _settings.value = _settings.value.copy(proxyPort = port)
+        persist(KEY_PROXY_PORT, port)
     }
 
     fun setOnboardingCompleted(completed: Boolean) {
         _settings.value = _settings.value.copy(onboardingCompleted = completed)
+        persist(KEY_ONBOARDING, completed)
     }
 
     fun updateSettings(newSettings: UserSettingsState) {
         _settings.value = newSettings
+        // Bulk persist
+        persist(KEY_USER_NAME, newSettings.userName)
+        persist(KEY_THEME_MODE, newSettings.themeMode)
+        persist(KEY_CORNER_RADIUS, newSettings.cornerRadiusDp)
+        persist(KEY_PROXY_PORT, newSettings.proxyPort)
+        persist(KEY_AUTO_BEAUTIFY, newSettings.autoBeautify)
+        persist(KEY_SSL_VERIFY, newSettings.sslVerification)
+        persist(KEY_SNIPPET_LANG, newSettings.defaultSnippetLang)
+        persist(KEY_ONBOARDING, newSettings.onboardingCompleted)
+    }
+
+    private fun persist(key: String, value: String) {
+        prefs?.edit()?.putString(key, value)?.apply()
+    }
+
+    private fun persist(key: String, value: Int) {
+        prefs?.edit()?.putInt(key, value)?.apply()
+    }
+
+    private fun persist(key: String, value: Boolean) {
+        prefs?.edit()?.putBoolean(key, value)?.apply()
     }
 }
