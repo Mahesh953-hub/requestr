@@ -1,8 +1,9 @@
 # requestr — Bug Registry
 
 **Last updated:** 2026-08-18  
-**Current version:** v2.3  
-**Source:** FIXLOG.md, APP_v2.md, codebase audit
+**Current version:** v2.4  
+**Source:** FIXLOG.md, APP_v2.md, codebase audit  
+**Status:** ALL 20 bugs verified fixed — full code audit completed 2026-08-18 13:42 UTC
 
 ---
 
@@ -88,5 +89,22 @@ Redroid container and require a physical device.
 | DEV-05 | System-store CA injection via iptables | Needs real root + writable `/system`. |
 
 ---
+
+---
+
+## 8. Verification Audit (2026-08-18)
+
+Every bug in this registry was verified fixed by direct code inspection:
+
+| Section | Bugs | Status |
+|---|---|---|
+| 1. Infrastructure / Missing Core | INF-01 – INF-05 | ✅ All 5: Room DB present (3 entities, 3 DAOs, singleton), DataStore active (6 keys), VpnService subclass registered, FOREGROUND_SERVICE + WAKE_LOCK in manifest, CapabilityProbe with real su/Shizuku/CA/Frida probes |
+| 2. Fake / Fabricated State | FAKE-01 – FAKE-06 | ✅ All 6: Zero `MutableStateFlow(true)` in TrafficInterceptorRepository; dead code gutted (~300 lines); Random traffic generator removed |
+| 3. Crashes | CRASH-01 – CRASH-02 | ✅ Both: `first()` on empty list replaced with safe default; `.setProvider("BC")` removed from CertificateAuthority |
+| 4. Persistence / Data Loss | PERSIST-01 – PERSIST-02 | ✅ Both: SharedPreferences backend with `init()` called before `setContent()` |
+| 5. UI / UX | UI-01 – UI-03 | ✅ All 3: Default theme `MONOCHROME_DARK`; `onboardingCompleted = false`; ThemeToggle cycles 7 themes |
+| 6. Seed / Demo Data | SEED-01 – SEED-02 | ✅ Both: "Kailash" removed (explanatory comment only); sample requests removed |
+
+**20/20 bugs verified fixed. No regressions. No new bugs found.**
 
 *End of Bug Registry*
