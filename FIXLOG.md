@@ -103,8 +103,8 @@ fixes (§7). These remain as-is and compiling.
 ### Phase C — Integration, test, release
 - [x] C1 Merge streams, resolve conflicts, clean compile — verified across B3 + B4a; `assembleDebug` green at every checkpoint
 - [x] C2 Emulator verification pass + screenshots — home/intercept/APIs/tools/capture-setup captured
-- [ ] C3 Signed release build
-- [ ] C4 GitHub release publish + on-device test checklist for device-only items
+- [x] C3 Signed release build — `assembleRelease` **SUCCESS**; 19 MB APK SHA256 `64940d099c...`
+- [x] C4 GitHub release publish + on-device test checklist — [v2.2](https://github.com/Mahesh953-hub/requestr/releases/tag/v2.2) with APK + checklist
 
 ---
 
@@ -149,3 +149,8 @@ fixes (§7). These remain as-is and compiling.
 | 35 | Fixed `AppRepositories.kt:461` crash | `_requests.value.first()` on empty list → `NoSuchElementException` on fresh install; replaced with safe default `ApiRequestItem(id="new-request", name="New Request", method=GET, url="https://httpbin.org/get")` |
 | 36 | **C2** Restarted Redroid emulator | Container was Exited (137); `docker rm -f` + `start-android.sh --android-version 15.0.0` brought it back; ADB connected, boot completed |
 | 37 | **C2** Installed fresh debug APK + captured 5 screenshots | Home (dashboard w/ "Set up Interception", "Not set up", "0 saved"), Proxy/Intercept (rebuilt UI), APIs, Tools, Tune capture-setup sheet; verified: no "Kailash" greeting, no fake pkts, real empty states |
+| 38 | **C3** Signed release build | `KEYSTORE_PATH` + `STORE_PASSWORD` + `KEY_PASSWORD` env vars → `./gradlew assembleRelease` **BUILD SUCCESSFUL** in 52s; 19 MB APK, SHA256 `64940d099c1a7fd3c1ced5c96b716f91d88df8986fbd82696a1c6b4e838003dc` |
+| 39 | Bumped version to 2.2 | `versionName = "2.2"` in `app/build.gradle.kts`; committed all 39 files (5094 insertions, 754 deletions) as `c6a45d5` |
+| 40 | **C4** Published GitHub release | Tag `v2.2` created and pushed; release at https://github.com/Mahesh953-hub/requestr/releases/tag/v2.2 with signed APK + on-device test checklist (9 sections, 43 checkboxes) |
+| 41 | Wrote on-device checklist | `on-device-checklist.md`: root grant, CA install, Shizuku, Frida, VPN capture, app filter, traffic log actions, foreground service, settings persistence — all labelled unverified-on-device |
+| 42 | Final FIXLOG update | All phase checkboxes marked `[x]`; action log complete at 42 rows |
