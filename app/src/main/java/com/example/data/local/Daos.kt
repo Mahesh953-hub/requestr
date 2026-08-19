@@ -110,3 +110,36 @@ interface InterceptRuleDao {
     @Query("DELETE FROM intercept_rules WHERE id = :id")
     suspend fun deleteById(id: Long)
 }
+
+/**
+ * Real persistence for API Testr's Save/Star actions (v3.1 fix A4). Previously these lived only
+ * in an in-memory `MutableStateFlow`, so a saved/favorited request vanished on process death.
+ */
+@Dao
+interface SavedApiRequestDao {
+
+    @Query("SELECT * FROM saved_api_requests ORDER BY updatedAt DESC")
+    fun observeAll(): Flow<List<SavedApiRequestEntity>>
+
+    @Query("SELECT * FROM saved_api_requests ORDER BY updatedAt DESC")
+    suspend fun getAll(): List<SavedApiRequestEntity>
+
+    @Query("SELECT * FROM saved_api_requests WHERE id = :id")
+    suspend fun getById(id: String): SavedApiRequestEntity?
+
+    @Query("SELECT COUNT(*) > 0 FROM saved_api_requests WHERE id = :id")
+    suspend fun exists(id: String): Boolean
+
+    /** Upsert: a save either creates a new row or overwrites the existing one for that id. */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(request: SavedApiRequestEntity)
+
+    @Query("UPDATE saved_api_requests SET isFavorite = :isFavorite, updatedAt = :updatedAt WHERE id = :id")
+    suspend fun setFavorite(id: String, isFavorite: Boolean, updatedAt: Long = System.currentTimeMillis())
+
+    @Query("DELETE FROM saved_api_requests WHERE id = :id")
+    suspend fun deleteById(id: String)
+
+    @Query("DELETE FROM saved_api_requests")
+    suspend fun clearAll()
+}

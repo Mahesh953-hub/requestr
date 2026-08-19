@@ -1,5 +1,9 @@
 package com.example.data.repository
 
+import android.content.Context
+import com.example.data.local.RequestrDatabase
+import com.example.data.local.toApiRequestItem
+import com.example.data.local.toEntity
 import com.example.data.models.ApiFolderItem
 import com.example.data.models.ApiRequestItem
 import com.example.data.models.FlowConnectionItem
@@ -13,10 +17,14 @@ import com.example.data.models.NoteItem
 import com.example.data.models.RequestBodyType
 import com.example.data.models.UserSettingsState
 import java.util.UUID
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 
 // ==========================================
 // 2. NOTES REPOSITORY
@@ -335,28 +343,76 @@ object ApiCollectionsRepository {
     )
     val currentActiveRequest: StateFlow<ApiRequestItem> = _currentActiveRequest.asStateFlow()
 
+    private var appContext: Context? = null
+    private val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * v3.1 fix (A4): saved requests previously lived only in [_requests], a plain in-memory
+     * `MutableStateFlow` — Save/Star looked like it worked but every request was lost on process
+     * death or app restart. Call once from Application/MainActivity.onCreate() (mirrors
+     * [SettingsRepository.init]) to back [_requests] with the real `saved_api_requests` Room
+     * table; every subsequent read reflects the DB, and writes below persist to it.
+     */
+    fun init(context: Context) {
+        if (appContext != null) return
+        val ctx = context.applicationContext
+        appContext = ctx
+        repoScope.launch {
+            RequestrDatabase.get(ctx).savedApiRequestDao().observeAll().collect { rows ->
+                _requests.value = rows.map { it.toApiRequestItem() }
+            }
+        }
+    }
+
     fun setActiveRequest(req: ApiRequestItem) {
         _currentActiveRequest.value = req
     }
 
     fun saveRequest(req: ApiRequestItem) {
+        val updated = req.copy(updatedAt = System.currentTimeMillis())
+        _currentActiveRequest.value = updated
+
+        // Optimistic in-memory update so the UI (e.g. Saved APIs list) reflects the save
+        // immediately, without waiting on the DB round-trip / Flow re-collection.
         val current = _requests.value
-        val exists = current.any { it.id == req.id }
-        if (exists) {
-            _requests.value = current.map { if (it.id == req.id) req.copy(updatedAt = System.currentTimeMillis()) else it }
+        val exists = current.any { it.id == updated.id }
+        _requests.value = if (exists) {
+            current.map { if (it.id == updated.id) updated else it }
         } else {
-            _requests.value = listOf(req.copy(updatedAt = System.currentTimeMillis())) + current
+            listOf(updated) + current
         }
-        _currentActiveRequest.value = req
+
+        val ctx = appContext
+        if (ctx != null) {
+            repoScope.launch {
+                RequestrDatabase.get(ctx).savedApiRequestDao().upsert(updated.toEntity())
+            }
+        }
     }
 
     fun deleteRequest(id: String) {
         _requests.value = _requests.value.filter { it.id != id }
+        val ctx = appContext
+        if (ctx != null) {
+            repoScope.launch {
+                RequestrDatabase.get(ctx).savedApiRequestDao().deleteById(id)
+            }
+        }
     }
 
     fun toggleFavorite(id: String) {
+        var newFavorite = false
         _requests.value = _requests.value.map {
-            if (it.id == id) it.copy(isFavorite = !it.isFavorite) else it
+            if (it.id == id) {
+                newFavorite = !it.isFavorite
+                it.copy(isFavorite = newFavorite)
+            } else it
+        }
+        val ctx = appContext
+        if (ctx != null) {
+            repoScope.launch {
+                RequestrDatabase.get(ctx).savedApiRequestDao().setFavorite(id, newFavorite)
+            }
         }
     }
 }

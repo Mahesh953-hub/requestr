@@ -17,8 +17,9 @@ import androidx.room.TypeConverters
         CapturedTrafficEntity::class,
         CaptureSessionEntity::class,
         InterceptRuleEntity::class,
+        SavedApiRequestEntity::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = false,
 )
 @TypeConverters(RequestrTypeConverters::class)
@@ -27,6 +28,7 @@ abstract class RequestrDatabase : RoomDatabase() {
     abstract fun capturedTrafficDao(): CapturedTrafficDao
     abstract fun captureSessionDao(): CaptureSessionDao
     abstract fun interceptRuleDao(): InterceptRuleDao
+    abstract fun savedApiRequestDao(): SavedApiRequestDao
 
     companion object {
         @Volatile

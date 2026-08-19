@@ -111,6 +111,9 @@ class MainActivity : ComponentActivity() {
         // never persisted theme choice, so the app lost its theme on restart
         // and briefly rendered a blank screen before the Compose tree settled.
         SettingsRepository.init(applicationContext)
+        // v3.1 fix (A4): backs ApiCollectionsRepository's saved-requests state with the real
+        // Room-persisted `saved_api_requests` table instead of an in-memory-only StateFlow.
+        ApiCollectionsRepository.init(applicationContext)
         enableEdgeToEdge()
         setContent {
             RequestrApp()

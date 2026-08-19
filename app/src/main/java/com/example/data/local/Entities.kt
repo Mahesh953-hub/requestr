@@ -80,3 +80,49 @@ data class InterceptRuleEntity(
     val replacementValue: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
 )
+
+/**
+ * A user-saved API Testr request.
+ *
+ * v3.1 fix (A4): previously `ApiCollectionsRepository` held saved requests only in an in-memory
+ * `MutableStateFlow`, so Save/Star looked persistent but every request was lost on process death
+ * or app restart (v3.1 spec Bug A4). This table is the real persistence layer; the id matches
+ * [com.example.data.models.ApiRequestItem.id] (a client-generated UUID string) so saves are a
+ * straightforward upsert rather than requiring an id round-trip.
+ */
+@Entity(tableName = "saved_api_requests", indices = [Index("isFavorite"), Index("updatedAt")])
+data class SavedApiRequestEntity(
+    @PrimaryKey val id: String,
+    val name: String = "Untitled Request",
+    val folderId: String? = null,
+    val method: String = "GET",
+    val url: String = "",
+    val queryParams: List<SavedKeyValue> = emptyList(),
+    val headers: List<SavedKeyValue> = emptyList(),
+    val authType: String = "NONE",
+    val bearerToken: String = "",
+    val basicUsername: String = "",
+    val basicPassword: String = "",
+    val apiKeyHeader: String = "X-API-Key",
+    val apiKeyValue: String = "",
+    val bodyType: String = "NONE",
+    val bodyContent: String = "",
+    val formData: List<SavedKeyValue> = emptyList(),
+    val preScript: String = "",
+    val postScript: String = "",
+    val isFavorite: Boolean = false,
+    val updatedAt: Long = System.currentTimeMillis(),
+)
+
+/**
+ * Plain-data mirror of [com.example.data.models.KeyValueItem] used only for JSON (de)serialization
+ * inside [SavedApiRequestEntity]'s list columns. Kept separate from the UI model so the DB schema
+ * never depends on `data.models` shapes changing.
+ */
+data class SavedKeyValue(
+    val id: String = "",
+    val key: String = "",
+    val value: String = "",
+    val isEnabled: Boolean = true,
+    val description: String = "",
+)

@@ -47,6 +47,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.TabRowDefaults.SecondaryIndicator
@@ -116,6 +119,15 @@ fun ApiTestrScreen(
     var showImportCurlModal by remember { mutableStateOf(false) }
     var selectedSnippetLang by remember { mutableStateOf("Python - Requests") }
 
+    // v3.1 fix (A4): Save previously gave zero feedback — the request was written to
+    // ApiCollectionsRepository silently, with no confirmation the tap did anything. This is the
+    // app's first SnackbarHost; other screens still have none.
+    val snackbarHostState = remember { SnackbarHostState() }
+    fun showSavedSnackbar(message: String) {
+        coroutineScope.launch { snackbarHostState.showSnackbar(message) }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -130,6 +142,7 @@ fun ApiTestrScreen(
                     val updated = reqState.copy(isFavorite = !reqState.isFavorite)
                     reqState = updated
                     ApiCollectionsRepository.saveRequest(updated)
+                    showSavedSnackbar(if (updated.isFavorite) "Added to favorites" else "Removed from favorites")
                 }) {
                     Icon(
                         imageVector = if (reqState.isFavorite) Icons.Default.Star else Icons.Default.StarBorder,
@@ -139,6 +152,7 @@ fun ApiTestrScreen(
                 }
                 IconButton(onClick = {
                     ApiCollectionsRepository.saveRequest(reqState)
+                    showSavedSnackbar("Saved \"${reqState.name}\"")
                 }) {
                     Icon(imageVector = Icons.Default.Save, contentDescription = "Save", tint = MaterialTheme.colorScheme.primary)
                 }
@@ -805,6 +819,7 @@ fun ApiTestrScreen(
                         reqState = parsed
                         ApiCollectionsRepository.saveRequest(parsed)
                         showImportCurlModal = false
+                        showSavedSnackbar("Imported \"${parsed.name}\"")
                     },
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp),
@@ -856,6 +871,16 @@ fun ApiTestrScreen(
                 showMoreMenu = false
             }
         )
+    }
+
+    SnackbarHost(
+        hostState = snackbarHostState,
+        modifier = Modifier
+            .align(Alignment.BottomCenter)
+            .padding(bottom = 16.dp)
+    ) { data ->
+        Snackbar(snackbarData = data)
+    }
     }
 }
 

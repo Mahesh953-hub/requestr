@@ -43,6 +43,17 @@ class RequestrTypeConverters {
     fun nameToRuleAction(value: String?): RuleAction =
         runCatching { RuleAction.valueOf(value ?: "") }.getOrNull() ?: RuleAction.LOG_ONLY
 
+    // -- Saved API Testr requests (A4) --------------------------------------------------------
+
+    @TypeConverter
+    fun savedKeyValueListToJson(value: List<SavedKeyValue>?): String =
+        if (value.isNullOrEmpty()) "[]" else savedKeyValueListAdapter.toJson(value)
+
+    @TypeConverter
+    fun jsonToSavedKeyValueList(value: String?): List<SavedKeyValue> =
+        if (value.isNullOrBlank() || value == "[]") emptyList()
+        else runCatching { savedKeyValueListAdapter.fromJson(value) }.getOrNull() ?: emptyList()
+
     private companion object {
         val moshi: Moshi = Moshi.Builder().addLast(KotlinJsonAdapterFactory()).build()
 
@@ -52,6 +63,10 @@ class RequestrTypeConverters {
 
         val listAdapter = moshi.adapter<List<String>>(
             Types.newParameterizedType(List::class.java, String::class.java)
+        )
+
+        val savedKeyValueListAdapter = moshi.adapter<List<SavedKeyValue>>(
+            Types.newParameterizedType(List::class.java, SavedKeyValue::class.java)
         )
     }
 }

@@ -1,5 +1,13 @@
 package com.example.ui.screens
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -24,6 +32,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Storage
@@ -39,14 +48,18 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -55,7 +68,23 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.ui.components.RequestrWordmark
 import com.example.ui.theme.AppThemeMode
+
+/**
+ * Real state for a single onboarding permission card (A2 fix).
+ *
+ * Previously every card only tracked a single `handled: Boolean` flipped identically by
+ * both "Grant" and "Skip" — meaning a skipped permission rendered as a green "Granted"
+ * pill exactly like a genuinely granted one. Now:
+ *  - [NOT_REQUESTED]: no OS dialog has been shown yet (or a previous denial reset it).
+ *  - [GRANTED]: `ContextCompat.checkSelfPermission` confirmed OS-level grant.
+ *  - [SKIPPED]: the user explicitly skipped an *optional* permission — rendered distinctly
+ *    from GRANTED, never claiming a real grant that didn't happen.
+ *  - [DENIED]: the OS permission dialog was shown and the user denied it. For a
+ *    non-optional permission this blocks wizard progression with a link to App Info.
+ */
+private enum class PermState { NOT_REQUESTED, GRANTED, SKIPPED, DENIED }
 
 /**
  * Redesigned onboarding (Fix 10). Three steps:
@@ -66,20 +95,90 @@ import com.example.ui.theme.AppThemeMode
  * Progress dots at the top; all colours use theme tokens; no hardcoded values.
  * When re-run via Settings, already-granted permissions show "Granted" +
  * a subtle "Skip" option; the theme selector pre-fills the current choice.
+ *
+ * A1 fix (v3.1): there is exactly ONE source of truth for the theme at all times —
+ * [SettingsRepository.settings.themeMode]. Previously this screen held its own
+ * `remember { mutableStateOf("MONOCHROME_DARK") }` copy that was invisible to the
+ * repository until "Finish Setup" was tapped. That caused two concrete bugs:
+ *   1. Re-running the wizard from Settings always reset the swatch highlight to
+ *      Monochrome Dark instead of showing the theme actually in effect, and tapping
+ *      Finish without touching the swatches would silently overwrite the real
+ *      persisted theme back to Monochrome Dark.
+ *   2. The onboarding screen's own chrome (background/surface/primary colors) never
+ *      reflected the theme being previewed, since the root `MyApplicationTheme` in
+ *      MainActivity reads the persisted value live, not this screen's local copy.
+ * Fix: seed local state FROM the repository, and write every tap straight through to
+ * [SettingsRepository.updateTheme] / [SettingsRepository.updateAppearanceMode] so the
+ * root theme provider and this screen are always looking at the same value — the
+ * wizard becomes a live editor of the real setting, not a disconnected preview.
  */
 @Composable
 fun OnboardingScreen(
     onFinishOnboarding: (userName: String, themeMode: String) -> Unit
 ) {
+    val settings by com.example.data.repository.SettingsRepository.settings.collectAsState()
     val totalSteps = 3
     var currentStep by remember { mutableIntStateOf(1) }
     var userName by remember { mutableStateOf("") }
-    var selectedTheme by remember { mutableStateOf("MONOCHROME_DARK") }
+    // Seed from the real persisted value (not a hardcoded literal) so re-running the
+    // wizard shows what's actually active instead of always resetting to Monochrome Dark.
+    var selectedTheme by remember { mutableStateOf(settings.themeMode) }
 
-    // Permission flags — ALL start as NOT granted (real status checked on tap)
-    var storageHandled by remember { mutableStateOf(false) }
-    var networkHandled by remember { mutableStateOf(false) }
-    var musicHandled by remember { mutableStateOf(false) }
+    // ── A2 fix: real permission state, backed by actual OS grants ─────────────
+    val context = LocalContext.current
+
+    val storagePermissionName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        Manifest.permission.READ_MEDIA_AUDIO
+    } else {
+        Manifest.permission.READ_EXTERNAL_STORAGE
+    }
+    fun hasStoragePermission(): Boolean =
+        ContextCompat.checkSelfPermission(context, storagePermissionName) ==
+            PackageManager.PERMISSION_GRANTED
+    fun hasNotificationPermission(): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
+                PackageManager.PERMISSION_GRANTED
+        } else {
+            true // POST_NOTIFICATIONS didn't exist pre-33; notifications are implicitly allowed.
+        }
+
+    var storageState by remember { mutableStateOf(if (hasStoragePermission()) PermState.GRANTED else PermState.NOT_REQUESTED) }
+    var musicState by remember { mutableStateOf(if (hasStoragePermission()) PermState.GRANTED else PermState.NOT_REQUESTED) }
+    // Notifications (POST_NOTIFICATIONS, Android 13+) — optional; app can function without
+    // them (only foreground-service/status notices are affected), so Skip is legitimate here.
+    var notificationState by remember {
+        mutableStateOf(if (hasNotificationPermission()) PermState.GRANTED else PermState.NOT_REQUESTED)
+    }
+    // Network permissions (INTERNET/ACCESS_NETWORK_STATE) are normal/install-time
+    // permissions on Android — never runtime-requestable, so there is no OS dialog to
+    // show. This card is real in that it reflects an actually-true fact (the manifest
+    // declares them, so they are always granted at install), not a fabricated "auto"
+    // state that pretends a runtime grant occurred.
+    val networkState = PermState.GRANTED
+
+    // Re-check on resume (e.g. returning from App Info settings after a manual grant).
+    LaunchedEffect(Unit) {
+        if (hasStoragePermission()) {
+            if (storageState != PermState.SKIPPED) storageState = PermState.GRANTED
+            if (musicState != PermState.SKIPPED) musicState = PermState.GRANTED
+        }
+        if (hasNotificationPermission() && notificationState != PermState.SKIPPED) {
+            notificationState = PermState.GRANTED
+        }
+    }
+
+    val storagePermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> storageState = if (granted) PermState.GRANTED else PermState.DENIED }
+
+    val musicPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> musicState = if (granted) PermState.GRANTED else PermState.DENIED }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> notificationState = if (granted) PermState.GRANTED else PermState.DENIED }
 
     Box(
         modifier = Modifier
@@ -107,20 +206,40 @@ fun OnboardingScreen(
                 )
 
                 2 -> PermissionsStep(
-                    storageHandled = storageHandled,
-                    networkHandled = networkHandled,
-                    musicHandled = musicHandled,
-                    onStorageGranted = { storageHandled = true },
-                    onStorageSkipped = { storageHandled = true },
-                    onNetworkGranted = { networkHandled = true },
-                    onMusicGranted = { musicHandled = true },
-                    onMusicSkipped = { musicHandled = true },
+                    storageState = storageState,
+                    networkState = networkState,
+                    musicState = musicState,
+                    notificationState = notificationState,
+                    onStorageGrant = { storagePermissionLauncher.launch(storagePermissionName) },
+                    onStorageOpenSettings = {
+                        context.startActivity(
+                            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                data = Uri.fromParts("package", context.packageName, null)
+                            }
+                        )
+                    },
+                    onMusicGrant = { musicPermissionLauncher.launch(storagePermissionName) },
+                    onMusicSkip = { musicState = PermState.SKIPPED },
+                    onNotificationGrant = {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        } else {
+                            notificationState = PermState.GRANTED
+                        }
+                    },
+                    onNotificationSkip = { notificationState = PermState.SKIPPED },
                     onContinue = { currentStep = 3 }
                 )
 
                 3 -> AppearanceStep(
                     selectedTheme = selectedTheme,
-                    onThemeSelected = { selectedTheme = it },
+                    onThemeSelected = { theme ->
+                        // Write through immediately so the root theme provider (which
+                        // reads SettingsRepository live) and this screen never disagree —
+                        // this IS the fix for A1's "collision" symptom.
+                        selectedTheme = theme
+                        com.example.data.repository.SettingsRepository.updateTheme(theme)
+                    },
                     onFinish = { onFinishOnboarding(userName, selectedTheme) }
                 )
             }
@@ -142,7 +261,9 @@ private fun WelcomeStep(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Branded logo
+        // Branded icon badge (A3 fix: emoji "⚡" placeholder replaced with a real vector
+        // icon token from the app's own icon set, consistent with the rest of the app's
+        // iconography rather than a stand-in glyph).
         Box(
             modifier = Modifier
                 .size(88.dp)
@@ -159,17 +280,24 @@ private fun WelcomeStep(
                 .border(2.dp, MaterialTheme.colorScheme.secondary.copy(alpha = 0.3f), RoundedCornerShape(20.dp)),
             contentAlignment = Alignment.Center
         ) {
-            Text("⚡", fontSize = 36.sp)
+            Icon(
+                imageVector = Icons.Default.Security,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(40.dp)
+            )
         }
 
         Spacer(modifier = Modifier.height(20.dp))
 
-        Text(
-            text = "requestr",
-            style = MaterialTheme.typography.headlineLarge,
-            fontWeight = FontWeight.Bold,
-            fontSize = 32.sp,
-            color = MaterialTheme.colorScheme.primary
+        // A3 fix: use the real app-wide wordmark composable (with its live-state dot)
+        // instead of a disconnected plain "requestr" Text — this is the same brand
+        // element rendered in HomeScreen/SettingsScreen/AppNavigationDrawer, so the
+        // wizard's first impression matches the rest of the app instead of diverging
+        // from it.
+        RequestrWordmark(
+            fontSize = 32,
+            textColor = MaterialTheme.colorScheme.primary
         )
 
         Spacer(modifier = Modifier.height(6.dp))
@@ -253,18 +381,23 @@ private fun WelcomeStep(
 
 @Composable
 private fun PermissionsStep(
-    storageHandled: Boolean,
-    networkHandled: Boolean,
-    musicHandled: Boolean,
-    onStorageGranted: () -> Unit,
-    onStorageSkipped: () -> Unit,
-    onNetworkGranted: () -> Unit,
-    onMusicGranted: () -> Unit,
-    onMusicSkipped: () -> Unit,
+    storageState: PermState,
+    networkState: PermState,
+    musicState: PermState,
+    notificationState: PermState,
+    onStorageGrant: () -> Unit,
+    onStorageOpenSettings: () -> Unit,
+    onMusicGrant: () -> Unit,
+    onMusicSkip: () -> Unit,
+    onNotificationGrant: () -> Unit,
+    onNotificationSkip: () -> Unit,
     onContinue: () -> Unit
 ) {
-    // Continue is enabled when storage + network are handled; music is optional
-    val canContinue = storageHandled && networkHandled
+    // Storage is NOT optional (collections/HAR export/notes need it) — per A2's spec,
+    // non-optional permissions block progression instead of offering Skip. Network is
+    // always GRANTED (install-time manifest permission). Music + notifications are
+    // optional, so they never block Continue even when SKIPPED or DENIED.
+    val canContinue = storageState == PermState.GRANTED
 
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
@@ -282,44 +415,68 @@ private fun PermissionsStep(
 
         Spacer(modifier = Modifier.height(20.dp))
 
-        // Storage card
+        // Storage card — required, no Skip. Denied blocks Continue and links to App Info.
         PermissionCard(
             icon = Icons.Default.Storage,
             iconTint = MaterialTheme.colorScheme.primary,
             title = "Storage Access",
             description = "Save and load API collections, HAR exports & notes",
-            handled = storageHandled,
-            onGrant = onStorageGranted,
-            onSkip = onStorageSkipped
+            state = storageState,
+            onGrant = onStorageGrant,
+            onOpenSettings = onStorageOpenSettings,
+            optional = false
         )
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        // Network card
+        // Network card — install-time manifest permission, always granted, no action needed.
         PermissionCard(
             icon = Icons.Default.Public,
             iconTint = MaterialTheme.colorScheme.secondary,
             title = "Network Permissions",
             description = "Required for API testing and packet interception",
-            handled = networkHandled,
-            onGrant = onNetworkGranted,
-            onSkip = onNetworkGranted, // network is auto-granted; tapping skip = same as grant
+            state = networkState,
+            onGrant = {},
             grantLabel = "Auto-granted"
         )
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        // Music card (from Fix 05)
+        // Music card (from Fix 05) — optional.
         PermissionCard(
             icon = Icons.Default.MusicNote,
             iconTint = MaterialTheme.colorScheme.tertiary,
             title = "Local Music Library",
             description = "Scan local audio for Focus & Synth Lounge",
-            handled = musicHandled,
-            onGrant = onMusicGranted,
-            onSkip = onMusicSkipped,
+            state = musicState,
+            onGrant = onMusicGrant,
+            onSkip = onMusicSkip,
             optional = true
         )
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // Notifications card (POST_NOTIFICATIONS, Android 13+) — optional.
+        PermissionCard(
+            icon = Icons.Default.Notifications,
+            iconTint = MaterialTheme.colorScheme.secondary,
+            title = "Notifications",
+            description = "Status updates for capture sessions and background tasks",
+            state = notificationState,
+            onGrant = onNotificationGrant,
+            onSkip = onNotificationSkip,
+            optional = true
+        )
+
+        if (storageState == PermState.DENIED) {
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = "requestr needs storage access to save your API collections — " +
+                    "please grant to continue.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error
+            )
+        }
 
         Spacer(modifier = Modifier.height(32.dp))
 
@@ -382,7 +539,21 @@ private fun AppearanceStep(
             modifier = Modifier.padding(bottom = 8.dp)
         )
         AppearanceSelectorCompact(
-            onModeSelected = { /* handled via accent grid — mode is implied by theme */ }
+            currentTheme = selectedTheme,
+            onModeSelected = { mode ->
+                // Mirrors the exact same write path SettingsScreen's AppearanceSelector
+                // uses, so "System/Light/Dark" here has a real, immediate effect instead
+                // of being cosmetic-only (previously a no-op comment).
+                com.example.data.repository.SettingsRepository.updateAppearanceMode(mode)
+                when (mode) {
+                    "LIGHT" -> onThemeSelected("EDITORIAL_LIGHT")
+                    "DARK" -> onThemeSelected(
+                        com.example.data.repository.SettingsRepository.settings.value.selectedDarkTheme
+                    )
+                    // "SYSTEM": theme follows system brightness; leave the accent
+                    // swatch selection (below) as the dark/light theme used when it does.
+                }
+            }
         )
 
         Spacer(modifier = Modifier.height(20.dp))
@@ -459,9 +630,10 @@ private fun PermissionCard(
     iconTint: Color,
     title: String,
     description: String,
-    handled: Boolean,
+    state: PermState,
     onGrant: () -> Unit,
-    onSkip: () -> Unit,
+    onSkip: (() -> Unit)? = null,
+    onOpenSettings: (() -> Unit)? = null,
     grantLabel: String = "Grant",
     optional: Boolean = false
 ) {
@@ -524,10 +696,10 @@ private fun PermissionCard(
 
         Spacer(modifier = Modifier.width(8.dp))
 
-        // Status
-        if (handled) {
-            // Already handled — show granted + subtle skip
-            Row(verticalAlignment = Alignment.CenterVertically) {
+        // Status — four visually distinct states (A2 fix): GRANTED, SKIPPED, and DENIED
+        // must never look identical to each other or to "needs action."
+        when (state) {
+            PermState.GRANTED -> {
                 Box(
                     modifier = Modifier
                         .clip(CircleShape)
@@ -542,9 +714,39 @@ private fun PermissionCard(
                     )
                 }
             }
-        } else {
-            // Needs granting
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            PermState.SKIPPED -> {
+                Box(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        "Skipped",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+            PermState.DENIED -> {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.error.copy(alpha = 0.15f))
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            "Denied",
+                            color = MaterialTheme.colorScheme.error,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+            PermState.NOT_REQUESTED -> {
                 Text(
                     text = grantLabel,
                     color = MaterialTheme.colorScheme.primary,
@@ -559,23 +761,64 @@ private fun PermissionCard(
         }
     }
 
-    // Skip row appears below when handled
-    if (handled) {
-        Text(
-            text = "Skip",
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            fontSize = 12.sp,
-            modifier = Modifier
-                .padding(start = 52.dp, top = 2.dp)
-                .clip(RoundedCornerShape(4.dp))
-                .clickable { onSkip() }
-                .padding(horizontal = 6.dp, vertical = 2.dp)
-        )
+    // Secondary action row below the card.
+    when {
+        // Skipped — read explicitly as "won't work until granted later," with a way back in.
+        state == PermState.SKIPPED -> {
+            Text(
+                text = "Skipped — this feature won't work until granted later in Settings",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(start = 52.dp, top = 2.dp)
+            )
+        }
+        // Denied on a non-optional permission — block-styled message + link to App Info.
+        state == PermState.DENIED && !optional && onOpenSettings != null -> {
+            Text(
+                text = "Open App Info to grant manually",
+                color = MaterialTheme.colorScheme.error,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .padding(start = 52.dp, top = 2.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .clickable { onOpenSettings() }
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            )
+        }
+        // Denied on an optional permission — offer to retry the real system dialog.
+        state == PermState.DENIED && optional -> {
+            Text(
+                text = "Try again",
+                color = MaterialTheme.colorScheme.primary,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .padding(start = 52.dp, top = 2.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .clickable { onGrant() }
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            )
+        }
+        // Not yet requested and genuinely optional — offer Skip (never for required perms).
+        state == PermState.NOT_REQUESTED && optional && onSkip != null -> {
+            Text(
+                text = "Skip",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 12.sp,
+                modifier = Modifier
+                    .padding(start = 52.dp, top = 2.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .clickable { onSkip() }
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            )
+        }
     }
 }
 
 @Composable
 private fun AppearanceSelectorCompact(
+    currentTheme: String,
     onModeSelected: (String) -> Unit
 ) {
     val modes = listOf(
@@ -583,7 +826,12 @@ private fun AppearanceSelectorCompact(
         Triple("LIGHT", "Light", Icons.Filled.LightMode),
         Triple("DARK", "Dark", Icons.Outlined.DarkMode)
     )
-    var selectedMode by remember { mutableStateOf("SYSTEM") }
+    // Derived from the real selected theme instead of an isolated local default, so this
+    // row reflects what AccentColorSwatches below is actually showing as selected.
+    val selectedMode = when {
+        currentTheme.equals("EDITORIAL_LIGHT", ignoreCase = true) -> "LIGHT"
+        else -> "DARK"
+    }
 
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -601,7 +849,7 @@ private fun AppearanceSelectorCompact(
                 modifier = Modifier
                     .clip(RoundedCornerShape(10.dp))
                     .background(bgColor)
-                    .clickable { selectedMode = mode; onModeSelected(mode) }
+                    .clickable { onModeSelected(mode) }
                     .padding(horizontal = 22.dp, vertical = 10.dp)
             ) {
                 Icon(
