@@ -377,24 +377,34 @@ object FlowRepository {
 // 4. MUSIC REPOSITORY
 // ==========================================
 object MusicRepository {
-    private val _tracks = MutableStateFlow<List<MusicTrackItem>>(
-        listOf(
-            MusicTrackItem("t-1", "Neon Interceptor (Lofi Mix)", "requestr Synth Lab", 195, MusicSourceType.SYNTH_LOFI, 0xFF1E3A8A),
-            MusicTrackItem("t-2", "Midnight Packet Stream", "Cyber Ambient", 240, MusicSourceType.AMBIENT_CYBER, 0xFF083344),
-            MusicTrackItem("t-3", "Root Shell Flow", "Terminal Beats", 180, MusicSourceType.CHILL_CODING, 0xFF312E81),
-            MusicTrackItem("t-4", "Bypass & Decrypt (Synthwave)", "Glitch Master", 215, MusicSourceType.SYNTH_LOFI, 0xFF701A75)
-        )
-    )
+    private val _tracks = MutableStateFlow<List<MusicTrackItem>>(emptyList())
     val tracks: StateFlow<List<MusicTrackItem>> = _tracks.asStateFlow()
 
-    private val _currentTrack = MutableStateFlow(_tracks.value.first())
+    private val _currentTrack = MutableStateFlow(
+        MusicTrackItem("", "No Track", "No Artist", 0, MusicSourceType.LOCAL, 0xFF1E3A8A)
+    )
     val currentTrack: StateFlow<MusicTrackItem> = _currentTrack.asStateFlow()
 
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
 
-    private val _currentPositionSec = MutableStateFlow(45)
+    private val _currentPositionSec = MutableStateFlow(0)
     val currentPositionSec: StateFlow<Int> = _currentPositionSec.asStateFlow()
+
+    /** Scan the device's local music library and populate the track list. */
+    suspend fun loadLocalLibrary(context: android.content.Context) {
+        val local = com.example.data.music.LocalMusicScanner.scanLocalTracks(context)
+        _tracks.value = local
+    }
+
+    /** Scan and pick a random track. If library is empty, current track unchanged. */
+    suspend fun pickRandomTrack(context: android.content.Context): MusicTrackItem {
+        val local = com.example.data.music.LocalMusicScanner.scanLocalTracks(context)
+        _tracks.value = local
+        val random = local.randomOrNull() ?: _currentTrack.value
+        _currentTrack.value = random
+        return random
+    }
 
     fun togglePlayPause() {
         _isPlaying.value = !_isPlaying.value
@@ -402,7 +412,9 @@ object MusicRepository {
 
     fun nextTrack() {
         val current = _tracks.value
-        val index = current.indexOfFirst { it.id == _currentTrack.value.id }
+        if (current.isEmpty()) return
+        val curId = _currentTrack.value?.id ?: return
+        val index = current.indexOfFirst { it.id == curId }
         val nextIndex = (index + 1) % current.size
         _currentTrack.value = current[nextIndex]
         _currentPositionSec.value = 0
@@ -410,14 +422,16 @@ object MusicRepository {
 
     fun prevTrack() {
         val current = _tracks.value
-        val index = current.indexOfFirst { it.id == _currentTrack.value.id }
+        if (current.isEmpty()) return
+        val curId = _currentTrack.value?.id ?: return
+        val index = current.indexOfFirst { it.id == curId }
         val prevIndex = if (index - 1 < 0) current.size - 1 else index - 1
         _currentTrack.value = current[prevIndex]
         _currentPositionSec.value = 0
     }
 
     fun seekTo(sec: Int) {
-        _currentPositionSec.value = sec.coerceIn(0, _currentTrack.value.durationSec)
+        _currentPositionSec.value = sec.coerceIn(0, _currentTrack.value?.durationSec ?: 0)
     }
 
     fun selectTrack(id: String) {

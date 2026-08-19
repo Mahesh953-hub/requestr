@@ -252,7 +252,7 @@ fun InterceptScreen(
             // The four capability chips and the app/rule/clear actions moved into the
             // "Capture setup" sheet rather than competing for the top bar.
             SectionHeader(
-                title = "HTTP(S) Interceptor",
+                title = "Interceptr",
                 onMiniSettings = onMiniSettings,
                 actions = {
                     IconButton(onClick = { showCaptureSetupSheet = true }) {
