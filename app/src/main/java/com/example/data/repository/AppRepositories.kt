@@ -16,6 +16,8 @@ import com.example.data.models.NoteFormatType
 import com.example.data.models.NoteItem
 import com.example.data.models.RequestBodyType
 import com.example.data.models.UserSettingsState
+import androidx.datastore.preferences.core.edit
+import com.example.data.prefs.unifiedDataStore
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -420,49 +422,16 @@ object ApiCollectionsRepository {
 // ==========================================
 // 6. USER SETTINGS REPOSITORY
 // ==========================================
+// v3.2 Part C — C1: now backed by the single unified DataStore
+// (com.example.data.prefs.unifiedDataStore) instead of its own raw "requestr_user_settings"
+// SharedPreferences file. init() triggers the one-time legacy migration (idempotent — see
+// LegacyDataMigration) and then collects the unified store into this StateFlow so every
+// existing call site (settings.value, settings StateFlow, update*() functions) keeps working
+// unchanged.
 object SettingsRepository {
-    private const val TAG = "SettingsRepository"
-    private const val PREFS_NAME = "requestr_user_settings"
-    private const val KEY_USER_NAME = "user_name"
-    private const val KEY_THEME_MODE = "theme_mode"
-    private const val KEY_CORNER_RADIUS = "corner_radius"
-    private const val KEY_PROXY_PORT = "proxy_port"
-    private const val KEY_AUTO_BEAUTIFY = "auto_beautify"
-    private const val KEY_SSL_VERIFY = "ssl_verify"
-    private const val KEY_SNIPPET_LANG = "snippet_lang"
-    private const val KEY_ONBOARDING = "onboarding_completed"
-    // Fix 01 — Theme appearance
-    private const val KEY_APPEARANCE_MODE = "appearance_mode"
-    private const val KEY_SELECTED_DARK_THEME = "selected_dark_theme"
-    private const val KEY_SELECTED_LIGHT_THEME = "selected_light_theme"
-    // Fix 02 — UI & UX
-    private const val KEY_SWIPE_TO_DELETE = "swipe_to_delete"
-    private const val KEY_HAPTIC_FEEDBACK = "haptic_feedback"
-    private const val KEY_GESTURE_NAVIGATION = "gesture_navigation"
-    private const val KEY_DENSITY_MODE = "density_mode"
-    private const val KEY_UPDATE_NOTIFICATION_POLICY = "update_notification_policy"
-    private const val KEY_ANIMATION_ENABLED = "animation_enabled"
-    private const val KEY_TRANSITION_BEHAVIOR = "transition_behavior"
-    private const val KEY_DISPLAY_SCALE = "display_scale"
-    // Fix 02 — Features
-    private const val KEY_AUTO_RECORDING = "auto_recording"
-    private const val KEY_TRAFFIC_LOG = "traffic_log"
-    private const val KEY_RECORDING_NOTIFICATIONS = "recording_notifications"
-    private const val KEY_REMOTE_CONTROL = "remote_control"
-    private const val KEY_REMOTE_COMMANDS = "remote_commands"
-    private const val KEY_LAN_DISCOVERY = "lan_discovery"
-    private const val KEY_DEVICE_BROADCASTING = "device_broadcasting"
-    private const val KEY_TRAFFIC_CAPTURE = "traffic_capture"
-    private const val KEY_REQUEST_LOGGING = "request_logging"
-    private const val KEY_RESPONSE_LOGGING = "response_logging"
-    // Fix 05 — Music
-    private const val KEY_MUSIC_PERMISSION_STATUS = "music_permission_status"
-    private const val KEY_MUSIC_BAR_DISMISSED = "music_bar_dismissed"
-    private const val KEY_MUSIC_LIBRARY_SCANNED = "music_library_scanned"
-    private const val KEY_SELECTED_LOCAL_TRACK_ID = "selected_local_track_id"
-
-    private var prefs: android.content.SharedPreferences? = null
-    private var initialized = false
+    private var appContext: Context? = null
+    private val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @Volatile private var initialized = false
 
     /**
      * Call once from Application.onCreate() or early in MainActivity before any
@@ -471,49 +440,49 @@ object SettingsRepository {
      */
     fun init(context: android.content.Context) {
         if (initialized) return
-        prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
         initialized = true
-
-        val p = prefs!!
-        _settings.value = _settings.value.copy(
-            userName = p.getString(KEY_USER_NAME, "") ?: "",
-            themeMode = p.getString(KEY_THEME_MODE, "MONOCHROME_DARK") ?: "MONOCHROME_DARK",
-            cornerRadiusDp = p.getInt(KEY_CORNER_RADIUS, 16),
-            proxyPort = p.getInt(KEY_PROXY_PORT, 8080),
-            autoBeautify = p.getBoolean(KEY_AUTO_BEAUTIFY, true),
-            sslVerification = p.getBoolean(KEY_SSL_VERIFY, false),
-            defaultSnippetLang = p.getString(KEY_SNIPPET_LANG, "Python - Requests") ?: "Python - Requests",
-            onboardingCompleted = p.getBoolean(KEY_ONBOARDING, false),
-            // Fix 01
-            appearanceMode = p.getString(KEY_APPEARANCE_MODE, "SYSTEM") ?: "SYSTEM",
-            selectedDarkTheme = p.getString(KEY_SELECTED_DARK_THEME, "MONOCHROME_DARK") ?: "MONOCHROME_DARK",
-            selectedLightTheme = p.getString(KEY_SELECTED_LIGHT_THEME, "EDITORIAL_LIGHT") ?: "EDITORIAL_LIGHT",
-            // Fix 02 — UI & UX
-            swipeToDeleteEnabled = p.getBoolean(KEY_SWIPE_TO_DELETE, true),
-            hapticFeedbackEnabled = p.getBoolean(KEY_HAPTIC_FEEDBACK, true),
-            gestureNavigationEnabled = p.getBoolean(KEY_GESTURE_NAVIGATION, true),
-            densityMode = p.getString(KEY_DENSITY_MODE, "COMFORTABLE") ?: "COMFORTABLE",
-            updateNotificationPolicy = p.getString(KEY_UPDATE_NOTIFICATION_POLICY, "MAJOR_ONLY") ?: "MAJOR_ONLY",
-            animationEnabled = p.getBoolean(KEY_ANIMATION_ENABLED, true),
-            transitionBehavior = p.getString(KEY_TRANSITION_BEHAVIOR, "STANDARD") ?: "STANDARD",
-            displayScale = p.getString(KEY_DISPLAY_SCALE, "NORMAL") ?: "NORMAL",
-            // Fix 02 — Features
-            autoRecordingEnabled = p.getBoolean(KEY_AUTO_RECORDING, false),
-            trafficLogEnabled = p.getBoolean(KEY_TRAFFIC_LOG, true),
-            recordingNotificationsEnabled = p.getBoolean(KEY_RECORDING_NOTIFICATIONS, true),
-            remoteControlEnabled = p.getBoolean(KEY_REMOTE_CONTROL, false),
-            remoteCommandsEnabled = p.getBoolean(KEY_REMOTE_COMMANDS, false),
-            lanDeviceDiscoveryEnabled = p.getBoolean(KEY_LAN_DISCOVERY, false),
-            deviceBroadcastingEnabled = p.getBoolean(KEY_DEVICE_BROADCASTING, false),
-            trafficCaptureEnabled = p.getBoolean(KEY_TRAFFIC_CAPTURE, true),
-            requestLoggingEnabled = p.getBoolean(KEY_REQUEST_LOGGING, true),
-            responseLoggingEnabled = p.getBoolean(KEY_RESPONSE_LOGGING, true),
-            // Fix 05 — Music
-            musicPermissionStatus = p.getString(KEY_MUSIC_PERMISSION_STATUS, "NOT_REQUESTED") ?: "NOT_REQUESTED",
-            musicBarDismissed = p.getBoolean(KEY_MUSIC_BAR_DISMISSED, false),
-            musicLibraryScanned = p.getBoolean(KEY_MUSIC_LIBRARY_SCANNED, false),
-            selectedLocalTrackId = p.getString(KEY_SELECTED_LOCAL_TRACK_ID, null),
-        )
+        val ctx = context.applicationContext
+        appContext = ctx
+        repoScope.launch {
+            com.example.data.prefs.LegacyDataMigration.migrateIfNeeded(ctx)
+            ctx.unifiedDataStore.data.collect { p ->
+                _settings.value = _settings.value.copy(
+                    userName = p[K.USER_NAME] ?: _settings.value.userName,
+                    themeMode = p[K.THEME_MODE] ?: _settings.value.themeMode,
+                    cornerRadiusDp = p[K.CORNER_RADIUS] ?: _settings.value.cornerRadiusDp,
+                    proxyPort = p[K.PROXY_PORT] ?: _settings.value.proxyPort,
+                    autoBeautify = p[K.AUTO_BEAUTIFY] ?: _settings.value.autoBeautify,
+                    sslVerification = p[K.SSL_VERIFY] ?: _settings.value.sslVerification,
+                    defaultSnippetLang = p[K.SNIPPET_LANG] ?: _settings.value.defaultSnippetLang,
+                    onboardingCompleted = p[K.ONBOARDING] ?: _settings.value.onboardingCompleted,
+                    appearanceMode = p[K.APPEARANCE_MODE] ?: _settings.value.appearanceMode,
+                    selectedDarkTheme = p[K.SELECTED_DARK_THEME] ?: _settings.value.selectedDarkTheme,
+                    selectedLightTheme = p[K.SELECTED_LIGHT_THEME] ?: _settings.value.selectedLightTheme,
+                    swipeToDeleteEnabled = p[K.SWIPE_TO_DELETE] ?: _settings.value.swipeToDeleteEnabled,
+                    hapticFeedbackEnabled = p[K.HAPTIC_FEEDBACK] ?: _settings.value.hapticFeedbackEnabled,
+                    gestureNavigationEnabled = p[K.GESTURE_NAVIGATION] ?: _settings.value.gestureNavigationEnabled,
+                    densityMode = p[K.DENSITY_MODE] ?: _settings.value.densityMode,
+                    updateNotificationPolicy = p[K.UPDATE_NOTIFICATION_POLICY] ?: _settings.value.updateNotificationPolicy,
+                    animationEnabled = p[K.ANIMATION_ENABLED] ?: _settings.value.animationEnabled,
+                    transitionBehavior = p[K.TRANSITION_BEHAVIOR] ?: _settings.value.transitionBehavior,
+                    displayScale = p[K.DISPLAY_SCALE] ?: _settings.value.displayScale,
+                    autoRecordingEnabled = p[K.AUTO_RECORDING] ?: _settings.value.autoRecordingEnabled,
+                    trafficLogEnabled = p[K.TRAFFIC_LOG] ?: _settings.value.trafficLogEnabled,
+                    recordingNotificationsEnabled = p[K.RECORDING_NOTIFICATIONS] ?: _settings.value.recordingNotificationsEnabled,
+                    remoteControlEnabled = p[K.REMOTE_CONTROL] ?: _settings.value.remoteControlEnabled,
+                    remoteCommandsEnabled = p[K.REMOTE_COMMANDS] ?: _settings.value.remoteCommandsEnabled,
+                    lanDeviceDiscoveryEnabled = p[K.LAN_DISCOVERY] ?: _settings.value.lanDeviceDiscoveryEnabled,
+                    deviceBroadcastingEnabled = p[K.DEVICE_BROADCASTING] ?: _settings.value.deviceBroadcastingEnabled,
+                    trafficCaptureEnabled = p[K.TRAFFIC_CAPTURE] ?: _settings.value.trafficCaptureEnabled,
+                    requestLoggingEnabled = p[K.REQUEST_LOGGING] ?: _settings.value.requestLoggingEnabled,
+                    responseLoggingEnabled = p[K.RESPONSE_LOGGING] ?: _settings.value.responseLoggingEnabled,
+                    musicPermissionStatus = p[K.MUSIC_PERMISSION_STATUS] ?: _settings.value.musicPermissionStatus,
+                    musicBarDismissed = p[K.MUSIC_BAR_DISMISSED] ?: _settings.value.musicBarDismissed,
+                    musicLibraryScanned = p[K.MUSIC_LIBRARY_SCANNED] ?: _settings.value.musicLibraryScanned,
+                    selectedLocalTrackId = p[K.SELECTED_LOCAL_TRACK_ID] ?: _settings.value.selectedLocalTrackId,
+                )
+            }
+        }
     }
 
     private val _settings = MutableStateFlow(
@@ -547,12 +516,12 @@ object SettingsRepository {
 
     fun updateUserName(name: String) {
         _settings.value = _settings.value.copy(userName = name)
-        persist(KEY_USER_NAME, name)
+        persist(K.USER_NAME, name)
     }
 
     fun updateTheme(themeMode: String) {
         _settings.value = _settings.value.copy(themeMode = themeMode)
-        persist(KEY_THEME_MODE, themeMode)
+        persist(K.THEME_MODE, themeMode)
     }
 
     // v3.1 B1 — the single, unified theme-selection write path. Every UI entry point
@@ -578,9 +547,9 @@ object SettingsRepository {
             current.copy(themeMode = theme.name, selectedDarkTheme = theme.name)
         }
         _settings.value = updated
-        persist(KEY_THEME_MODE, updated.themeMode)
-        if (theme.isLight) persist(KEY_SELECTED_LIGHT_THEME, updated.selectedLightTheme)
-        else persist(KEY_SELECTED_DARK_THEME, updated.selectedDarkTheme)
+        persist(K.THEME_MODE, updated.themeMode)
+        if (theme.isLight) persist(K.SELECTED_LIGHT_THEME, updated.selectedLightTheme)
+        else persist(K.SELECTED_DARK_THEME, updated.selectedDarkTheme)
     }
 
     // Convenience overload for call sites that only have the string key (e.g. from a
@@ -595,175 +564,181 @@ object SettingsRepository {
 
     fun updateCornerRadius(radius: Int) {
         _settings.value = _settings.value.copy(cornerRadiusDp = radius)
-        persist(KEY_CORNER_RADIUS, radius)
+        persist(K.CORNER_RADIUS, radius)
     }
 
     fun updateProxyPort(port: Int) {
         _settings.value = _settings.value.copy(proxyPort = port)
-        persist(KEY_PROXY_PORT, port)
+        persist(K.PROXY_PORT, port)
     }
 
     fun setOnboardingCompleted(completed: Boolean) {
         _settings.value = _settings.value.copy(onboardingCompleted = completed)
-        persist(KEY_ONBOARDING, completed)
+        persist(K.ONBOARDING, completed)
     }
 
     // Fix 01 — Appearance
     fun updateAppearanceMode(mode: String) {
         _settings.value = _settings.value.copy(appearanceMode = mode)
-        persist(KEY_APPEARANCE_MODE, mode)
+        persist(K.APPEARANCE_MODE, mode)
     }
     fun updateSelectedDarkTheme(theme: String) {
         _settings.value = _settings.value.copy(selectedDarkTheme = theme)
-        persist(KEY_SELECTED_DARK_THEME, theme)
+        persist(K.SELECTED_DARK_THEME, theme)
     }
     fun updateSelectedLightTheme(theme: String) {
         _settings.value = _settings.value.copy(selectedLightTheme = theme)
-        persist(KEY_SELECTED_LIGHT_THEME, theme)
+        persist(K.SELECTED_LIGHT_THEME, theme)
     }
     // Fix 02 — UI & UX
     fun updateSwipeToDelete(enabled: Boolean) {
         _settings.value = _settings.value.copy(swipeToDeleteEnabled = enabled)
-        persist(KEY_SWIPE_TO_DELETE, enabled)
+        persist(K.SWIPE_TO_DELETE, enabled)
     }
     fun updateHapticFeedback(enabled: Boolean) {
         _settings.value = _settings.value.copy(hapticFeedbackEnabled = enabled)
-        persist(KEY_HAPTIC_FEEDBACK, enabled)
+        persist(K.HAPTIC_FEEDBACK, enabled)
     }
     fun updateGestureNavigation(enabled: Boolean) {
         _settings.value = _settings.value.copy(gestureNavigationEnabled = enabled)
-        persist(KEY_GESTURE_NAVIGATION, enabled)
+        persist(K.GESTURE_NAVIGATION, enabled)
     }
     fun updateDensityMode(mode: String) {
         _settings.value = _settings.value.copy(densityMode = mode)
-        persist(KEY_DENSITY_MODE, mode)
+        persist(K.DENSITY_MODE, mode)
     }
     fun updateNotificationPolicy(policy: String) {
         _settings.value = _settings.value.copy(updateNotificationPolicy = policy)
-        persist(KEY_UPDATE_NOTIFICATION_POLICY, policy)
+        persist(K.UPDATE_NOTIFICATION_POLICY, policy)
     }
     fun updateAnimationEnabled(enabled: Boolean) {
         _settings.value = _settings.value.copy(animationEnabled = enabled)
-        persist(KEY_ANIMATION_ENABLED, enabled)
+        persist(K.ANIMATION_ENABLED, enabled)
     }
     fun updateTransitionBehavior(behavior: String) {
         _settings.value = _settings.value.copy(transitionBehavior = behavior)
-        persist(KEY_TRANSITION_BEHAVIOR, behavior)
+        persist(K.TRANSITION_BEHAVIOR, behavior)
     }
     fun updateDisplayScale(scale: String) {
         _settings.value = _settings.value.copy(displayScale = scale)
-        persist(KEY_DISPLAY_SCALE, scale)
+        persist(K.DISPLAY_SCALE, scale)
     }
     // Fix 02 — Features
     fun updateAutoRecording(enabled: Boolean) {
         _settings.value = _settings.value.copy(autoRecordingEnabled = enabled)
-        persist(KEY_AUTO_RECORDING, enabled)
+        persist(K.AUTO_RECORDING, enabled)
     }
     fun updateTrafficLog(enabled: Boolean) {
         _settings.value = _settings.value.copy(trafficLogEnabled = enabled)
-        persist(KEY_TRAFFIC_LOG, enabled)
+        persist(K.TRAFFIC_LOG, enabled)
     }
     fun updateRecordingNotifications(enabled: Boolean) {
         _settings.value = _settings.value.copy(recordingNotificationsEnabled = enabled)
-        persist(KEY_RECORDING_NOTIFICATIONS, enabled)
+        persist(K.RECORDING_NOTIFICATIONS, enabled)
     }
     fun updateRemoteControl(enabled: Boolean) {
         _settings.value = _settings.value.copy(remoteControlEnabled = enabled)
-        persist(KEY_REMOTE_CONTROL, enabled)
+        persist(K.REMOTE_CONTROL, enabled)
     }
     fun updateRemoteCommands(enabled: Boolean) {
         _settings.value = _settings.value.copy(remoteCommandsEnabled = enabled)
-        persist(KEY_REMOTE_COMMANDS, enabled)
+        persist(K.REMOTE_COMMANDS, enabled)
     }
     fun updateLanDiscovery(enabled: Boolean) {
         _settings.value = _settings.value.copy(lanDeviceDiscoveryEnabled = enabled)
-        persist(KEY_LAN_DISCOVERY, enabled)
+        persist(K.LAN_DISCOVERY, enabled)
     }
     fun updateDeviceBroadcasting(enabled: Boolean) {
         _settings.value = _settings.value.copy(deviceBroadcastingEnabled = enabled)
-        persist(KEY_DEVICE_BROADCASTING, enabled)
+        persist(K.DEVICE_BROADCASTING, enabled)
     }
     fun updateTrafficCapture(enabled: Boolean) {
         _settings.value = _settings.value.copy(trafficCaptureEnabled = enabled)
-        persist(KEY_TRAFFIC_CAPTURE, enabled)
+        persist(K.TRAFFIC_CAPTURE, enabled)
     }
     fun updateRequestLogging(enabled: Boolean) {
         _settings.value = _settings.value.copy(requestLoggingEnabled = enabled)
-        persist(KEY_REQUEST_LOGGING, enabled)
+        persist(K.REQUEST_LOGGING, enabled)
     }
     fun updateResponseLogging(enabled: Boolean) {
         _settings.value = _settings.value.copy(responseLoggingEnabled = enabled)
-        persist(KEY_RESPONSE_LOGGING, enabled)
+        persist(K.RESPONSE_LOGGING, enabled)
     }
     // Fix 05 — Music
     fun updateMusicPermissionStatus(status: String) {
         _settings.value = _settings.value.copy(musicPermissionStatus = status)
-        persist(KEY_MUSIC_PERMISSION_STATUS, status)
+        persist(K.MUSIC_PERMISSION_STATUS, status)
     }
     fun updateMusicBarDismissed(dismissed: Boolean) {
         _settings.value = _settings.value.copy(musicBarDismissed = dismissed)
-        persist(KEY_MUSIC_BAR_DISMISSED, dismissed)
+        persist(K.MUSIC_BAR_DISMISSED, dismissed)
     }
     fun updateMusicLibraryScanned(scanned: Boolean) {
         _settings.value = _settings.value.copy(musicLibraryScanned = scanned)
-        persist(KEY_MUSIC_LIBRARY_SCANNED, scanned)
+        persist(K.MUSIC_LIBRARY_SCANNED, scanned)
     }
     fun updateSelectedLocalTrackId(id: String?) {
         _settings.value = _settings.value.copy(selectedLocalTrackId = id)
-        if (id != null) persist(KEY_SELECTED_LOCAL_TRACK_ID, id)
+        if (id != null) persist(K.SELECTED_LOCAL_TRACK_ID, id)
     }
 
     fun updateSettings(newSettings: UserSettingsState) {
         _settings.value = newSettings
-        // Bulk persist
-        persist(KEY_USER_NAME, newSettings.userName)
-        persist(KEY_THEME_MODE, newSettings.themeMode)
-        persist(KEY_CORNER_RADIUS, newSettings.cornerRadiusDp)
-        persist(KEY_PROXY_PORT, newSettings.proxyPort)
-        persist(KEY_AUTO_BEAUTIFY, newSettings.autoBeautify)
-        persist(KEY_SSL_VERIFY, newSettings.sslVerification)
-        persist(KEY_SNIPPET_LANG, newSettings.defaultSnippetLang)
-        persist(KEY_ONBOARDING, newSettings.onboardingCompleted)
-        // Fix 01
-        persist(KEY_APPEARANCE_MODE, newSettings.appearanceMode)
-        persist(KEY_SELECTED_DARK_THEME, newSettings.selectedDarkTheme)
-        persist(KEY_SELECTED_LIGHT_THEME, newSettings.selectedLightTheme)
-        // Fix 02 — UI & UX
-        persist(KEY_SWIPE_TO_DELETE, newSettings.swipeToDeleteEnabled)
-        persist(KEY_HAPTIC_FEEDBACK, newSettings.hapticFeedbackEnabled)
-        persist(KEY_GESTURE_NAVIGATION, newSettings.gestureNavigationEnabled)
-        persist(KEY_DENSITY_MODE, newSettings.densityMode)
-        persist(KEY_UPDATE_NOTIFICATION_POLICY, newSettings.updateNotificationPolicy)
-        persist(KEY_ANIMATION_ENABLED, newSettings.animationEnabled)
-        persist(KEY_TRANSITION_BEHAVIOR, newSettings.transitionBehavior)
-        persist(KEY_DISPLAY_SCALE, newSettings.displayScale)
-        // Fix 02 — Features
-        persist(KEY_AUTO_RECORDING, newSettings.autoRecordingEnabled)
-        persist(KEY_TRAFFIC_LOG, newSettings.trafficLogEnabled)
-        persist(KEY_RECORDING_NOTIFICATIONS, newSettings.recordingNotificationsEnabled)
-        persist(KEY_REMOTE_CONTROL, newSettings.remoteControlEnabled)
-        persist(KEY_REMOTE_COMMANDS, newSettings.remoteCommandsEnabled)
-        persist(KEY_LAN_DISCOVERY, newSettings.lanDeviceDiscoveryEnabled)
-        persist(KEY_DEVICE_BROADCASTING, newSettings.deviceBroadcastingEnabled)
-        persist(KEY_TRAFFIC_CAPTURE, newSettings.trafficCaptureEnabled)
-        persist(KEY_REQUEST_LOGGING, newSettings.requestLoggingEnabled)
-        persist(KEY_RESPONSE_LOGGING, newSettings.responseLoggingEnabled)
-        // Fix 05 — Music
-        persist(KEY_MUSIC_PERMISSION_STATUS, newSettings.musicPermissionStatus)
-        persist(KEY_MUSIC_BAR_DISMISSED, newSettings.musicBarDismissed)
-        persist(KEY_MUSIC_LIBRARY_SCANNED, newSettings.musicLibraryScanned)
-        if (newSettings.selectedLocalTrackId != null) persist(KEY_SELECTED_LOCAL_TRACK_ID, newSettings.selectedLocalTrackId)
+        val ctx = appContext ?: return
+        repoScope.launch {
+            ctx.unifiedDataStore.edit { prefs ->
+                prefs[K.USER_NAME] = newSettings.userName
+                prefs[K.THEME_MODE] = newSettings.themeMode
+                prefs[K.CORNER_RADIUS] = newSettings.cornerRadiusDp
+                prefs[K.PROXY_PORT] = newSettings.proxyPort
+                prefs[K.AUTO_BEAUTIFY] = newSettings.autoBeautify
+                prefs[K.SSL_VERIFY] = newSettings.sslVerification
+                prefs[K.SNIPPET_LANG] = newSettings.defaultSnippetLang
+                prefs[K.ONBOARDING] = newSettings.onboardingCompleted
+                prefs[K.APPEARANCE_MODE] = newSettings.appearanceMode
+                prefs[K.SELECTED_DARK_THEME] = newSettings.selectedDarkTheme
+                prefs[K.SELECTED_LIGHT_THEME] = newSettings.selectedLightTheme
+                prefs[K.SWIPE_TO_DELETE] = newSettings.swipeToDeleteEnabled
+                prefs[K.HAPTIC_FEEDBACK] = newSettings.hapticFeedbackEnabled
+                prefs[K.GESTURE_NAVIGATION] = newSettings.gestureNavigationEnabled
+                prefs[K.DENSITY_MODE] = newSettings.densityMode
+                prefs[K.UPDATE_NOTIFICATION_POLICY] = newSettings.updateNotificationPolicy
+                prefs[K.ANIMATION_ENABLED] = newSettings.animationEnabled
+                prefs[K.TRANSITION_BEHAVIOR] = newSettings.transitionBehavior
+                prefs[K.DISPLAY_SCALE] = newSettings.displayScale
+                prefs[K.AUTO_RECORDING] = newSettings.autoRecordingEnabled
+                prefs[K.TRAFFIC_LOG] = newSettings.trafficLogEnabled
+                prefs[K.RECORDING_NOTIFICATIONS] = newSettings.recordingNotificationsEnabled
+                prefs[K.REMOTE_CONTROL] = newSettings.remoteControlEnabled
+                prefs[K.REMOTE_COMMANDS] = newSettings.remoteCommandsEnabled
+                prefs[K.LAN_DISCOVERY] = newSettings.lanDeviceDiscoveryEnabled
+                prefs[K.DEVICE_BROADCASTING] = newSettings.deviceBroadcastingEnabled
+                prefs[K.TRAFFIC_CAPTURE] = newSettings.trafficCaptureEnabled
+                prefs[K.REQUEST_LOGGING] = newSettings.requestLoggingEnabled
+                prefs[K.RESPONSE_LOGGING] = newSettings.responseLoggingEnabled
+                prefs[K.MUSIC_PERMISSION_STATUS] = newSettings.musicPermissionStatus
+                prefs[K.MUSIC_BAR_DISMISSED] = newSettings.musicBarDismissed
+                prefs[K.MUSIC_LIBRARY_SCANNED] = newSettings.musicLibraryScanned
+                if (newSettings.selectedLocalTrackId != null) prefs[K.SELECTED_LOCAL_TRACK_ID] = newSettings.selectedLocalTrackId
+            }
+        }
     }
 
-    private fun persist(key: String, value: String) {
-        prefs?.edit()?.putString(key, value)?.apply()
+    private fun persist(key: androidx.datastore.preferences.core.Preferences.Key<String>, value: String) {
+        val ctx = appContext ?: return
+        repoScope.launch { ctx.unifiedDataStore.edit { it[key] = value } }
     }
 
-    private fun persist(key: String, value: Int) {
-        prefs?.edit()?.putInt(key, value)?.apply()
+    private fun persist(key: androidx.datastore.preferences.core.Preferences.Key<Int>, value: Int) {
+        val ctx = appContext ?: return
+        repoScope.launch { ctx.unifiedDataStore.edit { it[key] = value } }
     }
 
-    private fun persist(key: String, value: Boolean) {
-        prefs?.edit()?.putBoolean(key, value)?.apply()
+    private fun persist(key: androidx.datastore.preferences.core.Preferences.Key<Boolean>, value: Boolean) {
+        val ctx = appContext ?: return
+        repoScope.launch { ctx.unifiedDataStore.edit { it[key] = value } }
     }
+
+    /** Short alias so the update*() functions above stay readable. */
+    private val K get() = com.example.data.prefs.AppSettingsKeys
 }

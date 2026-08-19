@@ -113,6 +113,10 @@ class MainActivity : ComponentActivity() {
         // v3.1 fix (A4): backs ApiCollectionsRepository's saved-requests state with the real
         // Room-persisted `saved_api_requests` table instead of an in-memory-only StateFlow.
         ApiCollectionsRepository.init(applicationContext)
+        // v3.2 Part C (C1): loads persisted Environments from the unified DataStore (was never
+        // initialised before C1, so ApiTestrScreen's EnvironmentRepository.active() always read
+        // the in-memory seed defaults only — now it reflects migrated + newly-saved data too).
+        com.example.data.env.EnvironmentRepository.init(applicationContext)
         enableEdgeToEdge()
         setContent {
             RequestrApp()
