@@ -144,12 +144,17 @@ import com.example.ui.components.SearchInputField
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.StatusCodeBadge
 import com.example.ui.components.formatByteCount
+import com.example.ui.components.rememberAppHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import com.example.ui.theme.InterceptorActiveGreen
 import com.example.ui.theme.InterceptorIdleAmber
 import com.example.ui.theme.InterceptorInactiveRed
+import com.example.ui.theme.LocalAnimationsEnabled
+import com.example.ui.theme.LocalAppSpacing
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.scaledTween
 import kotlinx.coroutines.launch
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
@@ -166,6 +171,10 @@ fun InterceptScreen(
     val screenContext = LocalContext.current
     val screenScope = rememberCoroutineScope()
     val clipboardManager = LocalClipboardManager.current
+
+    // B4: real tactile confirmation for start/stop capture, gated once behind
+    // settings.hapticFeedbackEnabled via the shared helper.
+    val performHaptic = rememberAppHapticFeedback()
 
     // Real interception state: single source of truth shared with the wordmark dot.
     val interceptionState by InterceptionStateRepository.state.collectAsState()
@@ -242,7 +251,7 @@ fun InterceptScreen(
             isArmed -> InterceptorIdleAmber
             else -> MaterialTheme.colorScheme.surfaceVariant
         },
-        animationSpec = tween(300),
+        animationSpec = scaledTween(300),
         label = "fabColor"
     )
 
@@ -467,7 +476,7 @@ fun InterceptScreen(
                         .weight(1f)
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    verticalArrangement = Arrangement.spacedBy(LocalAppSpacing.current.listItemSpacing)
                 ) {
                     items(filteredTraffic, key = { it.id }) { item ->
                         TrafficItemCard(
@@ -484,8 +493,11 @@ fun InterceptScreen(
         // Bottom-right capture FAB (APP_v2.md Bug 3.5).
         // Colour encodes the real engine state and the icon cross-fades between states.
         // A slow scale-pulse runs only while genuinely capturing.
+        // v3.1 B8: infinite pulse can't be duration-scaled to 0 without flickering
+        // forever, so skip it entirely and hold a static scale when animations are off.
+        val animationsEnabled = LocalAnimationsEnabled.current
         val pulseTransition = rememberInfiniteTransition(label = "fabPulse")
-        val pulseScale by pulseTransition.animateFloat(
+        val animatedPulseScale by pulseTransition.animateFloat(
             initialValue = 1f,
             targetValue = if (isCapturing) 1.08f else 1f,
             animationSpec = infiniteRepeatable(
@@ -494,11 +506,13 @@ fun InterceptScreen(
             ),
             label = "fabPulseScale"
         )
+        val pulseScale = if (animationsEnabled) animatedPulseScale else 1f
 
         FloatingActionButton(
             onClick = {
                 // Never a bare boolean flip: starting runs the full pre-flight gate, and
                 // stopping tears down the real foreground service.
+                performHaptic(HapticFeedbackType.LongPress)
                 if (isCapturing || isArmed) {
                     captureController.requestStop()
                 } else {
@@ -1302,6 +1316,8 @@ fun TrafficItemCard(
     onClick: () -> Unit,
     onLongClick: () -> Unit
 ) {
+    // B4: long-press context menus get a tactile confirmation too.
+    val performHaptic = rememberAppHapticFeedback()
     val shape = RoundedCornerShape(14.dp)
     Box(
         modifier = Modifier
@@ -1311,9 +1327,12 @@ fun TrafficItemCard(
             .border(1.dp, MaterialTheme.colorScheme.outline, shape)
             .combinedClickable(
                 onClick = onClick,
-                onLongClick = onLongClick
+                onLongClick = {
+                    performHaptic(HapticFeedbackType.LongPress)
+                    onLongClick()
+                }
             )
-            .padding(12.dp)
+            .padding(LocalAppSpacing.current.cardPadding)
     ) {
         Column {
             Row(

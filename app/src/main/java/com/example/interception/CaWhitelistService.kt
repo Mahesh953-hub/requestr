@@ -20,7 +20,9 @@ import kotlinx.coroutines.withContext
  * Strategy priority:
  * 1. Root: copy CA cert to /system/etc/security/cacerts/
  * 2. Shizuku: use Shizuku's elevated shell to do the same
- * 3. Falls back to Magisk module generation if direct write fails
+ *
+ * If neither root nor Shizuku is available, this is a no-op (there is no Magisk-module
+ * fallback implemented). Wired to a real UI trigger in SettingsScreen's CA card (v3.1 B11).
  */
 object CaWhitelistService {
 

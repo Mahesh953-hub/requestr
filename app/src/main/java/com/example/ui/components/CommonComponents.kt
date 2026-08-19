@@ -102,6 +102,8 @@ import com.example.data.interception.InterceptionStatus
 import com.example.ui.theme.InterceptorActiveGreen
 import com.example.ui.theme.InterceptorIdleAmber
 import com.example.ui.theme.InterceptorInactiveRed
+import com.example.ui.theme.scaledSpring
+import com.example.ui.theme.scaledTween
 import com.example.ui.theme.MethodDelete
 import com.example.ui.theme.MethodGet
 import com.example.ui.theme.MethodHead
@@ -114,6 +116,22 @@ import com.example.ui.theme.Status2xx
 import com.example.ui.theme.Status3xx
 import com.example.ui.theme.Status4xx
 import com.example.ui.theme.Status5xx
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+
+/**
+ * B4: single shared entry point for real haptic feedback, gated once behind
+ * [com.example.data.models.UserSettingsState.hapticFeedbackEnabled] instead of being re-checked
+ * ad hoc at every call site. Call this from any screen that wants a tactile response for a
+ * button press, toggle, or successful action; it silently no-ops when the user has disabled
+ * haptics in Settings.
+ */
+@Composable
+fun rememberAppHapticFeedback(): (HapticFeedbackType) -> Unit {
+    val haptics = LocalHapticFeedback.current
+    val enabled = SettingsRepository.settings.collectAsState().value.hapticFeedbackEnabled
+    return { type -> if (enabled) haptics.performHapticFeedback(type) }
+}
 
 @Composable
 fun GlassCard(
@@ -164,8 +182,12 @@ fun RequestrWordmark(
 ) {
     val interceptionState by InterceptionStateRepository.state.collectAsState()
 
+    // v3.1 B8: an infinite repeatable animation can't be duration-scaled to 0 without
+    // flickering forever between its two endpoints, so when animations are disabled we
+    // skip the infinite transition altogether and hold a static value instead.
+    val animationsEnabled = com.example.ui.theme.LocalAnimationsEnabled.current
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-    val dotPulse by infiniteTransition.animateFloat(
+    val animatedDotPulse by infiniteTransition.animateFloat(
         initialValue = 0.85f,
         targetValue = 1.25f,
         animationSpec = infiniteRepeatable(
@@ -174,6 +196,7 @@ fun RequestrWordmark(
         ),
         label = "dotPulse",
     )
+    val dotPulse = if (animationsEnabled) animatedDotPulse else 1f
 
     val dotColor = when (interceptionState.status) {
         InterceptionStatus.ACTIVE -> InterceptorActiveGreen
@@ -237,7 +260,10 @@ fun ThemeToggleButton(
     IconButton(
         onClick = {
             val next = cycle[(currentIdx.coerceAtLeast(0) + 1) % cycle.size]
-            SettingsRepository.updateTheme(next.first)
+            // v3.1 B1: route through the unified write path so cycling the theme here
+            // stays consistent with the Settings picker's per-family memory instead of
+            // reintroducing a second divergent write path (the original collision bug).
+            SettingsRepository.updateThemeSelection(next.first)
         },
         modifier = modifier.size(36.dp),
     ) {
@@ -246,46 +272,6 @@ fun ThemeToggleButton(
             contentDescription = "Cycle theme (current: $currentThemeKey)",
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-    }
-}
-
-@Composable
-fun TopEditorialBar(
-    onOpenDrawer: () -> Unit,
-    onOpenSettings: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onOpenDrawer, modifier = Modifier.size(36.dp)) {
-                Icon(
-                    imageVector = Icons.Default.Menu,
-                    contentDescription = "Open Navigation Drawer",
-                    tint = MaterialTheme.colorScheme.onBackground
-                )
-            }
-
-            Spacer(modifier = Modifier.width(6.dp))
-
-            RequestrWordmark(fontSize = 22)
-        }
-
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            ThemeToggleButton()
-            IconButton(onClick = onOpenSettings, modifier = Modifier.size(36.dp)) {
-                Icon(
-                    imageVector = Icons.Default.Settings,
-                    contentDescription = "Settings",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
     }
 }
 
@@ -414,7 +400,9 @@ fun SectionHeader(
             if (actions != null) {
                 actions()
             }
-            ThemeToggleButton()
+            // B13: the theme icon lives ONLY on the Home screen header (immediately left of the
+            // avatar) and in the drawer's quick theme-swap row. It no longer appears on every
+            // other screen's SectionHeader.
             if (onMiniSettings != null) {
                 IconButton(onClick = onMiniSettings, modifier = Modifier.size(36.dp)) {
                     Icon(
@@ -670,7 +658,7 @@ fun ExpandablePillMenu(
 
     val rotationAngle by animateFloatAsState(
         targetValue = if (isExpanded) 135f else 0f,
-        animationSpec = spring(stiffness = 400f, dampingRatio = 0.7f),
+        animationSpec = scaledSpring(stiffness = 400f, dampingRatio = 0.7f),
         label = "pillRotation"
     )
 
@@ -691,8 +679,8 @@ fun ExpandablePillMenu(
         // Expanded vertical stack with animated staggered visibility
         AnimatedVisibility(
             visible = isExpanded,
-            enter = fadeIn(tween(150)) + slideInVertically(spring(dampingRatio = 0.8f)) { it / 2 },
-            exit = fadeOut(tween(150)) + slideOutVertically(spring(dampingRatio = 0.8f)) { it / 2 }
+            enter = fadeIn(scaledTween(150)) + slideInVertically(scaledSpring<androidx.compose.ui.unit.IntOffset>(dampingRatio = 0.8f)) { it / 2 },
+            exit = fadeOut(scaledTween(150)) + slideOutVertically(scaledSpring<androidx.compose.ui.unit.IntOffset>(dampingRatio = 0.8f)) { it / 2 }
         ) {
             Column(
                 modifier = Modifier

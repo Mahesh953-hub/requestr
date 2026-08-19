@@ -79,6 +79,8 @@ import com.example.data.models.FlowNodeType
 import com.example.data.repository.FlowRepository
 import com.example.ui.components.GlassCard
 import com.example.ui.components.SectionHeader
+import com.example.ui.components.rememberAppHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
@@ -94,6 +96,10 @@ fun FlowScreen(
     val coroutineScope = rememberCoroutineScope()
     val nodes by FlowRepository.nodes.collectAsState()
     val connections by FlowRepository.connections.collectAsState()
+
+    // B4: real tactile confirmation for node drag/delete, gated once behind
+    // settings.hapticFeedbackEnabled via the shared helper.
+    val performHaptic = rememberAppHapticFeedback()
 
     var isRunning by remember { mutableStateOf(false) }
     var executionResult by remember { mutableStateOf<String?>(null) }
@@ -231,7 +237,10 @@ fun FlowScreen(
                         onDrag = { dx, dy ->
                             FlowRepository.updateNodePosition(node.id, node.x + dx / 2.5f, node.y + dy / 2.5f)
                         },
-                        onDelete = { FlowRepository.removeNode(node.id) },
+                        onDelete = {
+                            performHaptic(HapticFeedbackType.LongPress)
+                            FlowRepository.removeNode(node.id)
+                        },
                         onEdit = { nodeForEdit = node }
                     )
                 }

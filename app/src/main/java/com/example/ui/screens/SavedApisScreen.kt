@@ -148,7 +148,7 @@ fun SavedApisScreen(
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(
                     horizontal = 16.dp, vertical = 8.dp
                 ),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(com.example.ui.theme.LocalAppSpacing.current.listItemSpacing)
             ) {
                 items(filtered, key = { it.id }) { request ->
                     val swipeState = rememberSwipeToDismissBoxState(
@@ -201,12 +201,12 @@ private fun TabChip(
     val bgColor by animateColorAsState(
         if (selected) MaterialTheme.colorScheme.primary
         else MaterialTheme.colorScheme.surfaceVariant,
-        animationSpec = tween(250), label = "tabBg"
+        animationSpec = com.example.ui.theme.scaledTween(250), label = "tabBg"
     )
     val textColor by animateColorAsState(
         if (selected) MaterialTheme.colorScheme.onPrimary
         else MaterialTheme.colorScheme.onSurfaceVariant,
-        animationSpec = tween(250), label = "tabText"
+        animationSpec = com.example.ui.theme.scaledTween(250), label = "tabText"
     )
     Row(
         modifier = Modifier
@@ -256,7 +256,7 @@ private fun SavedApiCard(
                 RoundedCornerShape(14.dp)
             )
             .clickable { onClick() }
-            .padding(14.dp),
+            .padding(com.example.ui.theme.LocalAppSpacing.current.cardPadding),
         verticalAlignment = Alignment.CenterVertically
     ) {
         // Method badge

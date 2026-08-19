@@ -102,6 +102,20 @@ fun SettingsScreen(
     val settingsContext = LocalContext.current
     val settingsScope = rememberCoroutineScope()
     val capabilities by InterceptionStateRepository.capabilities.collectAsState()
+    // B9: the port editable here MUST be the same value PreflightController/InterceptScreen
+    // actually read (SettingsDataStore), not the separate, unconsumed SettingsRepository copy
+    // that previously made this field a no-op on the real capture engine.
+    val interceptionDataStore = remember(settingsContext) { com.example.data.prefs.SettingsDataStore.get(settingsContext) }
+    val realProxyPort by interceptionDataStore.proxyPort.collectAsState(initial = com.example.data.prefs.SettingsDataStore.DEFAULT_PROXY_PORT)
+    // B9(d): capture-tier preference and "remember last app filter" are both real
+    // SettingsDataStore values PreflightController.run() actually reads at the moment
+    // interception starts (see PreflightController.kt lines ~65-78) but neither previously
+    // had ANY Settings-page UI control — surface both here so they're not silently
+    // un-editable defaults forever.
+    val captureTierPref by interceptionDataStore.captureTierPreference.collectAsState(
+        initial = com.example.data.prefs.CaptureTierPreference.AUTO
+    )
+    val rememberLastAppFilter by interceptionDataStore.rememberLastAppFilter.collectAsState(initial = true)
     val capturedCount by remember(settingsContext) {
         CaptureLogRepository.observeCount(settingsContext)
     }.collectAsState(initial = 0)
@@ -120,12 +134,26 @@ fun SettingsScreen(
     LaunchedEffect(Unit) { CapabilityProbe.probeAll(settingsContext) }
 
     var userNameInput by remember(settings.userName) { mutableStateOf(settings.userName) }
-    var proxyPortInput by remember(settings.proxyPort) { mutableStateOf(settings.proxyPort.toString()) }
+    var proxyPortInput by remember(realProxyPort) { mutableStateOf(realProxyPort.toString()) }
     var upstreamProxyInput by remember { mutableStateOf("") }
 
-    var autoStartInterceptor by remember { mutableStateOf(false) }
-    var strictTls13 by remember { mutableStateOf(true) }
-    var followRedirects by remember { mutableStateOf(true) }
+    // B11: state for the "Install to System Store" button (root/Shizuku CA promotion).
+    var promoteToSystemInProgress by remember { mutableStateOf(false) }
+    var promoteToSystemResult by remember { mutableStateOf<String?>(null) }
+
+    // B9(c): "Auto-start interceptor on launch" / "Enforce TLS v1.3 Strict Ciphers" /
+    // "Follow HTTP 3xx Redirects" local-only toggles removed from the INTERCEPTION &
+    // PROXY ENGINE card. Investigated real wiring targets: CaptureController.requestStart()
+    // has no "auto-start on app launch" hook anywhere; MitmProxyEngine (the only TLS
+    // termination code in the codebase) is never instantiated by any live capture path
+    // (RequestrVpnService only drives PacketPump, which never touches TLS ciphers), so
+    // there is no real cipher-suite enforcement point to attach "Strict TLS v1.3" to; and
+    // HTTP redirect-following is already a real, separately-wired per-request toggle in
+    // ApiTestrScreen (passed into ApiTestrRepository.executeRequest) — this card's copy
+    // was a third, disconnected instance of the same concept with no adjacent real field
+    // in UserSettingsState. No genuinely real target existed for any of the three, so per
+    // the plan's stub-or-remove standard they are removed rather than left as switches
+    // that flip with zero effect.
 
     Column(
         modifier = Modifier
@@ -185,10 +213,15 @@ fun SettingsScreen(
                     currentMode = settings.appearanceMode,
                     onModeSelected = { mode ->
                         SettingsRepository.updateAppearanceMode(mode)
+                        // v3.1 B1: switching the appearance-mode family (System/Light/Dark)
+                        // recalls that family's remembered theme rather than always
+                        // re-writing a hardcoded value — LIGHT restores selectedLightTheme,
+                        // DARK restores selectedDarkTheme, and this call never mutates
+                        // either "remembered" slot itself (see updateThemeSelection doc).
                         when (mode) {
-                            "LIGHT" -> SettingsRepository.updateTheme("EDITORIAL_LIGHT")
+                            "LIGHT" -> SettingsRepository.updateTheme(settings.selectedLightTheme)
                             "DARK" -> SettingsRepository.updateTheme(settings.selectedDarkTheme)
-                            "SYSTEM" -> { /* theme follows system via MainActivity */ }
+                            "SYSTEM" -> { /* theme follows system via MainActivity's isSystemInDarkTheme() check */ }
                         }
                     }
                 )
@@ -200,18 +233,21 @@ fun SettingsScreen(
                     currentTheme = settings.themeMode,
                     appearanceMode = settings.appearanceMode,
                     onThemeSelected = { theme ->
-                        SettingsRepository.updateTheme(theme)
-                        if (settings.appearanceMode == "DARK") {
-                            SettingsRepository.updateSelectedDarkTheme(theme)
-                        }
+                        // v3.1 B1: route through the single unified write path instead of
+                        // separately calling updateTheme()+updateSelectedDarkTheme() — that
+                        // dual-write divergence (keyed off appearanceMode rather than the
+                        // theme's own light/dark identity) was the root cause of the
+                        // "theme selection collision" bug.
+                        SettingsRepository.updateThemeSelection(theme)
                     }
                 )
             }
 
-            // Token section placeholders
-            item {
-                TokenPlaceholders()
-            }
+            // B3: the old "Typography / Surfaces / Borders / Icons / States" placeholder
+            // list (TokenPlaceholders) rendered five inert labels with zero interactivity,
+            // zero backing UserSettingsState fields, and zero rendering hook anywhere in the
+            // app's theme wrapper. Removed per the plan's stub-or-remove standard — there was
+            // no underlying capability to attach real behavior to.
 
             // Re-run Setup Wizard — Fix 03
             item {
@@ -238,13 +274,19 @@ fun SettingsScreen(
             item { SubsectionTitle("Interaction") }
             item { SwitchPreference("Swipe to Delete", settings.swipeToDeleteEnabled, "Swipe items left or right to remove them") { SettingsRepository.updateSwipeToDelete(it) } }
             item { SwitchPreference("Haptic Feedback", settings.hapticFeedbackEnabled, "Short vibration on touch interactions") { SettingsRepository.updateHapticFeedback(it) } }
-            item { SwitchPreference("Gesture Navigation", settings.gestureNavigationEnabled, "Swipe gestures for back and navigation") { SettingsRepository.updateGestureNavigation(it) } }
+            item { SwitchPreference("Gesture Navigation", settings.gestureNavigationEnabled, "Allow edge-swipe to open the navigation drawer (disable if it conflicts with your system back gesture)") { SettingsRepository.updateGestureNavigation(it) } }
 
             // Display Behavior
             item { Spacer(modifier = Modifier.height(8.dp)) }
             item { SubsectionTitle("Display Behavior") }
-            item { SwitchPreference("Picture-in-Picture", settings.pictureInPictureEnabled, "Keep a mini player visible over other apps") { SettingsRepository.updatePictureInPicture(it) } }
-            item { SwitchPreference("Table Mode", settings.tableModeEnabled, "Prefer structured table views") { SettingsRepository.updateTableMode(it) } }
+            // Picture-in-Picture removed (B2): no video/camera surface exists anywhere in this
+            // app's feature set — only an audio-only mini-player with no PiP manifest support —
+            // so the toggle had no applicable target behavior and was removed per the plan's
+            // stub-or-remove directive rather than kept as a dead switch.
+            // B6: "Table Mode" removed — zero consumer anywhere in the codebase, and it
+            // directly overlaps with the not-yet-built adaptive/multi-pane tablet layout
+            // (Part C roadmap item #9). Per the plan, this must stay removed until #9 is
+            // actually implemented, then reintroduced as a real, functional toggle.
             item {
                 SelectPreference(
                     "Compact / Comfortable Density",
@@ -337,15 +379,20 @@ fun SettingsScreen(
             // Traffic & Network
             item { Spacer(modifier = Modifier.height(8.dp)) }
             item { SubsectionTitle("Traffic & Network") }
-            item { SwitchPreference("Traffic Capture", settings.trafficCaptureEnabled, "Capture network traffic for inspection") { SettingsRepository.updateTrafficCapture(it) } }
-            item { SwitchPreference("Request Logging", settings.requestLoggingEnabled, "Log all outgoing requests") { SettingsRepository.updateRequestLogging(it) } }
-            item { SwitchPreference("Response Logging", settings.responseLoggingEnabled, "Log all incoming responses") { SettingsRepository.updateResponseLogging(it) } }
+            item { SwitchPreference("Traffic Capture", settings.trafficCaptureEnabled, "When off, no captured transaction is written to the traffic log at all") { SettingsRepository.updateTrafficCapture(it) } }
+            item { SwitchPreference("Request Logging", settings.requestLoggingEnabled, "Store request headers and body for each captured transaction") { SettingsRepository.updateRequestLogging(it) } }
+            item { SwitchPreference("Response Logging", settings.responseLoggingEnabled, "Store response headers and body for each captured transaction") { SettingsRepository.updateResponseLogging(it) } }
 
-            // Advanced Features
-            item { Spacer(modifier = Modifier.height(8.dp)) }
-            item { SubsectionTitle("Advanced Features") }
-            item { SwitchPreference("Experimental Features", settings.experimentalFeaturesEnabled, "Early access features — may be unstable") { SettingsRepository.updateExperimentalFeatures(it) } }
-            item { SwitchPreference("Developer Options", settings.developerOptionsEnabled, "Extra tools and debug information") { SettingsRepository.updateDeveloperOptions(it) } }
+            // B10: "Advanced Features" section (Experimental Features, Developer Options)
+            // removed entirely. Audited both items individually: zero real backing
+            // implementation exists for either (no feature-flag gate reads
+            // experimentalFeaturesEnabled anywhere; no debug/dev-tools surface reads
+            // developerOptionsEnabled anywhere). The "ECOSYSTEM & DEEP LINKS" card below
+            // was checked as a candidate relocation target for "genuinely real advanced
+            // capability" per the plan's wording, but it is purely static/informational
+            // (URI scheme description only, no interactive deeplink management UI) — there
+            // was nothing genuinely real to relocate, so per the plan's fallback both
+            // toggles are removed rather than left as an unverified catch-all bucket.
 
             // Section 4: Network & Proxy Engine
             item {
@@ -365,7 +412,15 @@ fun SettingsScreen(
                                 value = proxyPortInput,
                                 onValueChange = {
                                     proxyPortInput = it
-                                    it.toIntOrNull()?.let { p -> SettingsRepository.updateProxyPort(p) }
+                                    it.toIntOrNull()?.let { p ->
+                                        // Write to BOTH stores: SettingsDataStore is the value
+                                        // PreflightController/InterceptScreen actually consume
+                                        // when arming capture; SettingsRepository is kept for the
+                                        // diagnostics-tab display (Section 7) so it doesn't fall
+                                        // out of sync with what the user just typed.
+                                        SettingsRepository.updateProxyPort(p)
+                                        settingsScope.launch { interceptionDataStore.setProxyPort(p) }
+                                    }
                                 },
                                 singleLine = true,
                                 modifier = Modifier.fillMaxWidth(),
@@ -379,9 +434,42 @@ fun SettingsScreen(
                             )
                         }
 
-                        SettingToggleRow("Auto-start interceptor on launch", autoStartInterceptor) { autoStartInterceptor = it }
-                        SettingToggleRow("Enforce TLS v1.3 Strict Ciphers", strictTls13) { strictTls13 = it }
-                        SettingToggleRow("Follow HTTP 3xx Redirects", followRedirects) { followRedirects = it }
+                        // B9(c): three local, never-persisted toggles removed here — see
+                        // the state-declaration comment above for the full rationale.
+
+                        // B9(d): default capture-tier preference — real value read by
+                        // PreflightController.run() at the moment interception starts
+                        // (Root > Shizuku > VPN auto-probe, or force the rootless VPN
+                        // path for baseline testing). Previously defined in
+                        // SettingsDataStore with zero Settings-page UI anywhere.
+                        SelectPreference(
+                            title = "Default Capture Tier",
+                            currentValue = captureTierPref.name,
+                            description = "AUTO probes Root > Shizuku > VPN and picks the best available. Force VPN Only always uses the rootless path.",
+                            options = listOf(
+                                com.example.data.prefs.CaptureTierPreference.AUTO.name to "Auto (best available)",
+                                com.example.data.prefs.CaptureTierPreference.FORCE_VPN_ONLY.name to "Force VPN Only"
+                            )
+                        ) { value ->
+                            settingsScope.launch {
+                                interceptionDataStore.setCaptureTierPreference(
+                                    com.example.data.prefs.CaptureTierPreference.valueOf(value)
+                                )
+                            }
+                        }
+
+                        // B9(d): remember-last-app-filter — real value read by
+                        // PreflightController.run() alongside appFilterMode/selectedPackages
+                        // (InterceptScreen.kt's "All apps" / "Selected apps" picker). When on,
+                        // the last app-filter selection is reused on the next capture; when
+                        // off, nothing currently forces a re-prompt (no re-ask UI exists yet),
+                        // but the flag itself is real and consumed by the pre-flight sequence.
+                        SettingToggleRow(
+                            label = "Remember Last App Filter",
+                            checked = rememberLastAppFilter
+                        ) { checked ->
+                            settingsScope.launch { interceptionDataStore.setRememberLastAppFilter(checked) }
+                        }
                     }
                 }
             }
@@ -508,6 +596,55 @@ fun SettingsScreen(
                                 Icon(imageVector = Icons.Default.Download, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(14.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text("Export PEM", color = MaterialTheme.colorScheme.onPrimary, fontSize = 11.sp)
+                            }
+                        }
+
+                        // B11: CaWhitelistService.promoteToSystem() was a fully-built root/Shizuku
+                        // system-store installer with no UI trigger anywhere in the app. This
+                        // button wires it up, gated on a real capability probe, and re-reads the
+                        // trust-store state afterward instead of assuming success.
+                        val canPromote = capabilities.root == RootState.GRANTED ||
+                            capabilities.shizuku == ShizukuState.GRANTED
+                        if (canPromote && capabilities.ca != CaState.SYSTEM_STORE) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Button(
+                                onClick = {
+                                    settingsScope.launch {
+                                        promoteToSystemInProgress = true
+                                        promoteToSystemResult = null
+                                        runCatching {
+                                            com.example.interception.CaWhitelistService.promoteToSystem(settingsContext)
+                                        }.onSuccess { newState ->
+                                            promoteToSystemResult = if (newState == CaState.SYSTEM_STORE) {
+                                                "Installed to system trust store"
+                                            } else {
+                                                "Install did not complete — still: $newState"
+                                            }
+                                        }.onFailure { e ->
+                                            promoteToSystemResult = "Failed: ${e.message ?: "unknown error"}"
+                                        }
+                                        // Re-probe the real trust store; never trust the call's
+                                        // return value alone as proof of installation.
+                                        CapabilityProbe.probeAll(settingsContext)
+                                        promoteToSystemInProgress = false
+                                    }
+                                },
+                                enabled = !promoteToSystemInProgress,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(8.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                            ) {
+                                Icon(imageVector = Icons.Default.Security, contentDescription = null, tint = MaterialTheme.colorScheme.onSecondary, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    if (promoteToSystemInProgress) "Installing..." else "Install to System Store",
+                                    color = MaterialTheme.colorScheme.onSecondary,
+                                    fontSize = 11.sp
+                                )
+                            }
+                            val resultText = promoteToSystemResult
+                            if (resultText != null) {
+                                Text(resultText, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
                     }
@@ -677,8 +814,7 @@ fun SettingsScreen(
 
                         AppMetaInfoRow("Application Name", "requestr")
                         AppMetaInfoRow("Package ID", "com.kailashhh.requestr")
-                        AppMetaInfoRow("Version", "2.5.0-release (API 36)")
-                        AppMetaInfoRow("Build Date", "2026.08.17")
+                        AppMetaInfoRow("Version", "${com.example.BuildConfig.VERSION_NAME} (build ${com.example.BuildConfig.VERSION_CODE}, API ${android.os.Build.VERSION.SDK_INT})")
                         AppMetaInfoRow("Core Engine", "OkHttp 4.12.0 + Conscrypt APEX")
                         AppMetaInfoRow("Architecture", "arm64-v8a, armeabi-v7a, x86_64")
                     }
@@ -775,11 +911,13 @@ private fun AppearanceSelector(
             val bgColor by animateColorAsState(
                 if (isSelected) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
                 else Color.Transparent,
+                animationSpec = com.example.ui.theme.scaledTween(200),
                 label = "bg"
             )
             val iconTint by animateColorAsState(
                 if (isSelected) MaterialTheme.colorScheme.primary
                 else MaterialTheme.colorScheme.onSurfaceVariant,
+                animationSpec = com.example.ui.theme.scaledTween(200),
                 label = "iconTint"
             )
             Column(
@@ -851,6 +989,13 @@ private fun AccentColorGrid(
                     .clip(if (isSelected) RoundedCornerShape(4.dp) else CircleShape)
                     .then(
                         if (isSelected) Modifier
+                            // v3.1 B1: an explicit primary-color border (rather than relying
+                            // solely on a surfaceVariant background fill) is what actually
+                            // makes the selected-state indicator visible for light-background
+                            // themes like Editorial Light, where surfaceVariant (0xFFFAF8F3)
+                            // is nearly indistinguishable from the surrounding card surface —
+                            // this was the root cause of "Light shows no selection outline."
+                            .border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(4.dp))
                             .background(MaterialTheme.colorScheme.surfaceVariant)
                             .padding(4.dp)
                             .clip(CircleShape)
@@ -866,20 +1011,8 @@ private fun AccentColorGrid(
     Spacer(modifier = Modifier.height(12.dp))
 }
 
-@Composable
-private fun TokenPlaceholders() {
-    val tokens = listOf("Typography", "Surfaces", "Borders", "Icons", "States")
-    tokens.forEach { token ->
-        Text(
-            text = token,
-            fontWeight = FontWeight.SemiBold,
-            fontSize = 12.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(vertical = 4.dp)
-        )
-        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
-    }
-}
+// B3: TokenPlaceholders() (Typography/Surfaces/Borders/Icons/States inert label list)
+// removed — see call-site comment above for rationale.
 
 // ─── Fix 02 + Fix 03 composables ──────────────────────────────────────
 

@@ -38,8 +38,6 @@ import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -50,6 +48,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -144,8 +143,23 @@ sealed class Screen(val route: String, val title: String, val icon: ImageVector)
 @Composable
 fun RequestrApp() {
     val settings by SettingsRepository.settings.collectAsState()
-    val themeMode = remember(settings.themeMode) {
-        when (settings.themeMode.uppercase()) {
+    // v3.1 B1: SYSTEM appearance mode must actually follow the OS light/dark setting —
+    // previously this function only ever inspected settings.themeMode, so "SYSTEM" had
+    // zero effect on which theme rendered (themeMode was always whatever the user last
+    // explicitly picked, regardless of the OS setting). Now: when appearanceMode is
+    // SYSTEM, resolve to the user's remembered per-family theme (selectedLightTheme /
+    // selectedDarkTheme) based on the real OS dark-theme state; LIGHT/DARK modes ignore
+    // the OS state entirely and just render settings.themeMode as already resolved by
+    // SettingsScreen's AppearanceSelector.
+    val systemInDarkTheme = androidx.compose.foundation.isSystemInDarkTheme()
+    val effectiveThemeKey = remember(settings.themeMode, settings.appearanceMode, settings.selectedLightTheme, settings.selectedDarkTheme, systemInDarkTheme) {
+        when (settings.appearanceMode.uppercase()) {
+            "SYSTEM" -> if (systemInDarkTheme) settings.selectedDarkTheme else settings.selectedLightTheme
+            else -> settings.themeMode
+        }
+    }
+    val themeMode = remember(effectiveThemeKey) {
+        when (effectiveThemeKey.uppercase()) {
             "EDITORIAL_LIGHT", "LIGHT" -> AppThemeMode.EDITORIAL_LIGHT
             "MONOCHROME_DARK", "OBSIDIAN" -> AppThemeMode.MONOCHROME_DARK
             "MIDNIGHT_SAPPHIRE", "MIDNIGHT" -> AppThemeMode.MIDNIGHT_SAPPHIRE
@@ -158,6 +172,34 @@ fun RequestrApp() {
     }
 
     MyApplicationTheme(themeMode = themeMode) {
+      // v3.1 B8: "Display Scale" (SMALL/NORMAL/LARGE) — override LocalDensity's fontScale
+      // so every sp-sized text and dp-based layout below actually renders larger/smaller,
+      // instead of the setting being stored and never read.
+      val baseDensity = androidx.compose.ui.platform.LocalDensity.current
+      val displayScaleFactor = when (settings.displayScale.uppercase()) {
+          "SMALL" -> 0.9f
+          "LARGE" -> 1.15f
+          else -> 1.0f
+      }
+      val scaledDensity = remember(baseDensity, displayScaleFactor) {
+          androidx.compose.ui.unit.Density(
+              density = baseDensity.density,
+              fontScale = baseDensity.fontScale * displayScaleFactor
+          )
+      }
+      CompositionLocalProvider(androidx.compose.ui.platform.LocalDensity provides scaledDensity) {
+      // v3.1 B8: provide the real animation gating (LocalAnimationsEnabled /
+      // LocalAnimationDurationScale) from live settings so every consumer below reads
+      // the user's actual Animation / Transition Behavior preference instead of always
+      // animating at full effect.
+      com.example.ui.theme.ProvideAnimationConfig(
+          animationsEnabled = settings.animationEnabled,
+          transitionBehavior = settings.transitionBehavior
+      ) {
+      // v3.1 B7: provide the real density gating (LocalAppSpacing) from live settings so
+      // list/card composables read the user's actual Compact/Comfortable preference
+      // instead of hardcoding their own spacing regardless of the setting.
+      com.example.ui.theme.ProvideDensityConfig(densityMode = settings.densityMode) {
         val navController = rememberNavController()
         val navBackStackEntry by navController.currentBackStackEntryAsState()
         val currentRoute = navBackStackEntry?.destination?.route ?: Screen.Home.route
@@ -254,7 +296,7 @@ fun RequestrApp() {
                             OnboardingScreen(
                                 onFinishOnboarding = { name, theme ->
                                     SettingsRepository.updateUserName(name)
-                                    SettingsRepository.updateTheme(theme)
+                                    SettingsRepository.updateThemeSelection(theme)
                                     SettingsRepository.setOnboardingCompleted(true)
                                     navController.navigate(Screen.Home.route) {
                                         popUpTo(Screen.Onboarding.route) { inclusive = true }
@@ -436,6 +478,9 @@ fun RequestrApp() {
                 }
             }
         }
+      }
+      }
+      }
     }
 }
 
@@ -559,26 +604,10 @@ fun SectionSpecificMiniSettings(
                 )
             }
         }
-
-        Spacer(modifier = Modifier.height(10.dp))
-
-        // Full App Settings Link Button
-        Button(
-            onClick = onOpenFullSettings,
-            modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.primary
-            ),
-            shape = MaterialTheme.shapes.medium
-        ) {
-            Icon(
-                imageVector = Icons.Default.Settings,
-                contentDescription = null,
-                modifier = Modifier.size(16.dp)
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text("Open Full App Settings", fontSize = 13.sp, fontWeight = FontWeight.Bold)
-        }
+        // B12: the "Open Full App Settings" affordance now lives exactly once, in the
+        // InPageMiniSettingsSheet chrome that wraps this content (see MainActivity's call site
+        // and CommonComponents.kt's InPageMiniSettingsSheet). This composable no longer renders
+        // its own duplicate copy.
     }
 }
 

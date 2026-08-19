@@ -237,8 +237,12 @@ fun OnboardingScreen(
                         // Write through immediately so the root theme provider (which
                         // reads SettingsRepository live) and this screen never disagree —
                         // this IS the fix for A1's "collision" symptom.
+                        // v3.1 B1: route through the unified per-family write path so a
+                        // theme picked during onboarding is remembered under the correct
+                        // light/dark slot, exactly like Settings' pickers, instead of the
+                        // wizard being a second divergent write path.
                         selectedTheme = theme
-                        com.example.data.repository.SettingsRepository.updateTheme(theme)
+                        com.example.data.repository.SettingsRepository.updateThemeSelection(theme)
                     },
                     onFinish = { onFinishOnboarding(userName, selectedTheme) }
                 )
@@ -611,7 +615,7 @@ private fun ProgressDots(currentStep: Int, total: Int) {
             val color by animateColorAsState(
                 if (isActive) MaterialTheme.colorScheme.primary
                 else MaterialTheme.colorScheme.outlineVariant,
-                animationSpec = tween(300),
+                animationSpec = com.example.ui.theme.scaledTween(300),
                 label = "dotColor"
             )
             Box(
@@ -842,6 +846,7 @@ private fun AppearanceSelectorCompact(
             val bgColor by animateColorAsState(
                 if (isSelected) MaterialTheme.colorScheme.surfaceVariant
                 else Color.Transparent,
+                animationSpec = com.example.ui.theme.scaledTween(200),
                 label = "modeBg"
             )
             Column(

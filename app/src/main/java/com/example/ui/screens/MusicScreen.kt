@@ -74,8 +74,11 @@ fun MusicScreen(
     val isPlaying by MusicRepository.isPlaying.collectAsState()
     val positionSec by MusicRepository.currentPositionSec.collectAsState()
 
+    // v3.1 B8: infinite pulse can't be duration-scaled to 0 without flickering forever,
+    // so skip it entirely and hold a static value when animations are disabled.
+    val animationsEnabled = com.example.ui.theme.LocalAnimationsEnabled.current
     val infiniteTransition = rememberInfiniteTransition(label = "wave")
-    val waveAnim by infiniteTransition.animateFloat(
+    val animatedWave by infiniteTransition.animateFloat(
         initialValue = 0.2f,
         targetValue = 1.0f,
         animationSpec = infiniteRepeatable(
@@ -84,6 +87,7 @@ fun MusicScreen(
         ),
         label = "waveAnim"
     )
+    val waveAnim = if (animationsEnabled) animatedWave else 0.6f
 
     Column(
         modifier = Modifier

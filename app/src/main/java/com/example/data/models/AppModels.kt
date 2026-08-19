@@ -297,12 +297,15 @@ data class UserSettingsState(
     // Fix 01 — Theme appearance
     val appearanceMode: String = "SYSTEM",
     val selectedDarkTheme: String = "MONOCHROME_DARK",
+    // v3.1 B1 — mirrors selectedDarkTheme so LIGHT-family theme choice is remembered
+    // independently of the DARK-family choice; fixes the theme-selection "collision"
+    // where picking a theme always overwrote themeMode with no regard to which
+    // appearanceMode family it belonged to.
+    val selectedLightTheme: String = "EDITORIAL_LIGHT",
     // Fix 02 — UI & UX preferences
     val swipeToDeleteEnabled: Boolean = true,
     val hapticFeedbackEnabled: Boolean = true,
     val gestureNavigationEnabled: Boolean = true,
-    val pictureInPictureEnabled: Boolean = false,
-    val tableModeEnabled: Boolean = false,
     val densityMode: String = "COMFORTABLE",
     val updateNotificationPolicy: String = "MAJOR_ONLY",
     val animationEnabled: Boolean = true,
@@ -319,8 +322,6 @@ data class UserSettingsState(
     val trafficCaptureEnabled: Boolean = true,
     val requestLoggingEnabled: Boolean = true,
     val responseLoggingEnabled: Boolean = true,
-    val experimentalFeaturesEnabled: Boolean = false,
-    val developerOptionsEnabled: Boolean = false,
     // Fix 05 — Music
     val musicPermissionStatus: String = "NOT_REQUESTED",
     val musicBarDismissed: Boolean = false,

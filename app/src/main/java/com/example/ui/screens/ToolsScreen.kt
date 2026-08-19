@@ -139,7 +139,7 @@ private fun CategorySelector(
             val textColor by animateColorAsState(
                 if (isActive) MaterialTheme.colorScheme.primary
                 else MaterialTheme.colorScheme.onSurfaceVariant,
-                animationSpec = tween(250),
+                animationSpec = com.example.ui.theme.scaledTween(250),
                 label = "catTextColor"
             )
             Column(

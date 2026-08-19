@@ -3,6 +3,7 @@ package com.example.interception
 import android.util.Log
 import com.example.data.local.CapturedTrafficEntity
 import com.example.data.local.RequestrDatabase
+import com.example.data.repository.SettingsRepository
 import com.example.interception.http.HttpParser
 import com.example.interception.http.ParsedHttpMessage
 import com.example.interception.tcp.TcpReassembler
@@ -110,6 +111,16 @@ class CaptureEngine(
         response: ParsedHttpMessage,
         stream: TcpStream,
     ) {
+        // B9(b): the three "Traffic & Network" Settings switches now gate what this,
+        // the one real persistence path for captured HTTP transactions, actually writes —
+        // previously these switches had zero consumers anywhere in the codebase.
+        val settings = SettingsRepository.settings.value
+        if (!settings.trafficCaptureEnabled) {
+            // Traffic capture disabled entirely: record nothing, matching the toggle's
+            // stated effect ("Capture network traffic for inspection").
+            return
+        }
+
         val entity = CapturedTrafficEntity(
             sessionId = sessionId,
             method = (request.method ?: com.example.data.models.HttpMethod.GET).name,
@@ -118,10 +129,10 @@ class CaptureEngine(
             path = request.path,
             statusCode = if (response.statusCode == 0) null else response.statusCode,
             protocol = response.version.ifEmpty { request.version },
-            requestHeaders = request.headers,
-            responseHeaders = response.headers,
-            requestBody = request.body.ifEmpty { null },
-            responseBody = response.body.ifEmpty { null },
+            requestHeaders = if (settings.requestLoggingEnabled) request.headers else emptyMap(),
+            responseHeaders = if (settings.responseLoggingEnabled) response.headers else emptyMap(),
+            requestBody = if (settings.requestLoggingEnabled) request.body.ifEmpty { null } else null,
+            responseBody = if (settings.responseLoggingEnabled) response.body.ifEmpty { null } else null,
             requestSizeBytes = request.body.toByteArray(Charsets.UTF_8).size.toLong(),
             responseSizeBytes = response.body.toByteArray(Charsets.UTF_8).size.toLong(),
             latencyMs = 0L, // without proxy we don't have timing between request/response

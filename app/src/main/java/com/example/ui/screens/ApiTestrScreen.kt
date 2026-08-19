@@ -87,6 +87,8 @@ import com.example.ui.components.MethodBadge
 import com.example.ui.components.ProtocolBadge
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.StatusCodeBadge
+import com.example.ui.components.rememberAppHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
@@ -127,6 +129,10 @@ fun ApiTestrScreen(
         coroutineScope.launch { snackbarHostState.showSnackbar(message) }
     }
 
+    // B4: real tactile confirmation for save/favorite/import, gated once behind
+    // settings.hapticFeedbackEnabled via the shared helper.
+    val performHaptic = rememberAppHapticFeedback()
+
     Box(modifier = Modifier.fillMaxSize()) {
     Column(
         modifier = Modifier
@@ -142,6 +148,7 @@ fun ApiTestrScreen(
                     val updated = reqState.copy(isFavorite = !reqState.isFavorite)
                     reqState = updated
                     ApiCollectionsRepository.saveRequest(updated)
+                    performHaptic(HapticFeedbackType.LongPress)
                     showSavedSnackbar(if (updated.isFavorite) "Added to favorites" else "Removed from favorites")
                 }) {
                     Icon(
@@ -152,6 +159,7 @@ fun ApiTestrScreen(
                 }
                 IconButton(onClick = {
                     ApiCollectionsRepository.saveRequest(reqState)
+                    performHaptic(HapticFeedbackType.LongPress)
                     showSavedSnackbar("Saved \"${reqState.name}\"")
                 }) {
                     Icon(imageVector = Icons.Default.Save, contentDescription = "Save", tint = MaterialTheme.colorScheme.primary)
@@ -819,6 +827,7 @@ fun ApiTestrScreen(
                         reqState = parsed
                         ApiCollectionsRepository.saveRequest(parsed)
                         showImportCurlModal = false
+                        performHaptic(HapticFeedbackType.LongPress)
                         showSavedSnackbar("Imported \"${parsed.name}\"")
                     },
                     modifier = Modifier.fillMaxWidth(),

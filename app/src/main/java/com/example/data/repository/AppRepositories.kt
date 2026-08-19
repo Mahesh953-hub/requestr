@@ -434,12 +434,11 @@ object SettingsRepository {
     // Fix 01 — Theme appearance
     private const val KEY_APPEARANCE_MODE = "appearance_mode"
     private const val KEY_SELECTED_DARK_THEME = "selected_dark_theme"
+    private const val KEY_SELECTED_LIGHT_THEME = "selected_light_theme"
     // Fix 02 — UI & UX
     private const val KEY_SWIPE_TO_DELETE = "swipe_to_delete"
     private const val KEY_HAPTIC_FEEDBACK = "haptic_feedback"
     private const val KEY_GESTURE_NAVIGATION = "gesture_navigation"
-    private const val KEY_PICTURE_IN_PICTURE = "picture_in_picture"
-    private const val KEY_TABLE_MODE = "table_mode"
     private const val KEY_DENSITY_MODE = "density_mode"
     private const val KEY_UPDATE_NOTIFICATION_POLICY = "update_notification_policy"
     private const val KEY_ANIMATION_ENABLED = "animation_enabled"
@@ -456,8 +455,6 @@ object SettingsRepository {
     private const val KEY_TRAFFIC_CAPTURE = "traffic_capture"
     private const val KEY_REQUEST_LOGGING = "request_logging"
     private const val KEY_RESPONSE_LOGGING = "response_logging"
-    private const val KEY_EXPERIMENTAL_FEATURES = "experimental_features"
-    private const val KEY_DEVELOPER_OPTIONS = "developer_options"
     // Fix 05 — Music
     private const val KEY_MUSIC_PERMISSION_STATUS = "music_permission_status"
     private const val KEY_MUSIC_BAR_DISMISSED = "music_bar_dismissed"
@@ -490,12 +487,11 @@ object SettingsRepository {
             // Fix 01
             appearanceMode = p.getString(KEY_APPEARANCE_MODE, "SYSTEM") ?: "SYSTEM",
             selectedDarkTheme = p.getString(KEY_SELECTED_DARK_THEME, "MONOCHROME_DARK") ?: "MONOCHROME_DARK",
+            selectedLightTheme = p.getString(KEY_SELECTED_LIGHT_THEME, "EDITORIAL_LIGHT") ?: "EDITORIAL_LIGHT",
             // Fix 02 — UI & UX
             swipeToDeleteEnabled = p.getBoolean(KEY_SWIPE_TO_DELETE, true),
             hapticFeedbackEnabled = p.getBoolean(KEY_HAPTIC_FEEDBACK, true),
             gestureNavigationEnabled = p.getBoolean(KEY_GESTURE_NAVIGATION, true),
-            pictureInPictureEnabled = p.getBoolean(KEY_PICTURE_IN_PICTURE, false),
-            tableModeEnabled = p.getBoolean(KEY_TABLE_MODE, false),
             densityMode = p.getString(KEY_DENSITY_MODE, "COMFORTABLE") ?: "COMFORTABLE",
             updateNotificationPolicy = p.getString(KEY_UPDATE_NOTIFICATION_POLICY, "MAJOR_ONLY") ?: "MAJOR_ONLY",
             animationEnabled = p.getBoolean(KEY_ANIMATION_ENABLED, true),
@@ -512,8 +508,6 @@ object SettingsRepository {
             trafficCaptureEnabled = p.getBoolean(KEY_TRAFFIC_CAPTURE, true),
             requestLoggingEnabled = p.getBoolean(KEY_REQUEST_LOGGING, true),
             responseLoggingEnabled = p.getBoolean(KEY_RESPONSE_LOGGING, true),
-            experimentalFeaturesEnabled = p.getBoolean(KEY_EXPERIMENTAL_FEATURES, false),
-            developerOptionsEnabled = p.getBoolean(KEY_DEVELOPER_OPTIONS, false),
             // Fix 05 — Music
             musicPermissionStatus = p.getString(KEY_MUSIC_PERMISSION_STATUS, "NOT_REQUESTED") ?: "NOT_REQUESTED",
             musicBarDismissed = p.getBoolean(KEY_MUSIC_BAR_DISMISSED, false),
@@ -561,6 +555,44 @@ object SettingsRepository {
         persist(KEY_THEME_MODE, themeMode)
     }
 
+    // v3.1 B1 — the single, unified theme-selection write path. Every UI entry point
+    // that lets the user pick a root theme (Setup Wizard's AppearanceStep, Settings'
+    // AppearanceSelector + AccentColorGrid, CommonComponents' ThemeToggleButton, and
+    // AppNavigationDrawer's quick-switcher) must route through THIS function instead
+    // of calling updateTheme()/updateSelectedDarkTheme() directly and separately —
+    // that dual-write divergence (mutating themeMode identity without regard to which
+    // appearanceMode family the pick belongs to) was exactly the "theme selection
+    // collision" bug. This function:
+    //  1. Writes themeMode (the value MyApplicationTheme actually renders) once.
+    //  2. Remembers the pick under the correct per-family slot (selectedLightTheme or
+    //     selectedDarkTheme) keyed off the theme's own isLight flag — NOT off whatever
+    //     appearanceMode happened to be active — so light/dark choices never bleed into
+    //     each other regardless of which mode the picker was shown under.
+    //  3. Never touches appearanceMode — picking a root theme must never silently flip
+    //     SYSTEM/LIGHT/DARK; that stays a fully independent, orthogonal setting.
+    fun updateThemeSelection(theme: com.example.ui.theme.AppThemeMode) {
+        val current = _settings.value
+        val updated = if (theme.isLight) {
+            current.copy(themeMode = theme.name, selectedLightTheme = theme.name)
+        } else {
+            current.copy(themeMode = theme.name, selectedDarkTheme = theme.name)
+        }
+        _settings.value = updated
+        persist(KEY_THEME_MODE, updated.themeMode)
+        if (theme.isLight) persist(KEY_SELECTED_LIGHT_THEME, updated.selectedLightTheme)
+        else persist(KEY_SELECTED_DARK_THEME, updated.selectedDarkTheme)
+    }
+
+    // Convenience overload for call sites that only have the string key (e.g. from a
+    // DropdownMenu/grid tap using AppThemeMode.name as the value). Falls back to the
+    // legacy single-field updateTheme() if the string doesn't map to a known theme, so
+    // this can never silently no-op.
+    fun updateThemeSelection(themeName: String) {
+        val theme = com.example.ui.theme.AppThemeMode.values()
+            .find { it.name.equals(themeName, ignoreCase = true) }
+        if (theme != null) updateThemeSelection(theme) else updateTheme(themeName)
+    }
+
     fun updateCornerRadius(radius: Int) {
         _settings.value = _settings.value.copy(cornerRadiusDp = radius)
         persist(KEY_CORNER_RADIUS, radius)
@@ -585,6 +617,10 @@ object SettingsRepository {
         _settings.value = _settings.value.copy(selectedDarkTheme = theme)
         persist(KEY_SELECTED_DARK_THEME, theme)
     }
+    fun updateSelectedLightTheme(theme: String) {
+        _settings.value = _settings.value.copy(selectedLightTheme = theme)
+        persist(KEY_SELECTED_LIGHT_THEME, theme)
+    }
     // Fix 02 — UI & UX
     fun updateSwipeToDelete(enabled: Boolean) {
         _settings.value = _settings.value.copy(swipeToDeleteEnabled = enabled)
@@ -597,14 +633,6 @@ object SettingsRepository {
     fun updateGestureNavigation(enabled: Boolean) {
         _settings.value = _settings.value.copy(gestureNavigationEnabled = enabled)
         persist(KEY_GESTURE_NAVIGATION, enabled)
-    }
-    fun updatePictureInPicture(enabled: Boolean) {
-        _settings.value = _settings.value.copy(pictureInPictureEnabled = enabled)
-        persist(KEY_PICTURE_IN_PICTURE, enabled)
-    }
-    fun updateTableMode(enabled: Boolean) {
-        _settings.value = _settings.value.copy(tableModeEnabled = enabled)
-        persist(KEY_TABLE_MODE, enabled)
     }
     fun updateDensityMode(mode: String) {
         _settings.value = _settings.value.copy(densityMode = mode)
@@ -667,14 +695,6 @@ object SettingsRepository {
         _settings.value = _settings.value.copy(responseLoggingEnabled = enabled)
         persist(KEY_RESPONSE_LOGGING, enabled)
     }
-    fun updateExperimentalFeatures(enabled: Boolean) {
-        _settings.value = _settings.value.copy(experimentalFeaturesEnabled = enabled)
-        persist(KEY_EXPERIMENTAL_FEATURES, enabled)
-    }
-    fun updateDeveloperOptions(enabled: Boolean) {
-        _settings.value = _settings.value.copy(developerOptionsEnabled = enabled)
-        persist(KEY_DEVELOPER_OPTIONS, enabled)
-    }
     // Fix 05 — Music
     fun updateMusicPermissionStatus(status: String) {
         _settings.value = _settings.value.copy(musicPermissionStatus = status)
@@ -707,12 +727,11 @@ object SettingsRepository {
         // Fix 01
         persist(KEY_APPEARANCE_MODE, newSettings.appearanceMode)
         persist(KEY_SELECTED_DARK_THEME, newSettings.selectedDarkTheme)
+        persist(KEY_SELECTED_LIGHT_THEME, newSettings.selectedLightTheme)
         // Fix 02 — UI & UX
         persist(KEY_SWIPE_TO_DELETE, newSettings.swipeToDeleteEnabled)
         persist(KEY_HAPTIC_FEEDBACK, newSettings.hapticFeedbackEnabled)
         persist(KEY_GESTURE_NAVIGATION, newSettings.gestureNavigationEnabled)
-        persist(KEY_PICTURE_IN_PICTURE, newSettings.pictureInPictureEnabled)
-        persist(KEY_TABLE_MODE, newSettings.tableModeEnabled)
         persist(KEY_DENSITY_MODE, newSettings.densityMode)
         persist(KEY_UPDATE_NOTIFICATION_POLICY, newSettings.updateNotificationPolicy)
         persist(KEY_ANIMATION_ENABLED, newSettings.animationEnabled)
@@ -729,8 +748,6 @@ object SettingsRepository {
         persist(KEY_TRAFFIC_CAPTURE, newSettings.trafficCaptureEnabled)
         persist(KEY_REQUEST_LOGGING, newSettings.requestLoggingEnabled)
         persist(KEY_RESPONSE_LOGGING, newSettings.responseLoggingEnabled)
-        persist(KEY_EXPERIMENTAL_FEATURES, newSettings.experimentalFeaturesEnabled)
-        persist(KEY_DEVELOPER_OPTIONS, newSettings.developerOptionsEnabled)
         // Fix 05 — Music
         persist(KEY_MUSIC_PERMISSION_STATUS, newSettings.musicPermissionStatus)
         persist(KEY_MUSIC_BAR_DISMISSED, newSettings.musicBarDismissed)

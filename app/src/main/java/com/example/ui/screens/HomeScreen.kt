@@ -64,6 +64,7 @@ import com.example.ui.components.GlassCard
 import com.example.ui.components.MethodBadge
 import com.example.ui.components.RequestrWordmark
 import com.example.ui.components.SearchInputField
+import com.example.ui.components.ThemeToggleButton
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
@@ -126,8 +127,15 @@ fun HomeScreen(
             ) {
                 RequestrWordmark(fontSize = 24)
 
-                // User Avatar Circle
-                Box(
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    // B13: the theme icon appears ONLY here on Home, immediately to the left of
+                    // the avatar. Every other screen's SectionHeader had its own copy removed.
+                    ThemeToggleButton()
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    // User Avatar Circle
+                    Box(
                     modifier = Modifier
                         .size(38.dp)
                         .clip(CircleShape)
@@ -149,6 +157,7 @@ fun HomeScreen(
                         fontSize = 14.sp,
                         fontFamily = FontFamily.Monospace
                     )
+                }
                 }
             }
 

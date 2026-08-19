@@ -84,6 +84,10 @@ fun AppNavigationDrawer(
     ModalNavigationDrawer(
         drawerState = drawerState,
         scrimColor = Color.Black.copy(alpha = 0.5f),
+        // B5: when disabled, the edge-swipe gesture that opens this drawer is turned off so it
+        // no longer fights with the system back-gesture nav; the drawer remains fully usable via
+        // the hamburger icon regardless of this setting.
+        gesturesEnabled = settings.gestureNavigationEnabled,
         drawerContent = {
             ModalDrawerSheet(
                 drawerContainerColor = MaterialTheme.colorScheme.surface,
@@ -271,7 +275,10 @@ fun AppNavigationDrawer(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(10.dp))
                                     .background(if (isModeActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
-                                    .clickable { SettingsRepository.updateTheme(mode.name) }
+                                    // v3.1 B1: route through the unified write path (see
+                                    // AppRepositories.updateThemeSelection doc) so this quick
+                                    // switcher stays consistent with Settings' per-family memory.
+                                    .clickable { SettingsRepository.updateThemeSelection(mode) }
                                     .padding(horizontal = 10.dp, vertical = 6.dp)
                             ) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -327,7 +334,7 @@ fun AppNavigationDrawer(
                                 )
                             }
                             Text(
-                                text = "v2.1",
+                                text = "v${com.example.BuildConfig.VERSION_NAME}",
                                 fontSize = 11.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 fontFamily = FontFamily.Monospace
