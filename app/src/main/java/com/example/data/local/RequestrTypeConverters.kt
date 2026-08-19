@@ -65,6 +65,17 @@ class RequestrTypeConverters {
         if (value.isNullOrBlank() || value == "[]") emptyList()
         else runCatching { chainExtractionListAdapter.fromJson(value) }.getOrNull() ?: emptyList()
 
+    // -- Test assertions (C3) ------------------------------------------------------------------
+
+    @TypeConverter
+    fun assertionListToJson(value: List<SavedAssertion>?): String =
+        if (value.isNullOrEmpty()) "[]" else assertionListAdapter.toJson(value)
+
+    @TypeConverter
+    fun jsonToAssertionList(value: String?): List<SavedAssertion> =
+        if (value.isNullOrBlank() || value == "[]") emptyList()
+        else runCatching { assertionListAdapter.fromJson(value) }.getOrNull() ?: emptyList()
+
     private companion object {
         val moshi: Moshi = Moshi.Builder().addLast(KotlinJsonAdapterFactory()).build()
 
@@ -82,6 +93,10 @@ class RequestrTypeConverters {
 
         val chainExtractionListAdapter = moshi.adapter<List<SavedChainExtractionRule>>(
             Types.newParameterizedType(List::class.java, SavedChainExtractionRule::class.java)
+        )
+
+        val assertionListAdapter = moshi.adapter<List<SavedAssertion>>(
+            Types.newParameterizedType(List::class.java, SavedAssertion::class.java)
         )
     }
 }

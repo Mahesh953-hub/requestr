@@ -1,6 +1,9 @@
 package com.example.data.local
 
 import com.example.data.models.ApiRequestItem
+import com.example.data.models.Assertion
+import com.example.data.models.AssertionOperator
+import com.example.data.models.AssertionTarget
 import com.example.data.models.AuthType
 import com.example.data.models.ChainExtractionRule
 import com.example.data.models.HttpMethod
@@ -34,6 +37,7 @@ internal fun SavedApiRequestEntity.toApiRequestItem(): ApiRequestItem = ApiReque
     isFavorite = isFavorite,
     updatedAt = updatedAt,
     chainExtractions = chainExtractions.map { it.toChainExtractionRule() },
+    assertions = assertions.map { it.toAssertion() },
 )
 
 internal fun ApiRequestItem.toEntity(): SavedApiRequestEntity = SavedApiRequestEntity(
@@ -58,6 +62,7 @@ internal fun ApiRequestItem.toEntity(): SavedApiRequestEntity = SavedApiRequestE
     isFavorite = isFavorite,
     updatedAt = updatedAt,
     chainExtractions = chainExtractions.map { it.toSavedChainExtractionRule() },
+    assertions = assertions.map { it.toSavedAssertion() },
 )
 
 private fun SavedKeyValue.toKeyValueItem(): KeyValueItem = KeyValueItem(
@@ -87,5 +92,23 @@ private fun ChainExtractionRule.toSavedChainExtractionRule(): SavedChainExtracti
     id = id,
     jsonPath = jsonPath,
     variableName = variableName,
+    enabled = enabled,
+)
+
+private fun SavedAssertion.toAssertion(): Assertion = Assertion(
+    id = id,
+    target = runCatching { AssertionTarget.valueOf(target) }.getOrDefault(AssertionTarget.STATUS_CODE),
+    targetKey = targetKey,
+    operator = runCatching { AssertionOperator.valueOf(operator) }.getOrDefault(AssertionOperator.EQUALS),
+    expectedValue = expectedValue,
+    enabled = enabled,
+)
+
+private fun Assertion.toSavedAssertion(): SavedAssertion = SavedAssertion(
+    id = id,
+    target = target.name,
+    targetKey = targetKey,
+    operator = operator.name,
+    expectedValue = expectedValue,
     enabled = enabled,
 )

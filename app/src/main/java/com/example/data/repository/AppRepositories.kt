@@ -448,6 +448,55 @@ object ApiCollectionsRepository {
         com.example.data.env.EnvironmentRepository.updateEnvironment(env.name, env.variables + extracted)
         return extracted
     }
+
+    /**
+     * v3.3 Part C — C3 (Test assertions / test runner): "Test runner mode" — runs every saved
+     * request in [folderId] (or every saved request, when null, for an ad-hoc "run all" outside
+     * a folder) that has at least one assertion, in sequence, substituting `{{var}}` templates
+     * against the active Environment exactly like a normal Send (so C2 chaining still applies —
+     * a request earlier in the list can feed variables the next one consumes), running its
+     * chain-extraction rules on success, then evaluating its assertions via [AssertionRunner].
+     * Returns a [com.example.data.models.CollectionTestReport] summarizing pass/fail counts.
+     */
+    suspend fun runCollectionTests(folderId: String?): com.example.data.models.CollectionTestReport {
+        val candidates = _requests.value
+            .filter { folderId == null || it.folderId == folderId }
+            .filter { it.assertions.any { a -> a.enabled } }
+            .sortedBy { it.updatedAt }
+
+        val results = candidates.map { request ->
+            val env = com.example.data.env.EnvironmentRepository.active()
+            fun sub(s: String) = com.example.data.env.EnvironmentRepository.substitute(s, env)
+            val substituted = request.copy(
+                url = sub(request.url),
+                headers = request.headers.map { it.copy(value = sub(it.value)) },
+                queryParams = request.queryParams.map { it.copy(value = sub(it.value)) },
+                bodyContent = sub(request.bodyContent),
+                bearerToken = sub(request.bearerToken),
+                apiKeyValue = sub(request.apiKeyValue),
+            )
+            val resp = runCatching { ApiTestrRepository.executeRequest(substituted) }.getOrNull()
+            if (resp == null) {
+                com.example.data.models.RequestTestResult(
+                    request = request,
+                    response = null,
+                    results = emptyList(),
+                    requestFailed = true,
+                )
+            } else {
+                if (resp.isSuccess && request.chainExtractions.isNotEmpty()) {
+                    runChainExtractions(request, resp.body)
+                }
+                com.example.data.models.RequestTestResult(
+                    request = request,
+                    response = resp,
+                    results = AssertionRunner.run(request.assertions, resp),
+                    requestFailed = false,
+                )
+            }
+        }
+        return com.example.data.models.CollectionTestReport(folderId = folderId, requestResults = results)
+    }
 }
 
 // ==========================================

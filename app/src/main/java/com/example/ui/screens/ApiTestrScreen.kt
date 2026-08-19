@@ -75,6 +75,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.models.ApiRequestItem
 import com.example.data.models.ApiResponseData
+import com.example.data.models.Assertion
+import com.example.data.models.AssertionOperator
+import com.example.data.models.AssertionResult
+import com.example.data.models.AssertionTarget
 import com.example.data.models.AuthType
 import com.example.data.models.ChainExtractionRule
 import com.example.data.models.HttpMethod
@@ -82,6 +86,7 @@ import com.example.data.models.KeyValueItem
 import com.example.data.models.RequestBodyType
 import com.example.data.repository.ApiCollectionsRepository
 import com.example.data.repository.ApiTestrRepository
+import com.example.data.repository.AssertionRunner
 import com.example.data.repository.ToolsRepository
 import com.example.ui.components.GlassCard
 import com.example.ui.components.MethodBadge
@@ -111,10 +116,15 @@ fun ApiTestrScreen(
     var responseData by remember { mutableStateOf<ApiResponseData?>(null) }
     var isLoading by remember { mutableStateOf(false) }
 
+    // v3.4 Part C — C3 (Test assertions / test runner): results of the last "Run Tests" pass
+    // against `responseData`. Cleared whenever a fresh Send/Run happens so stale pass/fail
+    // results are never shown next to a response they didn't evaluate.
+    var testResults by remember { mutableStateOf<List<AssertionResult>?>(null) }
+
     var selectedViewMode by remember { mutableIntStateOf(0) } // 0: Request, 1: Response
     var followRedirects by remember { mutableStateOf(true) }
-    var requestTab by remember { mutableIntStateOf(0) } // 0: Query, 1: Headers, 2: Body, 3: Auth, 4: Scripts
-    var responseTab by remember { mutableIntStateOf(0) } // 0: Body, 1: Headers, 2: Metrics
+    var requestTab by remember { mutableIntStateOf(0) } // 0: Query, 1: Headers, 2: Body, 3: Auth, 4: Scripts, 5: Chain, 6: Tests
+    var responseTab by remember { mutableIntStateOf(0) } // 0: Body, 1: Headers, 2: Metrics, 3: Test Results
 
     var showMethodDropdown by remember { mutableStateOf(false) }
     var showMoreMenu by remember { mutableStateOf(false) }
@@ -223,6 +233,9 @@ fun ApiTestrScreen(
                                 )
                                 val resp = ApiTestrRepository.executeRequest(substitutedState, followRedirects)
                                 responseData = resp
+                                // v3.4 Part C — C3: clear any previous run's pass/fail results —
+                                // they belong to a different response, not this one.
+                                testResults = null
                                 isLoading = false
                                 selectedViewMode = 1 // auto toggle to response
 
@@ -236,6 +249,13 @@ fun ApiTestrScreen(
                                             "Extracted " + written.keys.joinToString(", ") { "{{$it}}" }
                                         )
                                     }
+                                }
+
+                                // v3.4 Part C — C3: if this request carries assertions, evaluate
+                                // them immediately against the just-received response so a plain
+                                // Send already shows pass/fail without a second tap.
+                                if (reqState.assertions.any { it.enabled }) {
+                                    testResults = AssertionRunner.run(reqState.assertions, resp)
                                 }
                             }
                         },
@@ -370,7 +390,15 @@ fun ApiTestrScreen(
             // ==========================================
             // REQUEST EDITOR VIEW
             // ==========================================
-            val reqTabs = listOf("Query (${reqState.queryParams.count { it.isEnabled }})", "Headers (${reqState.headers.count { it.isEnabled }})", "Body", "Auth", "Scripts", "Chain (${reqState.chainExtractions.count { it.enabled }})")
+            val reqTabs = listOf(
+                "Query (${reqState.queryParams.count { it.isEnabled }})",
+                "Headers (${reqState.headers.count { it.isEnabled }})",
+                "Body",
+                "Auth",
+                "Scripts",
+                "Chain (${reqState.chainExtractions.count { it.enabled }})",
+                "Tests (${reqState.assertions.count { it.enabled }})",
+            )
 
             TabRow(
                 selectedTabIndex = requestTab,
@@ -599,6 +627,15 @@ fun ApiTestrScreen(
                             onRulesChanged = { reqState = reqState.copy(chainExtractions = it) }
                         )
                     }
+                    6 -> {
+                        // v3.4 Part C — C3: assertions attached to this saved request, evaluated
+                        // against a real response by AssertionRunner (see the Send handler above
+                        // and the standalone "Run Tests" button in the Response view).
+                        AssertionEditor(
+                            assertions = reqState.assertions,
+                            onAssertionsChanged = { reqState = reqState.copy(assertions = it) }
+                        )
+                    }
                 }
             }
         } else {
@@ -645,15 +682,46 @@ fun ApiTestrScreen(
                         }
                     }
 
+                    // v3.4 Part C — C3: "Run Tests" — re-evaluate this request's assertions
+                    // against the response already sitting in `resp`, without re-sending the
+                    // request. Only shown when the request actually carries at least one
+                    // enabled assertion, so requests with no tests don't grow an empty button.
+                    if (reqState.assertions.any { it.enabled }) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                            Button(
+                                onClick = {
+                                    testResults = AssertionRunner.run(reqState.assertions, resp)
+                                    responseTab = 3
+                                },
+                                shape = RoundedCornerShape(8.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary)
+                            ) {
+                                Icon(imageVector = Icons.Default.Check, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Run Tests", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    // Response Subtabs (Body, Headers, Metrics)
+                    // Response Subtabs (Body, Headers, Metrics, Tests)
+                    val responseTabTitles = if (reqState.assertions.any { it.enabled }) {
+                        listOf("Body", "Headers (${resp.headers.size})", "Timeline Metrics", "Tests${testResults?.let { " (${it.count { r -> r.passed }}/${it.size})" } ?: ""}")
+                    } else {
+                        listOf("Body", "Headers (${resp.headers.size})", "Timeline Metrics")
+                    }
+                    // Defensive clamp: if the request's assertions changed since responseTab was
+                    // last set (e.g. navigated to a different saved request), avoid indexing past
+                    // the now-shorter tab list.
+                    if (responseTab >= responseTabTitles.size) responseTab = 0
                     TabRow(
                         selectedTabIndex = responseTab,
                         containerColor = MaterialTheme.colorScheme.surface,
                         contentColor = MaterialTheme.colorScheme.primary
                     ) {
-                        listOf("Body", "Headers (${resp.headers.size})", "Timeline Metrics").forEachIndexed { idx, t ->
+                        responseTabTitles.forEachIndexed { idx, t ->
                             Tab(
                                 selected = responseTab == idx,
                                 onClick = { responseTab = idx },
@@ -736,6 +804,36 @@ fun ApiTestrScreen(
                                     TimelineMetricBar("TLS Handshake", "${resp.tlsTimeMs} ms", 0.40f, Color(0xFF8B5CF6))
                                     TimelineMetricBar("Request Sent", "${resp.requestTimeMs} ms", 0.10f, Color(0xFFF59E0B))
                                     TimelineMetricBar("Server Response", "${resp.responseTimeMs} ms", 0.60f, Color(0xFF22C55E))
+                                }
+                            }
+                            3 -> {
+                                // v3.4 Part C — C3: pass/fail per assertion, actual vs expected.
+                                val results = testResults
+                                if (results == null) {
+                                    Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+                                        Text(
+                                            "Tap \"Run Tests\" above to evaluate this request's assertions against this response.",
+                                            color = TextMuted,
+                                            fontSize = 12.sp
+                                        )
+                                    }
+                                } else {
+                                    LazyColumn(
+                                        modifier = Modifier.fillMaxSize(),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        item {
+                                            val passedCount = results.count { it.passed }
+                                            Text(
+                                                "$passedCount / ${results.size} assertions passed",
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (passedCount == results.size) Color(0xFF22C55E) else Color(0xFFEF4444),
+                                                fontSize = 13.sp
+                                            )
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                        }
+                                        items(results) { result -> AssertionResultRow(result) }
+                                    }
                                 }
                             }
                         }
@@ -1099,6 +1197,217 @@ fun ChainExtractionEditor(
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * v3.4 Part C — C3 (Test assertions / test runner): editor for the [Assertion]s attached to a
+ * saved request. Mirrors [ChainExtractionEditor]'s structure (header, "+ Add" button, empty
+ * state, LazyColumn of rows with a checkbox + delete button) but each row needs more fields
+ * than a chain-extraction rule: a target dropdown, a conditionally-shown target-key field
+ * (header name / JSON field — hidden for STATUS_CODE and RESPONSE_TIME_MS, which have nothing
+ * to name), an operator dropdown, and the expected-value field.
+ */
+@Composable
+fun AssertionEditor(
+    assertions: List<Assertion>,
+    onAssertionsChanged: (List<Assertion>) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        Column {
+            Text("Test Assertions", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = TextPrimary)
+            Text(
+                "Attach checks to this request. After Send (or via \"Run Tests\" in the Response view), each assertion is evaluated against the real response and shown as pass/fail with actual vs. expected values.",
+                color = TextMuted,
+                fontSize = 11.sp
+            )
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Button(
+            onClick = { onAssertionsChanged(assertions + Assertion()) },
+            shape = RoundedCornerShape(8.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(14.dp), tint = TextPrimary)
+            Spacer(modifier = Modifier.width(4.dp))
+            Text("Add Assertion", fontSize = 11.sp, color = TextPrimary)
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        if (assertions.isEmpty()) {
+            Text(
+                "No assertions yet. Add one to check, for example, that the status code equals 200, a header contains a value, a JSON field equals an expected value, or the response time is less than a threshold.",
+                color = TextMuted,
+                fontSize = 11.sp
+            )
+        }
+
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            items(assertions) { assertion ->
+                fun update(transform: (Assertion) -> Assertion) {
+                    onAssertionsChanged(assertions.map { if (it.id == assertion.id) transform(it) else it })
+                }
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.surface)
+                        .padding(8.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = assertion.enabled,
+                            onCheckedChange = { enabled -> update { it.copy(enabled = enabled) } },
+                            colors = CheckboxDefaults.colors(checkedColor = MaterialTheme.colorScheme.primary)
+                        )
+
+                        // Target dropdown
+                        var showTargetMenu by remember { mutableStateOf(false) }
+                        Box(modifier = Modifier.weight(1f)) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                                    .clickable { showTargetMenu = true }
+                                    .padding(horizontal = 10.dp, vertical = 8.dp)
+                                    .fillMaxWidth()
+                            ) {
+                                Text(assertion.target.name.replace('_', ' '), fontSize = 11.sp, color = TextPrimary, fontWeight = FontWeight.Bold)
+                            }
+                            DropdownMenu(expanded = showTargetMenu, onDismissRequest = { showTargetMenu = false }) {
+                                AssertionTarget.values().forEach { t ->
+                                    DropdownMenuItem(
+                                        text = { Text(t.name.replace('_', ' '), fontSize = 12.sp) },
+                                        onClick = {
+                                            update { it.copy(target = t) }
+                                            showTargetMenu = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.width(6.dp))
+
+                        // Operator dropdown
+                        var showOperatorMenu by remember { mutableStateOf(false) }
+                        Box(modifier = Modifier.weight(1f)) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                                    .clickable { showOperatorMenu = true }
+                                    .padding(horizontal = 10.dp, vertical = 8.dp)
+                                    .fillMaxWidth()
+                            ) {
+                                Text(assertion.operator.name.replace('_', ' '), fontSize = 11.sp, color = TextPrimary, fontWeight = FontWeight.Bold)
+                            }
+                            DropdownMenu(expanded = showOperatorMenu, onDismissRequest = { showOperatorMenu = false }) {
+                                AssertionOperator.values().forEach { op ->
+                                    DropdownMenuItem(
+                                        text = { Text(op.name.replace('_', ' '), fontSize = 12.sp) },
+                                        onClick = {
+                                            update { it.copy(operator = op) }
+                                            showOperatorMenu = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+
+                        IconButton(
+                            onClick = { onAssertionsChanged(assertions.filter { it.id != assertion.id }) },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.Delete, contentDescription = null, tint = TextMuted, modifier = Modifier.size(16.dp))
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // targetKey only makes sense for HEADER_VALUE / BODY_JSON_FIELD — status
+                        // code and response time are single scalar values with nothing to name.
+                        if (assertion.target == AssertionTarget.HEADER_VALUE || assertion.target == AssertionTarget.BODY_JSON_FIELD) {
+                            OutlinedTextField(
+                                value = assertion.targetKey,
+                                onValueChange = { k -> update { it.copy(targetKey = k) } },
+                                placeholder = {
+                                    Text(
+                                        if (assertion.target == AssertionTarget.HEADER_VALUE) "Header name (e.g. content-type)" else "JSON field (e.g. token)",
+                                        fontSize = 11.sp, color = TextMuted
+                                    )
+                                },
+                                textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = TextPrimary),
+                                singleLine = true,
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                        }
+
+                        OutlinedTextField(
+                            value = assertion.expectedValue,
+                            onValueChange = { v -> update { it.copy(expectedValue = v) } },
+                            placeholder = { Text("Expected value", fontSize = 11.sp, color = TextMuted) },
+                            textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = TextPrimary),
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(8.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * v3.4 Part C — C3: one row of the "Run Tests" result list — the assertion's description,
+ * a pass/fail indicator, and (when failed) the human-readable actual-vs-expected message
+ * from [AssertionResult.message].
+ */
+@Composable
+fun AssertionResultRow(result: AssertionResult) {
+    val a = result.assertion
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .padding(10.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Icon(
+            imageVector = if (result.passed) Icons.Default.Check else Icons.Default.Close,
+            contentDescription = if (result.passed) "Passed" else "Failed",
+            tint = if (result.passed) Color(0xFF22C55E) else Color(0xFFEF4444),
+            modifier = Modifier.size(16.dp)
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            val label = when (a.target) {
+                AssertionTarget.STATUS_CODE -> "Status code"
+                AssertionTarget.RESPONSE_TIME_MS -> "Response time"
+                AssertionTarget.HEADER_VALUE -> "Header \"${a.targetKey}\""
+                AssertionTarget.BODY_JSON_FIELD -> "JSON field \"${a.targetKey}\""
+            }
+            Text(
+                "$label ${a.operator.name.lowercase().replace('_', ' ')} \"${a.expectedValue}\"",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
+            )
+            Text(
+                if (result.passed) "Actual: \"${result.actualValue}\"" else result.message,
+                fontSize = 11.sp,
+                color = if (result.passed) TextSecondary else Color(0xFFEF4444)
+            )
         }
     }
 }

@@ -22,23 +22,32 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -50,10 +59,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.models.ApiRequestItem
+import com.example.data.models.CollectionTestReport
 import com.example.data.models.HttpMethod
+import com.example.data.models.RequestTestResult
 import com.example.data.repository.ApiCollectionsRepository
 import com.example.ui.components.MethodBadge
 import com.example.ui.components.SectionHeader
+import kotlinx.coroutines.launch
 
 /**
  * Saved & Liked APIs browser (Fix 09). Two tabs at top:
@@ -68,6 +80,15 @@ fun SavedApisScreen(
 ) {
     val allRequests by ApiCollectionsRepository.requests.collectAsState()
     var showSaved by remember { mutableStateOf(true) }
+    val coroutineScope = rememberCoroutineScope()
+
+    // v3.4 Part C — C3 (Test assertions / test runner): "test runner mode" — run every saved
+    // request's assertions in sequence (folderId = null covers the whole collection; there is
+    // no folder-picker UI yet, so "run all" is the scope this screen exposes) and show a summary
+    // report. null = not running / no report yet.
+    var isRunningTests by remember { mutableStateOf(false) }
+    var testReport by remember { mutableStateOf<CollectionTestReport?>(null) }
+    val testableCount = remember(allRequests) { allRequests.count { r -> r.assertions.any { it.enabled } } }
 
     val filtered = remember(allRequests, showSaved) {
         if (showSaved) allRequests
@@ -99,6 +120,31 @@ fun SavedApisScreen(
                 color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f)
             )
+
+            // v3.4 Part C — C3: only shown when at least one saved request actually has an
+            // enabled assertion — otherwise there is nothing to run and the button would just
+            // be a dead end.
+            if (testableCount > 0) {
+                IconButton(
+                    onClick = {
+                        isRunningTests = true
+                        coroutineScope.launch {
+                            testReport = ApiCollectionsRepository.runCollectionTests(folderId = null)
+                            isRunningTests = false
+                        }
+                    },
+                    enabled = !isRunningTests
+                ) {
+                    if (isRunningTests) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    } else {
+                        Icon(
+                            Icons.Default.PlayArrow, "Run All Tests ($testableCount)",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            }
         }
 
         // Tab row: Saved / Liked
@@ -187,6 +233,118 @@ fun SavedApisScreen(
                     }
                 }
                 item { Spacer(modifier = Modifier.height(80.dp)) }
+            }
+        }
+    }
+
+    // v3.4 Part C — C3: summary report modal for "Run All Tests" — X passed / Y failed overall,
+    // with a per-request breakdown so a failure can be traced back to which saved request and
+    // which specific assertion caused it.
+    val report = testReport
+    if (report != null) {
+        ModalBottomSheet(
+            onDismissRequest = { testReport = null },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
+        ) {
+            TestReportContent(report)
+        }
+    }
+}
+
+/**
+ * v3.4 Part C — C3: contents of the "Run All Tests" summary modal — overall X/Y passed count,
+ * then one row per tested saved request showing its own pass/fail count (or "request failed"
+ * when the request itself could not execute, e.g. network error) and, per assertion, whether it
+ * passed with the actual value or failed with the expected-vs-actual message.
+ */
+@Composable
+private fun TestReportContent(report: CollectionTestReport) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(20.dp)
+    ) {
+        Text("Test Run Summary", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            "${report.passedAssertions} / ${report.totalAssertions} assertions passed across ${report.requestResults.size} request(s)",
+            color = if (report.failedAssertions == 0 && report.totalAssertions > 0) Color(0xFF22C55E) else Color(0xFFEF4444),
+            fontWeight = FontWeight.Bold,
+            fontSize = 14.sp
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        LazyColumn(
+            modifier = Modifier.height(420.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            items(report.requestResults) { result -> RequestTestResultRow(result) }
+        }
+    }
+}
+
+@Composable
+private fun RequestTestResultRow(result: RequestTestResult) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+            .padding(10.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            MethodBadge(method = result.request.method, fontSize = 10)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                result.request.name,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            if (result.requestFailed) {
+                Icon(Icons.Default.Close, "Request failed", tint = Color(0xFFEF4444), modifier = Modifier.size(16.dp))
+            } else {
+                val passed = result.results.count { it.passed }
+                Text(
+                    "$passed/${result.results.size}",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (passed == result.results.size) Color(0xFF22C55E) else Color(0xFFEF4444)
+                )
+            }
+        }
+
+        if (result.requestFailed) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                "Request could not be executed (network/DNS error).",
+                fontSize = 11.sp,
+                color = Color(0xFFEF4444)
+            )
+        } else {
+            Spacer(modifier = Modifier.height(6.dp))
+            result.results.forEach { assertionResult ->
+                Row(verticalAlignment = Alignment.Top, modifier = Modifier.padding(vertical = 2.dp)) {
+                    Icon(
+                        imageVector = if (assertionResult.passed) Icons.Default.Check else Icons.Default.Close,
+                        contentDescription = null,
+                        tint = if (assertionResult.passed) Color(0xFF22C55E) else Color(0xFFEF4444),
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        if (assertionResult.passed) "Passed (actual: \"${assertionResult.actualValue}\")" else assertionResult.message,
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = if (assertionResult.passed) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFFEF4444)
+                    )
+                }
             }
         }
     }

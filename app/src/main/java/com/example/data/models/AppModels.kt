@@ -62,7 +62,14 @@ data class ApiRequestItem(
      * stores it as a named variable on the active [com.example.data.env.Environment], so a
      * later request in the same chain can reference it via `{{variableName}}`.
      */
-    val chainExtractions: List<ChainExtractionRule> = emptyList()
+    val chainExtractions: List<ChainExtractionRule> = emptyList(),
+    /**
+     * v3.3 Part C — C3 (Test assertions / test runner): assertions evaluated against this
+     * request's response by [com.example.data.repository.AssertionRunner]. Each one checks a
+     * single target (status code / a response header / a top-level JSON body field / response
+     * time) with a chosen comparison operator against an expected value.
+     */
+    val assertions: List<Assertion> = emptyList()
 )
 
 /**
@@ -79,6 +86,77 @@ data class ChainExtractionRule(
     val variableName: String = "",
     val enabled: Boolean = true,
 )
+
+/**
+ * v3.3 Part C — C3 (Test assertions / test runner): what part of a response an [Assertion]
+ * checks. [BODY_JSON_FIELD] reuses [com.example.flow.JsonFieldExtractor] (the same top-level-key
+ * extractor C2 already shares with the Flow Transform node) rather than a third extraction
+ * implementation.
+ */
+enum class AssertionTarget {
+    STATUS_CODE, HEADER_VALUE, BODY_JSON_FIELD, RESPONSE_TIME_MS
+}
+
+/** Comparison applied between the actual extracted value and [Assertion.expectedValue]. */
+enum class AssertionOperator {
+    EQUALS, CONTAINS, GREATER_THAN, LESS_THAN, MATCHES_REGEX
+}
+
+/**
+ * v3.3 Part C — C3: one pass/fail check attached to a saved [ApiRequestItem], evaluated by
+ * [com.example.data.repository.AssertionRunner] against a real [ApiResponseData] after Send.
+ *
+ * [targetKey] is only meaningful for [AssertionTarget.HEADER_VALUE] (the header name, e.g.
+ * "content-type") and [AssertionTarget.BODY_JSON_FIELD] (the JSON field name/path, e.g. "token")
+ * — ignored for [AssertionTarget.STATUS_CODE] and [AssertionTarget.RESPONSE_TIME_MS], which have
+ * exactly one value to check.
+ */
+data class Assertion(
+    val id: String = UUID.randomUUID().toString(),
+    val target: AssertionTarget = AssertionTarget.STATUS_CODE,
+    val targetKey: String = "",
+    val operator: AssertionOperator = AssertionOperator.EQUALS,
+    val expectedValue: String = "",
+    val enabled: Boolean = true,
+)
+
+/**
+ * v3.3 Part C — C3: the outcome of evaluating one [Assertion] against a real response, shown in
+ * the Test Results UI with the actual value alongside what was expected so a failure is
+ * immediately explainable rather than a bare pass/fail flag.
+ */
+data class AssertionResult(
+    val assertion: Assertion,
+    val passed: Boolean,
+    val actualValue: String,
+    val message: String = "",
+)
+
+/**
+ * v3.3 Part C — C3: one request's full test run — its response plus every assertion's result —
+ * used both for a single "Run Tests" tap and as one row inside a folder-level
+ * [CollectionTestReport].
+ */
+data class RequestTestResult(
+    val request: ApiRequestItem,
+    val response: ApiResponseData?,
+    val results: List<AssertionResult>,
+    /** True when the request itself failed to execute (network/DNS/etc.) before any assertion could run. */
+    val requestFailed: Boolean = false,
+)
+
+/**
+ * v3.3 Part C — C3: summary produced by running every assertion-bearing saved request in a
+ * folder/collection in sequence ("Test runner mode").
+ */
+data class CollectionTestReport(
+    val folderId: String?,
+    val requestResults: List<RequestTestResult>,
+) {
+    val totalAssertions: Int get() = requestResults.sumOf { it.results.size }
+    val passedAssertions: Int get() = requestResults.sumOf { r -> r.results.count { it.passed } }
+    val failedAssertions: Int get() = totalAssertions - passedAssertions
+}
 
 data class ApiResponseData(
     val statusCode: Int = 200,

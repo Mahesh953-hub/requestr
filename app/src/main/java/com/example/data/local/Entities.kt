@@ -114,6 +114,8 @@ data class SavedApiRequestEntity(
     val updatedAt: Long = System.currentTimeMillis(),
     /** v3.2 Part C — C2 (Request chaining): see [com.example.data.models.ChainExtractionRule]. */
     val chainExtractions: List<SavedChainExtractionRule> = emptyList(),
+    /** v3.3 Part C — C3 (Test assertions): see [com.example.data.models.Assertion]. */
+    val assertions: List<SavedAssertion> = emptyList(),
 )
 
 /**
@@ -137,5 +139,19 @@ data class SavedChainExtractionRule(
     val id: String = "",
     val jsonPath: String = "",
     val variableName: String = "",
+    val enabled: Boolean = true,
+)
+
+/**
+ * Plain-data mirror of [com.example.data.models.Assertion], same rationale as [SavedKeyValue]
+ * above (v3.3 Part C — C3). Enum fields stored as `String` names, same pattern as
+ * [SavedApiRequestEntity.method]/`authType`/`bodyType`.
+ */
+data class SavedAssertion(
+    val id: String = "",
+    val target: String = "STATUS_CODE",
+    val targetKey: String = "",
+    val operator: String = "EQUALS",
+    val expectedValue: String = "",
     val enabled: Boolean = true,
 )
