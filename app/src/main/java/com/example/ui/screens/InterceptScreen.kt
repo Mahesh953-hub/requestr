@@ -297,7 +297,7 @@ fun InterceptScreen(
                             Text(
                                 text = when (interceptionState.status) {
                                     InterceptionStatus.ACTIVE ->
-                                        "CAPTURING :$vpnPort - ${interceptionState.tierLabel}"
+                                        "CAPTURING :$vpnPort - ${interceptionState.methodLabel}"
                                     InterceptionStatus.ARMED -> "ARMED :$vpnPort - waiting for traffic"
                                     InterceptionStatus.ERROR -> "ERROR"
                                     InterceptionStatus.CONFIGURED_IDLE -> "IDLE - not capturing"

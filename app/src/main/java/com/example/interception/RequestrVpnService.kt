@@ -14,6 +14,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
 import com.example.data.interception.ActiveTier
+import com.example.data.interception.CaptureMethod
 import com.example.data.interception.InterceptionStateRepository
 import com.example.data.local.CaptureSessionEntity
 import com.example.data.local.CaptureTier
@@ -127,6 +128,7 @@ class RequestrVpnService : VpnService() {
                     sessionId = newId,
                     tier = ActiveTier.VPN,
                     port = port,
+                    method = CaptureMethod.VPN_TUN,
                 )
 
                 pumpJob = scope.launch {

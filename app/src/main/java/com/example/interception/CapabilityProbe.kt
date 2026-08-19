@@ -7,6 +7,7 @@ import com.example.data.interception.CaState
 import com.example.data.interception.FridaState
 import com.example.data.interception.InterceptionStateRepository
 import com.example.data.interception.RootState
+import com.example.data.interception.RootType
 import com.example.data.interception.ShizukuState
 import java.io.File
 import java.net.InetSocketAddress
@@ -198,6 +199,32 @@ object CapabilityProbe {
         }.getOrDefault(false)
 
         if (reachable) FridaState.RUNNING else FridaState.NOT_RUNNING
+    }
+
+    // ── root type detection ───────────────────────────────────────────────
+
+    /**
+     * Detect which root manager is installed. Used by [RootModuleGenerator]
+     * to produce the correct module format.
+     */
+    fun detectRootType(): RootType {
+        return when {
+            File("/data/adb/napatch").exists() ||
+                File("/data/adb/napatch/modules").exists() -> RootType.NAPATCH
+
+            File("/data/adb/ksu-next").exists() ||
+                File("/data/adb/ksu-next/modules").exists() -> RootType.KSU_NEXT
+
+            File("/data/adb/ksu").exists() ||
+                File("/data/adb/ksu/modules").exists() -> RootType.KSU
+
+            File("/data/adb/magisk").exists() ||
+                File("/data/adb/magisk/modules").exists() -> RootType.MAGISK
+
+            SU_PATHS.any { File(it).exists() } -> RootType.GENERIC_SU
+
+            else -> RootType.NONE
+        }
     }
 
     private const val ROOT_HANDSHAKE_TIMEOUT_MS = 3_000L

@@ -15,6 +15,7 @@ import androidx.compose.ui.platform.LocalContext
 import com.example.data.interception.InterceptionStateRepository
 import com.example.data.prefs.SettingsDataStore
 import com.example.interception.CapabilityProbe
+import com.example.interception.CaptureMethodWatcher
 import com.example.interception.PreflightController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
@@ -50,6 +51,8 @@ class CaptureController(
     private val onPrompt: (CaptureStartPrompt?) -> Unit,
 ) {
 
+    private val watcher = CaptureMethodWatcher()
+
     /**
      * Runs the full gate and starts capture only if every precondition genuinely passes.
      * Any blocking condition is reported through [onPrompt] instead of being swallowed.
@@ -82,7 +85,7 @@ class CaptureController(
                         // never before the user has actually granted consent.
                         launchConsent(consent)
                     } else {
-                        PreflightController.startCapture(context)
+                        startCaptureAndWatcher(result.method, result.port)
                     }
                 }
             }
@@ -91,7 +94,13 @@ class CaptureController(
 
     /** Called once the system VPN consent dialog returns OK. */
     fun onConsentGranted() {
+        val state = InterceptionStateRepository.state.value
+        startCaptureAndWatcher(state.captureMethod, state.port)
+    }
+
+    private fun startCaptureAndWatcher(method: com.example.data.interception.CaptureMethod, port: Int) {
         PreflightController.startCapture(context)
+        watcher.start(method, port)
     }
 
     /** Called when the user declines VPN consent — recorded as a real error, not ignored. */
@@ -101,6 +110,7 @@ class CaptureController(
     }
 
     fun requestStop() {
+        watcher.stop()
         PreflightController.stopCapture(context)
     }
 

@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.VpnService
 import com.example.data.interception.ActiveTier
 import com.example.data.interception.CapabilityState
+import com.example.data.interception.CaptureMethod
 import com.example.data.interception.InterceptionStateRepository
 import com.example.data.prefs.AppFilterMode
 import com.example.data.prefs.CaptureTierPreference
@@ -26,6 +27,7 @@ object PreflightController {
         /** Everything passed; [consentIntent] is non-null when the system dialog is still needed. */
         data class Ready(
             val tier: ActiveTier,
+            val method: CaptureMethod,
             val port: Int,
             val consentIntent: Intent?,
         ) : Result
@@ -77,12 +79,13 @@ object PreflightController {
         }
 
         val port = prefs.proxyPort.first()
+        val method = capabilities.resolveAutoCaptureMethod()
 
         // Step 4 — VPN consent. Non-null intent means the caller must launch it first.
         val consent = VpnService.prepare(context)
 
-        InterceptionStateRepository.markArmed(tier = tier, port = port)
-        return Result.Ready(tier = tier, port = port, consentIntent = consent)
+        InterceptionStateRepository.markArmed(tier = tier, port = port, method = method)
+        return Result.Ready(tier = tier, method = method, port = port, consentIntent = consent)
     }
 
     /** Starts capture. Only call after [run] returned [Result.Ready] with consent satisfied. */

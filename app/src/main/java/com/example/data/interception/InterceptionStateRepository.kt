@@ -47,11 +47,12 @@ object InterceptionStateRepository {
     }
 
     /** Pre-flight passed; awaiting VPN consent / user confirm. Renders the FAB yellow. */
-    fun markArmed(tier: ActiveTier, port: Int) {
+    fun markArmed(tier: ActiveTier, port: Int, method: CaptureMethod = CaptureMethod.VPN_TUN) {
         _state.update {
             it.copy(
                 status = InterceptionStatus.ARMED,
                 tier = tier,
+                captureMethod = method,
                 port = port,
                 errorText = null,
             )
@@ -59,11 +60,12 @@ object InterceptionStateRepository {
     }
 
     /** Capture genuinely began. Renders the FAB and logo dot green. */
-    fun markActive(sessionId: Long, tier: ActiveTier, port: Int) {
+    fun markActive(sessionId: Long, tier: ActiveTier, port: Int, method: CaptureMethod = CaptureMethod.VPN_TUN) {
         _state.update {
             it.copy(
                 status = InterceptionStatus.ACTIVE,
                 tier = tier,
+                captureMethod = method,
                 port = port,
                 sessionId = sessionId,
                 startedAt = System.currentTimeMillis(),
@@ -71,6 +73,7 @@ object InterceptionStateRepository {
                 bytesTransferred = 0L,
                 activeConnections = 0,
                 errorText = null,
+                watcherStatus = WatcherStatus.IDLE,
             )
         }
     }
@@ -147,6 +150,12 @@ object InterceptionStateRepository {
                 lastProbedAt = System.currentTimeMillis(),
             )
         }
+    }
+
+    // ---- Watcher (engine-owned) ----
+
+    fun setWatcherStatus(status: WatcherStatus) {
+        _state.update { it.copy(watcherStatus = status) }
     }
 
     /** Test/reset hook. Returns everything to genuine defaults. */

@@ -26,6 +26,42 @@ enum class InterceptionStatus {
 enum class ActiveTier { NONE, VPN, SHIZUKU, ROOT }
 
 /**
+ * Concrete capture transport. Each value corresponds to a specific engine implementation.
+ * The tier (VPN/SHIZUKU/ROOT) determines availability; this enum determines the actual
+ * method used within that tier.
+ */
+enum class CaptureMethod(val displayName: String) {
+    VPN_TUN("VPN Tun"),
+    HTTP_PROXY("HTTP Proxy"),
+    MITM_PROXY("MITM Proxy"),
+    ROOT_IPTABLES("Root iptables"),
+    ROOT_FRIDA("Root Frida"),
+    SHIZUKU_TUN("Shizuku Tun"),
+}
+
+/** Root manager types detected on the device. */
+enum class RootType(val displayName: String) {
+    NONE("None"),
+    MAGISK("Magisk"),
+    KSU("KernelSU"),
+    KSU_NEXT("KSU Next"),
+    NAPATCH("nAPatch"),
+    GENERIC_SU("Generic SU"),
+}
+
+/** Watcher health status for the active capture method. */
+enum class WatcherStatus {
+    /** Not watching — capture is not active. */
+    IDLE,
+    /** Watcher is running and the method is verified healthy. */
+    HEALTHY,
+    /** Watcher detected silence or errors. */
+    DEGRADED,
+    /** Method has been silent too long; user should investigate. */
+    ERROR,
+}
+
+/**
  * Real root availability. Never defaults to granted — the previous build hardcoded this to
  * `true`, which is why the chip always read "Root (Granted)" (APP_v2.md Bug 3.1).
  */
@@ -67,6 +103,16 @@ data class CapabilityState(
         isShizukuUsable -> ActiveTier.SHIZUKU
         else -> ActiveTier.VPN
     }
+
+    /**
+     * Best capture method given current capabilities. Priority:
+     * Root iptables (best coverage, transparent) > Shizuku tun > VPN tun.
+     */
+    fun resolveAutoCaptureMethod(): CaptureMethod = when {
+        isRootUsable -> CaptureMethod.ROOT_IPTABLES
+        isShizukuUsable -> CaptureMethod.SHIZUKU_TUN
+        else -> CaptureMethod.VPN_TUN
+    }
 }
 
 /**
@@ -79,6 +125,7 @@ data class CapabilityState(
 data class InterceptionState(
     val status: InterceptionStatus = InterceptionStatus.NEVER_CONFIGURED,
     val tier: ActiveTier = ActiveTier.NONE,
+    val captureMethod: CaptureMethod = CaptureMethod.VPN_TUN,
     val port: Int = 0,
     val packetCount: Int = 0,
     val bytesTransferred: Long = 0L,
@@ -86,6 +133,7 @@ data class InterceptionState(
     val sessionId: Long? = null,
     val startedAt: Long? = null,
     val errorText: String? = null,
+    val watcherStatus: WatcherStatus = WatcherStatus.IDLE,
 ) {
     val isActive: Boolean get() = status == InterceptionStatus.ACTIVE
     val isArmed: Boolean get() = status == InterceptionStatus.ARMED
@@ -98,4 +146,8 @@ data class InterceptionState(
             ActiveTier.VPN -> "Using: VPN capture (no root)"
             ActiveTier.NONE -> ""
         }
+
+    /** Detailed active-method label for status banners, e.g. "Root + iptables · port 8080". */
+    val methodLabel: String
+        get() = "${captureMethod.displayName} · port $port"
 }

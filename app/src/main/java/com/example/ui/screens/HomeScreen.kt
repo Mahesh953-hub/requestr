@@ -274,11 +274,11 @@ fun HomeScreen(
                                 color = TextPrimary,
                                 fontSize = 15.sp
                             )
-                            // Real port and real packet count from the live session only.
+                            // Real port, method, and packet count from the live session only.
                             Text(
                                 text = when (interceptionState.status) {
                                     InterceptionStatus.ACTIVE ->
-                                        "${interceptionState.tierLabel} · port ${interceptionState.port} · " +
+                                        "${interceptionState.methodLabel} · " +
                                             "${interceptionState.packetCount} packets"
                                     InterceptionStatus.ARMED -> "Pre-flight passed · tap to confirm"
                                     InterceptionStatus.ERROR ->
