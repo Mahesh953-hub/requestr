@@ -26,7 +26,14 @@ object ApiTestrRepository {
             .build()
     }
 
-    suspend fun executeRequest(requestItem: ApiRequestItem): ApiResponseData = withContext(Dispatchers.IO) {
+    suspend fun executeRequest(requestItem: ApiRequestItem, followRedirects: Boolean = true): ApiResponseData = withContext(Dispatchers.IO) {
+        // Per-request client that respects the follow-redirects toggle
+        val reqClient = if (followRedirects) client else OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
+            .writeTimeout(15, TimeUnit.SECONDS)
+            .followRedirects(false)
+            .build()
         val startDns = System.currentTimeMillis()
         val urlBuilder = requestItem.url.trim()
         
@@ -97,7 +104,7 @@ object ApiTestrRepository {
 
         val t0 = System.currentTimeMillis()
         try {
-            val response: Response = client.newCall(requestBuilder.build()).execute()
+            val response: Response = reqClient.newCall(requestBuilder.build()).execute()
             val latency = System.currentTimeMillis() - t0
             val responseBody = response.body?.string() ?: ""
             val size = responseBody.toByteArray().size.toLong()

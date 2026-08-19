@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Notes
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Radar
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
@@ -92,6 +93,7 @@ import com.example.ui.screens.InterceptScreen
 import com.example.ui.screens.MusicScreen
 import com.example.ui.screens.NotesScreen
 import com.example.ui.screens.OnboardingScreen
+import com.example.ui.screens.SavedApisScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.ToolsScreen
 import com.example.ui.screens.ToolWorkspaceScreen
@@ -128,6 +130,7 @@ sealed class Screen(val route: String, val title: String, val icon: ImageVector)
     object Flow : Screen("flow", "Flow", Icons.Default.Code)
     object Music : Screen("music", "Music", Icons.Default.MusicNote)
     object Settings : Screen("settings", "Settings", Icons.Default.Tune)
+    object SavedApis : Screen("saved_apis", "Saved APIs", Icons.Default.Save)
     object Onboarding : Screen("onboarding", "Onboarding", Icons.Default.Home)
     data class ToolWorkspace(val toolId: String) : Screen(
         "tool_workspace/{toolId}", "Tool", Icons.Default.Tune
@@ -332,8 +335,27 @@ fun RequestrApp() {
                         composable(Screen.Apis.route) {
                             ApiTestrScreen(
                                 onMiniSettings = { showMiniSettingsForSection = "APIs" },
+                                onNavigateToSaved = {
+                                    navController.navigate(Screen.SavedApis.route) {
+                                        popUpTo(Screen.Home.route) { saveState = true }
+                                        launchSingleTop = true
+                                        restoreState = true
+                                    }
+                                },
                                 onSendToIntercept = { reqItem ->
                                     navController.navigate(Screen.Intercept.route)
+                                }
+                            )
+                        }
+
+                        composable(Screen.SavedApis.route) {
+                            SavedApisScreen(
+                                onBack = { navController.popBackStack() },
+                                onOpenRequest = { req ->
+                                    ApiCollectionsRepository.setActiveRequest(req)
+                                    navController.navigate(Screen.Apis.route) {
+                                        popUpTo(Screen.SavedApis.route) { inclusive = true }
+                                    }
                                 }
                             )
                         }

@@ -93,7 +93,8 @@ import kotlinx.coroutines.launch
 @Composable
 fun ApiTestrScreen(
     onMiniSettings: () -> Unit,
-    onSendToIntercept: (ApiRequestItem) -> Unit
+    onNavigateToSaved: () -> Unit = {},
+    onSendToIntercept: (ApiRequestItem) -> Unit = {}
 ) {
     val coroutineScope = rememberCoroutineScope()
     val currentRequest by ApiCollectionsRepository.currentActiveRequest.collectAsState()
@@ -105,6 +106,7 @@ fun ApiTestrScreen(
     var isLoading by remember { mutableStateOf(false) }
 
     var selectedViewMode by remember { mutableIntStateOf(0) } // 0: Request, 1: Response
+    var followRedirects by remember { mutableStateOf(true) }
     var requestTab by remember { mutableIntStateOf(0) } // 0: Query, 1: Headers, 2: Body, 3: Auth, 4: Scripts
     var responseTab by remember { mutableIntStateOf(0) } // 0: Body, 1: Headers, 2: Metrics
 
@@ -182,7 +184,7 @@ fun ApiTestrScreen(
                         onClick = {
                             isLoading = true
                             coroutineScope.launch {
-                                val resp = ApiTestrRepository.executeRequest(reqState)
+                                val resp = ApiTestrRepository.executeRequest(reqState, followRedirects)
                                 responseData = resp
                                 isLoading = false
                                 selectedViewMode = 1 // auto toggle to response
@@ -263,7 +265,24 @@ fun ApiTestrScreen(
             }
         }
 
-        // View Mode Segmented Bar (↑ Request · ↓ Response)
+        // Follow Redirects toggle — Fix 09
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 2.dp),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Follow redirects", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(modifier = Modifier.width(6.dp))
+            androidx.compose.material3.Switch(
+                checked = followRedirects,
+                onCheckedChange = { followRedirects = it },
+                modifier = Modifier.height(24.dp)
+            )
+        }
+
+        // View Mode Segmented Bar — Fix 09: clean labels, no counts
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -276,9 +295,11 @@ fun ApiTestrScreen(
                 colors = ButtonDefaults.buttonColors(
                     containerColor = if (selectedViewMode == 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
                 ),
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.weight(1f),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 10.dp)
             ) {
-                Text("↑ Request (${reqState.queryParams.count { it.isEnabled }}q, ${reqState.headers.count { it.isEnabled }}h)", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text("Request", fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                    color = if (selectedViewMode == 0) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
             }
 
             Button(
@@ -287,10 +308,11 @@ fun ApiTestrScreen(
                 colors = ButtonDefaults.buttonColors(
                     containerColor = if (selectedViewMode == 1) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
                 ),
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.weight(1f),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 10.dp)
             ) {
-                val statusText = if (responseData != null) "↓ Response (${responseData?.statusCode})" else "↓ Response"
-                Text(statusText, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text("Response", fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                    color = if (selectedViewMode == 1) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
 
@@ -808,6 +830,13 @@ fun ApiTestrScreen(
             onClick = {
                 showMoreMenu = false
                 showImportCurlModal = true
+            }
+        )
+        DropdownMenuItem(
+            text = { Text("📋 View Saved") },
+            onClick = {
+                showMoreMenu = false
+                onNavigateToSaved()
             }
         )
         DropdownMenuItem(
