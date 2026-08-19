@@ -32,6 +32,12 @@ object CaptureLogRepository {
     fun observeCount(context: Context): Flow<Int> =
         RequestrDatabase.get(context).capturedTrafficDao().observeCount()
 
+    /** One-shot snapshot of all traffic entries, ordered newest first. Used for JSON export. */
+    suspend fun getAllTraffic(context: Context): List<CapturedTrafficItem> = withContext(Dispatchers.IO) {
+        RequestrDatabase.get(context).capturedTrafficDao().getAll()
+            .map { it.toUiModel() }
+    }
+
     suspend fun clearAll(context: Context) = withContext(Dispatchers.IO) {
         RequestrDatabase.get(context).capturedTrafficDao().clearAll()
     }

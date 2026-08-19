@@ -629,13 +629,15 @@ fun InterceptScreen(
             onReprobe = { captureController.reprobeAfterCaInstall() },
             onExportPem = {
                 screenScope.launch {
-                    val pem = CertificateAuthority.exportPem(screenContext)
-                    val send = Intent(Intent.ACTION_SEND).apply {
-                        type = "application/x-pem-file"
-                        putExtra(Intent.EXTRA_SUBJECT, "requestr Root CA (PEM)")
-                        putExtra(Intent.EXTRA_TEXT, pem)
+                    runCatching {
+                        val pem = CertificateAuthority.exportPem(screenContext)
+                        val file = com.example.data.export.FileExporter.writePem(screenContext, pem)
+                        com.example.data.export.FileExporter.shareFile(
+                            screenContext, file,
+                            "application/x-pem-file",
+                            "requestr Root CA (PEM)"
+                        )
                     }
-                    screenContext.startActivity(Intent.createChooser(send, "Export CA as PEM"))
                 }
             },
             onDismiss = { showCertSheet = false }
@@ -723,18 +725,21 @@ fun InterceptScreen(
                     }
                 ),
                 ContextActionItem(
-                    label = "Share (export as HAR)",
+                    label = "Export as HAR",
                     icon = Icons.Default.Share,
                     onClick = {
-                        val har = TrafficExporter.toHar(item)
-                        val send = Intent(Intent.ACTION_SEND).apply {
-                            type = "application/json"
-                            putExtra(Intent.EXTRA_SUBJECT, "requestr HAR export")
-                            putExtra(Intent.EXTRA_TEXT, har)
+                        runCatching {
+                            val har = TrafficExporter.toHar(item)
+                            val host = try {
+                                android.net.Uri.parse(item.url).host ?: "unknown"
+                            } catch (_: Exception) { "unknown" }
+                            val file = com.example.data.export.FileExporter.writeHarBlocking(screenContext, har, host)
+                            com.example.data.export.FileExporter.shareFile(
+                                screenContext, file,
+                                "application/json",
+                                "requestr HAR export"
+                            )
                         }
-                        screenContext.startActivity(
-                            Intent.createChooser(send, "Share HAR entry")
-                        )
                     }
                 ),
                 ContextActionItem(

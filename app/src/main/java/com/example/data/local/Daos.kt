@@ -18,6 +18,9 @@ interface CapturedTrafficDao {
     @Query("SELECT * FROM captured_traffic ORDER BY timestamp DESC")
     fun observeAll(): Flow<List<CapturedTrafficEntity>>
 
+    @Query("SELECT * FROM captured_traffic ORDER BY timestamp DESC")
+    suspend fun getAll(): List<CapturedTrafficEntity>
+
     @Query("SELECT * FROM captured_traffic WHERE sessionId = :sessionId ORDER BY timestamp DESC")
     fun observeBySession(sessionId: Long): Flow<List<CapturedTrafficEntity>>
 

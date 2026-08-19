@@ -488,19 +488,15 @@ fun SettingsScreen(
 
                             Button(
                                 onClick = {
-                                    // Exports the genuine CA as PEM for manual system-store install.
+                                    // Exports the genuine CA as PEM file.
                                     settingsScope.launch {
                                         runCatching {
                                             val pem = CertificateAuthority.exportPem(settingsContext)
-                                            settingsContext.startActivity(
-                                                Intent.createChooser(
-                                                    Intent(Intent.ACTION_SEND).apply {
-                                                        type = "application/x-pem-file"
-                                                        putExtra(Intent.EXTRA_SUBJECT, "requestr Root CA (PEM)")
-                                                        putExtra(Intent.EXTRA_TEXT, pem)
-                                                    },
-                                                    "Export CA as PEM"
-                                                )
+                                            val file = com.example.data.export.FileExporter.writePem(settingsContext, pem)
+                                            com.example.data.export.FileExporter.shareFile(
+                                                settingsContext, file,
+                                                "application/x-pem-file",
+                                                "requestr Root CA (PEM)"
                                             )
                                         }
                                     }
@@ -612,7 +608,34 @@ fun SettingsScreen(
                     }
 
                     Button(
-                        onClick = { /* Export */ },
+                        onClick = {
+                            settingsScope.launch {
+                                runCatching {
+                                    val items = com.example.data.interception.CaptureLogRepository.getAllTraffic(settingsContext)
+                                    val json = org.json.JSONArray(
+                                        items.map { item ->
+                                            org.json.JSONObject().apply {
+                                                put("id", item.id)
+                                                put("method", item.method.name)
+                                                put("url", item.url)
+                                                put("host", item.host)
+                                                put("statusCode", item.statusCode)
+                                                put("requestHeaders", org.json.JSONObject(item.requestHeaders))
+                                                put("responseHeaders", org.json.JSONObject(item.responseHeaders))
+                                                put("timestamp", item.timestamp)
+                                            }
+                                        }
+                                    ).toString(2)
+                                    val file = com.example.data.export.FileExporter.writeJson(settingsContext, json)
+                                    com.example.data.export.FileExporter.shareFile(
+                                        settingsContext, file,
+                                        "application/json",
+                                        "requestr Traffic Log"
+                                    )
+                                }
+                            }
+                        },
+                        enabled = capturedCount > 0,
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(10.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
