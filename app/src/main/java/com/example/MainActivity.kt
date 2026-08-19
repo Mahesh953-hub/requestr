@@ -94,6 +94,7 @@ import com.example.ui.screens.NotesScreen
 import com.example.ui.screens.OnboardingScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.ToolsScreen
+import com.example.ui.screens.ToolWorkspaceScreen
 import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.theme.TextMuted
@@ -128,6 +129,13 @@ sealed class Screen(val route: String, val title: String, val icon: ImageVector)
     object Music : Screen("music", "Music", Icons.Default.MusicNote)
     object Settings : Screen("settings", "Settings", Icons.Default.Tune)
     object Onboarding : Screen("onboarding", "Onboarding", Icons.Default.Home)
+    data class ToolWorkspace(val toolId: String) : Screen(
+        "tool_workspace/{toolId}", "Tool", Icons.Default.Tune
+    ) {
+        companion object {
+            fun createRoute(toolId: String) = "tool_workspace/$toolId"
+        }
+    }
 }
 
 @Composable
@@ -332,7 +340,25 @@ fun RequestrApp() {
 
                         composable(Screen.Tools.route) {
                             ToolsScreen(
-                                onMiniSettings = { showMiniSettingsForSection = "Tools" }
+                                onMiniSettings = { showMiniSettingsForSection = "Tools" },
+                                onNavigateToTool = { toolId ->
+                                    navController.navigate(Screen.ToolWorkspace.createRoute(toolId))
+                                }
+                            )
+                        }
+
+                        composable(
+                            route = "tool_workspace/{toolId}",
+                            arguments = listOf(
+                                androidx.navigation.navArgument("toolId") {
+                                    type = androidx.navigation.NavType.StringType
+                                }
+                            )
+                        ) { backStackEntry ->
+                            val toolId = backStackEntry.arguments?.getString("toolId") ?: ""
+                            ToolWorkspaceScreen(
+                                toolId = toolId,
+                                onBack = { navController.popBackStack() }
                             )
                         }
 

@@ -1,6 +1,27 @@
 package com.example.data.repository
 
 import android.util.Base64
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Calculate
+import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.DataObject
+import androidx.compose.material.icons.filled.Fingerprint
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Notes
+import androidx.compose.material.icons.filled.Password
+import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Shuffle
+import androidx.compose.material.icons.filled.SwapHoriz
+import androidx.compose.material.icons.filled.TableChart
+import androidx.compose.material.icons.filled.Tag
+import androidx.compose.material.icons.filled.Token
+import androidx.compose.material.icons.filled.Translate
+import androidx.compose.ui.graphics.vector.ImageVector
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
@@ -28,31 +49,35 @@ data class ToolItem(
     val id: String,
     val title: String,
     val description: String,
-    val category: ToolCategory
+    val category: ToolCategory,
+    val icon: ImageVector = Icons.Default.Build
 )
 
 object ToolsRepository {
 
+    // Icon shortcuts (Fix 07)
+    private val Ic = Icons.Default
+
     fun getToolsCatalog(): List<ToolItem> = listOf(
-        ToolItem("jwt-decoder", "JWT Token Decoder", "Decode Header, Payload claims and inspect signatures", ToolCategory.DECODERS),
-        ToolItem("base64", "Base64 Encoder / Decoder", "RFC 4648 Base64 text & binary converter", ToolCategory.DECODERS),
-        ToolItem("url-encoder", "URL / URI Percent Encoder", "Encode & decode query strings & path parameters", ToolCategory.DECODERS),
-        ToolItem("hex-converter", "Hex ↔ String Converter", "Convert ASCII/UTF-8 strings to Hex bytes", ToolCategory.DECODERS),
-        ToolItem("html-entity", "HTML Entity Escape", "Escape and unescape HTML special entities", ToolCategory.DECODERS),
-        ToolItem("morse-code", "Morse Code Converter", "Encode text to Morse code and decode back", ToolCategory.DECODERS),
-        ToolItem("aes-cipher", "AES Encrypt / Decrypt", "AES-CBC/GCM with custom key, IV & padding", ToolCategory.CIPHERS),
-        ToolItem("xor-cipher", "XOR Stream Cipher", "Fast bitwise XOR encryption with key", ToolCategory.CIPHERS),
-        ToolItem("sha256", "SHA-256 Hash", "Cryptographic 256-bit secure hash algorithm", ToolCategory.HASHES),
-        ToolItem("sha1", "SHA-1 Hash", "160-bit SHA-1 checksum generator", ToolCategory.HASHES),
-        ToolItem("md5", "MD5 Hash", "Standard 128-bit MD5 digest generator", ToolCategory.HASHES),
-        ToolItem("hmac-sha256", "HMAC-SHA256 Signer", "Keyed-hash message authentication code", ToolCategory.HASHES),
-        ToolItem("crc32", "CRC32 Checksum", "Cyclic redundancy check for packet verification", ToolCategory.HASHES),
-        ToolItem("json-formatter", "JSON Beautifier & Minifier", "Prettify, validate syntax and minify JSON structures", ToolCategory.FORMATTERS),
-        ToolItem("sql-formatter", "SQL Query Beautifier", "Format complex SELECT, INSERT, UPDATE queries", ToolCategory.FORMATTERS),
-        ToolItem("ip-calculator", "IPv4 Subnet Calculator", "Calculate CIDR, broadcast, netmask and host range", ToolCategory.NETWORK),
-        ToolItem("uuid-gen", "UUID v4 Generator", "Generate cryptographically secure RFC 4122 UUIDs", ToolCategory.GENERATORS),
-        ToolItem("random-string", "Secure Random String", "Alphanumeric passwords, tokens, entropy keys", ToolCategory.GENERATORS),
-        ToolItem("lorem-ipsum", "Lorem Ipsum Generator", "Generate mock payload strings and paragraphs", ToolCategory.GENERATORS)
+        ToolItem("jwt-decoder",     "JWT Token Decoder",        "Decode Header, Payload claims and inspect signatures", ToolCategory.DECODERS,   Ic.Key),
+        ToolItem("base64",          "Base64 Encoder / Decoder", "RFC 4648 Base64 text & binary converter",              ToolCategory.DECODERS,   Ic.DataObject),
+        ToolItem("url-encoder",     "URL / URI Percent Encoder","Encode & decode query strings & path parameters",       ToolCategory.DECODERS,   Ic.Link),
+        ToolItem("hex-converter",   "Hex ↔ String Converter",   "Convert ASCII/UTF-8 strings to Hex bytes",              ToolCategory.DECODERS,   Ic.Tag),
+        ToolItem("html-entity",     "HTML Entity Escape",       "Escape and unescape HTML special entities",             ToolCategory.DECODERS,   Ic.Code),
+        ToolItem("morse-code",      "Morse Code Converter",     "Encode text to Morse code and decode back",             ToolCategory.DECODERS,   Ic.Translate),
+        ToolItem("aes-cipher",      "AES Encrypt / Decrypt",    "AES-CBC/GCM with custom key, IV & padding",             ToolCategory.CIPHERS,    Ic.Lock),
+        ToolItem("xor-cipher",      "XOR Stream Cipher",        "Fast bitwise XOR encryption with key",                  ToolCategory.CIPHERS,    Ic.SwapHoriz),
+        ToolItem("sha256",          "SHA-256 Hash",             "Cryptographic 256-bit secure hash algorithm",           ToolCategory.HASHES,     Ic.Fingerprint),
+        ToolItem("sha1",            "SHA-1 Hash",               "160-bit SHA-1 checksum generator",                      ToolCategory.HASHES,     Ic.Fingerprint),
+        ToolItem("md5",             "MD5 Hash",                 "Standard 128-bit MD5 digest generator",                 ToolCategory.HASHES,     Ic.Fingerprint),
+        ToolItem("hmac-sha256",     "HMAC-SHA256 Signer",       "Keyed-hash message authentication code",                ToolCategory.HASHES,     Ic.Security),
+        ToolItem("crc32",           "CRC32 Checksum",           "Cyclic redundancy check for packet verification",       ToolCategory.HASHES,     Ic.Calculate),
+        ToolItem("json-formatter",  "JSON Beautifier & Minifier","Prettify, validate syntax and minify JSON structures",  ToolCategory.FORMATTERS, Ic.ContentCopy),
+        ToolItem("sql-formatter",   "SQL Query Beautifier",     "Format complex SELECT, INSERT, UPDATE queries",         ToolCategory.FORMATTERS, Ic.TableChart),
+        ToolItem("ip-calculator",   "IPv4 Subnet Calculator",   "Calculate CIDR, broadcast, netmask and host range",     ToolCategory.NETWORK,    Ic.Public),
+        ToolItem("uuid-gen",        "UUID v4 Generator",        "Generate cryptographically secure RFC 4122 UUIDs",     ToolCategory.GENERATORS, Ic.Token),
+        ToolItem("random-string",   "Secure Random String",     "Alphanumeric passwords, tokens, entropy keys",          ToolCategory.GENERATORS, Ic.Password),
+        ToolItem("lorem-ipsum",     "Lorem Ipsum Generator",    "Generate mock payload strings and paragraphs",          ToolCategory.GENERATORS, Ic.Notes)
     )
 
     // ==========================================
