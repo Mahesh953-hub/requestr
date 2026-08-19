@@ -1,4 +1,4 @@
-# requestr. (v2.0)
+# requestr. (v3.0)
 > **The Editorial-Grade API Testing, Network Interceptor, Security Suite & Automation Engine for Android.**
 
 `requestr.` is a developer and security toolkit built with Kotlin and Jetpack Compose. It blends network interception (VPN, MITM, Frida, Shizuku, Root), a full-featured API workspace, visual flow automation, an AI reverse-engineering assistant, an engineering notebook, and an ambient lo-fi focus lounge into a unified interface.
@@ -12,6 +12,21 @@
 - **Dynamic Glassmorphism & Roundness Engine**: Global corner radius scaling (0dp to 24dp) responsive across all cards, dialogs, and sheets.
 - **Hovered Pill Navigation Dock**: Bottom-anchored frosted pill dock with staggered active pill transitions.
 - **Contextual Section Settings**: In-page settings customized per active module with direct links to Full App Settings.
+
+## 🚀 What's New in v3.0
+
+- **Semantic Traffic Search**: Query captured traffic with `status:500`, `method:POST`, `host:api.example.com`, `duration:>1000`
+- **6-Tab Request Inspector**: Overview | Headers | Body | Timing | TLS | Raw — with real timing bars, TLS version/cipher/ALPN diagnostics, and traffic source/protocol badges
+- **Multi-Format Code Exporters**: cURL, Python `requests`, JavaScript `fetch`, Go `http.NewRequest`, HAR, JSON
+- **Environment Variable System**: `{{BASE_URL}}`, `{{TOKEN}}`, `{{TIMESTAMP}}`, `{{UUID}}` with Local/Dev/Staging/Prod presets
+- **Traffic Classification**: Auto-detects Native, WebView, Browser, or Frida traffic source and HTTP/1.1, HTTP/2, HTTP/3, WebSocket, SSE, or QUIC protocol
+- **CaptureMethod Architecture**: 6-tier capture method hierarchy (VPN_TUN, HTTP_PROXY, MITM_PROXY, ROOT_IPTABLES, ROOT_FRIDA, SHIZUKU_TUN) with auto-selection
+- **CaptureMethodWatcher**: Background health verification — detects silence/degradation, surfaces ERROR after 30s
+- **CA Whitelist Service**: Auto-promotes CA from user → system trust store via root or Shizuku
+- **Root Module Generator**: Auto-detects Magisk/KernelSU/KSU Next/nAPatch, generates flashable module zip
+- **Follow Redirects Toggle**: Per-request redirect control in API Testr
+- **Saved/Liked APIs**: Swipe-to-dismiss browser for saved API requests
+- **Onboarding Redesign**: Branded 3-step wizard with gradient logo, permission cards
 
 ---
 

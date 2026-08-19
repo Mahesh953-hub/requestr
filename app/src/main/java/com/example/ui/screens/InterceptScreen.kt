@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -66,6 +67,7 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -73,6 +75,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Surface
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
@@ -223,10 +226,11 @@ fun InterceptScreen(
     var showCaptureSetupSheet by remember { mutableStateOf(false) }
 
     val filteredTraffic = remember(capturedTraffic, searchQuery, selectedMethodFilter) {
-        capturedTraffic.filter { item ->
-            (selectedMethodFilter == null || item.method == selectedMethodFilter) &&
-                    (searchQuery.isBlank() || item.url.contains(searchQuery, ignoreCase = true) || item.host.contains(searchQuery, ignoreCase = true) || item.appName.contains(searchQuery, ignoreCase = true))
-        }
+        val baseFiltered = if (selectedMethodFilter == null) capturedTraffic
+            else capturedTraffic.filter { it.method == selectedMethodFilter }
+        if (searchQuery.isNotBlank()) {
+            com.example.data.search.TrafficSearch.filter(baseFiltered, searchQuery)
+        } else baseFiltered
     }
 
     // FAB colour is driven by the real engine status, and the three states are genuinely
@@ -341,7 +345,7 @@ fun InterceptScreen(
                 SearchInputField(
                     query = searchQuery,
                     onQueryChange = { searchQuery = it },
-                    placeholder = "Filter by URL, host, endpoint...",
+                    placeholder = "status:500 method:POST host:... duration:>1000",
                     onClear = { searchQuery = "" }
                 )
 
@@ -1928,6 +1932,17 @@ fun CapturedDetailBottomSheet(
             Spacer(modifier = Modifier.height(6.dp))
             Text(item.url, fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.primary)
 
+            Spacer(modifier = Modifier.height(4.dp))
+
+            // Source + Protocol badges
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                BadgePill(text = item.trafficSource.label, color = 0xFF64748B)
+                BadgePill(text = item.protocolHint.shortLabel.uppercase(), color = 0xFF0EA5E9)
+                if (item.tlsVersion.isNotBlank()) {
+                    BadgePill(text = item.tlsVersion, color = 0xFF10B981)
+                }
+            }
+
             Spacer(modifier = Modifier.height(10.dp))
 
             TabRow(
@@ -1940,11 +1955,11 @@ fun CapturedDetailBottomSheet(
                     )
                 }
             ) {
-                listOf("Response Body", "Request Body", "Headers", "Waterfall").forEachIndexed { idx, title ->
+                listOf("Overview", "Headers", "Body", "Timing", "TLS", "Raw").forEachIndexed { idx, title ->
                     Tab(
                         selected = selectedTab == idx,
                         onClick = { selectedTab = idx },
-                        text = { Text(title, fontSize = 12.sp, fontWeight = if (selectedTab == idx) FontWeight.Bold else FontWeight.Normal) }
+                        text = { Text(title, fontSize = 11.sp, fontWeight = if (selectedTab == idx) FontWeight.Bold else FontWeight.Normal) }
                     )
                 }
             }
@@ -1954,50 +1969,103 @@ fun CapturedDetailBottomSheet(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(280.dp)
+                    .height(300.dp)
                     .clip(RoundedCornerShape(12.dp))
                     .background(MaterialTheme.colorScheme.surfaceVariant)
                     .padding(12.dp)
             ) {
                 LazyColumn {
                     when (selectedTab) {
-                        0 -> item {
-                            Text(
-                                text = item.responseBody.ifBlank { "(Empty Response Body)" },
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
+                        0 -> item { // Overview
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                DetailRow("Method", item.method.name)
+                                DetailRow("URL", item.url)
+                                DetailRow("Host", item.host)
+                                DetailRow("Path", item.path)
+                                DetailRow("Status", "${item.statusCode} ${item.statusMessage}")
+                                DetailRow("Protocol", item.protocol)
+                                DetailRow("Latency", "${item.latencyMs}ms")
+                                DetailRow("Req Size", formatBytes(item.requestSize))
+                                DetailRow("Res Size", formatBytes(item.responseSize))
+                                DetailRow("App", item.appName)
+                                DetailRow("Source", item.trafficSource.label)
+                                DetailRow("Proto", item.protocolHint.label)
+                                item.tags.takeIf { it.isNotEmpty() }?.let { tags ->
+                                    DetailRow("Tags", tags.joinToString(", "))
+                                }
+                            }
                         }
-                        1 -> item {
-                            Text(
-                                text = item.requestBody.ifBlank { "(Empty Request Body)" },
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-                        2 -> item {
+                        1 -> item { // Headers
                             Column {
-                                Text("REQUEST HEADERS:", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
+                                Text("REQUEST:", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
                                 item.requestHeaders.forEach { (k, v) ->
                                     Text("$k: $v", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface)
                                 }
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Text("RESPONSE HEADERS:", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = MaterialTheme.colorScheme.secondary)
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Text("RESPONSE:", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = MaterialTheme.colorScheme.secondary)
                                 item.responseHeaders.forEach { (k, v) ->
                                     Text("$k: $v", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface)
                                 }
                             }
                         }
-                        3 -> item {
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Text("DNS Resolution: 8ms", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface)
-                                Text("TCP Connect: 18ms", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface)
-                                Text("TLS Handshake (TLSv1.3): 24ms", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface)
-                                Text("Server Processing (TTFB): 36ms", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface)
-                                Text("Total Latency: ${item.latencyMs}ms", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                        2 -> item { // Body
+                            Column {
+                                if (item.responseBody.isNotBlank()) {
+                                    Text("RESPONSE BODY:", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
+                                    Text(item.responseBody, fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface)
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                }
+                                if (item.requestBody.isNotBlank()) {
+                                    Text("REQUEST BODY:", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = MaterialTheme.colorScheme.secondary)
+                                    Text(item.requestBody, fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface)
+                                }
+                                if (item.requestBody.isBlank() && item.responseBody.isBlank()) {
+                                    Text("(Empty)", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                                }
                             }
+                        }
+                        3 -> item { // Timing
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                TimingBar("DNS", item.dnsMs)
+                                TimingBar("Connect", item.connectMs)
+                                TimingBar("TLS", item.tlsMs)
+                                TimingBar("Wait (TTFB)", item.waitMs)
+                                TimingBar("Download", item.downloadMs)
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                                Text("Total: ${item.latencyMs}ms", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+                        4 -> item { // TLS
+                            if (item.tlsVersion.isBlank()) {
+                                Text("No TLS data available", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                            } else {
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    DetailRow("TLS Version", item.tlsVersion)
+                                    DetailRow("Cipher", item.tlsCipher)
+                                    DetailRow("ALPN", item.alpnProtocol.ifBlank { "—" })
+                                    DetailRow("Handshake", if (item.tlsMs >= 0) "${item.tlsMs}ms" else "—")
+                                    DetailRow("Protocol", item.protocolHint.label)
+                                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                                    Text("Certificate:", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
+                                    Text("Issued by requestr CA", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface)
+                                    Text("Trust: User store", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
+                                }
+                            }
+                        }
+                        5 -> item { // Raw
+                            Text(
+                                text = buildString {
+                                    append("${item.method.name} ${item.url} ${item.protocol}\n")
+                                    item.requestHeaders.forEach { (k, v) -> append("$k: $v\n") }
+                                    if (item.requestBody.isNotBlank()) append("\n${item.requestBody}\n")
+                                    append("\n--- Response ${item.statusCode} ---\n")
+                                    item.responseHeaders.forEach { (k, v) -> append("$k: $v\n") }
+                                    if (item.responseBody.isNotBlank()) append("\n${item.responseBody}")
+                                },
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
                         }
                     }
                 }
@@ -2006,4 +2074,88 @@ fun CapturedDetailBottomSheet(
             Spacer(modifier = Modifier.height(20.dp))
         }
     }
+}
+
+// ── Detail sheet helpers ──────────────────────────────────────────────
+
+@Composable
+private fun BadgePill(text: String, color: Long) {
+    Surface(
+        color = Color(color).copy(alpha = 0.15f),
+        shape = RoundedCornerShape(6.dp),
+    ) {
+        Text(
+            text = text,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            color = Color(color),
+        )
+    }
+}
+
+@Composable
+private fun DetailRow(label: String, value: String) {
+    Row(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = "$label:  ",
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+        )
+        Text(
+            text = value,
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+    }
+}
+
+@Composable
+private fun TimingBar(label: String, ms: Long) {
+    val hasData = ms >= 0
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            fontSize = 11.sp,
+            color = if (hasData) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f),
+            modifier = Modifier.width(90.dp),
+        )
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .height(8.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+        ) {
+            if (hasData) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(fraction = (ms.toFloat() / 200f).coerceIn(0f, 1f))
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(MaterialTheme.colorScheme.primary),
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = if (hasData) "${ms}ms" else "\u2014",
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = if (hasData) FontWeight.SemiBold else FontWeight.Normal,
+            color = if (hasData) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f),
+        )
+    }
+}
+
+private fun formatBytes(bytes: Long): String = when {
+    bytes < 1024 -> "$bytes B"
+    bytes < 1024 * 1024 -> "${"%.1f".format(bytes / 1024.0)} KB"
+    else -> "${"%.1f".format(bytes / (1024.0 * 1024.0))} MB"
 }

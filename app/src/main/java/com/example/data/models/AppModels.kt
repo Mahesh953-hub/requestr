@@ -96,6 +96,26 @@ enum class ProxyTierType(val displayName: String, val badgeColor: Long) {
     LSPOSED("LSPosed Module", 0xFFF59E0B)
 }
 
+/** Where a captured request originated. */
+enum class TrafficSource(val label: String) {
+    NATIVE("Native"),
+    WEBVIEW("WebView"),
+    BROWSER("Browser"),
+    FRIDA("Frida"),
+    UNKNOWN("Unknown"),
+}
+
+/** Protocol observed for a captured request. */
+enum class ProtocolHint(val label: String, val shortLabel: String) {
+    HTTP11("HTTP/1.1", "h1"),
+    HTTP2("HTTP/2", "h2"),
+    HTTP3("HTTP/3", "h3"),
+    WEBSOCKET("WebSocket", "ws"),
+    SSE("SSE", "sse"),
+    QUIC("QUIC", "quic"),
+    UNKNOWN("Unknown", "?"),
+}
+
 data class CapturedTrafficItem(
     val id: String = UUID.randomUUID().toString(),
     val method: HttpMethod = HttpMethod.GET,
@@ -125,7 +145,22 @@ data class CapturedTrafficItem(
     val appName: String = "GitHub",
     val isPinned: Boolean = false,
     val isBlocked: Boolean = false,
-    val isModified: Boolean = false
+    val isModified: Boolean = false,
+    // ── V3: Traffic classification ──────────────────────────────────────
+    val trafficSource: TrafficSource = TrafficSource.NATIVE,
+    val protocolHint: ProtocolHint = ProtocolHint.UNKNOWN,
+    // ── V3: Timing breakdown (ms) ──────────────────────────────────────
+    val dnsMs: Long = -1,
+    val connectMs: Long = -1,
+    val tlsMs: Long = -1,
+    val waitMs: Long = -1,
+    val downloadMs: Long = -1,
+    // ── V3: TLS diagnostics ────────────────────────────────────────────
+    val tlsVersion: String = "",
+    val tlsCipher: String = "",
+    val alpnProtocol: String = "",
+    // ── V3: Tags ───────────────────────────────────────────────────────
+    val tags: List<String> = emptyList(),
 )
 
 enum class RuleAction(val label: String, val colorHex: Long) {

@@ -184,7 +184,10 @@ fun ApiTestrScreen(
                         onClick = {
                             isLoading = true
                             coroutineScope.launch {
-                                val resp = ApiTestrRepository.executeRequest(reqState, followRedirects)
+                                val env = com.example.data.env.EnvironmentRepository.active()
+                                val urlWithEnv = com.example.data.env.EnvironmentRepository.substitute(reqState.url, env)
+                                val substitutedState = reqState.copy(url = urlWithEnv)
+                                val resp = ApiTestrRepository.executeRequest(substitutedState, followRedirects)
                                 responseData = resp
                                 isLoading = false
                                 selectedViewMode = 1 // auto toggle to response
