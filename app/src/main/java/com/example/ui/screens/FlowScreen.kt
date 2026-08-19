@@ -316,7 +316,7 @@ fun DraggableNodeBox(
         FlowNodeType.INTERCEPT_TRIGGER -> Color(0xFFF59E0B)
         FlowNodeType.API -> Color(0xFF38BDF8)
         FlowNodeType.TRANSFORM -> Color(0xFF8B5CF6)
-        FlowNodeType.CHAT -> Color(0xFF10B981)
+
         FlowNodeType.OUTPUT -> Color(0xFFEC4899)
         FlowNodeType.TOOL -> Color(0xFFF97316)
         FlowNodeType.CONDITION -> Color(0xFFA855F7)

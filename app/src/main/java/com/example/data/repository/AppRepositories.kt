@@ -1,9 +1,7 @@
 package com.example.data.repository
 
-import com.example.data.models.AiAssistantPreset
 import com.example.data.models.ApiFolderItem
 import com.example.data.models.ApiRequestItem
-import com.example.data.models.ChatMessageItem
 import com.example.data.models.FlowConnectionItem
 import com.example.data.models.FlowNodeItem
 import com.example.data.models.FlowNodeType
@@ -13,198 +11,12 @@ import com.example.data.models.MusicTrackItem
 import com.example.data.models.NoteFormatType
 import com.example.data.models.NoteItem
 import com.example.data.models.RequestBodyType
-import com.example.data.models.ResponseFormat
 import com.example.data.models.UserSettingsState
 import java.util.UUID
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-
-// ==========================================
-// 1. CHAT REPOSITORY
-// ==========================================
-object ChatRepository {
-
-    private val _assistants = MutableStateFlow<List<AiAssistantPreset>>(
-        listOf(
-            AiAssistantPreset(
-                id = "ast-1",
-                name = "API Reverse Engineer",
-                avatarEmoji = "⚡",
-                model = "gemini-2.5-flash",
-                provider = "Google AI Studio",
-                systemPrompt = "You are requestr AI, an elite API reverse engineer and security analyst. You analyze captured requests, decode obscure tokens, write Frida bypass scripts, and structure HTTP requests.",
-                temperature = 0.4f
-            ),
-            AiAssistantPreset(
-                id = "ast-2",
-                name = "Security Auditor",
-                avatarEmoji = "🛡️",
-                model = "gpt-4o",
-                provider = "OpenAI",
-                systemPrompt = "You are a web application security auditor checking for OWASP Top 10 vulnerabilities, CORS misconfigurations, broken object level authorization (BOLA), and JWT flaws.",
-                temperature = 0.2f
-            ),
-            AiAssistantPreset(
-                id = "ast-3",
-                name = "Script Automator",
-                avatarEmoji = "🤖",
-                model = "claude-3.5-sonnet",
-                provider = "Anthropic",
-                systemPrompt = "You write clean, modular Python (requests/httpx) and TypeScript scripts for API automation and data extraction.",
-                temperature = 0.6f
-            )
-        )
-    )
-    val assistants: StateFlow<List<AiAssistantPreset>> = _assistants.asStateFlow()
-
-    private val _activeAssistant = MutableStateFlow(_assistants.value.first())
-    val activeAssistant: StateFlow<AiAssistantPreset> = _activeAssistant.asStateFlow()
-
-    private val _messages = MutableStateFlow<List<ChatMessageItem>>(
-        listOf(
-            ChatMessageItem(
-                id = "init-1",
-                role = "assistant",
-                text = "Welcome to requestr AI. I can help analyze your intercepted traffic, generate Frida SSL-pinning bypasses, construct complex OkHttp/cURL requests, or debug authentication headers. What are we building today?",
-                timestamp = System.currentTimeMillis() - 60000,
-                inputTokens = 95,
-                outputTokens = 42,
-                latencySeconds = 0.22,
-                tokensPerSec = 434,
-                provider = "Gemini 2.5 Flash"
-            )
-        )
-    )
-    val messages: StateFlow<List<ChatMessageItem>> = _messages.asStateFlow()
-
-    private val _responseFormat = MutableStateFlow(ResponseFormat.GEMINI)
-    val responseFormat: StateFlow<ResponseFormat> = _responseFormat.asStateFlow()
-
-    fun setResponseFormat(format: ResponseFormat) {
-        _responseFormat.value = format
-    }
-
-    fun setActiveAssistant(assistant: AiAssistantPreset) {
-        _activeAssistant.value = assistant
-    }
-
-    suspend fun sendMessage(userText: String): ChatMessageItem {
-        val userMsg = ChatMessageItem(
-            role = "user",
-            text = userText,
-            timestamp = System.currentTimeMillis()
-        )
-        _messages.value = _messages.value + userMsg
-
-        // AI response generation
-        val t0 = System.currentTimeMillis()
-        delay(400) // realistic token stream initiation
-
-        val replyText = generateContextualReply(userText, _activeAssistant.value)
-        val latency = (System.currentTimeMillis() - t0) / 1000.0
-        val inTok = (userText.length / 3).coerceAtLeast(15)
-        val outTok = (replyText.length / 3).coerceAtLeast(20)
-        val tokPerSec = if (latency > 0) (outTok / latency).toInt() else 350
-
-        val aiMsg = ChatMessageItem(
-            role = "assistant",
-            text = replyText,
-            timestamp = System.currentTimeMillis(),
-            inputTokens = inTok,
-            outputTokens = outTok,
-            latencySeconds = latency,
-            tokensPerSec = tokPerSec,
-            provider = _activeAssistant.value.model
-        )
-
-        _messages.value = _messages.value + aiMsg
-        return aiMsg
-    }
-
-    private fun generateContextualReply(prompt: String, assistant: AiAssistantPreset): String {
-        val p = prompt.lowercase()
-        return when {
-            p.contains("frida") || p.contains("pinning") || p.contains("ssl") -> {
-                """
-### Universal SSL Pinning Bypass (Conscrypt & TrustManager)
-
-Here is the recommended Frida script for bypassing certificate pinning in target apps:
-
-```javascript
-Java.perform(function() {
-    console.log("[*] Injected requestr Universal SSL Pinning Bypass");
-
-    // 1. TrustManagerImpl
-    var TrustManagerImpl = Java.use('com.android.org.conscrypt.TrustManagerImpl');
-    TrustManagerImpl.verifyChain.implementation = function(untrustedChain, trustAnchorChain, host, clientAuth, ocspData, tlsSctData) {
-        console.log("[+] Bypassed Conscrypt TrustManagerImpl for host: " + host);
-        return untrustedChain;
-    };
-
-    // 2. OkHttp 3 & 4 CertificatePinner
-    try {
-        var CertificatePinner = Java.use('okhttp3.CertificatePinner');
-        CertificatePinner.check.overload('java.lang.String', 'java.util.List').implementation = function(host, peerCerts) {
-            console.log('[+] Bypassed OkHttp CertificatePinner for: ' + host);
-            return;
-        };
-    } catch (err) {
-        console.log("[-] OkHttp CertificatePinner not present or obfuscated");
-    }
-});
-```
-
-**Next step:** You can also tap **Root & Frida Tools** in the Intercept tab and select **Attach & Run** to inject this script directly into any running process!
-                """.trimIndent()
-            }
-            p.contains("jwt") || p.contains("token") -> {
-                """
-### JWT Analysis & Signature Verification
-
-JWTs are composed of three Base64URL-encoded segments separated by dots (`.`):
-1. **Header**: Algorithm & token type (e.g. `{"alg":"HS256","typ":"JWT"}`)
-2. **Payload**: Claims and subject data
-3. **Signature**: `HMACSHA256(base64UrlEncode(header) + "." + base64UrlEncode(payload), secret)`
-
-You can paste any JWT directly into **Tools → Decoders → JWT Decoder** to view decoded claims with instant expiration & issuer verification.
-                """.trimIndent()
-            }
-            p.contains("curl") || p.contains("python") || p.contains("code") -> {
-                """
-### Generated Request Automation
-
-Here is the Python script using `httpx` with proxy routing to `requestr` local proxy (`127.0.0.1:8080`):
-
-```python
-import httpx
-
-proxies = "http://127.0.0.1:8080"
-
-headers = {
-    "User-Agent": "requestr-client/2.0",
-    "Accept": "application/json",
-    "X-Session-ID": "sec-test-8492"
-}
-
-with httpx.Client(proxies=proxies, verify=False) as client:
-    response = client.get("https://httpbin.org/get", headers=headers)
-    print(f"Status: {response.status_code}")
-    print(response.json())
-```
-                """.trimIndent()
-            }
-            else -> {
-                "I have analyzed your request based on '${assistant.name}' parameters. All network parameters, auth tokens, and payload transforms are ready. You can test endpoints in the **APIs** tab, inspect intercepted packets in the **Intercept** tab, or run automation in **Flow**."
-            }
-        }
-    }
-
-    fun clearMessages() {
-        _messages.value = emptyList()
-    }
-}
 
 // ==========================================
 // 2. NOTES REPOSITORY
@@ -318,7 +130,7 @@ object FlowRepository {
             FlowNodeItem(
                 id = "node-3",
                 title = "Verify with AI",
-                type = FlowNodeType.CHAT,
+                type = FlowNodeType.TRANSFORM,
                 x = 620f,
                 y = 80f,
                 inputPorts = listOf("token"),
@@ -368,8 +180,42 @@ object FlowRepository {
     }
 
     suspend fun executeFlow(): String {
-        delay(600)
-        return "Flow executed successfully! 4 nodes processed in 0.48s."
+        val nodes = _nodes.value.toList()
+        val connections = _connections.value.toList()
+
+        if (nodes.isEmpty()) return "No nodes to execute. Add a trigger node to begin."
+
+        val executor = com.example.flow.FlowExecutor { url, method, headers, body ->
+            val request = com.example.data.models.ApiRequestItem(
+                url = url,
+                method = try { com.example.data.models.HttpMethod.valueOf(method) }
+                    catch (_: Exception) { com.example.data.models.HttpMethod.GET },
+                headers = headers.map { com.example.data.models.KeyValueItem(it.key, it.value) },
+                bodyContent = body,
+                bodyType = com.example.data.models.RequestBodyType.JSON,
+            )
+            val response = com.example.data.repository.ApiTestrRepository.executeRequest(request, true)
+            response.body.ifBlank { "{\"status\":${response.statusCode}}" }
+        }
+
+        val result = executor.execute(nodes, connections)
+
+        return buildString {
+            appendLine("Flow execution ${if (result.success) "completed" else "finished with errors"}.")
+            appendLine("${result.nodesExecuted} node(s) executed in ${result.totalDurationMs}ms.")
+            if (result.errors.isNotEmpty()) {
+                appendLine("Errors:")
+                result.errors.forEach { appendLine("  - $it") }
+            }
+            if (result.outputs.isNotEmpty()) {
+                appendLine("Outputs:")
+                result.outputs.entries.take(5).forEach { (id, out) ->
+                    val label = nodes.find { it.id == id }?.title ?: id
+                    appendLine("  $label: ${out.take(80)}")
+                }
+                if (result.outputs.size > 5) appendLine("  ... and ${result.outputs.size - 5} more")
+            }
+        }.trimEnd()
     }
 }
 

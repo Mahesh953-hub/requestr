@@ -21,7 +21,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.MusicNote
@@ -54,7 +53,6 @@ import com.example.data.models.CapturedTrafficItem
 import com.example.data.models.HttpMethod
 import com.example.data.models.NoteItem
 import com.example.data.repository.ApiCollectionsRepository
-import com.example.data.repository.ChatRepository
 import com.example.data.repository.FlowRepository
 import com.example.data.repository.NotesRepository
 import com.example.data.repository.SettingsRepository
@@ -95,7 +93,6 @@ fun HomeScreen(
     val isInterceptionActive = interceptionState.isActive
     val notes by NotesRepository.notes.collectAsState()
     val flows by FlowRepository.nodes.collectAsState()
-    val assistants by ChatRepository.assistants.collectAsState()
 
     var searchQuery by remember { mutableStateOf("") }
 
@@ -205,11 +202,6 @@ fun HomeScreen(
                     label = "+ New Tool",
                     icon = Icons.Default.Tune,
                     onClick = { onNavigateToSection("tools") }
-                )
-                QuickActionChip(
-                    label = "+ New Chat",
-                    icon = Icons.Default.Chat,
-                    onClick = { onNavigateToSection("chats") }
                 )
                 QuickActionChip(
                     label = "+ New Note",
@@ -469,15 +461,6 @@ fun HomeScreen(
                         gradient = listOf(Color(0xFF78350F), Color(0xFF0F172A)),
                         modifier = Modifier.weight(1f),
                         onClick = { onNavigateToSection("tools") }
-                    )
-                    MainSectionCard(
-                        title = "Chats",
-                        subtitle = "AI reverse engineer assistant",
-                        badge = "${assistants.size} active",
-                        icon = "💬",
-                        gradient = listOf(Color(0xFF581C87), Color(0xFF0F172A)),
-                        modifier = Modifier.weight(1f),
-                        onClick = { onNavigateToSection("chats") }
                     )
                 }
 

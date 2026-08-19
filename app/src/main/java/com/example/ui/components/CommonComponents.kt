@@ -37,7 +37,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
@@ -592,7 +591,6 @@ fun HoveredPillNavigationBar(
         Triple("intercept", "Record", Icons.Default.Radar),
         Triple("apis", "APIs", Icons.Default.Public),
         Triple("tools", "Tools", Icons.Default.Tune),
-        Triple("chats", "AI", Icons.Default.Chat),
         Triple("notes", "Notes", Icons.Default.Notes),
         Triple("flow", "Flow", Icons.Default.Code),
         Triple("music", "Music", Icons.Default.MusicNote)
@@ -681,7 +679,6 @@ fun ExpandablePillMenu(
         Triple("intercept", "Interceptor", "📡"),
         Triple("apis", "APIs", "⚡"),
         Triple("tools", "Tools", "🛠️"),
-        Triple("chats", "AI Chats", "💬"),
         Triple("notes", "Notes", "📝"),
         Triple("flow", "Flow", "🔀"),
         Triple("music", "Music", "🎵")

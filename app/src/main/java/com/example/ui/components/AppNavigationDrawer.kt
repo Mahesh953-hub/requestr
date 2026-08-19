@@ -22,7 +22,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Home
@@ -206,7 +205,6 @@ fun AppNavigationDrawer(
                         DrawerNavItem("intercept", "HTTP(S) Interceptor", Icons.Default.Radar),
                         DrawerNavItem("apis", "API Testr Client", Icons.Default.Public),
                         DrawerNavItem("tools", "Security & Dev Tools", Icons.Default.Tune),
-                        DrawerNavItem("chats", "AI Assistant", Icons.Default.Chat),
                         DrawerNavItem("notes", "Notes & Documentation", Icons.Default.Notes),
                         DrawerNavItem("flow", "Flow Automation (n8n)", Icons.Default.Code),
                         DrawerNavItem("music", "Synth LoFi Lounge", Icons.Default.MusicNote)

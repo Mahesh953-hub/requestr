@@ -28,7 +28,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Menu
@@ -86,7 +85,6 @@ import com.example.ui.components.HoveredPillNavigationBar
 import com.example.ui.components.InPageMiniSettingsSheet
 import com.example.ui.components.MiniPlayerPersistentBar
 import com.example.ui.screens.ApiTestrScreen
-import com.example.ui.screens.ChatScreen
 import com.example.ui.screens.FlowScreen
 import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.InterceptScreen
@@ -125,7 +123,6 @@ sealed class Screen(val route: String, val title: String, val icon: ImageVector)
     object Intercept : Screen("intercept", "Intercept", Icons.Default.Radar)
     object Apis : Screen("apis", "APIs", Icons.Default.Public)
     object Tools : Screen("tools", "Tools", Icons.Default.Tune)
-    object Chats : Screen("chats", "Chats", Icons.Default.Chat)
     object Notes : Screen("notes", "Notes", Icons.Default.Notes)
     object Flow : Screen("flow", "Flow", Icons.Default.Code)
     object Music : Screen("music", "Music", Icons.Default.MusicNote)
@@ -175,7 +172,6 @@ fun RequestrApp() {
             Screen.Intercept.route,
             Screen.Apis.route,
             Screen.Tools.route,
-            Screen.Chats.route,
             Screen.Notes.route,
             Screen.Flow.route,
             Screen.Music.route
@@ -272,7 +268,6 @@ fun RequestrApp() {
                                         "intercept" -> Screen.Intercept.route
                                         "apis" -> Screen.Apis.route
                                         "tools" -> Screen.Tools.route
-                                        "chats" -> Screen.Chats.route
                                         "notes" -> Screen.Notes.route
                                         "flow" -> Screen.Flow.route
                                         "music" -> Screen.Music.route
@@ -381,12 +376,6 @@ fun RequestrApp() {
                             ToolWorkspaceScreen(
                                 toolId = toolId,
                                 onBack = { navController.popBackStack() }
-                            )
-                        }
-
-                        composable(Screen.Chats.route) {
-                            ChatScreen(
-                                onMiniSettings = { showMiniSettingsForSection = "AI Chat" }
                             )
                         }
 
@@ -534,23 +523,6 @@ fun SectionSpecificMiniSettings(
                     checked = strictSsl,
                     onCheckedChange = { strictSsl = it }
                 )
-            }
-            "AI Chat" -> {
-                MiniSettingToggleRow(
-                    title = "Code Syntax Highlighting",
-                    subtitle = "Format code blocks with editorial luxury styles",
-                    checked = codeHighlighting,
-                    onCheckedChange = { codeHighlighting = it }
-                )
-                GlassCard(
-                    modifier = Modifier.fillMaxWidth(),
-                    backgroundColor = MaterialTheme.colorScheme.surfaceVariant
-                ) {
-                    Column(modifier = Modifier.padding(10.dp)) {
-                        Text("Active AI Engine", fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                        Text("Gemini 2.5 Flash • Server-Side API Protocol", fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
-                    }
-                }
             }
             "Notes" -> {
                 MiniSettingToggleRow(

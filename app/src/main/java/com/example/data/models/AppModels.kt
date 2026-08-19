@@ -204,38 +204,6 @@ data class AppPackageItem(
     val isSystemApp: Boolean = false
 )
 
-enum class ResponseFormat(val label: String) {
-    OPENAI("OpenAI Compatible (choices[0].message.content)"),
-    GEMINI("Gemini (candidates[0].content.parts[0].text)"),
-    ANTHROPIC("Anthropic (content[0].text)"),
-    STREAMING_SSE("Streaming (SSE data chunks)"),
-    RAW("Raw JSON View"),
-    CUSTOM("Custom JSON Path")
-}
-
-data class ChatMessageItem(
-    val id: String = UUID.randomUUID().toString(),
-    val role: String = "assistant", // "user" or "assistant"
-    val text: String = "",
-    val timestamp: Long = System.currentTimeMillis(),
-    val inputTokens: Int = 185,
-    val outputTokens: Int = 240,
-    val latencySeconds: Double = 0.42,
-    val tokensPerSec: Int = 571,
-    val isStreaming: Boolean = false,
-    val provider: String = "Gemini 2.5 Flash"
-)
-
-data class AiAssistantPreset(
-    val id: String = UUID.randomUUID().toString(),
-    val name: String = "API Hacker AI",
-    val avatarEmoji: String = "⚡",
-    val model: String = "gemini-2.5-flash",
-    val provider: String = "Google AI Studio",
-    val systemPrompt: String = "You are requestr AI, an expert cybersecurity engineer, reverse engineer, and API architect assisting with network security research.",
-    val temperature: Float = 0.7f
-)
-
 enum class NoteFormatType(val label: String) {
     PLAIN("Plain"),
     MARKDOWN("Markdown"),
@@ -262,7 +230,6 @@ enum class FlowNodeType(val label: String, val colorHex: Long, val iconEmoji: St
     API("API Node", 0xFF3B82F6, "🌐"),
     INTERCEPT_TRIGGER("Intercept Trigger", 0xFF06B6D4, "📡"),
     TOOL("Tool Node", 0xFFF59E0B, "🔧"),
-    CHAT("AI Chat Node", 0xFF8B5CF6, "💬"),
     CONDITION("Condition Node", 0xFFEC4899, "🔀"),
     TRANSFORM("Transform (JSONPath)", 0xFF10B981, "🔄"),
     TEXT("Template Text", 0xFF64748B, "📝"),
