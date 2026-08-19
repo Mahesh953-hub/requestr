@@ -151,7 +151,6 @@ fun ChatScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(12.dp),
-            cornerRadius = 16.dp,
             backgroundColor = MaterialTheme.colorScheme.surface
         ) {
             Row(

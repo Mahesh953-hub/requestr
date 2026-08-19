@@ -515,6 +515,38 @@ object SettingsRepository {
     private const val KEY_SSL_VERIFY = "ssl_verify"
     private const val KEY_SNIPPET_LANG = "snippet_lang"
     private const val KEY_ONBOARDING = "onboarding_completed"
+    // Fix 01 — Theme appearance
+    private const val KEY_APPEARANCE_MODE = "appearance_mode"
+    private const val KEY_SELECTED_DARK_THEME = "selected_dark_theme"
+    // Fix 02 — UI & UX
+    private const val KEY_SWIPE_TO_DELETE = "swipe_to_delete"
+    private const val KEY_HAPTIC_FEEDBACK = "haptic_feedback"
+    private const val KEY_GESTURE_NAVIGATION = "gesture_navigation"
+    private const val KEY_PICTURE_IN_PICTURE = "picture_in_picture"
+    private const val KEY_TABLE_MODE = "table_mode"
+    private const val KEY_DENSITY_MODE = "density_mode"
+    private const val KEY_UPDATE_NOTIFICATION_POLICY = "update_notification_policy"
+    private const val KEY_ANIMATION_ENABLED = "animation_enabled"
+    private const val KEY_TRANSITION_BEHAVIOR = "transition_behavior"
+    private const val KEY_DISPLAY_SCALE = "display_scale"
+    // Fix 02 — Features
+    private const val KEY_AUTO_RECORDING = "auto_recording"
+    private const val KEY_TRAFFIC_LOG = "traffic_log"
+    private const val KEY_RECORDING_NOTIFICATIONS = "recording_notifications"
+    private const val KEY_REMOTE_CONTROL = "remote_control"
+    private const val KEY_REMOTE_COMMANDS = "remote_commands"
+    private const val KEY_LAN_DISCOVERY = "lan_discovery"
+    private const val KEY_DEVICE_BROADCASTING = "device_broadcasting"
+    private const val KEY_TRAFFIC_CAPTURE = "traffic_capture"
+    private const val KEY_REQUEST_LOGGING = "request_logging"
+    private const val KEY_RESPONSE_LOGGING = "response_logging"
+    private const val KEY_EXPERIMENTAL_FEATURES = "experimental_features"
+    private const val KEY_DEVELOPER_OPTIONS = "developer_options"
+    // Fix 05 — Music
+    private const val KEY_MUSIC_PERMISSION_STATUS = "music_permission_status"
+    private const val KEY_MUSIC_BAR_DISMISSED = "music_bar_dismissed"
+    private const val KEY_MUSIC_LIBRARY_SCANNED = "music_library_scanned"
+    private const val KEY_SELECTED_LOCAL_TRACK_ID = "selected_local_track_id"
 
     private var prefs: android.content.SharedPreferences? = null
     private var initialized = false
@@ -539,6 +571,38 @@ object SettingsRepository {
             sslVerification = p.getBoolean(KEY_SSL_VERIFY, false),
             defaultSnippetLang = p.getString(KEY_SNIPPET_LANG, "Python - Requests") ?: "Python - Requests",
             onboardingCompleted = p.getBoolean(KEY_ONBOARDING, false),
+            // Fix 01
+            appearanceMode = p.getString(KEY_APPEARANCE_MODE, "SYSTEM") ?: "SYSTEM",
+            selectedDarkTheme = p.getString(KEY_SELECTED_DARK_THEME, "MONOCHROME_DARK") ?: "MONOCHROME_DARK",
+            // Fix 02 — UI & UX
+            swipeToDeleteEnabled = p.getBoolean(KEY_SWIPE_TO_DELETE, true),
+            hapticFeedbackEnabled = p.getBoolean(KEY_HAPTIC_FEEDBACK, true),
+            gestureNavigationEnabled = p.getBoolean(KEY_GESTURE_NAVIGATION, true),
+            pictureInPictureEnabled = p.getBoolean(KEY_PICTURE_IN_PICTURE, false),
+            tableModeEnabled = p.getBoolean(KEY_TABLE_MODE, false),
+            densityMode = p.getString(KEY_DENSITY_MODE, "COMFORTABLE") ?: "COMFORTABLE",
+            updateNotificationPolicy = p.getString(KEY_UPDATE_NOTIFICATION_POLICY, "MAJOR_ONLY") ?: "MAJOR_ONLY",
+            animationEnabled = p.getBoolean(KEY_ANIMATION_ENABLED, true),
+            transitionBehavior = p.getString(KEY_TRANSITION_BEHAVIOR, "STANDARD") ?: "STANDARD",
+            displayScale = p.getString(KEY_DISPLAY_SCALE, "NORMAL") ?: "NORMAL",
+            // Fix 02 — Features
+            autoRecordingEnabled = p.getBoolean(KEY_AUTO_RECORDING, false),
+            trafficLogEnabled = p.getBoolean(KEY_TRAFFIC_LOG, true),
+            recordingNotificationsEnabled = p.getBoolean(KEY_RECORDING_NOTIFICATIONS, true),
+            remoteControlEnabled = p.getBoolean(KEY_REMOTE_CONTROL, false),
+            remoteCommandsEnabled = p.getBoolean(KEY_REMOTE_COMMANDS, false),
+            lanDeviceDiscoveryEnabled = p.getBoolean(KEY_LAN_DISCOVERY, false),
+            deviceBroadcastingEnabled = p.getBoolean(KEY_DEVICE_BROADCASTING, false),
+            trafficCaptureEnabled = p.getBoolean(KEY_TRAFFIC_CAPTURE, true),
+            requestLoggingEnabled = p.getBoolean(KEY_REQUEST_LOGGING, true),
+            responseLoggingEnabled = p.getBoolean(KEY_RESPONSE_LOGGING, true),
+            experimentalFeaturesEnabled = p.getBoolean(KEY_EXPERIMENTAL_FEATURES, false),
+            developerOptionsEnabled = p.getBoolean(KEY_DEVELOPER_OPTIONS, false),
+            // Fix 05 — Music
+            musicPermissionStatus = p.getString(KEY_MUSIC_PERMISSION_STATUS, "NOT_REQUESTED") ?: "NOT_REQUESTED",
+            musicBarDismissed = p.getBoolean(KEY_MUSIC_BAR_DISMISSED, false),
+            musicLibraryScanned = p.getBoolean(KEY_MUSIC_LIBRARY_SCANNED, false),
+            selectedLocalTrackId = p.getString(KEY_SELECTED_LOCAL_TRACK_ID, null),
         )
     }
 
@@ -596,6 +660,123 @@ object SettingsRepository {
         persist(KEY_ONBOARDING, completed)
     }
 
+    // Fix 01 — Appearance
+    fun updateAppearanceMode(mode: String) {
+        _settings.value = _settings.value.copy(appearanceMode = mode)
+        persist(KEY_APPEARANCE_MODE, mode)
+    }
+    fun updateSelectedDarkTheme(theme: String) {
+        _settings.value = _settings.value.copy(selectedDarkTheme = theme)
+        persist(KEY_SELECTED_DARK_THEME, theme)
+    }
+    // Fix 02 — UI & UX
+    fun updateSwipeToDelete(enabled: Boolean) {
+        _settings.value = _settings.value.copy(swipeToDeleteEnabled = enabled)
+        persist(KEY_SWIPE_TO_DELETE, enabled)
+    }
+    fun updateHapticFeedback(enabled: Boolean) {
+        _settings.value = _settings.value.copy(hapticFeedbackEnabled = enabled)
+        persist(KEY_HAPTIC_FEEDBACK, enabled)
+    }
+    fun updateGestureNavigation(enabled: Boolean) {
+        _settings.value = _settings.value.copy(gestureNavigationEnabled = enabled)
+        persist(KEY_GESTURE_NAVIGATION, enabled)
+    }
+    fun updatePictureInPicture(enabled: Boolean) {
+        _settings.value = _settings.value.copy(pictureInPictureEnabled = enabled)
+        persist(KEY_PICTURE_IN_PICTURE, enabled)
+    }
+    fun updateTableMode(enabled: Boolean) {
+        _settings.value = _settings.value.copy(tableModeEnabled = enabled)
+        persist(KEY_TABLE_MODE, enabled)
+    }
+    fun updateDensityMode(mode: String) {
+        _settings.value = _settings.value.copy(densityMode = mode)
+        persist(KEY_DENSITY_MODE, mode)
+    }
+    fun updateNotificationPolicy(policy: String) {
+        _settings.value = _settings.value.copy(updateNotificationPolicy = policy)
+        persist(KEY_UPDATE_NOTIFICATION_POLICY, policy)
+    }
+    fun updateAnimationEnabled(enabled: Boolean) {
+        _settings.value = _settings.value.copy(animationEnabled = enabled)
+        persist(KEY_ANIMATION_ENABLED, enabled)
+    }
+    fun updateTransitionBehavior(behavior: String) {
+        _settings.value = _settings.value.copy(transitionBehavior = behavior)
+        persist(KEY_TRANSITION_BEHAVIOR, behavior)
+    }
+    fun updateDisplayScale(scale: String) {
+        _settings.value = _settings.value.copy(displayScale = scale)
+        persist(KEY_DISPLAY_SCALE, scale)
+    }
+    // Fix 02 — Features
+    fun updateAutoRecording(enabled: Boolean) {
+        _settings.value = _settings.value.copy(autoRecordingEnabled = enabled)
+        persist(KEY_AUTO_RECORDING, enabled)
+    }
+    fun updateTrafficLog(enabled: Boolean) {
+        _settings.value = _settings.value.copy(trafficLogEnabled = enabled)
+        persist(KEY_TRAFFIC_LOG, enabled)
+    }
+    fun updateRecordingNotifications(enabled: Boolean) {
+        _settings.value = _settings.value.copy(recordingNotificationsEnabled = enabled)
+        persist(KEY_RECORDING_NOTIFICATIONS, enabled)
+    }
+    fun updateRemoteControl(enabled: Boolean) {
+        _settings.value = _settings.value.copy(remoteControlEnabled = enabled)
+        persist(KEY_REMOTE_CONTROL, enabled)
+    }
+    fun updateRemoteCommands(enabled: Boolean) {
+        _settings.value = _settings.value.copy(remoteCommandsEnabled = enabled)
+        persist(KEY_REMOTE_COMMANDS, enabled)
+    }
+    fun updateLanDiscovery(enabled: Boolean) {
+        _settings.value = _settings.value.copy(lanDeviceDiscoveryEnabled = enabled)
+        persist(KEY_LAN_DISCOVERY, enabled)
+    }
+    fun updateDeviceBroadcasting(enabled: Boolean) {
+        _settings.value = _settings.value.copy(deviceBroadcastingEnabled = enabled)
+        persist(KEY_DEVICE_BROADCASTING, enabled)
+    }
+    fun updateTrafficCapture(enabled: Boolean) {
+        _settings.value = _settings.value.copy(trafficCaptureEnabled = enabled)
+        persist(KEY_TRAFFIC_CAPTURE, enabled)
+    }
+    fun updateRequestLogging(enabled: Boolean) {
+        _settings.value = _settings.value.copy(requestLoggingEnabled = enabled)
+        persist(KEY_REQUEST_LOGGING, enabled)
+    }
+    fun updateResponseLogging(enabled: Boolean) {
+        _settings.value = _settings.value.copy(responseLoggingEnabled = enabled)
+        persist(KEY_RESPONSE_LOGGING, enabled)
+    }
+    fun updateExperimentalFeatures(enabled: Boolean) {
+        _settings.value = _settings.value.copy(experimentalFeaturesEnabled = enabled)
+        persist(KEY_EXPERIMENTAL_FEATURES, enabled)
+    }
+    fun updateDeveloperOptions(enabled: Boolean) {
+        _settings.value = _settings.value.copy(developerOptionsEnabled = enabled)
+        persist(KEY_DEVELOPER_OPTIONS, enabled)
+    }
+    // Fix 05 — Music
+    fun updateMusicPermissionStatus(status: String) {
+        _settings.value = _settings.value.copy(musicPermissionStatus = status)
+        persist(KEY_MUSIC_PERMISSION_STATUS, status)
+    }
+    fun updateMusicBarDismissed(dismissed: Boolean) {
+        _settings.value = _settings.value.copy(musicBarDismissed = dismissed)
+        persist(KEY_MUSIC_BAR_DISMISSED, dismissed)
+    }
+    fun updateMusicLibraryScanned(scanned: Boolean) {
+        _settings.value = _settings.value.copy(musicLibraryScanned = scanned)
+        persist(KEY_MUSIC_LIBRARY_SCANNED, scanned)
+    }
+    fun updateSelectedLocalTrackId(id: String?) {
+        _settings.value = _settings.value.copy(selectedLocalTrackId = id)
+        if (id != null) persist(KEY_SELECTED_LOCAL_TRACK_ID, id)
+    }
+
     fun updateSettings(newSettings: UserSettingsState) {
         _settings.value = newSettings
         // Bulk persist
@@ -607,6 +788,38 @@ object SettingsRepository {
         persist(KEY_SSL_VERIFY, newSettings.sslVerification)
         persist(KEY_SNIPPET_LANG, newSettings.defaultSnippetLang)
         persist(KEY_ONBOARDING, newSettings.onboardingCompleted)
+        // Fix 01
+        persist(KEY_APPEARANCE_MODE, newSettings.appearanceMode)
+        persist(KEY_SELECTED_DARK_THEME, newSettings.selectedDarkTheme)
+        // Fix 02 — UI & UX
+        persist(KEY_SWIPE_TO_DELETE, newSettings.swipeToDeleteEnabled)
+        persist(KEY_HAPTIC_FEEDBACK, newSettings.hapticFeedbackEnabled)
+        persist(KEY_GESTURE_NAVIGATION, newSettings.gestureNavigationEnabled)
+        persist(KEY_PICTURE_IN_PICTURE, newSettings.pictureInPictureEnabled)
+        persist(KEY_TABLE_MODE, newSettings.tableModeEnabled)
+        persist(KEY_DENSITY_MODE, newSettings.densityMode)
+        persist(KEY_UPDATE_NOTIFICATION_POLICY, newSettings.updateNotificationPolicy)
+        persist(KEY_ANIMATION_ENABLED, newSettings.animationEnabled)
+        persist(KEY_TRANSITION_BEHAVIOR, newSettings.transitionBehavior)
+        persist(KEY_DISPLAY_SCALE, newSettings.displayScale)
+        // Fix 02 — Features
+        persist(KEY_AUTO_RECORDING, newSettings.autoRecordingEnabled)
+        persist(KEY_TRAFFIC_LOG, newSettings.trafficLogEnabled)
+        persist(KEY_RECORDING_NOTIFICATIONS, newSettings.recordingNotificationsEnabled)
+        persist(KEY_REMOTE_CONTROL, newSettings.remoteControlEnabled)
+        persist(KEY_REMOTE_COMMANDS, newSettings.remoteCommandsEnabled)
+        persist(KEY_LAN_DISCOVERY, newSettings.lanDeviceDiscoveryEnabled)
+        persist(KEY_DEVICE_BROADCASTING, newSettings.deviceBroadcastingEnabled)
+        persist(KEY_TRAFFIC_CAPTURE, newSettings.trafficCaptureEnabled)
+        persist(KEY_REQUEST_LOGGING, newSettings.requestLoggingEnabled)
+        persist(KEY_RESPONSE_LOGGING, newSettings.responseLoggingEnabled)
+        persist(KEY_EXPERIMENTAL_FEATURES, newSettings.experimentalFeaturesEnabled)
+        persist(KEY_DEVELOPER_OPTIONS, newSettings.developerOptionsEnabled)
+        // Fix 05 — Music
+        persist(KEY_MUSIC_PERMISSION_STATUS, newSettings.musicPermissionStatus)
+        persist(KEY_MUSIC_BAR_DISMISSED, newSettings.musicBarDismissed)
+        persist(KEY_MUSIC_LIBRARY_SCANNED, newSettings.musicLibraryScanned)
+        if (newSettings.selectedLocalTrackId != null) persist(KEY_SELECTED_LOCAL_TRACK_ID, newSettings.selectedLocalTrackId)
     }
 
     private fun persist(key: String, value: String) {

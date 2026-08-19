@@ -233,7 +233,6 @@ fun HomeScreen(
         item {
             GlassCard(
                 modifier = Modifier.fillMaxWidth(),
-                cornerRadius = 16.dp,
                 backgroundColor = if (isInterceptionActive) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f) else MaterialTheme.colorScheme.surface,
                 borderColor = if (isInterceptionActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
                 onClick = { onNavigateToSection("intercept") }
@@ -343,7 +342,6 @@ fun HomeScreen(
                         modifier = Modifier
                             .width(170.dp)
                             .height(115.dp),
-                        cornerRadius = 14.dp,
                         backgroundColor = MaterialTheme.colorScheme.surfaceVariant,
                         onClick = {
                             ApiCollectionsRepository.setActiveRequest(api)
@@ -387,7 +385,6 @@ fun HomeScreen(
                         modifier = Modifier
                             .width(170.dp)
                             .height(115.dp),
-                        cornerRadius = 14.dp,
                         backgroundColor = MaterialTheme.colorScheme.surfaceVariant,
                         onClick = { onOpenNote(note) }
                     ) {
@@ -561,7 +558,6 @@ fun MainSectionCard(
 ) {
     GlassCard(
         modifier = modifier.height(130.dp),
-        cornerRadius = 16.dp,
         backgroundColor = MaterialTheme.colorScheme.surface,
         borderColor = MaterialTheme.colorScheme.outline,
         onClick = onClick

@@ -290,7 +290,6 @@ fun NotesScreen(
                 items(filteredNotes, key = { it.id }) { note ->
                     GlassCard(
                         modifier = Modifier.fillMaxWidth(),
-                        cornerRadius = 14.dp,
                         backgroundColor = MaterialTheme.colorScheme.surface,
                         onClick = { activeNoteToEdit = note }
                     ) {

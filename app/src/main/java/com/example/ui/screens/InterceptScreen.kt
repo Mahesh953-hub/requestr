@@ -271,7 +271,6 @@ fun InterceptScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 2.dp),
-                cornerRadius = 14.dp,
                 backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
             ) {
                 Column(modifier = Modifier.padding(10.dp)) {
@@ -507,7 +506,7 @@ fun InterceptScreen(
             shape = CircleShape,
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .padding(bottom = 76.dp, end = 20.dp)
+                .padding(bottom = 16.dp, end = 20.dp)
                 .scale(pulseScale)
                 .size(56.dp)
         ) {
@@ -943,7 +942,6 @@ fun FridaScriptsBottomSheet(
                 items(scripts) { script ->
                     GlassCard(
                         modifier = Modifier.fillMaxWidth(),
-                        cornerRadius = 10.dp,
                         backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
                     ) {
                         Column(modifier = Modifier.padding(10.dp)) {
@@ -1051,7 +1049,6 @@ fun MitmCertificateBottomSheet(
 
             GlassCard(
                 modifier = Modifier.fillMaxWidth(),
-                cornerRadius = 12.dp,
                 backgroundColor = MaterialTheme.colorScheme.surfaceVariant
             ) {
                 Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1248,7 +1245,6 @@ private fun CapabilityStatusCard(
 ) {
     GlassCard(
         modifier = Modifier.fillMaxWidth(),
-        cornerRadius = 12.dp,
         backgroundColor = MaterialTheme.colorScheme.surfaceVariant
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
@@ -1855,7 +1851,6 @@ fun RulesConfigBottomSheet(
                 items(rules, key = { it.id }) { rule ->
                     GlassCard(
                         modifier = Modifier.fillMaxWidth(),
-                        cornerRadius = 12.dp,
                         backgroundColor = MaterialTheme.colorScheme.surfaceVariant
                     ) {
                         Row(

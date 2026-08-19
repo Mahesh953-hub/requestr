@@ -115,7 +115,6 @@ fun MusicScreen(
             item {
                 GlassCard(
                     modifier = Modifier.fillMaxWidth(),
-                    cornerRadius = 20.dp,
                     backgroundColor = MaterialTheme.colorScheme.surface
                 ) {
                     Column(
@@ -272,7 +271,6 @@ fun MusicScreen(
                 val isSelected = track.id == currentTrack.id
                 GlassCard(
                     modifier = Modifier.fillMaxWidth(),
-                    cornerRadius = 14.dp,
                     backgroundColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f) else MaterialTheme.colorScheme.surface,
                     borderColor = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
                     onClick = { MusicRepository.selectTrack(track.id) }

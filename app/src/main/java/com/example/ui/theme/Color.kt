@@ -9,9 +9,13 @@ val EditorialLightBackground = Color(0xFFF4F2EC)
 val EditorialLightSurface = Color(0xFFFFFFFF)
 val EditorialLightSurfaceVariant = Color(0xFFFAF8F3)
 val EditorialLightBorder = Color(0xFFE5E2D8)
-val EditorialLightPrimary = Color(0xFF111111)
-val EditorialLightPrimaryBright = Color(0xFF222222)
-val EditorialLightAccent = Color(0xFFF28C28) // Warm Orange
+// Fix 03: The old EditorialLightPrimary (0xFF111111, near-black) was the root
+// cause of the "black-on-black" text bug. Composables using `primary` as a
+// background and `onSurface` (also 0xFF111111) for text had zero contrast.
+// Primary is now the warm orange accent; the old black is moved to secondary.
+val EditorialLightPrimary = Color(0xFFF28C28) // Warm Orange
+val EditorialLightPrimaryBright = Color(0xFFFB923C) // Brighter orange variant
+val EditorialLightAccent = Color(0xFFF28C28) // Warm Orange (same as primary)
 
 // ==========================================
 // 2. MONOCHROME OBSIDIAN (Universal Dark)

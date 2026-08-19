@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -18,10 +20,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -29,8 +34,12 @@ import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material.icons.filled.VpnKey
+import androidx.compose.material.icons.outlined.DarkMode
+import androidx.compose.material.icons.outlined.SettingsBrightness
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -54,10 +63,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import android.content.Intent
@@ -81,7 +93,8 @@ import com.example.ui.theme.TextSecondary
 
 @Composable
 fun SettingsScreen(
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onReRunWizard: () -> Unit = {}
 ) {
     val settings by SettingsRepository.settings.collectAsState()
     // Real capability state and a real CA read; v2.1 showed a hardcoded serial/fingerprint
@@ -135,7 +148,6 @@ fun SettingsScreen(
                 SettingsSectionHeader("OPERATOR & IDENTITY")
                 GlassCard(
                     modifier = Modifier.fillMaxWidth(),
-                    cornerRadius = 14.dp,
                     backgroundColor = MaterialTheme.colorScheme.surface
                 ) {
                     Column(modifier = Modifier.padding(14.dp)) {
@@ -161,108 +173,185 @@ fun SettingsScreen(
                 }
             }
 
-            // Section 2: Atmosphere & 7 Luxury Themes
+            // Section 2: Theme — Fix 01
             item {
-                SettingsSectionHeader("ATMOSPHERE & THEME PALETTES")
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    AppThemeMode.values().forEach { mode ->
-                        val isSelected = settings.themeMode.equals(mode.name, ignoreCase = true)
-                        GlassCard(
-                            modifier = Modifier.fillMaxWidth(),
-                            cornerRadius = 14.dp,
-                            backgroundColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f) else MaterialTheme.colorScheme.surface,
-                            borderColor = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
-                            onClick = { SettingsRepository.updateTheme(mode.name) }
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(12.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(24.dp)
-                                            .clip(CircleShape)
-                                            .background(mode.samplePrimary)
-                                            .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape)
-                                    )
-                                    Spacer(modifier = Modifier.width(12.dp))
-                                    Column {
-                                        Text(
-                                            text = mode.displayName,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 13.sp,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                        Text(
-                                            text = if (mode.isLight) "Light Editorial Tone" else "Luxury Dark Palette",
-                                            fontSize = 10.sp,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                }
-
-                                if (isSelected) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(20.dp)
-                                            .clip(CircleShape)
-                                            .background(MaterialTheme.colorScheme.primary),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Check,
-                                            contentDescription = "Selected",
-                                            tint = MaterialTheme.colorScheme.onPrimary,
-                                            modifier = Modifier.size(12.dp)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                SettingsSectionHeader("Theme")
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
             }
 
-            // Section 3: UI Geometry & Radius
+            // Appearance Selector — System / Light / Dark
             item {
-                SettingsSectionHeader("UI GEOMETRY & DISPLAY")
-                GlassCard(
+                AppearanceSelector(
+                    currentMode = settings.appearanceMode,
+                    onModeSelected = { mode ->
+                        SettingsRepository.updateAppearanceMode(mode)
+                        when (mode) {
+                            "LIGHT" -> SettingsRepository.updateTheme("EDITORIAL_LIGHT")
+                            "DARK" -> SettingsRepository.updateTheme(settings.selectedDarkTheme)
+                            "SYSTEM" -> { /* theme follows system via MainActivity */ }
+                        }
+                    }
+                )
+            }
+
+            // Accent Color Grid
+            item {
+                AccentColorGrid(
+                    currentTheme = settings.themeMode,
+                    appearanceMode = settings.appearanceMode,
+                    onThemeSelected = { theme ->
+                        SettingsRepository.updateTheme(theme)
+                        if (settings.appearanceMode == "DARK") {
+                            SettingsRepository.updateSelectedDarkTheme(theme)
+                        }
+                    }
+                )
+            }
+
+            // Token section placeholders
+            item {
+                TokenPlaceholders()
+            }
+
+            // Re-run Setup Wizard — Fix 03
+            item {
+                SettingRow(
+                    title = "Re-run Setup Wizard",
+                    description = "Restart the onboarding flow to re-configure your alias, theme, and permissions.",
+                    onClick = {
+                        settingsScope.launch {
+                            SettingsRepository.setOnboardingCompleted(false)
+                            SettingsRepository.updateUserName("")
+                        }
+                        onReRunWizard()
+                    }
+                )
+            }
+
+            // Section 3: UI & UX — Fix 02
+            item {
+                SettingsSectionHeader("UI & UX")
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
+            }
+
+            // Interaction
+            item { SubsectionTitle("Interaction") }
+            item { SwitchPreference("Swipe to Delete", settings.swipeToDeleteEnabled, "Swipe items left or right to remove them") { SettingsRepository.updateSwipeToDelete(it) } }
+            item { SwitchPreference("Haptic Feedback", settings.hapticFeedbackEnabled, "Short vibration on touch interactions") { SettingsRepository.updateHapticFeedback(it) } }
+            item { SwitchPreference("Gesture Navigation", settings.gestureNavigationEnabled, "Swipe gestures for back and navigation") { SettingsRepository.updateGestureNavigation(it) } }
+
+            // Display Behavior
+            item { Spacer(modifier = Modifier.height(8.dp)) }
+            item { SubsectionTitle("Display Behavior") }
+            item { SwitchPreference("Picture-in-Picture", settings.pictureInPictureEnabled, "Keep a mini player visible over other apps") { SettingsRepository.updatePictureInPicture(it) } }
+            item { SwitchPreference("Table Mode", settings.tableModeEnabled, "Prefer structured table views") { SettingsRepository.updateTableMode(it) } }
+            item {
+                SelectPreference(
+                    "Compact / Comfortable Density",
+                    settings.densityMode,
+                    "Control information density across the app",
+                    listOf("COMPACT" to "Compact", "COMFORTABLE" to "Comfortable")
+                ) { SettingsRepository.updateDensityMode(it) }
+            }
+
+            // Update Tips
+            item { Spacer(modifier = Modifier.height(8.dp)) }
+            item { SubsectionTitle("Update Tips") }
+            item {
+                SelectPreference(
+                    "Notification Policy",
+                    settings.updateNotificationPolicy,
+                    "When to notify about app updates",
+                    listOf("EVERY_UPDATE" to "Every Update", "MAJOR_ONLY" to "Major Only", "NEVER" to "Never")
+                ) { SettingsRepository.updateNotificationPolicy(it) }
+            }
+
+            // UI Preferences
+            item { Spacer(modifier = Modifier.height(8.dp)) }
+            item { SubsectionTitle("UI Preferences") }
+            item { SwitchPreference("Animation", settings.animationEnabled, "Enable animated transitions throughout the app") { SettingsRepository.updateAnimationEnabled(it) } }
+            item {
+                SelectPreference(
+                    "Transition Behavior",
+                    settings.transitionBehavior,
+                    "Animation style for screen transitions",
+                    listOf("STANDARD" to "Standard", "REDUCED" to "Reduced", "NONE" to "None")
+                ) { SettingsRepository.updateTransitionBehavior(it) }
+            }
+            item {
+                SelectPreference(
+                    "Display Scale",
+                    settings.displayScale,
+                    "Adjust the overall UI scaling",
+                    listOf("SMALL" to "Small", "NORMAL" to "Normal", "LARGE" to "Large")
+                ) { SettingsRepository.updateDisplayScale(it) }
+            }
+
+            // Card Corner Radius (moved from old Section 3)
+            item { Spacer(modifier = Modifier.height(8.dp)) }
+            item { SubsectionTitle("Card Corner Radius") }
+            item {
+                Row(
                     modifier = Modifier.fillMaxWidth(),
-                    cornerRadius = 14.dp,
-                    backgroundColor = MaterialTheme.colorScheme.surface
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("Card Corner Radius", color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                            Text("${settings.cornerRadiusDp} dp", color = MaterialTheme.colorScheme.primary, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
-                        }
-                        Slider(
-                            value = settings.cornerRadiusDp.toFloat(),
-                            onValueChange = { SettingsRepository.updateCornerRadius(it.toInt()) },
-                            valueRange = 8f..24f,
-                            steps = 8,
-                            colors = SliderDefaults.colors(
-                                thumbColor = MaterialTheme.colorScheme.primary,
-                                activeTrackColor = MaterialTheme.colorScheme.primary
-                            )
-                        )
-                    }
+                    Text("${settings.cornerRadiusDp} dp", color = MaterialTheme.colorScheme.primary, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
                 }
+                Slider(
+                    value = settings.cornerRadiusDp.toFloat(),
+                    onValueChange = { SettingsRepository.updateCornerRadius(it.toInt()) },
+                    valueRange = 8f..24f,
+                    steps = 8,
+                    colors = SliderDefaults.colors(
+                        thumbColor = MaterialTheme.colorScheme.primary,
+                        activeTrackColor = MaterialTheme.colorScheme.primary
+                    )
+                )
             }
+
+            // FEATURES section — Fix 02
+            item { Spacer(modifier = Modifier.height(8.dp)) }
+            item {
+                SettingsSectionHeader("FEATURES")
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
+            }
+
+            // Recording
+            item { SubsectionTitle("Recording") }
+            item { SwitchPreference("Auto Recording", settings.autoRecordingEnabled, "Automatically enter recording state") { SettingsRepository.updateAutoRecording(it) } }
+            item { SwitchPreference("Traffic Log", settings.trafficLogEnabled, "Record intercepted traffic to log") { SettingsRepository.updateTrafficLog(it) } }
+            item { SwitchPreference("Recording Notifications", settings.recordingNotificationsEnabled, "Show persistent notification during recording") { SettingsRepository.updateRecordingNotifications(it) } }
+
+            // Remote Control
+            item { Spacer(modifier = Modifier.height(8.dp)) }
+            item { SubsectionTitle("Remote Control") }
+            item { SwitchPreference("Remote Control", settings.remoteControlEnabled, "Allow remote devices to control recording") { SettingsRepository.updateRemoteControl(it) } }
+            item { SwitchPreference("Remote Commands", settings.remoteCommandsEnabled, "Accept command requests from paired devices") { SettingsRepository.updateRemoteCommands(it) } }
+
+            // Device Discovery
+            item { Spacer(modifier = Modifier.height(8.dp)) }
+            item { SubsectionTitle("Device Discovery") }
+            item { SwitchPreference("LAN Device Discovery", settings.lanDeviceDiscoveryEnabled, "Discover other requestr instances on local network") { SettingsRepository.updateLanDiscovery(it) } }
+            item { SwitchPreference("Device Broadcasting", settings.deviceBroadcastingEnabled, "Broadcast this device's presence on LAN") { SettingsRepository.updateDeviceBroadcasting(it) } }
+
+            // Traffic & Network
+            item { Spacer(modifier = Modifier.height(8.dp)) }
+            item { SubsectionTitle("Traffic & Network") }
+            item { SwitchPreference("Traffic Capture", settings.trafficCaptureEnabled, "Capture network traffic for inspection") { SettingsRepository.updateTrafficCapture(it) } }
+            item { SwitchPreference("Request Logging", settings.requestLoggingEnabled, "Log all outgoing requests") { SettingsRepository.updateRequestLogging(it) } }
+            item { SwitchPreference("Response Logging", settings.responseLoggingEnabled, "Log all incoming responses") { SettingsRepository.updateResponseLogging(it) } }
+
+            // Advanced Features
+            item { Spacer(modifier = Modifier.height(8.dp)) }
+            item { SubsectionTitle("Advanced Features") }
+            item { SwitchPreference("Experimental Features", settings.experimentalFeaturesEnabled, "Early access features — may be unstable") { SettingsRepository.updateExperimentalFeatures(it) } }
+            item { SwitchPreference("Developer Options", settings.developerOptionsEnabled, "Extra tools and debug information") { SettingsRepository.updateDeveloperOptions(it) } }
 
             // Section 4: Network & Proxy Engine
             item {
                 SettingsSectionHeader("INTERCEPTION & PROXY ENGINE")
                 GlassCard(
                     modifier = Modifier.fillMaxWidth(),
-                    cornerRadius = 14.dp,
                     backgroundColor = MaterialTheme.colorScheme.surface
                 ) {
                     Column(
@@ -302,7 +391,6 @@ fun SettingsScreen(
                 SettingsSectionHeader("ECOSYSTEM & DEEP LINKS")
                 GlassCard(
                     modifier = Modifier.fillMaxWidth(),
-                    cornerRadius = 14.dp,
                     backgroundColor = MaterialTheme.colorScheme.surface
                 ) {
                     Column(modifier = Modifier.padding(14.dp)) {
@@ -344,7 +432,6 @@ fun SettingsScreen(
                 SettingsSectionHeader("CA ROOT CERTIFICATE & TRUST STORE")
                 GlassCard(
                     modifier = Modifier.fillMaxWidth(),
-                    cornerRadius = 14.dp,
                     backgroundColor = MaterialTheme.colorScheme.surface
                 ) {
                     Column(
@@ -436,7 +523,6 @@ fun SettingsScreen(
                 SettingsSectionHeader("SECURITY TIERS DIAGNOSTICS")
                 GlassCard(
                     modifier = Modifier.fillMaxWidth(),
-                    cornerRadius = 14.dp,
                     backgroundColor = MaterialTheme.colorScheme.surface
                 ) {
                     Column(
@@ -542,7 +628,6 @@ fun SettingsScreen(
             item {
                 GlassCard(
                     modifier = Modifier.fillMaxWidth(),
-                    cornerRadius = 16.dp,
                     backgroundColor = MaterialTheme.colorScheme.surfaceVariant,
                     borderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
                 ) {
@@ -569,7 +654,7 @@ fun SettingsScreen(
 
                         AppMetaInfoRow("Application Name", "requestr")
                         AppMetaInfoRow("Package ID", "com.kailashhh.requestr")
-                        AppMetaInfoRow("Version", "2.1.0-release (API 36)")
+                        AppMetaInfoRow("Version", "2.5.0-release (API 36)")
                         AppMetaInfoRow("Build Date", "2026.08.17")
                         AppMetaInfoRow("Core Engine", "OkHttp 4.12.0 + Conscrypt APEX")
                         AppMetaInfoRow("Architecture", "arm64-v8a, armeabi-v7a, x86_64")
@@ -643,5 +728,306 @@ fun DiagnosticRow(name: String, status: String, isOk: Boolean) {
         ) {
             Text(status, color = if (isOk) Color(0xFF10B981) else Color(0xFFEF4444), fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
         }
+    }
+}
+
+// ─── Fix 01 composables ────────────────────────────────────────────────
+
+@Composable
+private fun AppearanceSelector(
+    currentMode: String,
+    onModeSelected: (String) -> Unit
+) {
+    val modes = listOf(
+        Triple("SYSTEM", "System", Icons.Outlined.SettingsBrightness),
+        Triple("LIGHT", "Light", Icons.Filled.LightMode),
+        Triple("DARK", "Dark", Icons.Outlined.DarkMode)
+    )
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceEvenly
+    ) {
+        modes.forEach { (mode, label, icon) ->
+            val isSelected = currentMode == mode
+            val bgColor by animateColorAsState(
+                if (isSelected) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                else Color.Transparent,
+                label = "bg"
+            )
+            val iconTint by animateColorAsState(
+                if (isSelected) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+                label = "iconTint"
+            )
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(bgColor)
+                    .clickable { onModeSelected(mode) }
+                    .padding(horizontal = 20.dp, vertical = 10.dp)
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = label,
+                    tint = iconTint,
+                    modifier = Modifier.size(22.dp)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = label,
+                    fontSize = 11.sp,
+                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                    color = if (isSelected) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+    Spacer(modifier = Modifier.height(8.dp))
+}
+
+@Composable
+private fun AccentColorGrid(
+    currentTheme: String,
+    appearanceMode: String,
+    onThemeSelected: (String) -> Unit
+) {
+    val displayName = when (appearanceMode) {
+        "LIGHT" -> "Light"
+        "DARK" -> "Dark"
+        else -> "System"
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            "Accent Color",
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Text(
+            displayName,
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+    Spacer(modifier = Modifier.height(8.dp))
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        AppThemeMode.values().forEach { mode ->
+            val isSelected = currentTheme.equals(mode.name, ignoreCase = true)
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(if (isSelected) RoundedCornerShape(4.dp) else CircleShape)
+                    .then(
+                        if (isSelected) Modifier
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .padding(4.dp)
+                            .clip(CircleShape)
+                            .background(mode.samplePrimary)
+                        else Modifier
+                            .clip(CircleShape)
+                            .background(mode.samplePrimary)
+                    )
+                    .clickable { onThemeSelected(mode.name) }
+            )
+        }
+    }
+    Spacer(modifier = Modifier.height(12.dp))
+}
+
+@Composable
+private fun TokenPlaceholders() {
+    val tokens = listOf("Typography", "Surfaces", "Borders", "Icons", "States")
+    tokens.forEach { token ->
+        Text(
+            text = token,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(vertical = 4.dp)
+        )
+        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+    }
+}
+
+// ─── Fix 02 + Fix 03 composables ──────────────────────────────────────
+
+@Composable
+private fun SubsectionTitle(title: String) {
+    Text(
+        text = title,
+        fontWeight = FontWeight.Bold,
+        fontSize = 13.sp,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(bottom = 4.dp)
+    )
+}
+
+@Composable
+private fun PreferenceRow(
+    title: String,
+    description: String,
+    modifier: Modifier = Modifier,
+    trailing: @Composable () -> Unit
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 14.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = description,
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        trailing()
+    }
+}
+
+@Composable
+private fun SwitchPreference(
+    title: String,
+    checked: Boolean,
+    description: String,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    PreferenceRow(
+        title = title,
+        description = description
+    ) {
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = Color.White,
+                checkedTrackColor = MaterialTheme.colorScheme.primary
+            )
+        )
+    }
+}
+
+@Composable
+private fun SelectPreference(
+    title: String,
+    currentValue: String,
+    description: String,
+    options: List<Pair<String, String>>,
+    onValueSelected: (String) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val currentLabel = options.find { it.first == currentValue }?.second ?: currentValue
+
+    PreferenceRow(
+        title = title,
+        description = description
+    ) {
+        Box {
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .clickable { expanded = true }
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = currentLabel,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowForwardIos,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(12.dp)
+                )
+            }
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false }
+            ) {
+                options.forEach { (value, label) ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                text = label,
+                                fontSize = 13.sp,
+                                color = if (value == currentValue) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurface
+                            )
+                        },
+                        onClick = {
+                            onValueSelected(value)
+                            expanded = false
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingRow(
+    title: String,
+    description: String,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
+            .clickable { onClick() }
+            .padding(14.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 14.sp,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Text(
+                text = description,
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Icon(
+            imageVector = Icons.Filled.ChevronRight,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(20.dp)
+        )
     }
 }

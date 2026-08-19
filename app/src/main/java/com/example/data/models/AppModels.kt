@@ -267,21 +267,61 @@ data class MusicTrackItem(
     val artist: String = "requestr Audio Engine",
     val durationSec: Int = 184,
     val source: MusicSourceType = MusicSourceType.SYNTH_LOFI,
-    val albumCoverHex: Long = 0xFF1E3A8A
+    val albumCoverHex: Long = 0xFF1E3A8A,
+    val contentUri: String? = null,
+    val albumArtUri: String? = null
 )
 
+enum class AppearanceMode(val displayName: String) {
+    SYSTEM("System"),
+    LIGHT("Light"),
+    DARK("Dark");
+}
+
 data class UserSettingsState(
-    val userName: String = "Hacker",
-    val themeMode: String = "MIDNIGHT",
+    val userName: String = "",
+    val themeMode: String = "MONOCHROME_DARK",
     val cornerRadiusDp: Int = 16,
     val proxyPort: Int = 8080,
     val isVpnActive: Boolean = false,
-    val isRootDetected: Boolean = true,
-    val isShizukuAvailable: Boolean = true,
+    val isRootDetected: Boolean = false,
+    val isShizukuAvailable: Boolean = false,
     val isFridaReady: Boolean = false,
-    val isLsposedInstalled: Boolean = true,
+    val isLsposedInstalled: Boolean = false,
     val autoBeautify: Boolean = true,
     val sslVerification: Boolean = false,
     val defaultSnippetLang: String = "Python - Requests",
-    val onboardingCompleted: Boolean = true
+    val onboardingCompleted: Boolean = false,
+    // Fix 01 — Theme appearance
+    val appearanceMode: String = "SYSTEM",
+    val selectedDarkTheme: String = "MONOCHROME_DARK",
+    // Fix 02 — UI & UX preferences
+    val swipeToDeleteEnabled: Boolean = true,
+    val hapticFeedbackEnabled: Boolean = true,
+    val gestureNavigationEnabled: Boolean = true,
+    val pictureInPictureEnabled: Boolean = false,
+    val tableModeEnabled: Boolean = false,
+    val densityMode: String = "COMFORTABLE",
+    val updateNotificationPolicy: String = "MAJOR_ONLY",
+    val animationEnabled: Boolean = true,
+    val transitionBehavior: String = "STANDARD",
+    val displayScale: String = "NORMAL",
+    // Fix 02 — Features preferences
+    val autoRecordingEnabled: Boolean = false,
+    val trafficLogEnabled: Boolean = true,
+    val recordingNotificationsEnabled: Boolean = true,
+    val remoteControlEnabled: Boolean = false,
+    val remoteCommandsEnabled: Boolean = false,
+    val lanDeviceDiscoveryEnabled: Boolean = false,
+    val deviceBroadcastingEnabled: Boolean = false,
+    val trafficCaptureEnabled: Boolean = true,
+    val requestLoggingEnabled: Boolean = true,
+    val responseLoggingEnabled: Boolean = true,
+    val experimentalFeaturesEnabled: Boolean = false,
+    val developerOptionsEnabled: Boolean = false,
+    // Fix 05 — Music
+    val musicPermissionStatus: String = "NOT_REQUESTED",
+    val musicBarDismissed: Boolean = false,
+    val musicLibraryScanned: Boolean = false,
+    val selectedLocalTrackId: String? = null
 )

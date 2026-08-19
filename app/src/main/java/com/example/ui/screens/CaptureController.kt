@@ -71,6 +71,10 @@ class CaptureController(
                 }
 
                 is PreflightController.Result.Ready -> {
+                    // Fix 04: transition NEVER_CONFIGURED → CONFIGURED_IDLE so the
+                    // HomeScreen power module and InterceptScreen header stop showing
+                    // "Set up Interception" after the user has granted permissions.
+                    InterceptionStateRepository.markConfiguredIdle(result.port)
                     onPrompt(null)
                     val consent = result.consentIntent
                     if (consent != null) {

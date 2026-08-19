@@ -256,30 +256,55 @@ fun RequestrApp() {
                         composable(Screen.Home.route) {
                             HomeScreen(
                                 onNavigateToSection = { section ->
-                                    when (section) {
-                                        "home" -> navController.navigate(Screen.Home.route)
-                                        "intercept" -> navController.navigate(Screen.Intercept.route)
-                                        "apis" -> navController.navigate(Screen.Apis.route)
-                                        "tools" -> navController.navigate(Screen.Tools.route)
-                                        "chats" -> navController.navigate(Screen.Chats.route)
-                                        "notes" -> navController.navigate(Screen.Notes.route)
-                                        "flow" -> navController.navigate(Screen.Flow.route)
-                                        "music" -> navController.navigate(Screen.Music.route)
-                                        "settings" -> navController.navigate(Screen.Settings.route)
+                                    val route = when (section) {
+                                        "home" -> Screen.Home.route
+                                        "intercept" -> Screen.Intercept.route
+                                        "apis" -> Screen.Apis.route
+                                        "tools" -> Screen.Tools.route
+                                        "chats" -> Screen.Chats.route
+                                        "notes" -> Screen.Notes.route
+                                        "flow" -> Screen.Flow.route
+                                        "music" -> Screen.Music.route
+                                        "settings" -> Screen.Settings.route
+                                        else -> Screen.Home.route
+                                    }
+                                    // Fix 04: use same nav options as the pill bar so the
+                                    // back stack doesn't get corrupted and the bottom nav
+                                    // stays responsive after Home shortcuts.
+                                    navController.navigate(route) {
+                                        popUpTo(Screen.Home.route) { saveState = true }
+                                        launchSingleTop = true
+                                        restoreState = true
                                     }
                                 },
                                 onOpenApiRequest = { req ->
                                     ApiCollectionsRepository.setActiveRequest(req)
-                                    navController.navigate(Screen.Apis.route)
+                                    navController.navigate(Screen.Apis.route) {
+                                        popUpTo(Screen.Home.route) { saveState = true }
+                                        launchSingleTop = true
+                                        restoreState = true
+                                    }
                                 },
                                 onOpenTrafficDetail = {
-                                    navController.navigate(Screen.Intercept.route)
+                                    navController.navigate(Screen.Intercept.route) {
+                                        popUpTo(Screen.Home.route) { saveState = true }
+                                        launchSingleTop = true
+                                        restoreState = true
+                                    }
                                 },
                                 onOpenNote = {
-                                    navController.navigate(Screen.Notes.route)
+                                    navController.navigate(Screen.Notes.route) {
+                                        popUpTo(Screen.Home.route) { saveState = true }
+                                        launchSingleTop = true
+                                        restoreState = true
+                                    }
                                 },
                                 onOpenSettings = {
-                                    navController.navigate(Screen.Settings.route)
+                                    navController.navigate(Screen.Settings.route) {
+                                        popUpTo(Screen.Home.route) { saveState = true }
+                                        launchSingleTop = true
+                                        restoreState = true
+                                    }
                                 }
                             )
                         }
@@ -338,7 +363,12 @@ fun RequestrApp() {
 
                         composable(Screen.Settings.route) {
                             SettingsScreen(
-                                onBack = { navController.popBackStack() }
+                                onBack = { navController.popBackStack() },
+                                onReRunWizard = {
+                                    navController.navigate(Screen.Onboarding.route) {
+                                        popUpTo(0) { inclusive = true }
+                                    }
+                                }
                             )
                         }
                     }
@@ -466,7 +496,6 @@ fun SectionSpecificMiniSettings(
                 )
                 GlassCard(
                     modifier = Modifier.fillMaxWidth(),
-                    cornerRadius = 10.dp,
                     backgroundColor = MaterialTheme.colorScheme.surfaceVariant
                 ) {
                     Column(modifier = Modifier.padding(10.dp)) {
@@ -539,7 +568,6 @@ fun MiniSettingToggleRow(
 ) {
     GlassCard(
         modifier = Modifier.fillMaxWidth(),
-        cornerRadius = 12.dp,
         backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
     ) {
         Row(
@@ -591,7 +619,6 @@ fun MiniSettingStatusRow(
 ) {
     GlassCard(
         modifier = Modifier.fillMaxWidth(),
-        cornerRadius = 12.dp,
         backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
     ) {
         Row(

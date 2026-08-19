@@ -151,7 +151,6 @@ fun ApiTestrScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 4.dp),
-            cornerRadius = 14.dp,
             backgroundColor = MaterialTheme.colorScheme.surface
         ) {
             Column(modifier = Modifier.padding(10.dp)) {

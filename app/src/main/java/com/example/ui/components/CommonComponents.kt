@@ -493,7 +493,6 @@ fun MiniPlayerPersistentBar(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 14.dp, vertical = 4.dp),
-        cornerRadius = 14.dp,
         backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.95f),
         borderColor = MaterialTheme.colorScheme.outline,
         onClick = onExpand
@@ -590,7 +589,7 @@ fun HoveredPillNavigationBar(
 ) {
     val navItems = listOf(
         Triple("home", "Home", Icons.Default.Home),
-        Triple("intercept", "Proxy", Icons.Default.Radar),
+        Triple("intercept", "Record", Icons.Default.Radar),
         Triple("apis", "APIs", Icons.Default.Public),
         Triple("tools", "Tools", Icons.Default.Tune),
         Triple("chats", "AI", Icons.Default.Chat),
@@ -778,7 +777,6 @@ fun ContextualActionMenuDialog(
     Dialog(onDismissRequest = onDismiss) {
         GlassCard(
             modifier = Modifier.fillMaxWidth(0.92f),
-            cornerRadius = 20.dp,
             backgroundColor = MaterialTheme.colorScheme.surface,
             borderColor = MaterialTheme.colorScheme.outline
         ) {
@@ -862,7 +860,6 @@ fun ConfirmActionDialog(
     Dialog(onDismissRequest = onDismiss) {
         GlassCard(
             modifier = Modifier.fillMaxWidth(0.92f),
-            cornerRadius = 20.dp,
             backgroundColor = MaterialTheme.colorScheme.surface,
             borderColor = MaterialTheme.colorScheme.outline
         ) {
@@ -967,7 +964,6 @@ fun InPageMiniSettingsSheet(
 
             GlassCard(
                 modifier = Modifier.fillMaxWidth(),
-                cornerRadius = 12.dp,
                 backgroundColor = MaterialTheme.colorScheme.surfaceVariant,
                 onClick = onNavigateFullSettings
             ) {

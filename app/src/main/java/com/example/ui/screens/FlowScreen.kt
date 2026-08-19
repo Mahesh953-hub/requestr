@@ -251,7 +251,6 @@ fun FlowScreen(
                 items(nodes, key = { it.id }) { node ->
                     GlassCard(
                         modifier = Modifier.fillMaxWidth(),
-                        cornerRadius = 14.dp,
                         backgroundColor = MaterialTheme.colorScheme.surface
                     ) {
                         Row(

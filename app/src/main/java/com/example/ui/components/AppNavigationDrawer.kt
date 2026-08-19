@@ -127,7 +127,6 @@ fun AppNavigationDrawer(
                     // Proxy Toggle Status Card
                     GlassCard(
                         modifier = Modifier.fillMaxWidth(),
-                        cornerRadius = 14.dp,
                         backgroundColor = MaterialTheme.colorScheme.surfaceVariant
                     ) {
                         Row(
@@ -301,7 +300,6 @@ fun AppNavigationDrawer(
                     // Settings Button
                     GlassCard(
                         modifier = Modifier.fillMaxWidth(),
-                        cornerRadius = 12.dp,
                         backgroundColor = MaterialTheme.colorScheme.surfaceVariant,
                         onClick = {
                             coroutineScope.launch { drawerState.close() }

@@ -16,16 +16,17 @@ enum class AppThemeMode(val displayName: String, val isLight: Boolean, val sampl
     SOLAR_AMBER("Solar Amber", false, SolarAmberPrimary, SolarAmberBackground)
 }
 
-// 1. Editorial Light (Ivory & Warm Orange)
+// Fix 03 — Editorial Light (primary → warm orange, was near-black causing
+// black-on-black text). Old primary moved to secondary for dark-semantic uses.
 private val EditorialLightColorScheme = lightColorScheme(
-    primary = EditorialLightPrimary,
-    onPrimary = Color.White,
-    primaryContainer = Color(0xFFFDE8D3),
-    onPrimaryContainer = EditorialLightAccent,
-    secondary = EditorialLightAccent,
+    primary = EditorialLightPrimary,            // 0xFFF28C28 warm orange
+    onPrimary = Color(0xFF111111),             // dark text on orange
+    primaryContainer = Color(0xFFFFF1E6),      // lighter warm surface
+    onPrimaryContainer = Color(0xFFB35A0D),    // dark orange text
+    secondary = Color(0xFF111111),             // old primary as secondary
     onSecondary = Color.White,
-    secondaryContainer = Color(0xFFFFF1E6),
-    onSecondaryContainer = Color(0xFFB35A0D),
+    secondaryContainer = Color(0xFFFDE8D3),    // warm cream container
+    onSecondaryContainer = EditorialLightAccent,
     tertiary = Color(0xFF2B2D42),
     background = EditorialLightBackground,
     onBackground = Color(0xFF111111),

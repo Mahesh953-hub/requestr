@@ -145,7 +145,6 @@ fun ToolsScreen(
                 items(filteredTools, key = { it.id }) { tool ->
                     GlassCard(
                         modifier = Modifier.height(120.dp),
-                        cornerRadius = 14.dp,
                         backgroundColor = MaterialTheme.colorScheme.surface,
                         onClick = { activeTool = tool }
                     ) {
