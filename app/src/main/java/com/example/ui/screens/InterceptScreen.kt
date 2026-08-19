@@ -1892,7 +1892,7 @@ fun RulesConfigBottomSheet(
 fun CapturedDetailBottomSheet(
     item: CapturedTrafficItem,
     onDismiss: () -> Unit,
-    onSendToTestr: () -> Unit
+    onSendToTestr: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var selectedTab by remember { mutableIntStateOf(0) }
@@ -2006,6 +2006,13 @@ fun CapturedDetailBottomSheet(
                                 item.responseHeaders.forEach { (k, v) ->
                                     Text("$k: $v", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface)
                                 }
+                                // JWT detection — check Authorization header
+                                val authHeader = item.requestHeaders["Authorization"]
+                                    ?: item.requestHeaders["authorization"]
+                                if (authHeader != null && authHeader.startsWith("Bearer ", ignoreCase = true)) {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    com.example.ui.components.JwtDecoder(token = authHeader.removePrefix("Bearer ").trim())
+                                }
                             }
                         }
                         2 -> item { // Body
@@ -2068,6 +2075,26 @@ fun CapturedDetailBottomSheet(
                             )
                         }
                     }
+                }
+            }
+
+            // ── Actions row: Replay + Export ───────────────────────────
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Button(
+                    onClick = {
+                        onDismiss()
+                        onSendToTestr()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Replay", fontSize = 13.sp)
                 }
             }
 
