@@ -607,6 +607,32 @@ For every item in Parts A, B, and C, before marking complete:
 
 ---
 
+## IMPLEMENTATION NOTES — Design decisions recorded during Part C build-out
+
+**C2 (Request chaining) — Environments picker/editor UI: not built, by
+design.** The plan text for C2 requires: (a) extraction of variables from
+a response into named variables scoped to the active Environment, (b)
+`{{variableName}}` referencing in a subsequent request's URL/headers/body,
+and (c) a visible "Chain" indicator/link between two saved requests. It
+does **not** require a dedicated Environments-list picker/editor UI — the
+app's existing `EnvironmentRepository.active()` / `.substitute()` call
+path already resolves and applies `{{var}}` templates against whichever
+Environment is currently active, so extraction-writes-to-active-Environment
+plus substitution-reads-from-active-Environment satisfies the spec without
+a separate picker screen. Building one would be new scope beyond what C2
+asks for. Verified end-to-end on-device (real network round trip, not a
+mock): a producer request (`GET https://httpbin.org/uuid`) extracted a
+UUID into `{{myUuid}}`; a consumer request
+(`GET https://postman-echo.com/get?token={{myUuid}}`) substituted the
+exact extracted value and received a real `200 OK` echoing it back; the
+Saved APIs screen showed "⬆ Feeds variables to: ..." / "⬇ Uses variables
+from: ..." indicator pills on the two cards; the Environment variable and
+both saved requests (including `chainExtractions`) survived a force-stop
++ relaunch; Settings (C1's unified DataStore) showed no regression after
+the Room schema bump.
+
+---
+
 *End of requestr v3.1 Revision Spec*
 *Read alongside: requestr_stitch_prompt.md (v1), requestr_ai_build_spec.md
 (v2 architecture), requestr_v2.1_revision_spec.md (first bug-fix pass)*

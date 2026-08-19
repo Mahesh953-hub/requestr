@@ -76,6 +76,7 @@ import androidx.compose.ui.unit.sp
 import com.example.data.models.ApiRequestItem
 import com.example.data.models.ApiResponseData
 import com.example.data.models.AuthType
+import com.example.data.models.ChainExtractionRule
 import com.example.data.models.HttpMethod
 import com.example.data.models.KeyValueItem
 import com.example.data.models.RequestBodyType
@@ -206,13 +207,36 @@ fun ApiTestrScreen(
                         onClick = {
                             isLoading = true
                             coroutineScope.launch {
+                                // v3.2 Part C — C2 (Request chaining): substitute {{variableName}}
+                                // in URL, headers, and body — not just the URL as before — so a
+                                // value extracted from an earlier chained request's response can
+                                // be referenced anywhere in this request, per the plan's spec.
                                 val env = com.example.data.env.EnvironmentRepository.active()
-                                val urlWithEnv = com.example.data.env.EnvironmentRepository.substitute(reqState.url, env)
-                                val substitutedState = reqState.copy(url = urlWithEnv)
+                                fun sub(s: String) = com.example.data.env.EnvironmentRepository.substitute(s, env)
+                                val substitutedState = reqState.copy(
+                                    url = sub(reqState.url),
+                                    headers = reqState.headers.map { it.copy(value = sub(it.value)) },
+                                    queryParams = reqState.queryParams.map { it.copy(value = sub(it.value)) },
+                                    bodyContent = sub(reqState.bodyContent),
+                                    bearerToken = sub(reqState.bearerToken),
+                                    apiKeyValue = sub(reqState.apiKeyValue),
+                                )
                                 val resp = ApiTestrRepository.executeRequest(substitutedState, followRedirects)
                                 responseData = resp
                                 isLoading = false
                                 selectedViewMode = 1 // auto toggle to response
+
+                                // Run this request's chain-extraction rules (if any) against the
+                                // response body, writing extracted values into the active
+                                // Environment so a subsequent chained request can pick them up.
+                                if (resp.isSuccess && reqState.chainExtractions.isNotEmpty()) {
+                                    val written = ApiCollectionsRepository.runChainExtractions(reqState, resp.body)
+                                    if (written.isNotEmpty()) {
+                                        showSavedSnackbar(
+                                            "Extracted " + written.keys.joinToString(", ") { "{{$it}}" }
+                                        )
+                                    }
+                                }
                             }
                         },
                         enabled = !isLoading,
@@ -346,7 +370,7 @@ fun ApiTestrScreen(
             // ==========================================
             // REQUEST EDITOR VIEW
             // ==========================================
-            val reqTabs = listOf("Query (${reqState.queryParams.count { it.isEnabled }})", "Headers (${reqState.headers.count { it.isEnabled }})", "Body", "Auth", "Scripts")
+            val reqTabs = listOf("Query (${reqState.queryParams.count { it.isEnabled }})", "Headers (${reqState.headers.count { it.isEnabled }})", "Body", "Auth", "Scripts", "Chain (${reqState.chainExtractions.count { it.enabled }})")
 
             TabRow(
                 selectedTabIndex = requestTab,
@@ -565,6 +589,15 @@ fun ApiTestrScreen(
                                 shape = RoundedCornerShape(10.dp)
                             )
                         }
+                    }
+                    5 -> {
+                        // v3.2 Part C — C2: Request chaining — extraction rules run against this
+                        // request's response, writing named variables into the active
+                        // Environment for a later chained request to reference via {{name}}.
+                        ChainExtractionEditor(
+                            rules = reqState.chainExtractions,
+                            onRulesChanged = { reqState = reqState.copy(chainExtractions = it) }
+                        )
                     }
                 }
             }
@@ -963,6 +996,103 @@ fun KeyValueEditorTable(
 
                     IconButton(
                         onClick = { onItemsChanged(items.filter { it.id != item.id }) },
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.Delete, contentDescription = null, tint = TextMuted, modifier = Modifier.size(16.dp))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ChainExtractionEditor(
+    rules: List<ChainExtractionRule>,
+    onRulesChanged: (List<ChainExtractionRule>) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column {
+                Text("Response Chaining", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = TextPrimary)
+                Text(
+                    "Extract a field from this request's response into a named variable, then reference it as {{name}} in another request's URL, headers, or body.",
+                    color = TextMuted,
+                    fontSize = 11.sp
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Button(
+            onClick = {
+                onRulesChanged(rules + ChainExtractionRule())
+            },
+            shape = RoundedCornerShape(8.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(14.dp), tint = TextPrimary)
+            Spacer(modifier = Modifier.width(4.dp))
+            Text("Add Extraction Rule", fontSize = 11.sp, color = TextPrimary)
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        if (rules.isEmpty()) {
+            Text(
+                "No extraction rules yet. Add one to pull a value out of this request's JSON response body (e.g. path \"token\") and store it as a variable (e.g. \"authToken\") on the active Environment.",
+                color = TextMuted,
+                fontSize = 11.sp
+            )
+        }
+
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            items(rules) { rule ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(
+                        checked = rule.enabled,
+                        onCheckedChange = { enabled ->
+                            onRulesChanged(rules.map { if (it.id == rule.id) it.copy(enabled = enabled) else it })
+                        },
+                        colors = CheckboxDefaults.colors(checkedColor = MaterialTheme.colorScheme.primary)
+                    )
+
+                    OutlinedTextField(
+                        value = rule.jsonPath,
+                        onValueChange = { p ->
+                            onRulesChanged(rules.map { if (it.id == rule.id) it.copy(jsonPath = p) else it })
+                        },
+                        placeholder = { Text("JSON field (e.g. token)", fontSize = 11.sp, color = TextMuted) },
+                        textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = TextPrimary),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp)
+                    )
+
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    OutlinedTextField(
+                        value = rule.variableName,
+                        onValueChange = { v ->
+                            onRulesChanged(rules.map { if (it.id == rule.id) it.copy(variableName = v) else it })
+                        },
+                        placeholder = { Text("Variable name (e.g. authToken)", fontSize = 11.sp, color = TextMuted) },
+                        textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = TextPrimary),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp)
+                    )
+
+                    IconButton(
+                        onClick = { onRulesChanged(rules.filter { it.id != rule.id }) },
                         modifier = Modifier.size(32.dp)
                     ) {
                         Icon(imageVector = Icons.Default.Delete, contentDescription = null, tint = TextMuted, modifier = Modifier.size(16.dp))

@@ -417,6 +417,37 @@ object ApiCollectionsRepository {
             }
         }
     }
+
+    /**
+     * v3.2 Part C — C2 (Request chaining): runs [request]'s enabled
+     * [com.example.data.models.ChainExtractionRule]s against a just-received [responseBody],
+     * using the same top-level-key extractor the Flow Transform node uses
+     * ([com.example.flow.JsonFieldExtractor] — reused, not re-implemented per the plan), and
+     * writes every successful extraction into the active Environment via
+     * [com.example.data.env.EnvironmentRepository.updateEnvironment] so a later request in the
+     * chain can reference it as `{{variableName}}` (substituted by
+     * [com.example.data.env.EnvironmentRepository.substitute]).
+     *
+     * Returns the map of variableName -> extractedValue that was actually written, so the
+     * calling screen can show the user what happened (a rule whose path is not found in the
+     * response is silently skipped, not an error — the request itself already succeeded).
+     */
+    fun runChainExtractions(request: ApiRequestItem, responseBody: String): Map<String, String> {
+        val rules = request.chainExtractions.filter { it.enabled && it.variableName.isNotBlank() }
+        if (rules.isEmpty()) return emptyMap()
+
+        val extracted = linkedMapOf<String, String>()
+        rules.forEach { rule ->
+            com.example.flow.JsonFieldExtractor.extract(responseBody, rule.jsonPath)?.let { value ->
+                extracted[rule.variableName.trim()] = value
+            }
+        }
+        if (extracted.isEmpty()) return emptyMap()
+
+        val env = com.example.data.env.EnvironmentRepository.active()
+        com.example.data.env.EnvironmentRepository.updateEnvironment(env.name, env.variables + extracted)
+        return extracted
+    }
 }
 
 // ==========================================

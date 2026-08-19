@@ -178,6 +178,7 @@ fun SavedApisScreen(
                     ) {
                         SavedApiCard(
                             request = request,
+                            allRequests = allRequests,
                             onClick = { onOpenRequest(request) },
                             onToggleFavorite = {
                                 ApiCollectionsRepository.toggleFavorite(request.id)
@@ -243,10 +244,14 @@ private fun TabChip(
 @Composable
 private fun SavedApiCard(
     request: ApiRequestItem,
+    allRequests: List<ApiRequestItem>,
     onClick: () -> Unit,
     onToggleFavorite: () -> Unit
 ) {
-    Row(
+    val chainTargets = remember(request, allRequests) { chainTargets(request, allRequests) }
+    val chainSources = remember(request, allRequests) { chainSources(request, allRequests) }
+
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
@@ -256,54 +261,147 @@ private fun SavedApiCard(
                 RoundedCornerShape(14.dp)
             )
             .clickable { onClick() }
-            .padding(com.example.ui.theme.LocalAppSpacing.current.cardPadding),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(com.example.ui.theme.LocalAppSpacing.current.cardPadding)
     ) {
-        // Method badge
-        MethodBadge(method = request.method, fontSize = 10)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            // Method badge
+            MethodBadge(method = request.method, fontSize = 10)
 
-        Spacer(modifier = Modifier.width(10.dp))
+            Spacer(modifier = Modifier.width(10.dp))
 
-        // Info
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                request.name,
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 14.sp,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                request.url,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                formatTimestamp(request.updatedAt),
-                fontSize = 10.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-            )
+            // Info
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    request.name,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    request.url,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    formatTimestamp(request.updatedAt),
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            // Favorite toggle
+            IconButton(onClick = onToggleFavorite, modifier = Modifier.size(32.dp)) {
+                Icon(
+                    if (request.isFavorite) Icons.Default.Star else Icons.Default.StarBorder,
+                    "Favorite",
+                    tint = if (request.isFavorite) Color(0xFFF59E0B)
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
         }
 
-        Spacer(modifier = Modifier.width(8.dp))
-
-        // Favorite toggle
-        IconButton(onClick = onToggleFavorite, modifier = Modifier.size(32.dp)) {
-            Icon(
-                if (request.isFavorite) Icons.Default.Star else Icons.Default.StarBorder,
-                "Favorite",
-                tint = if (request.isFavorite) Color(0xFFF59E0B)
-                else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(18.dp)
-            )
+        // v3.2 Part C — C2: explicit "Chain" indicator showing the extraction -> injection
+        // relationship between this saved request and other saved requests, instead of
+        // leaving {{variableName}} matching purely implicit with no visual trace.
+        if (chainTargets.isNotEmpty() || chainSources.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Column {
+                if (chainSources.isNotEmpty()) {
+                    ChainLinkRow(
+                        icon = "⬇",
+                        text = "Uses variables from: ${chainSources.joinToString(", ")}"
+                    )
+                }
+                if (chainTargets.isNotEmpty()) {
+                    ChainLinkRow(
+                        icon = "⬆",
+                        text = "Feeds variables to: ${chainTargets.joinToString(", ")}"
+                    )
+                }
+            }
         }
     }
+}
+
+@Composable
+private fun ChainLinkRow(icon: String, text: String) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f))
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(icon, fontSize = 10.sp, color = MaterialTheme.colorScheme.primary)
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(
+            text,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.primary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+/**
+ * v3.2 Part C — C2 (Request chaining): variable names this request *reads* via `{{name}}`
+ * tokens across its URL, headers, query params, body, and bearer/API-key auth fields. Used to
+ * cross-reference against other saved requests' [chainExtractionVariableNames] so the "Chain"
+ * indicator can show an explicit link instead of relying on the user to remember variable names.
+ */
+private val CHAIN_VAR_REGEX = Regex("\\{\\{\\s*([A-Za-z0-9_]+)\\s*\\}\\}")
+
+private fun referencedChainVariables(request: ApiRequestItem): Set<String> {
+    val haystacks = buildList {
+        add(request.url)
+        add(request.bodyContent)
+        add(request.bearerToken)
+        add(request.apiKeyValue)
+        request.headers.forEach { add(it.value) }
+        request.queryParams.forEach { add(it.value) }
+    }
+    return haystacks
+        .flatMap { CHAIN_VAR_REGEX.findAll(it).map { m -> m.groupValues[1] } }
+        .toSet()
+}
+
+/** Variable names this request *writes* into the active Environment via its chain extraction rules. */
+private fun chainExtractionVariableNames(request: ApiRequestItem): Set<String> =
+    request.chainExtractions
+        .filter { it.enabled && it.variableName.isNotBlank() }
+        .map { it.variableName.trim() }
+        .toSet()
+
+/** Names of other saved requests that consume a variable this [request] extracts. */
+private fun chainTargets(request: ApiRequestItem, all: List<ApiRequestItem>): List<String> {
+    val produced = chainExtractionVariableNames(request)
+    if (produced.isEmpty()) return emptyList()
+    return all
+        .filter { it.id != request.id }
+        .filter { referencedChainVariables(it).intersect(produced).isNotEmpty() }
+        .map { it.name }
+}
+
+/** Names of other saved requests that extract a variable this [request] consumes. */
+private fun chainSources(request: ApiRequestItem, all: List<ApiRequestItem>): List<String> {
+    val consumed = referencedChainVariables(request)
+    if (consumed.isEmpty()) return emptyList()
+    return all
+        .filter { it.id != request.id }
+        .filter { chainExtractionVariableNames(it).intersect(consumed).isNotEmpty() }
+        .map { it.name }
 }
 
 private fun formatTimestamp(millis: Long): String {

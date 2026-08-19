@@ -112,6 +112,8 @@ data class SavedApiRequestEntity(
     val postScript: String = "",
     val isFavorite: Boolean = false,
     val updatedAt: Long = System.currentTimeMillis(),
+    /** v3.2 Part C — C2 (Request chaining): see [com.example.data.models.ChainExtractionRule]. */
+    val chainExtractions: List<SavedChainExtractionRule> = emptyList(),
 )
 
 /**
@@ -125,4 +127,15 @@ data class SavedKeyValue(
     val value: String = "",
     val isEnabled: Boolean = true,
     val description: String = "",
+)
+
+/**
+ * Plain-data mirror of [com.example.data.models.ChainExtractionRule], same rationale as
+ * [SavedKeyValue] above (v3.2 Part C — C2).
+ */
+data class SavedChainExtractionRule(
+    val id: String = "",
+    val jsonPath: String = "",
+    val variableName: String = "",
+    val enabled: Boolean = true,
 )

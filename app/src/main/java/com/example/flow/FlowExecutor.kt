@@ -125,8 +125,7 @@ class FlowExecutor(
         if (path.isEmpty()) return input
 
         return try {
-            val key = path.removePrefix("\$.").removePrefix(".")
-            extractJsonField(input, key) ?: input
+            JsonFieldExtractor.extract(input, path) ?: input
         } catch (_: Exception) {
             input
         }
@@ -156,10 +155,10 @@ class FlowExecutor(
         return adj
     }
 
-    private fun extractJsonField(json: String, key: String): String? {
-        val cleanKey = key.trim().removeSurrounding("\"")
-        val regex = Regex("\"$cleanKey\"\\s*:\\s*\"([^\"]*)\"")
-        return regex.find(json)?.groupValues?.get(1)
-            ?: Regex("\"$cleanKey\"\\s*:\\s*(\\S+)").find(json)?.groupValues?.get(1)
-    }
+    /**
+     * v3.2 Part C — C2: delegates to the shared [JsonFieldExtractor] (moved out during C2 so the
+     * request-chaining feature reuses this exact regex pair instead of re-implementing it).
+     */
+    private fun extractJsonField(json: String, key: String): String? =
+        JsonFieldExtractor.extractByKey(json, key.trim().removeSurrounding("\""))
 }

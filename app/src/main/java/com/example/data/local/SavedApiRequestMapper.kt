@@ -2,6 +2,7 @@ package com.example.data.local
 
 import com.example.data.models.ApiRequestItem
 import com.example.data.models.AuthType
+import com.example.data.models.ChainExtractionRule
 import com.example.data.models.HttpMethod
 import com.example.data.models.KeyValueItem
 import com.example.data.models.RequestBodyType
@@ -32,6 +33,7 @@ internal fun SavedApiRequestEntity.toApiRequestItem(): ApiRequestItem = ApiReque
     postScript = postScript,
     isFavorite = isFavorite,
     updatedAt = updatedAt,
+    chainExtractions = chainExtractions.map { it.toChainExtractionRule() },
 )
 
 internal fun ApiRequestItem.toEntity(): SavedApiRequestEntity = SavedApiRequestEntity(
@@ -55,6 +57,7 @@ internal fun ApiRequestItem.toEntity(): SavedApiRequestEntity = SavedApiRequestE
     postScript = postScript,
     isFavorite = isFavorite,
     updatedAt = updatedAt,
+    chainExtractions = chainExtractions.map { it.toSavedChainExtractionRule() },
 )
 
 private fun SavedKeyValue.toKeyValueItem(): KeyValueItem = KeyValueItem(
@@ -71,4 +74,18 @@ private fun KeyValueItem.toSavedKeyValue(): SavedKeyValue = SavedKeyValue(
     value = value,
     isEnabled = isEnabled,
     description = description,
+)
+
+private fun SavedChainExtractionRule.toChainExtractionRule(): ChainExtractionRule = ChainExtractionRule(
+    id = id,
+    jsonPath = jsonPath,
+    variableName = variableName,
+    enabled = enabled,
+)
+
+private fun ChainExtractionRule.toSavedChainExtractionRule(): SavedChainExtractionRule = SavedChainExtractionRule(
+    id = id,
+    jsonPath = jsonPath,
+    variableName = variableName,
+    enabled = enabled,
 )

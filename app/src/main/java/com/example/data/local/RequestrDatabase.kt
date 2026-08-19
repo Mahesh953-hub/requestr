@@ -19,7 +19,10 @@ import androidx.room.TypeConverters
         InterceptRuleEntity::class,
         SavedApiRequestEntity::class,
     ],
-    version = 2,
+    // v3.2 Part C — C2: bumped 2 -> 3 for SavedApiRequestEntity.chainExtractions. Schema is young;
+    // destructive migration (below) is acceptable pre-1.0 and avoids shipping a broken upgrade
+    // path for a single additive column.
+    version = 3,
     exportSchema = false,
 )
 @TypeConverters(RequestrTypeConverters::class)

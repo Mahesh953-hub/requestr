@@ -54,6 +54,17 @@ class RequestrTypeConverters {
         if (value.isNullOrBlank() || value == "[]") emptyList()
         else runCatching { savedKeyValueListAdapter.fromJson(value) }.getOrNull() ?: emptyList()
 
+    // -- Request chaining extraction rules (C2) -----------------------------------------------
+
+    @TypeConverter
+    fun chainExtractionListToJson(value: List<SavedChainExtractionRule>?): String =
+        if (value.isNullOrEmpty()) "[]" else chainExtractionListAdapter.toJson(value)
+
+    @TypeConverter
+    fun jsonToChainExtractionList(value: String?): List<SavedChainExtractionRule> =
+        if (value.isNullOrBlank() || value == "[]") emptyList()
+        else runCatching { chainExtractionListAdapter.fromJson(value) }.getOrNull() ?: emptyList()
+
     private companion object {
         val moshi: Moshi = Moshi.Builder().addLast(KotlinJsonAdapterFactory()).build()
 
@@ -67,6 +78,10 @@ class RequestrTypeConverters {
 
         val savedKeyValueListAdapter = moshi.adapter<List<SavedKeyValue>>(
             Types.newParameterizedType(List::class.java, SavedKeyValue::class.java)
+        )
+
+        val chainExtractionListAdapter = moshi.adapter<List<SavedChainExtractionRule>>(
+            Types.newParameterizedType(List::class.java, SavedChainExtractionRule::class.java)
         )
     }
 }

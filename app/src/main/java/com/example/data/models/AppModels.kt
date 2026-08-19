@@ -55,7 +55,29 @@ data class ApiRequestItem(
     val preScript: String = "// Pre-request script (JS/Python)\n// setHeader('X-Timestamp', Date.now());",
     val postScript: String = "// Post-response test script\n// assert(response.status === 200);",
     val isFavorite: Boolean = false,
-    val updatedAt: Long = System.currentTimeMillis()
+    val updatedAt: Long = System.currentTimeMillis(),
+    /**
+     * v3.2 Part C — C2 (Request chaining): rules run against this request's *response* after a
+     * successful Send. Each rule extracts one top-level JSON field from the response body and
+     * stores it as a named variable on the active [com.example.data.env.Environment], so a
+     * later request in the same chain can reference it via `{{variableName}}`.
+     */
+    val chainExtractions: List<ChainExtractionRule> = emptyList()
+)
+
+/**
+ * v3.2 Part C — C2 (Request chaining): one "extract a response field into an Environment
+ * variable" rule attached to a saved [ApiRequestItem]. [jsonPath] is fed to
+ * [com.example.flow.JsonFieldExtractor] — the same extractor the Flow Transform node uses — so
+ * chaining and Flow automation share one extraction implementation rather than two.
+ */
+data class ChainExtractionRule(
+    val id: String = UUID.randomUUID().toString(),
+    /** e.g. "token" or "$.token" — top-level JSON key in the response body to extract. */
+    val jsonPath: String = "",
+    /** Name the extracted value is stored under, referenced downstream as `{{variableName}}`. */
+    val variableName: String = "",
+    val enabled: Boolean = true,
 )
 
 data class ApiResponseData(
