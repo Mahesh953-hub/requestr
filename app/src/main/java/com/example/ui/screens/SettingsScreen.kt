@@ -769,6 +769,27 @@ fun SettingsScreen(
                             modifier = Modifier.padding(top = 4.dp)
                         )
 
+                        // Regenerate CA button
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = {
+                                settingsScope.launch {
+                                    runCatching {
+                                        CertificateAuthority.regenerate(settingsContext)
+                                        android.widget.Toast.makeText(settingsContext, "CA regenerated — re-export and re-install", android.widget.Toast.LENGTH_SHORT).show()
+                                        onReprobe()
+                                    }
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+                        ) {
+                            Icon(imageVector = Icons.Default.Refresh, contentDescription = null, tint = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Regenerate CA", color = MaterialTheme.colorScheme.onErrorContainer, fontSize = 12.sp)
+                        }
+
                         // Fix #21 (TODO): auto-promote to system store when root/Shizuku
                         // transitions to GRANTED and CA is in user store. Previously the user
                         // had to manually tap the button. Now we observe the capability state
