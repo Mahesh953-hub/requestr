@@ -135,12 +135,14 @@ class RequestrVpnService : VpnService() {
                     method = CaptureMethod.VPN_TUN,
                 )
 
+                val printUndecoded = prefs.printUndecoded.first()
                 pumpJob = scope.launch {
                     PacketPump(
                         input = FileInputStream(tun.fileDescriptor),
                         output = FileOutputStream(tun.fileDescriptor),
                         sessionId = newId,
                         db = db,
+                        printUndecoded = printUndecoded,
                     ).run(this)
                 }
 

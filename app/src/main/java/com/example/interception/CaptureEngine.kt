@@ -10,6 +10,7 @@ import com.example.interception.http.ParsedHttpMessage
 import com.example.interception.tcp.TcpReassembler
 import com.example.interception.tcp.TcpStream
 import com.example.interception.tls.TlsDecoder
+import kotlinx.coroutines.runBlocking
 
 /**
  * Orchestrates the pipeline: raw tun packets → TCP reassembly → HTTP/TLS
@@ -32,6 +33,7 @@ import com.example.interception.tls.TlsDecoder
 class CaptureEngine(
     private val db: RequestrDatabase,
     private val sessionId: Long,
+    var printUndecoded: Boolean = true,
 ) {
     private val reassembler = TcpReassembler()
     private val pendingRequests = LinkedHashMap<String, ParsedHttpMessage>() // keyed by stream key
@@ -63,13 +65,25 @@ class CaptureEngine(
             if (TlsDecoder.looksLikeTls(clientBytes)) {
                 stream.isTls = true
                 stream.sniHost = TlsDecoder.extractSni(clientBytes)
-                if (stream.sniHost != null) {
-                    Log.i(TAG, "TLS: ${stream.sniHost} (${stream.key})")
-                    // We can't decrypt TLS without MITM. Record the SNI observation
-                    // but do NOT fabricate a transaction — the log stays empty for TLS
-                    // until the MITM layer is built.
+                Log.i(TAG, "TLS: ${stream.sniHost ?: "unknown"} (${stream.key}) bytes=${clientBytes.size}")
+
+                if (printUndecoded) {
+                    val entity = CapturedTrafficEntity(
+                        method = "TLS",
+                        url = "https://${stream.sniHost ?: stream.dstIp}",
+                        host = stream.sniHost ?: "$stream.dstIp:$stream.dstPort",
+                        requestHeaders = mapOf("x-tls-sni" to (stream.sniHost ?: "—"), "x-capture" to "undecoded"),
+                        requestBody = null,
+                        statusCode = 0,
+                        responseHeaders = mapOf("x-undecoded" to "tls-detected", "x-bytes" to "${clientBytes.size}"),
+                        responseBody = clientBytes.take(128).joinToString(" ") { "%02x".format(it) },
+                        timestamp = System.currentTimeMillis(),
+                        sessionId = sessionId,
+                    )
+                    kotlinx.coroutines.runBlocking {
+                        try { db.capturedTrafficDao().insert(entity); transactionCount++; Log.i(TAG, "Undecoded TLS persisted: ${stream.sniHost ?: stream.dstIp}") } catch (_: Exception) {}
+                    }
                 }
-                // Once identified as TLS, clear the buffers — we can't parse HTTP from it
                 stream.clientToServer.reset()
                 stream.serverToClient.reset()
                 return

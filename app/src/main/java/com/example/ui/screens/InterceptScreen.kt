@@ -204,6 +204,8 @@ fun InterceptScreen(
     val configuredPort by settings.proxyPort.collectAsState(initial = SettingsDataStore.DEFAULT_PROXY_PORT)
     val captureRecordMode by settings.captureRecordMode.collectAsState(initial = "VPN")
     val enhancedMode by settings.enhancedMode.collectAsState(initial = false)
+    val loggingEnabled by settings.loggingEnabled.collectAsState(initial = false)
+    val printUndecoded by settings.printUndecoded.collectAsState(initial = true)
 
     // isCapturing is now derived from the real engine status rather than a free-floating boolean.
     val isCapturing = interceptionState.isActive
@@ -560,7 +562,7 @@ fun InterceptScreen(
         if (logEntries.size > 25) logEntries.removeAt(0)
     }
 
-    if (logEntries.isNotEmpty()) {
+    if (loggingEnabled && logEntries.isNotEmpty()) {
         Box(
             Modifier
                 .fillMaxWidth()
@@ -643,8 +645,12 @@ fun InterceptScreen(
             trafficCount = capturedTraffic.size,
             captureRecordMode = captureRecordMode,
             enhancedMode = enhancedMode,
+            loggingEnabled = loggingEnabled,
+            printUndecoded = printUndecoded,
             onRecordModeChange = { mode -> screenScope.launch { settings.setCaptureRecordMode(mode) } },
             onEnhancedModeChange = { on -> screenScope.launch { settings.setEnhancedMode(on) } },
+            onLoggingChange = { on -> screenScope.launch { settings.setLoggingEnabled(on) } },
+            onPrintUndecodedChange = { on -> screenScope.launch { settings.setPrintUndecoded(on) } },
             onOpenApps = {
                 showCaptureSetupSheet = false
                 showAppFilterSheet = true
@@ -1447,8 +1453,12 @@ fun CaptureSetupBottomSheet(
     trafficCount: Int,
     captureRecordMode: String,
     enhancedMode: Boolean,
+    loggingEnabled: Boolean,
+    printUndecoded: Boolean,
     onRecordModeChange: (String) -> Unit,
     onEnhancedModeChange: (Boolean) -> Unit,
+    onLoggingChange: (Boolean) -> Unit,
+    onPrintUndecodedChange: (Boolean) -> Unit,
     onOpenApps: () -> Unit,
     onOpenRules: () -> Unit,
     onOpenCert: () -> Unit,
@@ -1524,6 +1534,28 @@ fun CaptureSetupBottomSheet(
                     Text("Richer packet analysis, dynamic logging, extended trace", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Switch(checked = enhancedMode, onCheckedChange = onEnhancedModeChange)
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // ── Logging ────────────────────────────────────────
+            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Logging Overlay", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
+                    Text("Show debug header + state transition logs on screen", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(checked = loggingEnabled, onCheckedChange = onLoggingChange)
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // ── Print Undecoded ────────────────────────────────
+            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Print Undecoded", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
+                    Text("Show TLS/TCP entries in capture list without decryption", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(checked = printUndecoded, onCheckedChange = onPrintUndecodedChange)
             }
 
             Spacer(modifier = Modifier.height(14.dp))
@@ -1632,12 +1664,20 @@ fun CaptureSetupBottomSheet(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            Text(
-                text = "Local proxy port: $port",
-                fontSize = 11.sp,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            if (captureRecordMode == "PROXY") {
+                Text(
+                    text = "Proxy port: $port",
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                Text(
+                    text = "VPN mode — no port needed. TUN interface captures all IP traffic.",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
 
             Spacer(modifier = Modifier.height(20.dp))
         }

@@ -39,6 +39,7 @@ class PacketPump(
     private val db: RequestrDatabase,
     /** Called for each parsed DNS query (Fix #16). */
     var dnsCallback: ((com.example.interception.dns.DnsParser.DnsQuery, String, Int, String, Int) -> Unit)? = null,
+    printUndecoded: Boolean = true,
 ) {
 
     private var packetCount = 0
@@ -48,7 +49,7 @@ class PacketPump(
     private val activeFlows = LinkedHashMap<String, Long>()
 
     /** TCP reassembly + HTTP/TLS pipeline. Feeds decoded transactions into Room. */
-    private val captureEngine = CaptureEngine(db, sessionId)
+    private val captureEngine = CaptureEngine(db, sessionId, printUndecoded)
 
     suspend fun run(scope: CoroutineScope) {
         val buffer = ByteBuffer.allocate(MAX_PACKET)

@@ -92,6 +92,8 @@ object AppSettingsKeys {
     // v4.2: capture mode selection
     val CAPTURE_RECORD_MODE = stringPreferencesKey("capture_record_mode")  // "VPN" or "PROXY"
     val ENHANCED_MODE = booleanPreferencesKey("enhanced_mode")             // richer logging + analysis
+    val LOGGING_ENABLED = booleanPreferencesKey("logging_enabled")         // show debug overlay
+    val PRINT_UNDECODED = booleanPreferencesKey("print_undecoded")         // show raw TLS/TCP in list
 }
 
 /**
