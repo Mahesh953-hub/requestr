@@ -5,7 +5,10 @@ import android.util.Log
 import com.example.data.interception.ActiveTier
 import com.example.data.interception.CaptureMethod
 import com.example.data.interception.InterceptionStateRepository
+import com.example.data.local.RequestrDatabase
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
@@ -122,6 +125,14 @@ class MitmProxyEngine(
             val target = parts[1]
             val (host, port) = parseHostPort(target, 443)
 
+            // Check intercept rules BEFORE establishing the tunnel
+            val ruleAction = checkInterceptRules(host)
+            if (ruleAction == com.example.data.local.RuleAction.BLOCK) {
+                Log.i(TAG, "BLOCKED by rule: $host")
+                output.write("HTTP/1.1 403 Blocked by requestr\r\n\r\n".toByteArray())
+                return
+            }
+
             // Send 200 to client — we're about to MITM
             output.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray())
             output.flush()
@@ -162,6 +173,25 @@ class MitmProxyEngine(
         } catch (e: Exception) {
             if (running.get()) Log.w(TAG, "Client handler: ${e.message}")
         }
+    }
+
+    // ── Rule enforcement ────────────────────────────────────────────────
+
+    private fun checkInterceptRules(host: String): com.example.data.local.RuleAction? {
+        return try {
+            val db = com.example.data.local.RequestrDatabase.instance
+            if (db == null) return null
+            val rules = kotlinx.coroutines.runBlocking {
+                db.interceptRuleDao().observeAll().first()
+            }
+            for (rule in rules) {
+                if (!rule.enabled) continue
+                if (host.contains(rule.domain, ignoreCase = true)) return rule.action
+                val pattern = rule.pattern
+                if (pattern.isNotBlank() && Regex(pattern).containsMatchIn(host)) return rule.action
+            }
+            null
+        } catch (_: Exception) { null }
     }
 
     // ── Per-host cert generation ────────────────────────────────────────

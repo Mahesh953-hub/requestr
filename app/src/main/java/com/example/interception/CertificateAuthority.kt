@@ -199,4 +199,54 @@ object CertificateAuthority {
                 ((digest[3].toLong() and 0xFF) shl 24)
         String.format("%08x", hash)
     }
+
+    // ── System CA installation (root only) ─────────────────────────
+
+    sealed class SystemInstallResult {
+        data class Success(val path: String) : SystemInstallResult()
+        data class Failure(val reason: String) : SystemInstallResult()
+    }
+
+    suspend fun installToSystem(context: Context): SystemInstallResult = withContext(Dispatchers.IO) {
+        try {
+            val pem = exportPem(context)
+            val certHash = getSubjectHash(context)
+            val apexDir = "/apex/com.android.conscrypt/cacerts"
+            val legacyDir = "/system/etc/security/cacerts"
+            val targetDir = if (java.io.File(apexDir).exists()) apexDir else legacyDir
+            val targetFile = "$targetDir/${certHash}.0"
+
+            val script = """
+                cd /data/local/tmp
+                cat > requestr_ca.pem << 'REOF'
+$pem
+REOF
+                if [ -d "$apexDir" ]; then
+                    mount -t tmpfs tmpfs "$apexDir" 2>/dev/null
+                    cp /system/etc/security/cacerts/* "$apexDir/" 2>/dev/null
+                fi
+                mount -o rw,remount "$targetDir" 2>/dev/null || mount -o rw,remount /system 2>/dev/null
+                cp -f /data/local/tmp/requestr_ca.pem "$targetFile"
+                chown root:root "$targetFile" 2>/dev/null
+                chmod 644 "$targetFile"
+                chcon u:object_r:system_file:s0 "$targetFile" 2>/dev/null
+                mount -o ro,remount "$targetDir" 2>/dev/null || mount -o ro,remount /system 2>/dev/null
+            """.trimIndent()
+
+            val proc = Runtime.getRuntime().exec(arrayOf("su", "-c", script))
+            val exit = proc.waitFor()
+            val err = proc.errorStream.bufferedReader().use { it.readText() }
+            if (exit == 0) SystemInstallResult.Success(targetFile)
+            else SystemInstallResult.Failure("exit=$exit: $err")
+        } catch (e: Exception) {
+            SystemInstallResult.Failure(e.message ?: "unknown")
+        }
+    }
+
+    /** Delete the CA material and regenerate fresh. */
+    suspend fun regenerate(context: Context) = withContext(Dispatchers.IO) {
+        java.io.File(context.cacheDir, "requestr_ca.pem").delete()
+        java.io.File(context.cacheDir, "requestr_ca_key.pkcs8").delete()
+        getOrCreate(context)
+    }
 }
