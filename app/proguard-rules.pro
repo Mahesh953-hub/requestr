@@ -164,6 +164,13 @@
 # ── Repositories ────────────────────────────────────────────────────
 -keep class com.example.data.repository.** { *; }
 
+# ── Plugin system ───────────────────────────────────────────────────
+-keep class com.example.plugin.** { *; }
+-keep interface com.example.plugin.Plugin { *; }
+
+# ── Local API server ────────────────────────────────────────────────
+-keep class com.example.api.** { *; }
+
 # ── Preserve line numbers for crash stack traces ───────────────────
 -keepattributes SourceFile,LineNumberTable
 -renamesourcefileattribute SourceFile

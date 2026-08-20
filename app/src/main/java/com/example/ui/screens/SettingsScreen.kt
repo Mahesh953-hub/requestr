@@ -26,8 +26,10 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
@@ -511,6 +513,95 @@ fun SettingsScreen(
                                 Text(desc, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
+                    }
+                }
+            }
+
+            // Section 5.5: Local REST API & CLI
+            item {
+                SettingsSectionHeader("LOCAL REST API & CLI")
+                GlassCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    backgroundColor = MaterialTheme.colorScheme.surface
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(imageVector = Icons.Default.Terminal, contentDescription = "Terminal", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Embedded HTTP API Server", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text("Exposes captures, flows, tools, rules, and sessions on 127.0.0.1:9876 for CLI and automation access.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column {
+                                Text(if (com.example.api.LocalApiServer.isRunning) "Server running on port 9876" else "Server stopped", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
+                                if (com.example.api.LocalApiServer.isRunning) {
+                                    Text("curl http://127.0.0.1:9876/api/ping", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = MaterialTheme.colorScheme.primary)
+                                }
+                            }
+                            Switch(
+                                checked = com.example.api.LocalApiServer.isRunning,
+                                onCheckedChange = { checked ->
+                                    if (checked) {
+                                        com.example.api.LocalApiServer.start(9876)
+                                    } else {
+                                        com.example.api.LocalApiServer.stop()
+                                    }
+                                }
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("CLI module available at cli/build/libs/cli-all.jar. Run with: java -jar cli-all.jar --api-base http://127.0.0.1:9876 captures", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+
+            // Section 5.6: Plugin Manager
+            item {
+                SettingsSectionHeader("PLUGIN MANAGER")
+                GlassCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    backgroundColor = MaterialTheme.colorScheme.surface
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        val plugins = com.example.plugin.PluginManager.plugins.collectAsState()
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(imageVector = Icons.Default.Extension, contentDescription = "Plugin", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Installed Plugins", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        if (plugins.value.isEmpty()) {
+                            Text("No plugins loaded", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        } else {
+                            plugins.value.values.forEach { entry ->
+                                val p = entry.plugin
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("${p.name} v${p.version}", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
+                                        Text(p.description, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text("${p.author} · ${entry.permissions.size} permissions", fontSize = 9.sp, color = MaterialTheme.colorScheme.primary)
+                                    }
+                                    Switch(
+                                        checked = entry.enabled,
+                                        onCheckedChange = { on ->
+                                            com.example.plugin.PluginManager.setPluginEnabled(p.id, on)
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text("External plugins: /sdcard/requestr/plugins/*.jar", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }

@@ -27,3 +27,4 @@ dependencyResolutionManagement {
 rootProject.name = "requestr"
 
 include(":app")
+include(":cli")

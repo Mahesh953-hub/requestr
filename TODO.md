@@ -114,11 +114,11 @@ These are polish items, future roadmap features, or items that don't affect curr
 
 - [x] 46. **Schema Reconstruction** — Infer JSON Schema / OpenAPI / TypeScript / Python types from response bodies. Files: new `data/analysis/SchemaReconstructor.kt`
 
-- [ ] 47. **Plugin architecture** — Plugin lifecycle + permissions + custom decoders/tools. Files: new subsystem
+- [x] 47. **Plugin architecture** — Plugin interface (lifecycle, permissions, hooks: onBeforeRequest/onAfterResponse/customDecode/executeCustomTool). PluginManager (built-in + external DexClassLoader). JsonPrettifierPlugin example. Settings toggle. Files: `plugin/Plugin.kt`, `plugin/PluginManager.kt`, `plugin/JsonPrettifierPlugin.kt`
 
-- [ ] 48. **Local API** — REST endpoints for captures/flows/tools/rules/sessions. Files: new subsystem
+- [x] 48. **Local API** — Embedded HTTP/1.1 server (127.0.0.1:9876). Endpoints: /api/captures, /api/flows, /api/tools, /api/rules, /api/plugin/execute, /api/ping, /api/status. Settings toggle. Files: `api/LocalApiServer.kt`
 
-- [ ] 49. **CLI** — Command-line interface sharing core with Android. Files: new module
+- [x] 49. **CLI** — Standalone `:cli` Gradle module. Commands: captures, flow create/execute/delete, tools, tool exec, rules, plugin, status, ping. Fat JAR. Files: `cli/` subproject
 
 - [x] 50. **Workspace system** — Import/export workspaces (environments, captures, requests, flows, rules, mocks, tools, schemas, collections, history). Files: new subsystem
 
@@ -137,6 +137,6 @@ These are polish items, future roadmap features, or items that don't affect curr
 | v3.9 | Custom tools, Chats, Diff view, HAR import, API Discovery, Schema, Workspace | 2026-08-20 |
 | v4.0 | **ProGuard fix** (-dontoptimize + comprehensive keep rules → APK 10→15MB), **MediaPlayer** audio playback, custom tools in catalog, Chat nav wiring, GlassCard border fix, keyboard shortcuts | 2026-08-20 |
 
-**Remaining (separate modules):** #47 Plugin architecture, #48 Local API, #49 CLI
+**Remaining (separate modules):** ~~#47 Plugin architecture~~, ~~#48 Local API~~, ~~#49 CLI~~ — ALL DONE in v4.0
 
 *This file is the single source of truth for remaining work. Update it as items are completed.*

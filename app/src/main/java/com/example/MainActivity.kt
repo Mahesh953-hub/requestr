@@ -163,6 +163,14 @@ class MainActivity : ComponentActivity() {
         kotlinx.coroutines.MainScope().launch(kotlinx.coroutines.Dispatchers.IO) {
             com.example.data.interception.CaptureLogRepository.seedDefaultRules(applicationContext)
         }
+        // v4.0: Register built-in plugins at startup
+        com.example.plugin.PluginManager.registerBuiltinPlugins(listOf(
+            com.example.plugin.JsonPrettifierPlugin()
+        ))
+        // v4.0: Scan for external plugins on /sdcard/requestr/plugins/
+        com.example.plugin.PluginManager.scanExternalPlugins(applicationContext)
+        // v4.0: Initialize Local API server (doesn't start it)
+        com.example.api.LocalApiServer.init(applicationContext)
         // v3.2 Part C (C1): loads persisted Environments from the unified DataStore (was never
         // initialised before C1, so ApiTestrScreen's EnvironmentRepository.active() always read
         // the in-memory seed defaults only — now it reflects migrated + newly-saved data too).
