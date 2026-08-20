@@ -923,12 +923,12 @@ fun FridaScriptsBottomSheet(
             CapabilityStatusCard(
                 title = "frida-server on 127.0.0.1:27042",
                 description = when (fridaState) {
-                    FridaState.RUNNING -> "Reachable. SSL-pinning bypass scripts can be attached with the Frida CLI from your workstation."
+                    FridaState.RUNNING -> "frida-server detected on port 27042. Note: in-app injection is not yet implemented — use Frida CLI from your workstation."
                     FridaState.NOT_RUNNING -> "Not reachable. Push and start frida-server on this device (requires root), then re-check."
                     FridaState.UNKNOWN -> "Not probed yet."
                 },
                 statusLabel = when (fridaState) {
-                    FridaState.RUNNING -> "Running"
+                    FridaState.RUNNING -> "Detected (CLI only)"
                     FridaState.NOT_RUNNING -> "Not running"
                     FridaState.UNKNOWN -> "Unknown"
                 },

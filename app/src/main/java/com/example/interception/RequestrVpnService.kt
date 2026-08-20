@@ -27,6 +27,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -48,6 +51,7 @@ class RequestrVpnService : VpnService() {
     private var tunInterface: ParcelFileDescriptor? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var pumpJob: Job? = null
+    private var filterObserverJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO)
     private var sessionId: Long? = null
 
@@ -141,6 +145,25 @@ class RequestrVpnService : VpnService() {
                 }
 
                 Log.i(TAG, "Capture started on tun, session=$newId port=$port")
+
+                // Fix #2 (TODO): Hot-reload app filter. VpnService.Builder doesn't
+                // support dynamic app list changes after establish(), so we tear down
+                // and re-establish the tun when the user changes the filter.
+                filterObserverJob?.cancel()
+                filterObserverJob = scope.launch {
+                    val prefs2 = SettingsDataStore.get(applicationContext)
+                    combine(
+                        prefs2.selectedPackages,
+                        prefs2.appFilterMode
+                    ) { pkgs, mode -> Pair(pkgs, mode) }
+                        .drop(1) // skip initial emission = current state
+                        .collect { (_, _) ->
+                            Log.i(TAG, "App filter changed, restarting VPN tunnel")
+                            stopCapture("Filter changed — restarting")
+                            delay(500)
+                            startCapture()
+                        }
+                }
             } catch (t: Throwable) {
                 if (t is kotlinx.coroutines.CancellationException) throw t
                 fail("Capture failed to start: ${t.message ?: t::class.java.simpleName}")
@@ -170,6 +193,8 @@ class RequestrVpnService : VpnService() {
     }
 
     private fun cleanup() {
+        filterObserverJob?.cancel()
+        filterObserverJob = null
         pumpJob?.cancel()
         pumpJob = null
         runCatching { tunInterface?.close() }

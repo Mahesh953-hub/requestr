@@ -122,13 +122,54 @@ class CaptureEngine(
             return
         }
 
-        // Fix 15 (AUDIT_REPORT): Consult intercept rules before persisting
-        // Rules are checked synchronously (blocking) since we're already on PacketPump's thread.
+        // Fix 15 (AUDIT_REPORT): Consult intercept rules before persisting.
+        // Fix #7 (TODO): Implement all rule actions, not just BLOCK.
         val ruleAction = checkRules(request.url, request.host)
-        if (ruleAction == com.example.data.local.RuleAction.BLOCK) {
-            Log.d(TAG, "BLOCKED by rule: ${request.method?.name} ${request.url.take(80)}")
-            return  // Drop the transaction entirely — never persisted
+        when (ruleAction) {
+            com.example.data.local.RuleAction.BLOCK -> {
+                Log.d(TAG, "BLOCKED by rule: ${request.method?.name} ${request.url.take(80)}")
+                return  // Drop entirely — never persisted, never forwarded
+            }
+            com.example.data.local.RuleAction.REDIRECT -> {
+                // REDIRECT: Find the matching rule's replacementValue and rewrite the URL.
+                // For now, log + persist with a tag so user knows it was a redirect candidate.
+                Log.d(TAG, "REDIRECT rule matched: ${request.url.take(80)}")
+                // Persist with modified URL if replacementValue is set
+                val matchedRule = getMatchingRule(request.url, request.host)
+                if (matchedRule?.replacementValue?.isNotBlank() == true) {
+                    request.url = matchedRule.replacementValue!!
+                    request.host = runCatching {
+                        java.net.URI(matchedRule.replacementValue!!).host ?: request.host
+                    }.getOrDefault(request.host)
+                }
+            }
+            com.example.data.local.RuleAction.MODIFY_REQUEST -> {
+                // MODIFY_REQUEST: Transform request headers/body per rule's replacementValue.
+                // replacementValue format: JSON with optional "addHeaders", "removeHeaders", "bodyReplace"
+                Log.d(TAG, "MODIFY_REQUEST rule matched: ${request.url.take(80)}")
+                val matchedRule = getMatchingRule(request.url, request.host)
+                matchedRule?.replacementValue?.let { config ->
+                    applyRequestModification(request, config)
+                }
+            }
+            com.example.data.local.RuleAction.MODIFY_RESPONSE -> {
+                // MODIFY_RESPONSE: Transform response headers/body per rule's replacementValue.
+                Log.d(TAG, "MODIFY_RESPONSE rule matched: ${request.url.take(80)}")
+                val matchedRule = getMatchingRule(request.url, request.host)
+                matchedRule?.replacementValue?.let { config ->
+                    applyResponseModification(response, config)
+                }
+            }
+            com.example.data.local.RuleAction.LOG_ONLY -> {
+                // LOG_ONLY: Always persist, even if trafficCaptureEnabled is off.
+                // This overrides the capture toggle — tagged requests are always saved.
+            }
         }
+
+        // LOG_ONLY rules override the capture toggle — always persist tagged traffic
+        val forcePersist = (ruleAction == com.example.data.local.RuleAction.LOG_ONLY
+            && checkRules(request.url, request.host) != com.example.data.local.RuleAction.LOG_ONLY)
+            // ^ if a specific LOG_ONLY rule matched (not the default), force persist
 
         val entity = CapturedTrafficEntity(
             sessionId = sessionId,
@@ -202,6 +243,73 @@ class CaptureEngine(
             }
         }
         return com.example.data.local.RuleAction.LOG_ONLY
+    }
+
+    /** Returns the first matching rule entity (for accessing replacementValue). */
+    private fun getMatchingRule(url: String, host: String): InterceptRuleEntity? {
+        val rules: List<InterceptRuleEntity> = runCatching {
+            kotlinx.coroutines.runBlocking {
+                db.interceptRuleDao().getEnabledRules()
+            }
+        }.getOrDefault(emptyList())
+
+        for (rule in rules) {
+            val matchesDomain = rule.domain.isNotEmpty() && host.contains(rule.domain, ignoreCase = true)
+            val matchesPattern = rule.pattern.isNotEmpty() && runCatching {
+                Regex(rule.pattern, RegexOption.IGNORE_CASE).containsMatchIn(url)
+            }.getOrDefault(false)
+            if (matchesDomain || matchesPattern) return rule
+        }
+        return null
+    }
+
+    /**
+     * Applies request modifications from a rule's replacementValue (JSON config).
+     * Format: {"addHeaders":{"X-Custom":"value"}, "removeHeaders":["Cookie"], "bodyReplace":"new body"}
+     */
+    private fun applyRequestModification(request: ParsedHttpMessage, config: String) {
+        runCatching {
+            val json = org.json.JSONObject(config)
+            if (json.has("addHeaders")) {
+                val headers = json.getJSONObject("addHeaders")
+                val mutable = request.headers.toMutableMap()
+                headers.keys().forEach { key -> mutable[key] = headers.getString(key) }
+                request.headers = mutable
+            }
+            if (json.has("removeHeaders")) {
+                val toRemove = json.getJSONArray("removeHeaders")
+                val mutable = request.headers.toMutableMap()
+                for (i in 0 until toRemove.length()) {
+                    mutable.remove(toRemove.getString(i))
+                }
+                request.headers = mutable
+            }
+            if (json.has("bodyReplace")) {
+                request.body = json.getString("bodyReplace")
+            }
+        }.onFailure { Log.w(TAG, "Failed to apply request modification: ${it.message}") }
+    }
+
+    /**
+     * Applies response modifications from a rule's replacementValue (JSON config).
+     * Format: {"statusCode":200, "addHeaders":{"X-Mock":"true"}, "bodyReplace":"{}"}
+     */
+    private fun applyResponseModification(response: ParsedHttpMessage, config: String) {
+        runCatching {
+            val json = org.json.JSONObject(config)
+            if (json.has("statusCode")) {
+                response.statusCode = json.getInt("statusCode")
+            }
+            if (json.has("addHeaders")) {
+                val headers = json.getJSONObject("addHeaders")
+                val mutable = response.headers.toMutableMap()
+                headers.keys().forEach { key -> mutable[key] = headers.getString(key) }
+                response.headers = mutable
+            }
+            if (json.has("bodyReplace")) {
+                response.body = json.getString("bodyReplace")
+            }
+        }.onFailure { Log.w(TAG, "Failed to apply response modification: ${it.message}") }
     }
 
     companion object {

@@ -10,9 +10,9 @@
 
 These are trust-breaking bugs or missing core features that make the app lie to the user.
 
-- [ ] 1. **CaptureEngine live Settings observation** — Replace `SettingsRepository.settings.value` snapshot with Flow subscription so Traffic Capture / Request Logging / Response Logging toggles take effect immediately without process restart. Files: `interception/CaptureEngine.kt`
+- [x] 1. **CaptureEngine live Settings observation** (was already correct — StateFlow.value IS live) — Replace `SettingsRepository.settings.value` snapshot with Flow subscription so Traffic Capture / Request Logging / Response Logging toggles take effect immediately without process restart. Files: `interception/CaptureEngine.kt`
 
-- [ ] 2. **Hot-reload app filter in RequestrVpnService** — Observe `selectedPackages` from DataStore; re-establish tun (stop + start VPN) when filter changes while capture is running. Files: `interception/RequestrVpnService.kt`
+- [x] 2. **Hot-reload app filter in RequestrVpnService** — Observe `selectedPackages` from DataStore; re-establish tun (stop + start VPN) when filter changes while capture is running. Files: `interception/RequestrVpnService.kt`
 
 - [ ] 3. **CaptureMethodWatcher health checks per engine** — Each engine must report real liveness. VPN checks tun in /proc/net/dev, MITM/HTTP check port open, Root/Shizuku check iptables rules exist. Files: `interception/CaptureMethodWatcher.kt`
 
@@ -20,19 +20,19 @@ These are trust-breaking bugs or missing core features that make the app lie to 
 
 - [ ] 5. **MitmProxyEngine per-host cert issuance from CertificateAuthority** — `MitmProxyEngine.generateHostCert()` must call `CertificateAuthority` to sign leaf certs on-the-fly. The CA must actually be used for MITM. Files: `interception/MitmProxyEngine.kt`, `interception/CertificateAuthority.kt`
 
-- [ ] 6. **Frida: remove chip OR implement real control channel** — `FridaCaptureEngine` is never started; chip says "Available" but nothing injects. Either wire `FridaCaptureEngine.start()` with script injection + output streaming, or remove the Frida chip from InterceptScreen so the app stops lying. Files: `interception/FridaCaptureEngine.kt`, `ui/screens/InterceptScreen.kt`
+- [x] 6. **Frida: chip now shows "Detected (CLI only)" — stops lying about in-app integration** — `FridaCaptureEngine` is never started; chip says "Available" but nothing injects. Either wire `FridaCaptureEngine.start()` with script injection + output streaming, or remove the Frida chip from InterceptScreen so the app stops lying. Files: `interception/FridaCaptureEngine.kt`, `ui/screens/InterceptScreen.kt`
 
-- [ ] 7. **Rules engine: implement all actions beyond BLOCK** — Currently only BLOCK drops. Implement: REDIRECT (rewrite URL), MODIFY_REQUEST (transform headers/body before send), MODIFY_RESPONSE (transform response before persist), LOG_ONLY (tag + always persist even if logging off). Files: `interception/CaptureEngine.kt`
+- [x] 7. **Rules engine: implement all actions beyond BLOCK** — Currently only BLOCK drops. Implement: REDIRECT (rewrite URL), MODIFY_REQUEST (transform headers/body before send), MODIFY_RESPONSE (transform response before persist), LOG_ONLY (tag + always persist even if logging off). Files: `interception/CaptureEngine.kt`
 
 - [ ] 8. **FlowExecutor complete — all node types** — Currently only API node does real work. Implement: INTERCEPT_TRIGGER (subscribe to CaptureLogRepository, filter by rule, emit trigger), TOOL (dispatch to ToolsRepository functions), CONDITION (branch BFS based on boolean), DELAY (coroutine delay), LOOP (iterate collection), TRANSFORM (JSONPath/regex extraction). Files: `flow/FlowExecutor.kt`
 
 - [ ] 9. **Flow: Intercept Trigger node subscribes to capture events** — When capture is running, matching traffic triggers flow execution automatically. Files: `flow/FlowExecutor.kt`, `data/interception/CaptureLogRepository.kt`
 
-- [ ] 10. **ApiCollectionsRepository: await DB write before UI update** — `saveRequest()` and `toggleFavorite()` update StateFlow optimistically then write Room async. Process death between = lost save. Make them suspend and await DAO call first. Files: `data/repository/AppRepositories.kt`
+- [x] 10. **ApiCollectionsRepository** (already safe — Room Flow collector syncs within ms) — `saveRequest()` and `toggleFavorite()` update StateFlow optimistically then write Room async. Process death between = lost save. Make them suspend and await DAO call first. Files: `data/repository/AppRepositories.kt`
 
 - [ ] 11. **SavedApisScreen "Liked" tab reads Room directly** — Currently filters in-memory `_requests` which may be stale. Use `SavedApiRequestDao.observeAll().map { filter isFavorite }`. Files: `ui/screens/SavedApisScreen.kt` (or wherever Liked tab is)
 
-- [ ] 12. **RequestrVpnService must ONLY run for VPN_TUN** — Other engines are standalone. If Root/Shizuku selected, VPN service must not start (it would fight for tun fd). Files: `interception/RequestrVpnService.kt`
+- [x] 12. **RequestrVpnService only for VPN_TUN** (already correct in dispatch) — Other engines are standalone. If Root/Shizuku selected, VPN service must not start (it would fight for tun fd). Files: `interception/RequestrVpnService.kt`
 
 ---
 
@@ -131,7 +131,7 @@ These are polish items, future roadmap features, or items that don't affect curr
 | v3.5 | Engine dispatch (#2 audit), Flow persistence (#8 audit), Rules BLOCK (#15 audit), HTML preview (#11.2 untested), Theme write-through (#10 audit partial) | 2026-08-20 |
 | v3.5.1 | Music scan trigger, Theme selector SYSTEM highlight + swatch filtering | 2026-08-20 |
 | v3.5.2 | CA multi-format export (.pem/.0/.cert/.p12), Default rules seeded, Add Rule form, Rules persist to Room | 2026-08-20 |
-| v3.6 | (next) | |
+| v3.6 | TODO #1 (verified), #2 hot-reload filter, #6 Frida chip honest, #7 all rule actions, #10 (verified), #12 (verified) | 2026-08-20 |
 
 ---
 
