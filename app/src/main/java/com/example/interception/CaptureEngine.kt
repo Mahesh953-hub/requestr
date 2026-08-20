@@ -4,7 +4,6 @@ import android.util.Log
 import com.example.data.local.CapturedTrafficEntity
 import com.example.data.local.InterceptRuleEntity
 import com.example.data.local.RequestrDatabase
-import com.example.data.repository.SettingsRepository
 import com.example.interception.http.HttpParser
 import com.example.interception.http.ParsedHttpMessage
 import com.example.interception.tcp.TcpReassembler
@@ -35,6 +34,7 @@ class CaptureEngine(
     private val sessionId: Long,
     var printUndecoded: Boolean = true,
     var dumpToFile: Boolean = false,
+    var captureEnabled: Boolean = true,
 ) {
     private val dumpFile: java.io.File? by lazy {
         if (!dumpToFile) null else {
@@ -189,15 +189,8 @@ class CaptureEngine(
         response: ParsedHttpMessage,
         stream: TcpStream,
     ) {
-        // Fix 06 (AUDIT_REPORT): Previously read SettingsRepository.settings.value (stale
-        // snapshot). Now we read via .value on the StateFlow which IS the live-collected state
-        // from DataStore. The StateFlow is hot — its .value IS the latest emission, so this is
-        // always the most recent toggle state without needing a coroutine collect here.
-        // The actual fix is ensuring CaptureEngine checks at persistence time (which it does).
-        val settings = SettingsRepository.settings.value
-        if (!settings.trafficCaptureEnabled) {
-            return
-        }
+        // v5: captureEnabled flag passed from RequestrVpnService (reads live settings at start)
+        if (!captureEnabled) return
 
         // Fix 15 (AUDIT_REPORT): Consult intercept rules before persisting.
         // Fix #7 (TODO): Implement all rule actions, not just BLOCK.

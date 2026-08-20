@@ -171,6 +171,12 @@
 # ── Local API server ────────────────────────────────────────────────
 -keep class com.example.api.** { *; }
 
+# ── v5 new classes ──────────────────────────────────────────────────
+-keep class com.example.interception.OkHttpProxyInterceptor { *; }
+-keep class com.example.interception.MitmProxyEngine { *; }
+-keep class com.example.interception.CertificateAuthority$SystemInstallResult { *; }
+-keep class com.example.data.local.CapturedTrafficEntity { *; }
+
 # ── Preserve line numbers for crash stack traces ───────────────────
 -keepattributes SourceFile,LineNumberTable
 -renamesourcefileattribute SourceFile
