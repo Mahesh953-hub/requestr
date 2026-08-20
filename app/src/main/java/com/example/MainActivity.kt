@@ -62,10 +62,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
-import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.compose.NavHost
@@ -353,27 +349,8 @@ fun RequestrApp() {
         var isMiniPlayerDismissed by remember { mutableStateOf(false) }
         val showPillNav = currentRoute in rootRoutes && settings.onboardingCompleted
 
-        // ── Scroll-driven nav pill collapse/expand signals ──────
-        var scrollCollapseSignal by remember { mutableStateOf(false) }
-        var scrollExpandSignal by remember { mutableStateOf(false) }
-        val scrollConnection = remember {
-            object : NestedScrollConnection {
-                override fun onPreScroll(available: Offset, source: androidx.compose.ui.input.nestedscroll.NestedScrollSource): Offset {
-                    if (available.y < -2f) {
-                        scrollCollapseSignal = true; scrollExpandSignal = false
-                    } else if (available.y > 2f) {
-                        scrollCollapseSignal = false; scrollExpandSignal = true
-                    }
-                    return Offset.Zero
-                }
-                override suspend fun onPreFling(available: Velocity): Velocity {
-                    if (available.y < -500f) {
-                        scrollCollapseSignal = true; scrollExpandSignal = false
-                    }
-                    return Velocity.Zero
-                }
-            }
-        }
+        // Scroll-driven auto-collapse removed per user feedback:
+        // the pill stays open until manual swipe — tap only expands.
 
         AppNavigationDrawer(
             drawerState = drawerState,
@@ -392,9 +369,7 @@ fun RequestrApp() {
             }
         ) {
             Scaffold(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .nestedScroll(scrollConnection),
+                modifier = Modifier.fillMaxSize(),
                 containerColor = MaterialTheme.colorScheme.background,
                 bottomBar = {
                     if (showPillNav) {
@@ -429,9 +404,7 @@ fun RequestrApp() {
                                             restoreState = true
                                         }
                                     }
-                                },
-                                scrollSignalCollapse = scrollCollapseSignal,
-                                scrollSignalExpand = scrollExpandSignal
+                                }
                             )
                         }
                     }

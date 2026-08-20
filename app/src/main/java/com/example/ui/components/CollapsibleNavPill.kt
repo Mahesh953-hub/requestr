@@ -11,14 +11,15 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -35,6 +36,7 @@ import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -47,32 +49,22 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
-import kotlin.math.roundToInt
 
-// ─── State machine ───────────────────────────────────────────────
+// ─── Data ────────────────────────────────────────────────────────
 
-enum class NavPillState { Expanded, Collapsing, Collapsed, Expanding }
+data class NavDestination(val route: String, val label: String, val icon: ImageVector)
 
-data class NavDestination(
-    val route: String,
-    val label: String,
-    val icon: ImageVector
-)
-
-private val NAV_DESTINATIONS = listOf(
+private val NAV = listOf(
     NavDestination("home", "Home", Icons.Default.Home),
     NavDestination("intercept", "Intercept", Icons.Default.Radar),
     NavDestination("apis", "APIs", Icons.Default.Public),
@@ -84,178 +76,169 @@ private val NAV_DESTINATIONS = listOf(
 // ─── Main composable ─────────────────────────────────────────────
 
 /**
- * Floating glassmorphic navigation pill per requestr_nav_pill_spec.md.
+ * Floating glassmorphic navigation pill.
  *
- * States: Expanded → (swipe up / scroll down) → Collapsing → Collapsed
- *         Collapsed → (tap / scroll up) → Expanding → Expanded
- *
- * The music mini-player row above is rendered by the caller as an
- * independent element — the pill never controls it.
+ * - NO parent container — the pill is the only rendered element.
+ * - TAP the collapsed pill → EXPAND only (never toggle-close).
+ * - SWIPE up on expanded pill → collapse to icon+label (width hugs the chip).
+ * - Collapsed width exactly matches the active chip; no extra dead space.
+ * - No gray ripple — only colour feedback on active/inactive states.
+ * - Glassy transparent background, hairline border, soft shadow.
  */
 @Composable
 fun CollapsibleNavPill(
     currentRoute: String,
     onNavigate: (String) -> Unit,
-    scrollSignalCollapse: Boolean = false,
-    scrollSignalExpand: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    var pillState by remember { mutableStateOf(NavPillState.Expanded) }
+    val activeIdx = NAV.indexOfFirst { it.route == currentRoute }.coerceAtLeast(0)
     val coroutineScope = rememberCoroutineScope()
-    val collapseProgress = remember { Animatable(0f) }
 
-    // Gesture-driven drag offset (for manual swipe)
+    // ── State: Expanded (full pill) | Collapsed (icon+label chip) ──
+    var isCollapsed by remember { mutableStateOf(false) }
+
+    // ── Animated progress: 0 = expanded, 1 = collapsed ─────────────
+    val animateProgress = remember { Animatable(0f) }
+    val progress by animateFloatAsState(
+        targetValue = animateProgress.value,
+        animationSpec = spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessLow),
+        label = "pillProgress"
+    )
+
+    // Drag offset for gesture tracking
     var dragOffset by remember { mutableFloatStateOf(0f) }
 
-    // ── React to scroll signals ──────────────────────────────
-    // scrollSignalCollapse: content is scrolling down → auto-collapse
-    if (scrollSignalCollapse && pillState == NavPillState.Expanded) {
-        pillState = NavPillState.Collapsing
-        coroutineScope.launch {
-            collapseProgress.animateTo(1f, spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessLow))
-            pillState = NavPillState.Collapsed
-        }
-    }
-    // scrollSignalExpand: content stopped / scrolling up → auto-expand
-    if (scrollSignalExpand && pillState == NavPillState.Collapsed) {
-        pillState = NavPillState.Expanding
-        coroutineScope.launch {
-            collapseProgress.animateTo(0f, spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessLow))
-            pillState = NavPillState.Expanded
-        }
-    }
+    // ── Width calculation: when collapsed, width hugs the chip ──
+    // We can't animate between "wrap" and "full" directly with Dp values,
+    // so we use alpha + width constraints.
+    // Expanded: fillMaxWidth with side margins
+    // Collapsed: wrap the single chip tightly
+    val collapsedFraction = progress.coerceIn(0f, 1f)
 
-    // ── Animated progress for width + opacity ─────────────────
-    val progress by animateFloatAsState(
-        targetValue = collapseProgress.value,
-        animationSpec = if (pillState == NavPillState.Collapsing || pillState == NavPillState.Expanding) {
-            spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessLow)
-        } else {
-            tween(0)
-        },
-        label = "collapseAnim"
-    )
-
-    val activeIndex = NAV_DESTINATIONS.indexOfFirst { it.route == currentRoute }.coerceAtLeast(0)
-
-    // ── Pill width: full (~screen - 32dp) → collapsed (~140dp) ──
-    val fullPillWidth = 360 // will use fillMaxWidth; this is conceptual
-    val collapsedPillWidth = 140
-    val pillWidth = androidx.compose.ui.unit.Dp(
-        fullPillWidth - (progress * (fullPillWidth - collapsedPillWidth))
-    )
-
+    // ── Glass pill surface ────────────────────────────────────────
     Box(
         modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 10.dp),
+            .padding(horizontal = 8.dp, vertical = 10.dp)
+            .then(
+                if (collapsedFraction < 0.95f) {
+                    // Expanded / transitioning: takes full width with side margins
+                    Modifier.fillMaxWidth()
+                } else {
+                    // Fully collapsed: hug content
+                    Modifier
+                }
+            ),
         contentAlignment = Alignment.Center
     ) {
-        // ── The pill: glassmorphic surface ────────────────────
+        // ── The pill itself ─────────────────────────────────────
         Box(
             modifier = Modifier
-                .width(pillWidth)
-                .height(52.dp)
-                .shadow(
-                    elevation = (6f * (1f - progress * 0.5f)).dp,
-                    shape = RoundedCornerShape(26.dp),
-                    ambientColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f),
-                    spotColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                .then(
+                    if (collapsedFraction < 0.95f) {
+                        Modifier.fillMaxWidth()
+                    } else {
+                        Modifier // wraps to content
+                    }
                 )
-                .clip(RoundedCornerShape(26.dp))
+                .height(48.dp)
+                .shadow(
+                    elevation = 8.dp,
+                    shape = RoundedCornerShape(24.dp),
+                    ambientColor = Color.Black.copy(alpha = 0.06f),
+                    spotColor = Color.Black.copy(alpha = 0.08f)
+                )
+                .clip(RoundedCornerShape(24.dp))
                 .background(
-                    // Glassmorphic: semi-transparent surface with blur feel
+                    // Glassy translucent — no solid parent block
                     Brush.verticalGradient(
                         colors = listOf(
-                            MaterialTheme.colorScheme.surface.copy(alpha = 0.82f),
-                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.78f)
+                            MaterialTheme.colorScheme.surface.copy(alpha = 0.78f),
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f)
                         )
                     )
                 )
                 .border(
                     width = 0.5.dp,
-                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
-                    shape = RoundedCornerShape(26.dp)
+                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f),
+                    shape = RoundedCornerShape(24.dp)
                 )
-                .pointerInput(pillState) {
-                    when (pillState) {
-                        NavPillState.Expanded -> {
-                            detectVerticalDragGestures(
-                                onDragEnd = {
-                                    if (dragOffset < -30) {
-                                        pillState = NavPillState.Collapsing
-                                        coroutineScope.launch {
-                                            collapseProgress.animateTo(1f, spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessLow))
-                                            pillState = NavPillState.Collapsed
-                                        }
+                .pointerInput(isCollapsed) {
+                    if (!isCollapsed) {
+                        // Expanded: swipe up to collapse
+                        detectVerticalDragGestures(
+                            onDragEnd = {
+                                if (dragOffset < -25f) {
+                                    coroutineScope.launch {
+                                        animateProgress.animateTo(1f, spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessLow))
+                                        isCollapsed = true
                                     }
-                                    dragOffset = 0f
-                                },
-                                onDragCancel = { dragOffset = 0f },
-                                onVerticalDrag = { _, amt ->
-                                    dragOffset += amt
-                                    val raw = (collapseProgress.value - amt / 200f).coerceIn(0f, 1f)
-                                    coroutineScope.launch { collapseProgress.snapTo(raw) }
-                                    if (raw > 0f) pillState = NavPillState.Collapsing
                                 }
-                            )
-                        }
-                        NavPillState.Collapsed -> {
-                            detectTapGestures {
-                                pillState = NavPillState.Expanding
+                                dragOffset = 0f
+                            },
+                            onDragCancel = { dragOffset = 0f },
+                            onVerticalDrag = { _, amt ->
+                                dragOffset += amt
                                 coroutineScope.launch {
-                                    collapseProgress.animateTo(0f, spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessLow))
-                                    pillState = NavPillState.Expanded
+                                    animateProgress.snapTo((animateProgress.value - amt / 180f).coerceIn(0f, 1f))
                                 }
                             }
+                        )
+                    } else {
+                        // Collapsed: TAP to expand (never closes on tap)
+                        detectTapGestures {
+                            coroutineScope.launch {
+                                animateProgress.animateTo(0f, spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessLow))
+                                isCollapsed = false
+                            }
                         }
-                        else -> {}
                     }
                 },
             contentAlignment = Alignment.Center
         ) {
-            if (pillState == NavPillState.Collapsed || pillState == NavPillState.Expanding) {
-                // ── Collapsed: only active icon+label ────────
-                CollapsedPillContent(NAV_DESTINATIONS[activeIndex])
+            if (isCollapsed && collapsedFraction > 0.9f) {
+                // ── Collapsed: single active icon+label chip, width hugs ──
+                CollapsedChip(NAV[activeIdx])
             } else {
-                // ── Expanded / Collapsing: full row ─────────
-                ExpandedPillContent(
-                    destinations = NAV_DESTINATIONS,
-                    activeIndex = activeIndex,
-                    progress = progress,
-                    onNavigate = onNavigate
+                // ── Expanded: full row of all items ────────────────
+                ExpandedRow(
+                    destinations = NAV,
+                    activeIdx = activeIdx,
+                    progress = collapsedFraction,
+                    onNavigate = { route ->
+                        onNavigate(route)
+                    }
                 )
             }
         }
     }
 }
 
-// ─── Expanded pill content ───────────────────────────────────────
+// ─── Expanded row ────────────────────────────────────────────────
 
 @Composable
-private fun ExpandedPillContent(
+private fun ExpandedRow(
     destinations: List<NavDestination>,
-    activeIndex: Int,
+    activeIdx: Int,
     progress: Float,
     onNavigate: (String) -> Unit
 ) {
     Row(
         modifier = Modifier
-            .padding(horizontal = 6.dp, vertical = 5.dp),
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
+            .padding(horizontal = 4.dp, vertical = 4.dp)
+            .height(IntrinsicSize.Min),
+        horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        destinations.forEachIndexed { index, dest ->
-            val isActive = index == activeIndex
-            val itemAlpha = if (isActive) 1f else (1f - progress).coerceIn(0f, 1f)
-            val itemScale = if (isActive) 1f else (1f - progress * 0.6f).coerceIn(0.4f, 1f)
+        destinations.forEachIndexed { idx, dest ->
+            val isActive = idx == activeIdx
+            // Non-active items fade as progress → 1
+            val itemAlpha = if (isActive) 1f else (1f - progress * 1.2f).coerceIn(0f, 1f)
 
-            if (itemAlpha > 0.05f) {
-                NavPillItem(
+            if (itemAlpha > 0.03f) {
+                PillItem(
                     dest = dest,
                     isActive = isActive,
                     alpha = itemAlpha,
-                    scale = itemScale,
                     onClick = { onNavigate(dest.route) }
                 )
             }
@@ -264,101 +247,90 @@ private fun ExpandedPillContent(
 }
 
 @Composable
-private fun NavPillItem(
+private fun PillItem(
     dest: NavDestination,
     isActive: Boolean,
     alpha: Float,
-    scale: Float,
     onClick: () -> Unit
 ) {
-    val bgColor by animateColorAsState(
-        if (isActive) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f)
-        else Color.Transparent,
-        tween(200), label = "itBg"
+    val activeBg = MaterialTheme.colorScheme.primaryContainer
+    val activeFg = MaterialTheme.colorScheme.onPrimaryContainer
+    val inactiveFg = MaterialTheme.colorScheme.onSurfaceVariant
+
+    val bg by animateColorAsState(
+        if (isActive) activeBg else Color.Transparent,
+        tween(200), label = "iBg"
     )
-    val iconColor by animateColorAsState(
-        if (isActive) MaterialTheme.colorScheme.onPrimaryContainer
-        else MaterialTheme.colorScheme.onSurfaceVariant,
-        tween(200), label = "itIcon"
+    val fg by animateColorAsState(
+        if (isActive) activeFg else inactiveFg,
+        tween(200), label = "iFg"
     )
-    val labelColor by animateColorAsState(
-        if (isActive) MaterialTheme.colorScheme.primary
-        else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0f),
-        tween(200), label = "itLabel"
-    )
+
+    // NO ripple — just color feedback
+    val interactionSource = remember { MutableInteractionSource() }
 
     Box(
         modifier = Modifier
             .alpha(alpha)
-            .clip(RoundedCornerShape(22.dp))
-            .background(bgColor)
-            .clickable(enabled = !isActive) { onClick() }
-            .padding(
-                horizontal = if (isActive) 11.dp else 9.dp,
-                vertical = 7.dp
-            ),
+            .clip(RoundedCornerShape(20.dp))
+            .background(bg)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,              // ← NO gray ripple overlay
+                onClick = onClick
+            )
+            .padding(horizontal = 10.dp, vertical = 7.dp),
         contentAlignment = Alignment.Center
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center
-        ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(
                 imageVector = dest.icon,
                 contentDescription = dest.label,
-                tint = iconColor,
-                modifier = Modifier.size((17f * scale).dp)
+                tint = fg,
+                modifier = Modifier.size(17.dp)
             )
-            AnimatedLabel(
-                visible = isActive,
-                text = dest.label,
-                color = labelColor
-            )
+            if (isActive) {
+                Spacer(modifier = Modifier.width(5.dp))
+                Text(
+                    text = dest.label,
+                    color = activeFg,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1
+                )
+            }
         }
     }
 }
 
-@Composable
-private fun AnimatedLabel(visible: Boolean, text: String, color: Color) {
-    if (visible) {
-        Spacer(modifier = Modifier.width(5.dp))
-        Text(
-            text = text,
-            color = color,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Bold,
-            maxLines = 1
-        )
-    }
-}
-
-// ─── Collapsed pill content ──────────────────────────────────────
+// ─── Collapsed chip ──────────────────────────────────────────────
 
 @Composable
-private fun CollapsedPillContent(dest: NavDestination) {
+private fun CollapsedChip(dest: NavDestination) {
+    val interactionSource = remember { MutableInteractionSource() }
+
     Row(
-        modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center
-    ) {
-        Box(
-            modifier = Modifier
-                .size(28.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f)),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = dest.icon,
-                contentDescription = dest.label,
-                tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                modifier = Modifier.size(16.dp)
+        modifier = Modifier
+            .clip(RoundedCornerShape(20.dp))
+            .background(MaterialTheme.colorScheme.primaryContainer)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,              // ← NO gray ripple
+                onClick = { /* handled by parent pointerInput */ }
             )
-        }
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = dest.icon,
+            contentDescription = dest.label,
+            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+            modifier = Modifier.size(17.dp)
+        )
         Spacer(modifier = Modifier.width(7.dp))
         Text(
             text = dest.label,
-            color = MaterialTheme.colorScheme.primary,
+            color = MaterialTheme.colorScheme.onPrimaryContainer,
             fontSize = 12.sp,
             fontWeight = FontWeight.Bold,
             maxLines = 1
@@ -366,14 +338,8 @@ private fun CollapsedPillContent(dest: NavDestination) {
     }
 }
 
-// ─── Independent Music Mini-Player ───────────────────────────────
+// ─── Music Mini-Player (independent, per spec §1-B) ──────────────
 
-/**
- * Music mini-player floating above the nav pill.
- * Per spec §1 Context B: "Music mini player is independent and always
- * visible if playing." Rendered by the caller — never controlled by
- * the nav pill's state.
- */
 @Composable
 fun MusicMiniPlayer(
     track: com.example.data.models.MusicTrackItem,
@@ -386,84 +352,66 @@ fun MusicMiniPlayer(
 ) {
     Box(
         modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp)
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .shadow(4.dp, RoundedCornerShape(16.dp))
-                .clip(RoundedCornerShape(16.dp))
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.85f),
-                            MaterialTheme.colorScheme.surface.copy(alpha = 0.82f)
-                        )
+            .padding(horizontal = 8.dp)
+            .shadow(6.dp, RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(16.dp))
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.82f),
+                        MaterialTheme.colorScheme.surface.copy(alpha = 0.78f)
                     )
                 )
-                .border(0.5.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
-                .clickable { onExpand() }
-                .padding(horizontal = 12.dp, vertical = 8.dp)
+            )
+            .border(0.5.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onExpand
+            )
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                    Box(
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(
-                                Brush.linearGradient(
-                                    listOf(Color(track.albumCoverHex), MaterialTheme.colorScheme.primary)
-                                )
-                            ),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("🎧", fontSize = 16.sp)
-                    }
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Column {
-                        Text(track.title, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSurface, maxLines = 1)
-                        Text(track.artist, fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
-                    }
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    androidx.compose.material3.IconButton(
-                        onClick = onTogglePlay,
-                        modifier = Modifier.size(34.dp)
-                    ) {
-                        Icon(
-                            if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                            contentDescription = if (isPlaying) "Pause" else "Play",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(20.dp)
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(
+                        Brush.linearGradient(
+                            listOf(Color(track.albumCoverHex), MaterialTheme.colorScheme.primary)
                         )
-                    }
-                    if (isPlaying) {
-                        androidx.compose.material3.IconButton(
-                            onClick = onNext,
-                            modifier = Modifier.size(34.dp)
-                        ) {
-                            Icon(Icons.Default.SkipNext, "Next",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(20.dp))
-                        }
-                    }
-                    androidx.compose.material3.IconButton(
-                        onClick = onClose,
-                        modifier = Modifier.size(34.dp)
-                    ) {
-                        Icon(Icons.Default.Close, "Close",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp))
-                    }
+                    ),
+                contentAlignment = Alignment.Center
+            ) { Text("🎧", fontSize = 16.sp) }
+
+            Spacer(modifier = Modifier.width(10.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(track.title, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface, maxLines = 1)
+                Text(track.artist, fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+            }
+
+            IconButton(onClick = onTogglePlay, modifier = Modifier.size(34.dp)) {
+                Icon(
+                    if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    contentDescription = if (isPlaying) "Pause" else "Play",
+                    tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp)
+                )
+            }
+            if (isPlaying) {
+                IconButton(onClick = onNext, modifier = Modifier.size(34.dp)) {
+                    Icon(Icons.Default.SkipNext, "Next",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
                 }
+            }
+            IconButton(onClick = onClose, modifier = Modifier.size(34.dp)) {
+                Icon(Icons.Default.Close, "Close",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
             }
         }
     }
