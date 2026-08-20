@@ -62,6 +62,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.compose.NavHost
@@ -83,9 +87,9 @@ import com.example.data.interception.RootState
 // TrafficInterceptorRepository import removed — all state flows now come from InterceptionStateRepository
 import com.example.ui.components.AppNavigationDrawer
 import com.example.ui.components.GlassCard
-import com.example.ui.components.HoveredPillNavigationBar
+import com.example.ui.components.CollapsibleNavPill
 import com.example.ui.components.InPageMiniSettingsSheet
-import com.example.ui.components.MiniPlayerPersistentBar
+import com.example.ui.components.MusicMiniPlayer
 import com.example.ui.screens.ApiTestrScreen
 import com.example.ui.screens.FlowScreen
 import com.example.ui.screens.HomeScreen
@@ -349,6 +353,28 @@ fun RequestrApp() {
         var isMiniPlayerDismissed by remember { mutableStateOf(false) }
         val showPillNav = currentRoute in rootRoutes && settings.onboardingCompleted
 
+        // ── Scroll-driven nav pill collapse/expand signals ──────
+        var scrollCollapseSignal by remember { mutableStateOf(false) }
+        var scrollExpandSignal by remember { mutableStateOf(false) }
+        val scrollConnection = remember {
+            object : NestedScrollConnection {
+                override fun onPreScroll(available: Offset, source: androidx.compose.ui.input.nestedscroll.NestedScrollSource): Offset {
+                    if (available.y < -2f) {
+                        scrollCollapseSignal = true; scrollExpandSignal = false
+                    } else if (available.y > 2f) {
+                        scrollCollapseSignal = false; scrollExpandSignal = true
+                    }
+                    return Offset.Zero
+                }
+                override suspend fun onPreFling(available: Velocity): Velocity {
+                    if (available.y < -500f) {
+                        scrollCollapseSignal = true; scrollExpandSignal = false
+                    }
+                    return Velocity.Zero
+                }
+            }
+        }
+
         AppNavigationDrawer(
             drawerState = drawerState,
             currentRoute = currentRoute,
@@ -366,7 +392,9 @@ fun RequestrApp() {
             }
         ) {
             Scaffold(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .nestedScroll(scrollConnection),
                 containerColor = MaterialTheme.colorScheme.background,
                 bottomBar = {
                     if (showPillNav) {
@@ -375,9 +403,9 @@ fun RequestrApp() {
                                 .fillMaxWidth()
                                 .windowInsetsPadding(WindowInsets.navigationBars)
                         ) {
-                            // Persistent Mini Player above hovered pill dock
+                            // Music mini-player — independent floating element per spec §1-B
                             if (currentRoute != Screen.Music.route && !isMiniPlayerDismissed) {
-                                MiniPlayerPersistentBar(
+                                MusicMiniPlayer(
                                     track = currentTrack,
                                     isPlaying = isMusicPlaying,
                                     onTogglePlay = { MusicRepository.togglePlayPause() },
@@ -390,8 +418,8 @@ fun RequestrApp() {
                                 )
                             }
 
-                            // Hovered Floating Pill Style Navigation Bar
-                            HoveredPillNavigationBar(
+                            // Collapsible glassmorphic navigation pill per requestr_nav_pill_spec.md
+                            CollapsibleNavPill(
                                 currentRoute = currentRoute,
                                 onNavigate = { route ->
                                     if (currentRoute != route) {
@@ -401,7 +429,9 @@ fun RequestrApp() {
                                             restoreState = true
                                         }
                                     }
-                                }
+                                },
+                                scrollSignalCollapse = scrollCollapseSignal,
+                                scrollSignalExpand = scrollExpandSignal
                             )
                         }
                     }
