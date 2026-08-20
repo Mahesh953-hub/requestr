@@ -129,6 +129,15 @@ class PacketPump(
             }
         }
 
+        // Fix #26 (TODO): extract SNI from QUIC Initial packets on UDP port 443.
+        if (protocol == 17 && (sPort == 443 || dPort == 443)) {
+            val quicPayload = packet.copyOfRange(ihl + 8, length)
+            val sni = com.example.interception.quic.QuicParser.extractSni(quicPayload)
+            if (sni != null) {
+                Log.i(TAG, "QUIC SNI: $sni (${if (dPort == 443) "outbound" else "inbound"})")
+            }
+        }
+
         trackFlow("$protocol|$src:$sPort>$dst:$dPort")
     }
 

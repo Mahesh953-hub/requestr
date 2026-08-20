@@ -46,9 +46,9 @@ These are real gaps that affect functionality but don't actively mislead the use
 
 - [x] 15. **SSE parser** — SseParser.kt for text/event-stream — Event stream reconstruction (event/id/retry/data fields). Files: new `interception/SseParser.kt`
 
-- [ ] 16. **DNS capture** — Parse DNS queries/responses on port 53 from tun packets. Store hostname, query type, resolver, answer, TTL. Files: new `interception/DnsParser.kt`
+- [x] 16. **DNS capture** — DnsParser.kt parses UDP port 53, wired in PacketPump — Parse DNS queries/responses on port 53 from tun packets. Store hostname, query type, resolver, answer, TTL. Files: new `interception/DnsParser.kt`
 
-- [ ] 17. **Traffic classification** — Populate `trafficSource` (Native/WebView/Frida) and `protocolHint` (h1/h2/h3/WS/SSE) on every `CapturedTrafficEntity`. Currently always NATIVE/UNKNOWN. Files: `interception/CaptureEngine.kt`, `data/local/Entities.kt`
+- [x] 17. **Traffic classification** — protocolHint and trafficSource populated — Populate `trafficSource` (Native/WebView/Frida) and `protocolHint` (h1/h2/h3/WS/SSE) on every `CapturedTrafficEntity`. Currently always NATIVE/UNKNOWN. Files: `interception/CaptureEngine.kt`, `data/local/Entities.kt`
 
 - [x] 18. **Notes MD/HTML export** — share button in editor exports .md/.html to Downloads/requestr/ — Menu items exist but no implementation. Use `FileExporter` to write .md or .html file + share intent. Files: `ui/screens/NotesScreen.kt`, `data/export/FileExporter.kt`
 
