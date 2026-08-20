@@ -71,3 +71,10 @@
 # ── Preserve line numbers for crash stack traces ───────────────────
 -keepattributes SourceFile,LineNumberTable
 -renamesourcefileattribute SourceFile
+
+# ── R8 auto-generated missing rules (from release build) ──────────
+-dontwarn java.lang.management.ManagementFactory
+-dontwarn java.lang.management.RuntimeMXBean
+
+# ── Google Play Services (recaptcha) ──────────────────────────────
+-dontwarn com.google.android.gms.internal.recaptchabase.**
