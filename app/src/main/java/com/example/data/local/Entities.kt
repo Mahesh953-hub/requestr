@@ -36,6 +36,8 @@ data class CapturedTrafficEntity(
     val appUid: Int? = null,
     /** True when the transaction was decrypted via MITM rather than observed opaquely. */
     val wasDecrypted: Boolean = false,
+    /** True when this row is an SNI-only observation (no body decrypted). */
+    val isUndecoded: Boolean = false,
 )
 
 /** Capture-tier actually used for a session. Never inferred by the UI — recorded by the engine. */

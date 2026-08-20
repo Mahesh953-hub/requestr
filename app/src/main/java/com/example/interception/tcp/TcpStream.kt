@@ -42,6 +42,9 @@ data class TcpStream(
     /** True once we've identified this as TLS (ClientHello seen). */
     var isTls: Boolean = false
 
+    /** True when this stream's bytes arrived already decrypted by the MITM proxy. */
+    var decryptedByMitm: Boolean = false
+
     /** SNI hostname extracted from TLS ClientHello, if any. */
     var sniHost: String? = null
 

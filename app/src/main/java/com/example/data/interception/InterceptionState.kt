@@ -130,6 +130,7 @@ data class InterceptionState(
     val packetCount: Int = 0,
     val bytesTransferred: Long = 0L,
     val activeConnections: Int = 0,
+    val decryptedTransactionCount: Int = 0,
     val sessionId: Long? = null,
     val startedAt: Long? = null,
     val errorText: String? = null,

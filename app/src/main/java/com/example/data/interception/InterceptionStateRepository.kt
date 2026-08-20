@@ -92,6 +92,10 @@ object InterceptionStateRepository {
         }
     }
 
+    fun addDecryptedTransactions(count: Int) {
+        _state.update { it.copy(decryptedTransactionCount = it.decryptedTransactionCount + count) }
+    }
+
     fun markError(message: String) {
         _state.update {
             it.copy(

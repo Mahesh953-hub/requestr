@@ -88,6 +88,8 @@ class CaptureEngine(
                         responseBody = clientBytes.copyOfRange(0, minOf(128, clientBytes.size)).joinToString(" ") { "%02x".format(it) },
                         timestamp = System.currentTimeMillis(),
                         sessionId = sessionId,
+                        wasDecrypted = false,
+                        isUndecoded = true,
                     )
                     kotlinx.coroutines.runBlocking {
                         try { db.capturedTrafficDao().insert(entity); transactionCount++; Log.i(TAG, "Undecoded TLS persisted: ${stream.sniHost ?: stream.dstIp}") } catch (_: Exception) {}
@@ -103,7 +105,7 @@ class CaptureEngine(
             }
         }
 
-        if (stream.isTls) return // not inspecting TLS streams further (no MITM yet)
+        if (stream.isTls && !stream.decryptedByMitm) return // allow MITM-decrypted streams through
 
         // ── HTTP detection ───────────────────────────────────────────────
         val csBytes = stream.clientToServer.bytes()
