@@ -119,6 +119,8 @@ import com.example.data.interception.CapabilityState
 import com.example.data.interception.CaState
 import com.example.data.interception.CaptureLogRepository
 import com.example.data.interception.FridaState
+import com.example.data.interception.ActiveTier
+import com.example.data.interception.CaptureMethod
 import com.example.data.interception.InterceptionStateRepository
 import com.example.data.interception.InterceptionStatus
 import com.example.data.interception.RootState
@@ -339,6 +341,25 @@ fun InterceptScreen(
                             fontSize = 10.sp,
                             color = MaterialTheme.colorScheme.primary
                         )
+
+                        // Honest decryption status
+                        val decryptText = when {
+                            interceptionState.decryptedTransactionCount > 0 ->
+                                "HTTPS DECRYPTED ✓ · ${interceptionState.decryptedTransactionCount} transactions"
+                            interceptionState.captureMethod == CaptureMethod.VPN_TUN ->
+                                "PLAINTEXT ONLY · HTTPS bodies not captured"
+                            interceptionState.tier == ActiveTier.PROXY ->
+                                "PROXY · decrypting..."
+                            else -> ""
+                        }
+                        if (decryptText.isNotEmpty()) {
+                            Text(
+                                text = decryptText,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 9.sp,
+                                color = if (interceptionState.decryptedTransactionCount > 0) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
 
                     // A real error is shown verbatim instead of being swallowed.

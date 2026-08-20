@@ -90,35 +90,29 @@ object PreflightController {
                 if (!caInstalled) return Result.CaRequired(CertificateAuthority.buildInstallIntent(context))
             }
             recordMode == "PROXY" -> {
-                // PROXY mode: MITM if CA installed, plain HTTP proxy otherwise
                 tier = ActiveTier.PROXY
                 port = prefs.proxyPort.first()
-                if (caInstalled) {
-                    method = CaptureMethod.MITM_PROXY
-                } else {
-                    method = CaptureMethod.HTTP_PROXY
-                    // HTTP_PROXY does NOT need CA — skip the CA requirement
-                }
+                if (caInstalled) { method = CaptureMethod.MITM_PROXY }
+                else { method = CaptureMethod.HTTP_PROXY }
             }
             else -> {
-                // VPN mode: no port, TUN captures all IP directly
-                method = CaptureMethod.VPN_TUN
-                tier = ActiveTier.VPN
-                port = 0  // VPN does NOT use a port
+                if (caInstalled) {
+                    method = CaptureMethod.MITM_PROXY
+                    tier = ActiveTier.PROXY
+                    port = prefs.proxyPort.first()
+                } else {
+                    method = CaptureMethod.VPN_TUN
+                    tier = ActiveTier.VPN
+                    port = 0
+                }
             }
         }
 
-        // MITM_PROXY still needs CA — check here (after method resolution)
         if (method == CaptureMethod.MITM_PROXY && !caInstalled) {
             return Result.CaRequired(CertificateAuthority.buildInstallIntent(context))
         }
 
-        // Only VPN mode needs VPN consent. PROXY mode does not.
-        val consent = if (method == CaptureMethod.VPN_TUN) {
-            VpnService.prepare(context)
-        } else {
-            null
-        }
+        val consent = if (method == CaptureMethod.VPN_TUN) VpnService.prepare(context) else null
 
         InterceptionStateRepository.markArmed(tier = tier, port = port, method = method)
         if (enhanced) {

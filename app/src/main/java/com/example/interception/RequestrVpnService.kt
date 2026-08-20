@@ -254,7 +254,7 @@ class RequestrVpnService : VpnService() {
 
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("requestr is capturing traffic")
-            .setContentText("Local VPN active on port $port")
+            .setContentText("VPN active — HTTPS bodies not captured without proxy mode")
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setOngoing(true)
             .setContentIntent(openApp)

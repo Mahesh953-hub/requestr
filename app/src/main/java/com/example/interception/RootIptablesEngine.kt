@@ -53,8 +53,8 @@ class RootIptablesEngine {
             add("iptables -t nat -A OUTPUT -m owner --uid-owner $excludeUid -j RETURN")
             // Redirect HTTP
             add("iptables -t nat -A OUTPUT -p tcp --dport 80 -j REDIRECT --to-port $port")
-            // Redirect HTTPS
             add("iptables -t nat -A OUTPUT -p tcp --dport 443 -j REDIRECT --to-port $port")
+            add("iptables -t nat -A OUTPUT -p udp --dport 443 -j REDIRECT --to-port $port")
         }
 
         val success = executeRules(rules)
