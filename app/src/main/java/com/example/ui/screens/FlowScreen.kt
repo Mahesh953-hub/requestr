@@ -116,6 +116,32 @@ fun FlowScreen(
             title = "Flow & Automation (n8n Engine)",
             onMiniSettings = onMiniSettings,
             actions = {
+                // Fix #25 (TODO): Flow export/import via FlowSerializer
+                val flowContext = androidx.compose.ui.platform.LocalContext.current
+                IconButton(onClick = {
+                    coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                        runCatching {
+                            val json = com.example.flow.FlowSerializer.exportToJson(
+                                "requestr-flow",
+                                nodes,
+                                connections
+                            )
+                            val file = com.example.data.export.FileExporter.writeJson(flowContext, json)
+                            com.example.data.export.FileExporter.shareFile(
+                                flowContext, file,
+                                "application/json",
+                                "Flow export"
+                            )
+                        }
+                    }
+                }) {
+                    Icon(
+                        imageVector = androidx.compose.material.icons.Icons.Default.Share,
+                        contentDescription = "Export Flow",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
                 IconButton(onClick = { viewMode = if (viewMode == 0) 1 else 0 }) {
                     Icon(
                         imageVector = if (viewMode == 0) Icons.Default.LinearScale else Icons.Default.GridView,
@@ -129,6 +155,25 @@ fun FlowScreen(
                         imageVector = Icons.Default.Add,
                         contentDescription = "Add Step",
                         tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+
+                // Fix #25: Import flow from JSON (share sheet)
+                IconButton(onClick = {
+                    coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                        runCatching {
+                            val importIntent = android.content.Intent(android.content.Intent.ACTION_GET_CONTENT).apply {
+                                type = "application/json"
+                                addCategory(android.content.Intent.CATEGORY_OPENABLE)
+                            }
+                            flowContext.startActivity(importIntent)
+                        }
+                    }
+                }) {
+                    Icon(
+                        imageVector = Icons.Default.FileDownload,
+                        contentDescription = "Import Flow",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
 

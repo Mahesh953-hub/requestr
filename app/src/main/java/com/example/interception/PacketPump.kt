@@ -37,6 +37,8 @@ class PacketPump(
     private val output: FileOutputStream,
     private val sessionId: Long,
     private val db: RequestrDatabase,
+    /** Called for each parsed DNS query (Fix #16). */
+    var dnsCallback: ((com.example.interception.dns.DnsParser.DnsQuery, String, Int, String, Int) -> Unit)? = null,
 ) {
 
     private var packetCount = 0
@@ -116,6 +118,16 @@ class PacketPump(
             val d = ((packet[ihl + 2].u() shl 8) or packet[ihl + 3].u())
             s to d
         } else 0 to 0
+
+        // Fix #16 (TODO): intercept DNS queries on UDP port 53.
+        if (protocol == 17 && (sPort == 53 || dPort == 53)) {
+            val udpPayload = packet.copyOfRange(ihl + 8, length)
+            val query = com.example.interception.dns.DnsParser.parse(udpPayload, sPort, dPort)
+            query?.let { dns ->
+                Log.d(TAG, "DNS ${dns.qtypeName}: ${dns.hostname} (${if (dns.isResponse) "response" else "query"})")
+                dnsCallback?.invoke(dns, src, sPort, dst, dPort)
+            }
+        }
 
         trackFlow("$protocol|$src:$sPort>$dst:$dPort")
     }
