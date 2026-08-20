@@ -21,6 +21,7 @@ import com.example.data.local.CaptureTier
 import com.example.data.local.RequestrDatabase
 import com.example.data.prefs.AppFilterMode
 import com.example.data.prefs.SettingsDataStore
+import com.example.data.repository.SettingsRepository
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import kotlinx.coroutines.CoroutineScope

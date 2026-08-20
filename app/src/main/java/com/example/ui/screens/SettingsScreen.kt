@@ -777,7 +777,6 @@ fun SettingsScreen(
                                     runCatching {
                                         CertificateAuthority.regenerate(settingsContext)
                                         android.widget.Toast.makeText(settingsContext, "CA regenerated — re-export and re-install", android.widget.Toast.LENGTH_SHORT).show()
-                                        onReprobe()
                                     }
                                 }
                             },

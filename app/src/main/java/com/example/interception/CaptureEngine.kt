@@ -4,6 +4,7 @@ import android.util.Log
 import com.example.data.local.CapturedTrafficEntity
 import com.example.data.local.InterceptRuleEntity
 import com.example.data.local.RequestrDatabase
+import com.example.data.repository.SettingsRepository
 import com.example.interception.http.HttpParser
 import com.example.interception.http.ParsedHttpMessage
 import com.example.interception.tcp.TcpReassembler
@@ -249,10 +250,10 @@ class CaptureEngine(
             path = request.path,
             statusCode = if (response.statusCode == 0) null else response.statusCode,
             protocol = response.version.ifEmpty { request.version },
-            requestHeaders = if (settings.requestLoggingEnabled) request.headers else emptyMap(),
-            responseHeaders = if (settings.responseLoggingEnabled) response.headers else emptyMap(),
-            requestBody = if (settings.requestLoggingEnabled) request.body.ifEmpty { null } else null,
-            responseBody = if (settings.responseLoggingEnabled) response.body.ifEmpty { null } else null,
+            requestHeaders = if (SettingsRepository.settings.value.requestLoggingEnabled) request.headers else emptyMap(),
+            responseHeaders = if (SettingsRepository.settings.value.responseLoggingEnabled) response.headers else emptyMap(),
+            requestBody = if (SettingsRepository.settings.value.requestLoggingEnabled) request.body.ifEmpty { null } else null,
+            responseBody = if (SettingsRepository.settings.value.responseLoggingEnabled) response.body.ifEmpty { null } else null,
             requestSizeBytes = request.body.toByteArray(Charsets.UTF_8).size.toLong(),
             responseSizeBytes = response.body.toByteArray(Charsets.UTF_8).size.toLong(),
             latencyMs = 0L, // without proxy we don't have timing between request/response
@@ -320,8 +321,7 @@ class CaptureEngine(
      * The URL is derived from the stream host plus " (WS)" suffix to make the direction visible.
      */
     private fun persistWsFrame(stream: TcpStream, frame: com.example.interception.http.WebSocketParser.WsFrame, isClient: Boolean) {
-        val settings = SettingsRepository.settings.value
-        if (!settings.trafficCaptureEnabled) return
+        if (!captureEnabled) return
 
         val wsHost = stream.sniHost ?: stream.dstIp
         val wsUrl = "ws://$wsHost${if (stream.dstPort != 80) ":${stream.dstPort}" else ""}"

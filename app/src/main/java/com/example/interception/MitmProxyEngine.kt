@@ -126,7 +126,7 @@ class MitmProxyEngine(
             val (host, port) = parseHostPort(target, 443)
 
             // Check intercept rules BEFORE establishing the tunnel
-            val ruleAction = checkInterceptRules(host)
+            val ruleAction = checkInterceptRules(context, host)
             if (ruleAction == com.example.data.local.RuleAction.BLOCK) {
                 Log.i(TAG, "BLOCKED by rule: $host")
                 output.write("HTTP/1.1 403 Blocked by requestr\r\n\r\n".toByteArray())
@@ -177,18 +177,15 @@ class MitmProxyEngine(
 
     // ── Rule enforcement ────────────────────────────────────────────────
 
-    private fun checkInterceptRules(host: String): com.example.data.local.RuleAction? {
+    private fun checkInterceptRules(ctx: android.content.Context, host: String): com.example.data.local.RuleAction? {
         return try {
-            val db = com.example.data.local.RequestrDatabase.instance
-            if (db == null) return null
-            val rules = kotlinx.coroutines.runBlocking {
-                db.interceptRuleDao().observeAll().first()
+            val rules = runBlocking {
+                RequestrDatabase.get(ctx).interceptRuleDao().observeAll().first()
             }
             for (rule in rules) {
                 if (!rule.enabled) continue
                 if (host.contains(rule.domain, ignoreCase = true)) return rule.action
-                val pattern = rule.pattern
-                if (pattern.isNotBlank() && Regex(pattern).containsMatchIn(host)) return rule.action
+                if (rule.pattern.isNotBlank() && Regex(rule.pattern).containsMatchIn(host)) return rule.action
             }
             null
         } catch (_: Exception) { null }
