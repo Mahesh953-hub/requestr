@@ -904,7 +904,7 @@ fun FridaScriptsBottomSheet(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(imageVector = Icons.Default.Security, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Icon(imageVector = Icons.Default.Security, contentDescription = "Security", tint = MaterialTheme.colorScheme.primary)
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("Frida Dynamic Instrumentation", fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 }
@@ -944,7 +944,7 @@ fun FridaScriptsBottomSheet(
                 modifier = Modifier.fillMaxWidth(),
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
             ) {
-                Icon(imageVector = Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                Icon(imageVector = Icons.Default.Refresh, contentDescription = "Refresh", modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(if (isProbing) "Checking..." else "Re-check frida-server", fontSize = 13.sp, fontWeight = FontWeight.Bold)
             }
@@ -1038,7 +1038,7 @@ fun MitmCertificateBottomSheet(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(imageVector = Icons.Default.Description, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Icon(imageVector = Icons.Default.Description, contentDescription = "Description", tint = MaterialTheme.colorScheme.primary)
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("MITM Root CA Certificate", fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 }
@@ -1103,7 +1103,7 @@ fun MitmCertificateBottomSheet(
                 modifier = Modifier.fillMaxWidth(),
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
             ) {
-                Icon(imageVector = Icons.Default.Security, contentDescription = null, modifier = Modifier.size(16.dp))
+                Icon(imageVector = Icons.Default.Security, contentDescription = "Security", modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(8.dp))
                 Text("Install certificate", fontSize = 13.sp, fontWeight = FontWeight.Bold)
             }
@@ -1179,7 +1179,7 @@ fun SystemIntegrationBottomSheet(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(imageVector = Icons.Default.Bolt, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Icon(imageVector = Icons.Default.Bolt, contentDescription = "Quick action", tint = MaterialTheme.colorScheme.primary)
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("Root & Shizuku Privileges", fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 }
@@ -1241,7 +1241,7 @@ fun SystemIntegrationBottomSheet(
                 modifier = Modifier.fillMaxWidth(),
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
             ) {
-                Icon(imageVector = Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                Icon(imageVector = Icons.Default.Refresh, contentDescription = "Refresh", modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(if (isProbing) "Checking..." else "Re-check privileges", fontSize = 13.sp, fontWeight = FontWeight.Bold)
             }
@@ -1987,7 +1987,7 @@ fun RulesConfigBottomSheet(
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(8.dp)
                         ) {
-                            Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Icon(imageVector = Icons.Default.Add, contentDescription = "Add", modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(6.dp))
                             Text("Add Rule")
                         }
@@ -2283,7 +2283,7 @@ fun CapturedDetailBottomSheet(
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.weight(1f),
                 ) {
-                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Default.Refresh, contentDescription = "Refresh", modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(6.dp))
                     Text("Replay", fontSize = 13.sp)
                 }

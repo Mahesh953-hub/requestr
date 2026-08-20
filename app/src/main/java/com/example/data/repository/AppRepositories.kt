@@ -223,6 +223,15 @@ object FlowRepository {
         persistConnection(conn)
     }
 
+    /** Removes a connection by ID and deletes it from Room. */
+    fun removeConnection(id: String) {
+        _connections.value = _connections.value.filter { it.id != id }
+        val ctx = appContext ?: return
+        repoScope.launch {
+            com.example.data.local.RequestrDatabase.get(ctx).flowConnectionDao().deleteById(id)
+        }
+    }
+
     private fun persistNode(node: FlowNodeItem) {
         val ctx = appContext ?: return
         repoScope.launch {
@@ -375,6 +384,15 @@ object MusicRepository {
     fun stopMusic() {
         _isPlaying.value = false
         _currentPositionSec.value = 0
+    }
+
+    /** Removes a track from the playlist (Fix #35). If it's the current track, stops playback. */
+    fun removeTrack(id: String) {
+        val wasCurrent = _currentTrack.value.id == id
+        _tracks.value = _tracks.value.filter { it.id != id }
+        if (wasCurrent) {
+            stopMusic()
+        }
     }
 }
 

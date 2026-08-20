@@ -10,8 +10,6 @@ package com.example.interception.http
  *   data: line1
  *   data: line2
  *   (blank line separates events)
- *
- * Data lines concatenated with \n -> dispatch "message" event
  */
 object SseParser {
 
@@ -24,62 +22,64 @@ object SseParser {
 
     /** True if the response content-type is text/event-stream. */
     fun looksLikeSse(headers: Map<String, String>?): Boolean {
-        val ct = (headers?.get("Content-Type") ?: headers?.get("content-type") ?: "") .lowercase()
+        val ct = (headers?.get("Content-Type") ?: headers?.get("content-type") ?: "").lowercase()
         return ct.contains("text/event-stream") || ct.contains("application/event-stream")
     }
 
-    /** Parses SSE events from an accumulated response body string. */
-    fun parseEvents(body: String, lastSeenBlock: Int = 0): Pair<List<SseEvent>, Int> {
-        // Track last fully-consumed block to avoid re-dispatching partial tails
+    /** Parses SSE events from a response body string. */
+    fun parseEvents(body: String, lastSeenBlock: Int = -1): Pair<List<SseEvent>, Int> {
         val events = mutableListOf<SseEvent>()
-        var id: String? = null
-        var eventName = "message"
-        var retry: Int? = null
-        val dataLines = mutableListOf<String>()
-
-        var consumedBlock = -1
         val blocks = body.split("\n\n")
+
         for (i in blocks.indices) {
             if (i <= lastSeenBlock) continue
-            val block = blocks[i]
-            var isEvent = false
+            val block = blocks[i].trim()
+            if (block.isEmpty()) continue
+
+            var id: String? = null
+            var eventName = "message"
+            var retry: Int? = null
+            val dataLines = mutableListOf<String>()
+
             for (line in block.split("\n")) {
+                val trimmed = line.trimEnd('\r')
                 when {
-                    line.startsWith("id:") -> id = line.removePrefix("id:").trim()
-                    line.startsWith("event:") -> eventName = line.removePrefix("event:").trim()
-                    line.startsWith("retry:") -> retry = line.removePrefix("retry:").trim().toIntOrNull()
-                    line.startsWith("data:") -> {
-                        val d = line.removePrefix("data:")
-                            .removePrefix(" ") // strip the single leading space
-                        dataLines.add(d)
-                        isEvent = true
+                    trimmed.startsWith("data:") -> {
+                        var value = trimmed.removePrefix("data:")
+                        if (value.startsWith(" ")) value = value.substring(1)
+                        dataLines.add(value)
                     }
-                    line == ":heartbeat" || line.startsWith(":") -> { /* comment = heartbeat */ }
-                    line.isBlank() && !isEvent -> { /* whitespace block */ }
+                    trimmed.startsWith("event:") -> {
+                        var value = trimmed.removePrefix("event:")
+                        if (value.startsWith(" ")) value = value.substring(1)
+                        eventName = value
+                    }
+                    trimmed.startsWith("id:") -> {
+                        var value = trimmed.removePrefix("id:")
+                        if (value.startsWith(" ")) value = value.substring(1)
+                        id = value
+                    }
+                    trimmed.startsWith("retry:") -> {
+                        var value = trimmed.removePrefix("retry:")
+                        if (value.startsWith(" ")) value = value.substring(1)
+                        retry = value.trim().toIntOrNull()
+                    }
+                    trimmed.startsWith(":") -> { /* comment / heartbeat */ }
                 }
             }
-            // A blank line (block end) terminates the event
-            dataLines.let { lines ->
-                if (lines.isNotEmpty()) {
-                    events.add(
-                        SseEvent(
-                            id = id,
-                            event = eventName,
-                            retryMs = retry,
-                            data = lines.joinToString("\n"),
-                        )
+
+            if (dataLines.isNotEmpty()) {
+                events.add(
+                    SseEvent(
+                        id = id,
+                        event = eventName,
+                        retryMs = retry,
+                        data = dataLines.joinToString("\n"),
                     )
-                }
+                )
             }
-            if (isEvent || block.isBlank() || block.endsWith("\n\n")) {
-                dataLines.clear()
-                eventName = "message"
-                id = null
-                retry = null
-            }
-            consumedBlock = i
         }
 
-        return events to consumedBlock
+        return events to (blocks.size - 1)
     }
 }

@@ -5,7 +5,10 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -52,6 +55,8 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.TabRowDefaults.SecondaryIndicator
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -67,13 +72,16 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.models.FlowConnectionItem
 import com.example.data.models.FlowNodeItem
 import com.example.data.models.FlowNodeType
 import com.example.data.repository.FlowRepository
@@ -193,7 +201,7 @@ fun FlowScreen(
                     if (isRunning) {
                         CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
                     } else {
-                        Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Icon(imageVector = Icons.Default.PlayArrow, contentDescription = "Run flow", modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("Run Flow", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
@@ -214,7 +222,7 @@ fun FlowScreen(
                     modifier = Modifier.padding(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(imageVector = Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFF10B981), modifier = Modifier.size(18.dp))
+                    Icon(imageVector = Icons.Default.CheckCircle, contentDescription = "Success", tint = Color(0xFF10B981), modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(executionResult!!, color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                 }
@@ -222,74 +230,48 @@ fun FlowScreen(
         }
 
         if (viewMode == 0) {
-            // Visual Canvas Mode
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(16.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(MaterialTheme.colorScheme.surface)
-                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(16.dp))
-            ) {
-                // Draw grid dots and connection bezier paths
-                Canvas(modifier = Modifier.fillMaxSize()) {
-                    val step = 28.dp.toPx()
-                    var x = 0f
-                    while (x < size.width) {
-                        var y = 0f
-                        while (y < size.height) {
-                            drawCircle(
-                                color = Color.White.copy(alpha = 0.06f),
-                                radius = 1.5f,
-                                center = Offset(x, y)
+            // Visual Canvas Mode — with pan/zoom, port-drag, context menu, mini-map
+            FlowCanvas(
+                nodes = nodes,
+                connections = connections,
+                performHaptic = performHaptic,
+                onNodeMoved = { id, x, y -> FlowRepository.updateNodePosition(id, x, y) },
+                onNodeDeleted = { id ->
+                    performHaptic(HapticFeedbackType.LongPress)
+                    FlowRepository.removeNode(id)
+                },
+                onNodeEdit = { nodeForEdit = it },
+                onConnectionCreated = { fromId, toId ->
+                    val fromNode = nodes.find { it.id == fromId }
+                    val toNode = nodes.find { it.id == toId }
+                    if (fromNode != null && toNode != null) {
+                        FlowRepository.addConnection(
+                            com.example.data.models.FlowConnectionItem(
+                                id = "${fromId}_out_${toId}_in",
+                                fromNodeId = fromId,
+                                toNodeId = toId,
+                                fromPort = "out",
+                                toPort = "in",
                             )
-                            y += step
-                        }
-                        x += step
+                        )
+                        performHaptic(HapticFeedbackType.LongPress)
                     }
-
-                    // Connection Lines
-                    connections.forEach { conn ->
-                        val from = nodes.find { it.id == conn.fromNodeId }
-                        val to = nodes.find { it.id == conn.toNodeId }
-                        if (from != null && to != null) {
-                            val startX = from.x.dp.toPx() + 180.dp.toPx()
-                            val startY = from.y.dp.toPx() + 35.dp.toPx()
-                            val endX = to.x.dp.toPx()
-                            val endY = to.y.dp.toPx() + 35.dp.toPx()
-
-                            val path = Path().apply {
-                                moveTo(startX, startY)
-                                cubicTo(
-                                    startX + 60f, startY,
-                                    endX - 60f, endY,
-                                    endX, endY
-                                )
-                            }
-                            drawPath(
-                                path = path,
-                                color = Color(0xFF38BDF8),
-                                style = Stroke(width = 3.dp.toPx())
-                            )
-                        }
-                    }
-                }
-
-                // Interactive draggable nodes
-                nodes.forEach { node ->
-                    DraggableNodeBox(
-                        node = node,
-                        onDrag = { dx, dy ->
-                            FlowRepository.updateNodePosition(node.id, node.x + dx / 2.5f, node.y + dy / 2.5f)
-                        },
-                        onDelete = {
-                            performHaptic(HapticFeedbackType.LongPress)
-                            FlowRepository.removeNode(node.id)
-                        },
-                        onEdit = { nodeForEdit = node }
+                },
+                onNodeDuplicated = { node ->
+                    FlowRepository.addNode(
+                        node.copy(
+                            id = java.util.UUID.randomUUID().toString(),
+                            x = node.x + 30f,
+                            y = node.y + 30f,
+                            title = "${node.title} (copy)"
+                        )
                     )
+                },
+                onNodeDisconnected = { nodeId ->
+                    connections.filter { it.fromNodeId == nodeId || it.toNodeId == nodeId }
+                        .forEach { FlowRepository.removeConnection(it.id) }
                 }
-            }
+            )
         } else {
             // Sequence List Mode
             LazyColumn(
@@ -359,69 +341,374 @@ fun FlowScreen(
     }
 }
 
+/**
+ * Flow canvas with pan/zoom, port-drag connection creation, and long-press
+ * context menu. Implements TODO items #23, #24, #32, #33, #34.
+ */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-fun DraggableNodeBox(
-    node: FlowNodeItem,
-    onDrag: (Float, Float) -> Unit,
-    onDelete: () -> Unit,
-    onEdit: () -> Unit
+fun FlowCanvas(
+    nodes: List<FlowNodeItem>,
+    connections: List<FlowConnectionItem>,
+    performHaptic: (androidx.compose.ui.hapticfeedback.HapticFeedbackType) -> Unit,
+    onNodeMoved: (String, Float, Float) -> Unit,
+    onNodeDeleted: (String) -> Unit,
+    onNodeEdit: (FlowNodeItem) -> Unit,
+    onConnectionCreated: (String, String) -> Unit,
+    onNodeDuplicated: (FlowNodeItem) -> Unit,
+    onNodeDisconnected: (String) -> Unit,
 ) {
-    val nodeColor = when (node.type) {
-        FlowNodeType.INTERCEPT_TRIGGER -> Color(0xFFF59E0B)
-        FlowNodeType.API -> Color(0xFF38BDF8)
-        FlowNodeType.TRANSFORM -> Color(0xFF8B5CF6)
-
-        FlowNodeType.OUTPUT -> Color(0xFFEC4899)
-        FlowNodeType.TOOL -> Color(0xFFF97316)
-        FlowNodeType.CONDITION -> Color(0xFFA855F7)
-        FlowNodeType.TEXT -> Color(0xFF64748B)
-        FlowNodeType.DELAY -> Color(0xFF8B5CF6)
+    // Pan/zoom state
+    var scale by remember { mutableStateOf(1f) }
+    var offsetX by remember { mutableStateOf(0f) }
+    var offsetY by remember { mutableStateOf(0f) }
+    val transformState = rememberTransformableState { zoomChange, panChange, _ ->
+        scale = (scale * zoomChange).coerceIn(0.3f, 3f)
+        offsetX += panChange.x
+        offsetY += panChange.y
     }
+
+    // Port-drag connection state
+    var dragFromNodeId by remember { mutableStateOf<String?>(null) }
+    var dragEndX by remember { mutableStateOf(0f) }
+    var dragEndY by remember { mutableStateOf(0f) }
+
+    // Long-press context menu state
+    var contextMenuNode by remember { mutableStateOf<FlowNodeItem?>(null) }
 
     Box(
         modifier = Modifier
-            .offset { IntOffset(node.x.dp.roundToPx(), node.y.dp.roundToPx()) }
-            .width(180.dp)
-            .clip(RoundedCornerShape(12.dp))
+            .fillMaxSize()
+            .padding(16.dp)
+            .clip(RoundedCornerShape(16.dp))
             .background(MaterialTheme.colorScheme.surface)
-            .border(1.5.dp, nodeColor, RoundedCornerShape(12.dp))
-            .pointerInput(Unit) {
-                detectDragGestures { change, dragAmount ->
-                    change.consume()
-                    onDrag(dragAmount.x, dragAmount.y)
-                }
-            }
-            .padding(10.dp)
+            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(16.dp))
+            .transformable(state = transformState)
     ) {
-        Column {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "${node.type.iconEmoji} ${node.title}",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1
-                )
-                IconButton(
-                    onClick = onDelete,
-                    modifier = Modifier.size(16.dp)
-                ) {
-                    Icon(imageVector = Icons.Default.Close, contentDescription = "Delete", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(12.dp))
+        // Fit-to-view button
+        IconButton(
+            onClick = {
+                // Calculate bounding box of all nodes and center+scale to fit
+                if (nodes.isNotEmpty()) {
+                    val minX = nodes.minOf { it.x }
+                    val maxX = nodes.maxOf { it.x } + 180f
+                    val minY = nodes.minOf { it.y }
+                    val maxY = nodes.maxOf { it.y } + 60f
+                    val contentW = maxX - minX
+                    val contentH = maxY - minY
+                    if (contentW > 0 && contentH > 0) {
+                        scale = 0.8f
+                        offsetX = -(minX + contentW / 2) * scale + 300f
+                        offsetY = -(minY + contentH / 2) * scale + 300f
+                    }
+                }
+            },
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(8.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.AutoAwesome,
+                contentDescription = "Fit to View",
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+
+        // Canvas: grid dots + connection lines + drag preview line
+        Canvas(
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                    translationX = offsetX
+                    translationY = offsetY
+                }
+        ) {
+            val step = 28.dp.toPx() / scale
+            var x = -offsetX / scale - 500f
+            while (x < size.width / scale + 500f) {
+                var y = -offsetY / scale - 500f
+                while (y < size.height / scale + 500f) {
+                    drawCircle(
+                        color = Color.White.copy(alpha = 0.06f),
+                        radius = 1.5f / scale,
+                        center = Offset(x, y)
+                    )
+                    y += step
+                }
+                x += step
+            }
+
+            // Draw existing connections
+            connections.forEach { conn ->
+                val from = nodes.find { it.id == conn.fromNodeId }
+                val to = nodes.find { it.id == conn.toNodeId }
+                if (from != null && to != null) {
+                    val startX = from.x.dp.toPx() + 180.dp.toPx()
+                    val startY = from.y.dp.toPx() + 35.dp.toPx()
+                    val endX = to.x.dp.toPx()
+                    val endY = to.y.dp.toPx() + 35.dp.toPx()
+
+                    val path = Path().apply {
+                        moveTo(startX, startY)
+                        cubicTo(
+                            startX + 60f, startY,
+                            endX - 60f, endY,
+                            endX, endY
+                        )
+                    }
+                    drawPath(
+                        path = path,
+                        color = Color(0xFF38BDF8),
+                        style = Stroke(width = 3.dp.toPx() / scale)
+                    )
                 }
             }
 
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = node.configData,
-                fontSize = 9.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontFamily = FontFamily.Monospace,
-                maxLines = 2
-            )
+            // Draw drag preview line (port-drag connection in progress)
+            if (dragFromNodeId != null) {
+                val fromNode = nodes.find { it.id == dragFromNodeId }
+                if (fromNode != null) {
+                    val startX = fromNode.x.dp.toPx() + 180.dp.toPx()
+                    val startY = fromNode.y.dp.toPx() + 35.dp.toPx()
+                    val path = Path().apply {
+                        moveTo(startX, startY)
+                        cubicTo(
+                            startX + 60f, startY,
+                            dragEndX - 60f, dragEndY,
+                            dragEndX, dragEndY
+                        )
+                    }
+                    drawPath(
+                        path = path,
+                        color = Color(0xFF38BDF8).copy(alpha = 0.5f),
+                        style = Stroke(width = 2.dp.toPx() / scale, pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 10f)))
+                    )
+                }
+            }
+        }
+
+        // Node boxes (positioned in transformed space)
+        nodes.forEach { node ->
+            val nodeColor = when (node.type) {
+                FlowNodeType.INTERCEPT_TRIGGER -> Color(0xFFF59E0B)
+                FlowNodeType.API -> Color(0xFF38BDF8)
+                FlowNodeType.TRANSFORM -> Color(0xFF8B5CF6)
+                FlowNodeType.OUTPUT -> Color(0xFFEC4899)
+                FlowNodeType.TOOL -> Color(0xFFF97316)
+                FlowNodeType.CONDITION -> Color(0xFFA855F7)
+                FlowNodeType.TEXT -> Color(0xFF64748B)
+                FlowNodeType.DELAY -> Color(0xFF8B5CF6)
+            }
+
+            // Long-press context menu for this node
+            if (contextMenuNode?.id == node.id) {
+                DropdownMenu(
+                    expanded = true,
+                    onDismissRequest = { contextMenuNode = null },
+                    modifier = Modifier
+                        .offset { IntOffset(
+                            (node.x.dp.roundToPx() * scale + offsetX).toInt(),
+                            (node.y.dp.roundToPx() * scale + offsetY).toInt() + 60
+                        )}
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Edit") },
+                        onClick = { contextMenuNode = null; onNodeEdit(node) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Duplicate") },
+                        onClick = { contextMenuNode = null; onNodeDuplicated(node) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Disconnect All") },
+                        onClick = { contextMenuNode = null; onNodeDisconnected(node.id) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Delete", color = MaterialTheme.colorScheme.error) },
+                        onClick = { contextMenuNode = null; onNodeDeleted(node.id) }
+                    )
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .offset {
+                        IntOffset(
+                            (node.x.dp.roundToPx() * scale + offsetX).toInt(),
+                            (node.y.dp.roundToPx() * scale + offsetY).toInt()
+                        )
+                    }
+                    .width((180.dp.value * scale).dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surface)
+                    .border(1.5.dp, nodeColor, RoundedCornerShape(12.dp))
+                    .combinedClickable(
+                        onClick = { onNodeEdit(node) },
+                        onLongClick = {
+                            performHaptic(HapticFeedbackType.LongPress)
+                            contextMenuNode = node
+                        }
+                    )
+                    .pointerInput(node.id) {
+                        detectDragGestures { change, dragAmount ->
+                            change.consume()
+                            onNodeMoved(
+                                node.id,
+                                node.x + dragAmount.x / scale / 2.5f,
+                                node.y + dragAmount.y / scale / 2.5f
+                            )
+                        }
+                    }
+                    .padding(10.dp)
+            ) {
+                Column {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "${node.type.iconEmoji} ${node.title}",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = (12.sp.value * scale).sp,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1
+                        )
+                        IconButton(
+                            onClick = { onNodeDeleted(node.id) },
+                            modifier = Modifier.size(16.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.Close, contentDescription = "Delete", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(12.dp))
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = node.configData,
+                        fontSize = (9.sp.value * scale).sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 2
+                    )
+
+                    // Port handles for drag-to-connect
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        // Input port (left)
+                        Box(
+                            modifier = Modifier
+                                .size(10.dp)
+                                .clip(CircleShape)
+                                .background(nodeColor.copy(alpha = 0.4f))
+                                .border(1.dp, nodeColor, CircleShape)
+                        )
+                        // Output port (right) — draggable to create connection
+                        Box(
+                            modifier = Modifier
+                                .size(10.dp)
+                                .clip(CircleShape)
+                                .background(nodeColor)
+                                .pointerInput(node.id) {
+                                    detectDragGestures(
+                                        onDragStart = {
+                                            dragFromNodeId = node.id
+                                            dragEndX = node.x.dp.toPx() + 180.dp.toPx()
+                                            dragEndY = node.y.dp.toPx() + 35.dp.toPx()
+                                        },
+                                        onDrag = { change, dragAmount ->
+                                            change.consume()
+                                            dragEndX += dragAmount.x / scale
+                                            dragEndY += dragAmount.y / scale
+                                        },
+                                        onDragEnd = {
+                                            // Check if dropped on another node's input port
+                                            val dropNode = nodes.find { n ->
+                                                n.id != node.id &&
+                                                kotlin.math.abs(dragEndX - n.x.dp.toPx()) < 30f &&
+                                                kotlin.math.abs(dragEndY - (n.y.dp.toPx() + 35.dp.toPx())) < 30f
+                                            }
+                                            if (dropNode != null) {
+                                                onConnectionCreated(node.id, dropNode.id)
+                                            }
+                                            dragFromNodeId = null
+                                        }
+                                    )
+                                }
+                        )
+                    }
+                }
+            }
+        }
+
+        // Mini-map (bottom right corner)
+        if (nodes.isNotEmpty()) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(8.dp)
+                    .size(80.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color.Black.copy(alpha = 0.5f))
+                    .border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize().padding(4.dp)) {
+                    val minX = nodes.minOf { it.x }
+                    val maxX = nodes.maxOf { it.x } + 180f
+                    val minY = nodes.minOf { it.y }
+                    val maxY = nodes.maxOf { it.y } + 60f
+                    val mapScale = minOf(
+                        size.width / (maxX - minX).coerceAtLeast(1f),
+                        size.height / (maxY - minY).coerceAtLeast(1f)
+                    ) * 0.8f
+
+                    // Draw connections as lines
+                    connections.forEach { conn ->
+                        val from = nodes.find { it.id == conn.fromNodeId }
+                        val to = nodes.find { it.id == conn.toNodeId }
+                        if (from != null && to != null) {
+                            drawLine(
+                                color = Color(0xFF38BDF8).copy(alpha = 0.4f),
+                                start = Offset(
+                                    (from.x - minX) * mapScale,
+                                    (from.y - minY) * mapScale
+                                ),
+                                end = Offset(
+                                    (to.x - minX) * mapScale,
+                                    (to.y - minY) * mapScale
+                                ),
+                                strokeWidth = 1f
+                            )
+                        }
+                    }
+
+                    // Draw nodes as dots
+                    nodes.forEach { node ->
+                        val color = when (node.type) {
+                            FlowNodeType.API -> Color(0xFF38BDF8)
+                            FlowNodeType.INTERCEPT_TRIGGER -> Color(0xFFF59E0B)
+                            FlowNodeType.TOOL -> Color(0xFFF97316)
+                            FlowNodeType.CONDITION -> Color(0xFFA855F7)
+                            FlowNodeType.TRANSFORM -> Color(0xFF8B5CF6)
+                            FlowNodeType.OUTPUT -> Color(0xFFEC4899)
+                            else -> Color(0xFF64748B)
+                        }
+                        drawCircle(
+                            color = color,
+                            radius = 3f,
+                            center = Offset(
+                                (node.x - minX) * mapScale,
+                                (node.y - minY) * mapScale
+                            )
+                        )
+                    }
+                }
+            }
         }
     }
 }

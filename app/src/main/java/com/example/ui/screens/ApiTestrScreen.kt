@@ -267,7 +267,7 @@ fun ApiTestrScreen(
                         if (isLoading) {
                             CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
                         } else {
-                            Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Icon(imageVector = Icons.Default.PlayArrow, contentDescription = "Play", modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(4.dp))
                             Text("Send", fontWeight = FontWeight.Bold)
                         }
@@ -698,7 +698,7 @@ fun ApiTestrScreen(
                                 shape = RoundedCornerShape(8.dp),
                                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary)
                             ) {
-                                Icon(imageVector = Icons.Default.Check, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Icon(imageVector = Icons.Default.Check, contentDescription = "Confirm", modifier = Modifier.size(14.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text("Run Tests", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                             }
@@ -867,7 +867,7 @@ fun ApiTestrScreen(
                 ) {
                     Text("Code Snippet", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = TextPrimary)
                     IconButton(onClick = { showSnippetModal = false }) {
-                        Icon(imageVector = Icons.Default.Close, contentDescription = null, tint = TextMuted)
+                        Icon(imageVector = Icons.Default.Close, contentDescription = "Close", tint = TextMuted)
                     }
                 }
 
@@ -915,7 +915,7 @@ fun ApiTestrScreen(
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
                 ) {
-                    Icon(imageVector = Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Icon(imageVector = Icons.Default.ContentCopy, contentDescription = "Copy", modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("Copy Snippet")
                 }
@@ -1075,7 +1075,7 @@ fun KeyValueEditorTable(
                 shape = RoundedCornerShape(8.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
             ) {
-                Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(14.dp), tint = TextPrimary)
+                Icon(imageVector = Icons.Default.Add, contentDescription = "Add", modifier = Modifier.size(14.dp), tint = TextPrimary)
                 Spacer(modifier = Modifier.width(4.dp))
                 Text("Add Row", fontSize = 11.sp, color = TextPrimary)
             }
@@ -1127,7 +1127,7 @@ fun KeyValueEditorTable(
                         onClick = { onItemsChanged(items.filter { it.id != item.id }) },
                         modifier = Modifier.size(32.dp)
                     ) {
-                        Icon(imageVector = Icons.Default.Delete, contentDescription = null, tint = TextMuted, modifier = Modifier.size(16.dp))
+                        Icon(imageVector = Icons.Default.Delete, contentDescription = "Delete", tint = TextMuted, modifier = Modifier.size(16.dp))
                     }
                 }
             }
@@ -1165,7 +1165,7 @@ fun ChainExtractionEditor(
             shape = RoundedCornerShape(8.dp),
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
         ) {
-            Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(14.dp), tint = TextPrimary)
+            Icon(imageVector = Icons.Default.Add, contentDescription = "Add", modifier = Modifier.size(14.dp), tint = TextPrimary)
             Spacer(modifier = Modifier.width(4.dp))
             Text("Add Extraction Rule", fontSize = 11.sp, color = TextPrimary)
         }
@@ -1224,7 +1224,7 @@ fun ChainExtractionEditor(
                         onClick = { onRulesChanged(rules.filter { it.id != rule.id }) },
                         modifier = Modifier.size(32.dp)
                     ) {
-                        Icon(imageVector = Icons.Default.Delete, contentDescription = null, tint = TextMuted, modifier = Modifier.size(16.dp))
+                        Icon(imageVector = Icons.Default.Delete, contentDescription = "Delete", tint = TextMuted, modifier = Modifier.size(16.dp))
                     }
                 }
             }
@@ -1262,7 +1262,7 @@ fun AssertionEditor(
             shape = RoundedCornerShape(8.dp),
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
         ) {
-            Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(14.dp), tint = TextPrimary)
+            Icon(imageVector = Icons.Default.Add, contentDescription = "Add", modifier = Modifier.size(14.dp), tint = TextPrimary)
             Spacer(modifier = Modifier.width(4.dp))
             Text("Add Assertion", fontSize = 11.sp, color = TextPrimary)
         }
@@ -1355,7 +1355,7 @@ fun AssertionEditor(
                             onClick = { onAssertionsChanged(assertions.filter { it.id != assertion.id }) },
                             modifier = Modifier.size(32.dp)
                         ) {
-                            Icon(imageVector = Icons.Default.Delete, contentDescription = null, tint = TextMuted, modifier = Modifier.size(16.dp))
+                            Icon(imageVector = Icons.Default.Delete, contentDescription = "Delete", tint = TextMuted, modifier = Modifier.size(16.dp))
                         }
                     }
 
