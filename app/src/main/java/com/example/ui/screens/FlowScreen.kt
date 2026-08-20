@@ -330,6 +330,7 @@ fun DraggableNodeBox(
         FlowNodeType.TOOL -> Color(0xFFF97316)
         FlowNodeType.CONDITION -> Color(0xFFA855F7)
         FlowNodeType.TEXT -> Color(0xFF64748B)
+        FlowNodeType.DELAY -> Color(0xFF8B5CF6)
     }
 
     Box(

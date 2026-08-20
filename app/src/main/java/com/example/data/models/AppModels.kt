@@ -333,7 +333,8 @@ enum class FlowNodeType(val label: String, val colorHex: Long, val iconEmoji: St
     CONDITION("Condition Node", 0xFFEC4899, "🔀"),
     TRANSFORM("Transform (JSONPath)", 0xFF10B981, "🔄"),
     TEXT("Template Text", 0xFF64748B, "📝"),
-    OUTPUT("Output / Alert", 0xFFEF4444, "📤")
+    OUTPUT("Output / Alert", 0xFFEF4444, "📤"),
+    DELAY("Delay", 0xFF8B5CF6, "⏱"),
 }
 
 data class FlowNodeItem(
@@ -385,11 +386,10 @@ data class UserSettingsState(
     val themeMode: String = "MONOCHROME_DARK",
     val cornerRadiusDp: Int = 16,
     val proxyPort: Int = 8080,
-    val isVpnActive: Boolean = false,
-    val isRootDetected: Boolean = false,
-    val isShizukuAvailable: Boolean = false,
-    val isFridaReady: Boolean = false,
-    val isLsposedInstalled: Boolean = false,
+    // Fix #30 (TODO): Removed isVpnActive, isRootDetected, isShizukuAvailable,
+    // isFridaReady, isLsposedInstalled — these were initialized as false and never
+    // updated by CapabilityProbe (which writes to InterceptionStateRepository).
+    // The Settings Diagnostics section reads capabilities directly, not these.
     val autoBeautify: Boolean = true,
     val sslVerification: Boolean = false,
     val defaultSnippetLang: String = "Python - Requests",

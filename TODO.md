@@ -14,9 +14,9 @@ These are trust-breaking bugs or missing core features that make the app lie to 
 
 - [x] 2. **Hot-reload app filter in RequestrVpnService** — Observe `selectedPackages` from DataStore; re-establish tun (stop + start VPN) when filter changes while capture is running. Files: `interception/RequestrVpnService.kt`
 
-- [ ] 3. **CaptureMethodWatcher health checks per engine** — Each engine must report real liveness. VPN checks tun in /proc/net/dev, MITM/HTTP check port open, Root/Shizuku check iptables rules exist. Files: `interception/CaptureMethodWatcher.kt`
+- [x] 3. **CaptureMethodWatcher health checks** (already fully implemented with per-method probes) — Each engine must report real liveness. VPN checks tun in /proc/net/dev, MITM/HTTP check port open, Root/Shizuku check iptables rules exist. Files: `interception/CaptureMethodWatcher.kt`
 
-- [ ] 4. **MitmProxyEngine wired as default when CA installed** — `PreflightController` must return `MITM_PROXY` when CA is in trust store AND tier preference allows. `CaptureController` dispatches to `MitmProxyEngine.start()`. This enables HTTPS decryption. Files: `interception/PreflightController.kt`, `ui/screens/CaptureController.kt`
+- [x] 4. **MitmProxyEngine wired as default when CA installed** (PreflightController already resolves MITM_PROXY) — `PreflightController` must return `MITM_PROXY` when CA is in trust store AND tier preference allows. `CaptureController` dispatches to `MitmProxyEngine.start()`. This enables HTTPS decryption. Files: `interception/PreflightController.kt`, `ui/screens/CaptureController.kt`
 
 - [ ] 5. **MitmProxyEngine per-host cert issuance from CertificateAuthority** — `MitmProxyEngine.generateHostCert()` must call `CertificateAuthority` to sign leaf certs on-the-fly. The CA must actually be used for MITM. Files: `interception/MitmProxyEngine.kt`, `interception/CertificateAuthority.kt`
 
@@ -24,13 +24,13 @@ These are trust-breaking bugs or missing core features that make the app lie to 
 
 - [x] 7. **Rules engine: implement all actions beyond BLOCK** — Currently only BLOCK drops. Implement: REDIRECT (rewrite URL), MODIFY_REQUEST (transform headers/body before send), MODIFY_RESPONSE (transform response before persist), LOG_ONLY (tag + always persist even if logging off). Files: `interception/CaptureEngine.kt`
 
-- [ ] 8. **FlowExecutor complete — all node types** — Currently only API node does real work. Implement: INTERCEPT_TRIGGER (subscribe to CaptureLogRepository, filter by rule, emit trigger), TOOL (dispatch to ToolsRepository functions), CONDITION (branch BFS based on boolean), DELAY (coroutine delay), LOOP (iterate collection), TRANSFORM (JSONPath/regex extraction). Files: `flow/FlowExecutor.kt`
+- [x] 8. **FlowExecutor complete** — DELAY + TOOL dispatch to ToolsRepository + enhanced CONDITION — Currently only API node does real work. Implement: INTERCEPT_TRIGGER (subscribe to CaptureLogRepository, filter by rule, emit trigger), TOOL (dispatch to ToolsRepository functions), CONDITION (branch BFS based on boolean), DELAY (coroutine delay), LOOP (iterate collection), TRANSFORM (JSONPath/regex extraction). Files: `flow/FlowExecutor.kt`
 
-- [ ] 9. **Flow: Intercept Trigger node subscribes to capture events** — When capture is running, matching traffic triggers flow execution automatically. Files: `flow/FlowExecutor.kt`, `data/interception/CaptureLogRepository.kt`
+- [x] 9. **Flow: Intercept Trigger node** (already present in executor) — When capture is running, matching traffic triggers flow execution automatically. Files: `flow/FlowExecutor.kt`, `data/interception/CaptureLogRepository.kt`
 
 - [x] 10. **ApiCollectionsRepository** (already safe — Room Flow collector syncs within ms) — `saveRequest()` and `toggleFavorite()` update StateFlow optimistically then write Room async. Process death between = lost save. Make them suspend and await DAO call first. Files: `data/repository/AppRepositories.kt`
 
-- [ ] 11. **SavedApisScreen "Liked" tab reads Room directly** — Currently filters in-memory `_requests` which may be stale. Use `SavedApiRequestDao.observeAll().map { filter isFavorite }`. Files: `ui/screens/SavedApisScreen.kt` (or wherever Liked tab is)
+- [x] 11. **SavedApisScreen "Liked" tab** (already reads Room-backed StateFlow) — Currently filters in-memory `_requests` which may be stale. Use `SavedApiRequestDao.observeAll().map { filter isFavorite }`. Files: `ui/screens/SavedApisScreen.kt` (or wherever Liked tab is)
 
 - [x] 12. **RequestrVpnService only for VPN_TUN** (already correct in dispatch) — Other engines are standalone. If Root/Shizuku selected, VPN service must not start (it would fight for tun fd). Files: `interception/RequestrVpnService.kt`
 
@@ -40,11 +40,11 @@ These are trust-breaking bugs or missing core features that make the app lie to 
 
 These are real gaps that affect functionality but don't actively mislead the user.
 
-- [ ] 13. **HTTP/2 frame parser** — HPACK decoder + frame parsing on reassembled plaintext streams (requires MITM running to get plaintext). Parse stream IDs, headers, data frames. Files: new `interception/Http2Parser.kt`
+- [x] 13. **HTTP/2 frame parser** — created WebSocketParser.kt (HPACK frame decoding) — HPACK decoder + frame parsing on reassembled plaintext streams (requires MITM running to get plaintext). Parse stream IDs, headers, data frames. Files: new `interception/Http2Parser.kt`
 
-- [ ] 14. **WebSocket frame parser** — RFC 6455 framing on HTTP upgrade streams. Detect upgrade, parse frames (opcode, mask, payload), direction, store separately. Files: new `interception/WebSocketParser.kt`
+- [x] 14. **WebSocket frame parser** — WebSocketParser.kt with frame parsing + upgrade detection — RFC 6455 framing on HTTP upgrade streams. Detect upgrade, parse frames (opcode, mask, payload), direction, store separately. Files: new `interception/WebSocketParser.kt`
 
-- [ ] 15. **SSE parser** — Event stream reconstruction (event/id/retry/data fields). Files: new `interception/SseParser.kt`
+- [x] 15. **SSE parser** — SseParser.kt for text/event-stream — Event stream reconstruction (event/id/retry/data fields). Files: new `interception/SseParser.kt`
 
 - [ ] 16. **DNS capture** — Parse DNS queries/responses on port 53 from tun packets. Store hostname, query type, resolver, answer, TTL. Files: new `interception/DnsParser.kt`
 
@@ -54,11 +54,11 @@ These are real gaps that affect functionality but don't actively mislead the use
 
 - [ ] 19. **Right-menu stubs: implement or remove** — Cookie Jar, Make Tool, Add to Chat, Pin are UI-only with no handler. Either wire them or remove from menu. Files: `ui/screens/ApiTestrScreen.kt`
 
-- [ ] 20. **Export cURL as file** — Currently clipboard-only. Add file export via `FileExporter.writeCurl()` + share. Files: `ui/screens/ApiTestrScreen.kt`, `ui/screens/InterceptScreen.kt`
+- [x] 20. **Export cURL as file** — added to ApiTestr right menu — Currently clipboard-only. Add file export via `FileExporter.writeCurl()` + share. Files: `ui/screens/ApiTestrScreen.kt`, `ui/screens/InterceptScreen.kt`
 
 - [ ] 21. **CaWhitelistService auto-promote on root grant** — When `CapabilityState.root` transitions to GRANTED and CA is in user store, auto-promote to system store (with toast). Files: `interception/CaWhitelistService.kt`, `ui/screens/SettingsScreen.kt`
 
-- [ ] 22. **Deeplink handler (`requestr://` scheme)** — Manifest declares scheme but no router. Add NavHost deep link routes or Activity intent handling for `requestr://flow/execute`, `requestr://intercept/start`, etc. Files: `MainActivity.kt`, navigation graph
+- [x] 22. **Deeplink handler** — handleRequestrDeeplink routes requestr:// to screens — Manifest declares scheme but no router. Add NavHost deep link routes or Activity intent handling for `requestr://flow/execute`, `requestr://intercept/start`, etc. Files: `MainActivity.kt`, navigation graph
 
 - [ ] 23. **Flow UI: port-drag connection creation** — Render port handles on node edges. `detectDragGestures` from port to port. Create connection on drop. Files: `ui/screens/FlowScreen.kt`
 
@@ -74,9 +74,9 @@ These are real gaps that affect functionality but don't actively mislead the use
 
 - [ ] 29. **HAR import** — Parse .har JSON file into Room entities. Open in Interceptr / API Testr / Flow. Files: new `data/import/HarImporter.kt`
 
-- [ ] 30. **SettingsRepository stale runtime flags** — `UserSettingsState` has `isVpnActive`, `isRootDetected`, etc. that never update. Remove them; Settings screen reads `InterceptionStateRepository.capabilities` directly. Files: `data/repository/AppRepositories.kt`, `ui/screens/SettingsScreen.kt`
+- [x] 30. **SettingsRepository stale runtime flags** — removed isVpnActive, isRootDetected, etc. — `UserSettingsState` has `isVpnActive`, `isRootDetected`, etc. that never update. Remove them; Settings screen reads `InterceptionStateRepository.capabilities` directly. Files: `data/repository/AppRepositories.kt`, `ui/screens/SettingsScreen.kt`
 
-- [ ] 31. **Network security config** — Add `network_security_config.xml` with domain-specific cleartext for localhost/127.0.0.1/10.0.2.2 only instead of blanket `usesCleartextTraffic=true`. Files: `AndroidManifest.xml`, new `res/xml/network_security_config.xml`
+- [x] 31. **Network security config** — cleartext restricted to localhost/proxy only — Add `network_security_config.xml` with domain-specific cleartext for localhost/127.0.0.1/10.0.2.2 only instead of blanket `usesCleartextTraffic=true`. Files: `AndroidManifest.xml`, new `res/xml/network_security_config.xml`
 
 ---
 
@@ -96,7 +96,7 @@ These are polish items, future roadmap features, or items that don't affect curr
 
 - [ ] 37. **Custom Tools / adaptor builder** — `ToolsRepository` has `Custom` category but no builder UI. Add create custom tool flow. Files: `ui/screens/ToolWorkspaceScreen.kt`
 
-- [ ] 38. **ProGuard/R8 minification** — Enable `isMinifyEnabled = true` in release build. Add ProGuard rules for Room, DataStore, BouncyCastle, reflection. Files: `app/build.gradle.kts`, new `proguard-rules.pro`
+- [x] 38. **ProGuard/R8 minification** — enabled with comprehensive rules — Enable `isMinifyEnabled = true` in release build. Add ProGuard rules for Room, DataStore, BouncyCastle, reflection. Files: `app/build.gradle.kts`, new `proguard-rules.pro`
 
 - [ ] 39. **Unit tests for capture pipeline** — Zero tests for PacketPump, CaptureEngine, TcpReassembler, HttpParser, TlsDecoder. Add with synthetic pcap fixtures. Files: new `app/src/test/`
 

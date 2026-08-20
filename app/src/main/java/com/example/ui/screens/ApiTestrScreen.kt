@@ -108,6 +108,7 @@ fun ApiTestrScreen(
     onSendToIntercept: (ApiRequestItem) -> Unit = {}
 ) {
     val coroutineScope = rememberCoroutineScope()
+    val appContext = androidx.compose.ui.platform.LocalContext.current
     val currentRequest by ApiCollectionsRepository.currentActiveRequest.collectAsState()
     val allRequests by ApiCollectionsRepository.requests.collectAsState()
     val folders by ApiCollectionsRepository.folders.collectAsState()
@@ -1009,6 +1010,36 @@ fun ApiTestrScreen(
             onClick = {
                 reqState = ApiRequestItem(name = "New Request", url = "https://httpbin.org/get")
                 showMoreMenu = false
+            }
+        )
+        DropdownMenuItem(
+            text = { Text("📁 Export cURL as File") },
+            onClick = {
+                showMoreMenu = false
+                // Build curl string from the current request state (Fix #14 audit)
+                val curl = buildString {
+                    append("curl -X ").append(reqState.method.name)
+                    append(" '").append(reqState.url).append("'")
+                    reqState.headers.filter { it.key.isNotBlank() }.forEach { h ->
+                        append(" -H '").append(h.key).append(": ").append(h.value).append("'")
+                    }
+                    if (reqState.bodyContent.isNotBlank() && reqState.bodyType != com.example.data.models.RequestBodyType.NONE) {
+                        val escaped = reqState.bodyContent.replace("'", "'\\''")
+                        append(" --data '").append(escaped).append("'")
+                    }
+                }
+                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                    runCatching {
+                        val file = com.example.data.export.FileExporter.writeCurl(appContext, curl)
+                        com.example.data.export.FileExporter.shareFile(
+                            appContext, file,
+                            "application/x-shellscript",
+                            "cURL export"
+                        )
+                    }.onFailure { e ->
+                        android.util.Log.w("ApiTestr", "Export cURL failed: ${e.message}")
+                    }
+                }
             }
         )
     }

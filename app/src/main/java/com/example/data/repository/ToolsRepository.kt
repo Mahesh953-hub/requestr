@@ -324,4 +324,32 @@ Broadcast: $ip (Derived)
         }
         return formatted.trim()
     }
+
+    /**
+     * Dispatches a tool execution by ID for use in Flow TOOL nodes.
+     * Maps toolId to the appropriate function in this repository.
+     */
+    fun executeToolFunction(toolId: String, input: String): String {
+        return when (toolId.lowercase().replace(" ", "-").replace("_", "-")) {
+            "base64-encode", "base64" -> encodeBase64(input)
+            "base64-decode" -> decodeBase64(input)
+            "hex-encode", "text-to-hex" -> textToHex(input)
+            "hex-decode", "hex-to-text" -> hexToText(input)
+            "jwt-decode", "jwt-decoder" -> decodeJwt(input)
+            "html-encode", "html-entity-encode" -> htmlEntityEncode(input)
+            "html-decode", "html-entity-decode" -> htmlEntityDecode(input)
+            "sha256", "hash-sha256" -> hashSha256(input)
+            "sha1", "hash-sha1" -> hashSha1(input)
+            "md5", "hash-md5" -> hashMd5(input)
+            "uuid", "generate-uuid" -> generateUuid()
+            "random-string", "secure-random-string" -> generateRandomString(input.toIntOrNull() ?: 32)
+            "lorem", "lorem-ipsum" -> generateLoremIpsum(input.toIntOrNull() ?: 2)
+            "json-format", "json-formatter" -> formatJson(input)
+            "sql-format", "sql-formatter" -> formatSql(input)
+            "ip-calc", "ip-calculator", "subnet" -> calculateSubnet(input)
+            "url-encode" -> java.net.URLEncoder.encode(input, "UTF-8")
+            "url-decode" -> java.net.URLDecoder.decode(input, "UTF-8")
+            else -> "{\"error\": \"Unknown tool: $toolId\", \"input\": \"${input.take(100)}\"}"
+        }
+    }
 }

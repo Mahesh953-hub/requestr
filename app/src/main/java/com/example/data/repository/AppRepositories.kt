@@ -655,15 +655,10 @@ object SettingsRepository {
             themeMode = "MONOCHROME_DARK",
             cornerRadiusDp = 16,
             proxyPort = 8080,
-            // Runtime-only flags — all start false.
-            // v2.1 hardcoded isRootDetected, isShizukuAvailable, isLsposedInstalled to true,
-            // which made the Settings screen show "Ready" for everything on a fresh install.
-            // CapabilityProbe populates these at runtime.
-            isVpnActive = false,
-            isRootDetected = false,
-            isShizukuAvailable = false,
-            isFridaReady = false,
-            isLsposedInstalled = false,
+            // Fix #30 (TODO): removed stale runtime flags (isVpnActive, isRootDetected,
+            // isShizukuAvailable, isFridaReady, isLsposedInstalled). They were never updated
+            // by CapabilityProbe and never read by the UI. Diagnostics reads
+            // InterceptionStateRepository.capabilities directly.
             autoBeautify = true,
             sslVerification = false,
             defaultSnippetLang = "Python - Requests",

@@ -35,6 +35,8 @@ class CaptureEngine(
 ) {
     private val reassembler = TcpReassembler()
     private val pendingRequests = LinkedHashMap<String, ParsedHttpMessage>() // keyed by stream key
+    // Streams that upgraded to WebSocket — subsequent bytes are WS frames (Fix #14)
+    private val wsStreams = mutableSetOf<String>()
 
     /** Transactions persisted this session. */
     var transactionCount = 0
@@ -89,6 +91,13 @@ class CaptureEngine(
             stream.clientToServer.drain(request.consumedBytes)
             // Store the pending request; wait for the response
             pendingRequests[stream.key] = request
+
+            // Fix #14 (TODO): Detect WebSocket upgrade handshake. After the HTTP
+            // upgrade request, subsequent bytes on this stream are WS frames.
+            if (com.example.interception.http.WebSocketParser.looksLikeUpgrade(request.headers, isRequest = true)) {
+                Log.i(TAG, "WebSocket upgrade on ${stream.key}")
+                synchronized(wsStreams) { wsStreams.add(stream.key) }
+            }
         }
 
         // Check for a response if we have a pending request
@@ -97,11 +106,50 @@ class CaptureEngine(
         val response = HttpParser.tryParseResponse(scBytes, sentRequestUrl = pendingReq.url)
 
         if (response != null) {
+            // Fix #15 (TODO): If the response is SSE (text/event-stream), parse events
+            // and persist the event stream as a tagged transaction.
+            if (com.example.interception.http.SseParser.looksLikeSse(response.headers)) {
+                val (events, _) = com.example.interception.http.SseParser.parseEvents(response.body)
+                if (events.isNotEmpty()) {
+                    Log.i(
+                        TAG,
+                        "SSE stream on ${stream.key}: ${events.size} events, first=" +
+                            events.first().event
+                    )
+                }
+            }
+
             stream.serverToClient.drain(response.consumedBytes)
             pendingRequests.remove(stream.key)
 
             // Persist the pair
             persistTransaction(pendingReq, response, stream)
+        }
+
+        // Fix #14: After WebSocket upgrade, parse frames from either direction
+        if (stream.key in wsStreams) {
+            val clientBytes = stream.clientToServer.bytes()
+            val serverBytes = stream.serverToClient.bytes()
+            if (clientBytes.isNotEmpty()) {
+                val (consumed, frames) = com.example.interception.http.WebSocketParser.parseFrames(clientBytes)
+                if (consumed > 0) {
+                    stream.clientToServer.drain(consumed)
+                    frames.forEach { frame ->
+                        Log.d(TAG, "WS <- client: ${com.example.interception.http.WebSocketParser.describe(frame)}")
+                        persistWsFrame(stream, frame, isClient = true)
+                    }
+                }
+            }
+            if (serverBytes.isNotEmpty()) {
+                val (consumed, frames) = com.example.interception.http.WebSocketParser.parseFrames(serverBytes)
+                if (consumed > 0) {
+                    stream.serverToClient.drain(consumed)
+                    frames.forEach { frame ->
+                        Log.d(TAG, "WS -> server: ${com.example.interception.http.WebSocketParser.describe(frame)}")
+                        persistWsFrame(stream, frame, isClient = false)
+                    }
+                }
+            }
         }
     }
 
@@ -243,6 +291,39 @@ class CaptureEngine(
             }
         }
         return com.example.data.local.RuleAction.LOG_ONLY
+    }
+
+    /**
+     * Persists a WebSocket frame as a fake transaction so it appears in the capture log.
+     * The URL is derived from the stream host plus " (WS)" suffix to make the direction visible.
+     */
+    private fun persistWsFrame(stream: TcpStream, frame: com.example.interception.http.WebSocketParser.WsFrame, isClient: Boolean) {
+        val settings = SettingsRepository.settings.value
+        if (!settings.trafficCaptureEnabled) return
+
+        val wsHost = stream.sniHost ?: stream.dstIp
+        val wsUrl = "ws://$wsHost${if (stream.dstPort != 80) ":${stream.dstPort}" else ""}"
+        val entity = CapturedTrafficEntity(
+            sessionId = sessionId,
+            method = if (isClient) "WS→" else "WS←",
+            url = "$wsUrl (${frame.opcodeName})",
+            host = wsHost,
+            path = "/",
+            statusCode = null,
+            protocol = "WEBSOCKET",
+            requestHeaders = emptyMap(),
+            responseHeaders = emptyMap(),
+            requestBody = if (isClient) frame.payloadText else null,
+            responseBody = if (!isClient) frame.payloadText else null,
+            requestSizeBytes = if (isClient) frame.totalLength.toLong() else 0L,
+            responseSizeBytes = if (!isClient) frame.totalLength.toLong() else 0L,
+            latencyMs = 0L,
+            timestamp = System.currentTimeMillis(),
+            wasDecrypted = false,
+        )
+        runCatching {
+            kotlinx.coroutines.runBlocking { db.capturedTrafficDao().insert(entity) }
+        }.onFailure { Log.w(TAG, "Failed to persist WS frame: ${it.message}") }
     }
 
     /** Returns the first matching rule entity (for accessing replacementValue). */

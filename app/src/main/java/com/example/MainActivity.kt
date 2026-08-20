@@ -1,5 +1,6 @@
 package com.example
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -49,6 +50,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -103,6 +105,21 @@ import com.example.ui.theme.TextSecondary
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+
+    companion object {
+        /** Deep-link navigation requests received while the activity was alive. */
+        val pendingDeeplinks = java.util.concurrent.ConcurrentLinkedQueue<android.net.Uri>()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // Fix #22 (TODO): handle requestr:// deep links arriving while the app is open.
+        val data = intent.data
+        if (data?.scheme == "requestr") {
+            pendingDeeplinks.add(data)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Load persisted user settings before the UI tree reads them.
@@ -128,6 +145,53 @@ class MainActivity : ComponentActivity() {
         setContent {
             RequestrApp()
         }
+    }
+}
+
+/**
+ * Fix #22 (TODO): routes a requestr:// deep link to the matching screen.
+ * Supported routes: requestr://flow/execute, requestr://intercept,
+ * requestr://apis, requestr://tools, requestr://notes, requestr://music,
+ * requestr://settings, requestr://saved
+ */
+private fun handleRequestrDeeplink(
+    navController: androidx.navigation.NavHostController,
+    uri: android.net.Uri,
+) {
+    val route = when (uri.host) {
+        "flow" -> Screen.Flow.route
+        "intercept" -> Screen.Intercept.route
+        "apis" -> Screen.Apis.route
+        "tools" -> Screen.Tools.route
+        "notes" -> Screen.Notes.route
+        "music" -> Screen.Music.route
+        "settings" -> Screen.Settings.route
+        "saved" -> Screen.SavedApis.route
+        "home" -> Screen.Home.route
+        "flow/execute" -> Screen.Flow.route
+        else -> uri.path?.trim('/')?.takeIf { it.isNotBlank() }?.let { path ->
+            when (path.split("/").first()) {
+                "flow" -> Screen.Flow.route
+                "intercept" -> Screen.Intercept.route
+                "apis", "api" -> Screen.Apis.route
+                "tools" -> Screen.Tools.route
+                "notes" -> Screen.Notes.route
+                "music" -> Screen.Music.route
+                "settings" -> Screen.Settings.route
+                "saved" -> Screen.SavedApis.route
+                else -> null
+            }
+        }
+    } ?: return
+
+    try {
+        navController.navigate(route) {
+            popUpTo(Screen.Home.route) { saveState = true }
+            launchSingleTop = true
+            restoreState = true
+        }
+    } catch (_: Exception) {
+        // Navigation not ready yet — ignore, deep link is best-effort
     }
 }
 
@@ -214,6 +278,19 @@ fun RequestrApp() {
         val navController = rememberNavController()
         val navBackStackEntry by navController.currentBackStackEntryAsState()
         val currentRoute = navBackStackEntry?.destination?.route ?: Screen.Home.route
+
+        // Fix #22 (TODO): drain pending requestr:// deep links and navigate.
+        val activity = androidx.compose.ui.platform.LocalContext.current as? MainActivity
+        LaunchedEffect(Unit) {
+            val initialUri = activity?.intent?.data
+            if (initialUri?.scheme == "requestr") {
+                handleRequestrDeeplink(navController, initialUri)
+            }
+            while (true) {
+                val uri = MainActivity.pendingDeeplinks.poll() ?: break
+                handleRequestrDeeplink(navController, uri)
+            }
+        }
 
         val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
         val coroutineScope = rememberCoroutineScope()

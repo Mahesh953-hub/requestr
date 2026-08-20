@@ -1,21 +1,73 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# requestr ProGuard / R8 rules (Fix #38 — enable minification)
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# ── Kotlin ──────────────────────────────────────────────────────────
+-keepclassmembers class **$CompanionObject { *; }
+-keep class kotlin.Metadata { *; }
+-keepclassmembers public class ** { public <init>(...); }
+-dontwarn kotlin.**
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# ── Jetpack Compose ────────────────────────────────────────────────
+# Compose uses reflection to resolve composable functions.
+-keepclasseswithmembers public class ** { @androidx.compose.runtime.Composable public *; }
+-keep class androidx.compose.runtime.** { *; }
+-dontwarn androidx.compose.**
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# ── Room ────────────────────────────────────────────────────────────
+-keep class androidx.room.RoomDatabase { *; }
+-keep @interface androidx.room.Entity
+-keep @interface androidx.room.Dao
+-keep @interface androidx.room.Query
+-keep class ** extends androidx.room.RoomDatabase
+-keep class ** { @androidx.room.* <methods>; }
+-dontwarn androidx.room.**
+
+# ── DataStore ───────────────────────────────────────────────────────
+-keepclassmembers class androidx.datastore.preferences.** { *; }
+-keep class androidx.datastore.core.** { *; }
+-dontwarn androidx.datastore.**
+
+# ── Kotlin Serialization / DataStore protobuf ──────────────────────
+-keepclasseswithmembers class * {
+    kotlinx.serialization.Serializable <fields>;
+}
+
+# ── BouncyCastle (CA generation, PKCS#12) ───────────────────────────
+-keep class org.bouncycastle.** { *; }
+-keepclassmembers class org.bouncycastle.** { *; }
+-dontwarn org.bouncycastle.**
+
+# ── java.security (KeyStore, KeyPairGenerator) ──────────────────────
+-keepclassmembers class java.security.** { *; }
+-keepclassmembers class javax.crypto.** { *; }
+-dontwarn javax.crypto.**
+-dontwarn java.security.**
+
+# ── Android / system classes used by reflection ─────────────────────
+-keepclassmembers class android.security.KeyChain { *; }
+-keepclassmembers class android.net.VpnService { *; }
+-keepclassmembers class android.net.VpnService$Builder { *; }
+
+# ── Frida reflection (Shizuku probe) ────────────────────────────────
+-keepclasseswithmembers class rikka.shizuku.** { *; }
+-dontwarn rikka.shizuku.**
+
+# ── Gson (EnvironmentRepository, ApiTestr chain extraction) ─────────
+-keepclassmembers class * implements com.google.gson.JsonDeserializer { *; }
+-keepclassmembers class * implements com.google.gson.JsonSerializer { *; }
+-keepclassmembers class * { @com.google.gson.annotations.SerializedName *; }
+
+# ── libsu (Root access) ─────────────────────────────────────────────
+-keepclasseswithmembers class com.topjohnwu.superuser.** { *; }
+-dontwarn com.topjohnwu.superuser.**
+
+# ── General keep for annotation processors / code-gen ───────────────
+-keepclassmembers class ** { @kotlin.jvm.JvmStatic <methods>; }
+-keepclassmembers class ** { @kotlin.jvm.JvmField <fields>; }
+
+# ── OkHttp (API Testr engine) ───────────────────────────────────────
+-keepclasseswithmembers class okhttp3.** { *; }
+-dontwarn okhttp3.**
+
+# ── Preserve line numbers for crash stack traces ───────────────────
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile
