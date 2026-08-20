@@ -74,15 +74,17 @@ class CaptureController(
                 }
 
                 is PreflightController.Result.Ready -> {
-                    // Fix 04: transition NEVER_CONFIGURED → CONFIGURED_IDLE so the
-                    // HomeScreen power module and InterceptScreen header stop showing
-                    // "Set up Interception" after the user has granted permissions.
-                    InterceptionStateRepository.markConfiguredIdle(result.port)
+                    // BUGFIX: Do NOT call markConfiguredIdle here — it wipes the ARMED
+                    // state set by PreflightController.run(), causing the FAB to think
+                    // nothing is happening and re-trigger start() infinitely. The ARMED
+                    // state is the correct transition into consent flow.
+                    //
+                    // When the user denies consent, onConsentDenied() marks the error.
+                    // When granted, onConsentGranted() → VPN starts → markActive().
                     onPrompt(null)
                     val consent = result.consentIntent
+                    android.util.Log.i("CaptureController", "Ready: method=${result.method} port=${result.port} consent=${consent != null}")
                     if (consent != null) {
-                        // System VPN dialog still owed. Capture starts from the result callback,
-                        // never before the user has actually granted consent.
                         launchConsent(consent)
                     } else {
                         startCaptureAndWatcher(result.method, result.port)

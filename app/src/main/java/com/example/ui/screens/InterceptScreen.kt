@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -90,6 +91,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -200,6 +202,8 @@ fun InterceptScreen(
     val appFilterMode by settings.appFilterMode.collectAsState(initial = AppFilterMode.ALL_APPS)
     val selectedPackages by settings.selectedPackages.collectAsState(initial = emptySet())
     val configuredPort by settings.proxyPort.collectAsState(initial = SettingsDataStore.DEFAULT_PROXY_PORT)
+    val captureRecordMode by settings.captureRecordMode.collectAsState(initial = "VPN")
+    val enhancedMode by settings.enhancedMode.collectAsState(initial = false)
 
     // isCapturing is now derived from the real engine status rather than a free-floating boolean.
     val isCapturing = interceptionState.isActive
@@ -542,6 +546,48 @@ fun InterceptScreen(
         }
     }
 
+    // ── Debug log: shows every interception state change in real-time ──
+    var expandedLog by remember { mutableStateOf(false) }
+    val logEntries = remember { mutableStateListOf<String>() }
+
+    // Watch state changes and append log entries
+    LaunchedEffect(interceptionState) {
+        val entry = "[${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())}] " +
+            "status=${interceptionState.status} tier=${interceptionState.tier} method=${interceptionState.captureMethod} " +
+            "port=${interceptionState.port} active=${interceptionState.activeConnections} " +
+            "err=${interceptionState.errorText ?: "—"}"
+        if (logEntries.lastOrNull() != entry) logEntries.add(entry)
+        if (logEntries.size > 25) logEntries.removeAt(0)
+    }
+
+    if (logEntries.isNotEmpty()) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .padding(start = 8.dp, end = 80.dp, bottom = 80.dp)
+        ) {
+            Box(
+                Modifier
+                    .widthIn(max = 300.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color.Black.copy(alpha = 0.75f))
+                    .clickable { expandedLog = !expandedLog }
+                    .padding(6.dp)
+            ) {
+                Column {
+                    Text("📋 Interception Log", color = Color(0xFF4ADE80), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    if (expandedLog) {
+                        logEntries.takeLast(12).forEach { entry ->
+                            Text(entry, color = Color.White.copy(alpha = 0.85f), fontSize = 9.sp, maxLines = 1)
+                        }
+                    } else {
+                        Text(logEntries.last(), color = Color.White.copy(alpha = 0.8f), fontSize = 9.sp, maxLines = 1)
+                    }
+                }
+            }
+        }
+    }
+
     // Pre-flight outcomes. Each one is a real blocking condition, surfaced with the exact
     // remedy rather than a silent no-op.
     when (val prompt = startPrompt) {
@@ -595,6 +641,10 @@ fun InterceptScreen(
             appFilterMode = appFilterMode,
             selectedCount = selectedPackages.size,
             trafficCount = capturedTraffic.size,
+            captureRecordMode = captureRecordMode,
+            enhancedMode = enhancedMode,
+            onRecordModeChange = { mode -> screenScope.launch { settings.setCaptureRecordMode(mode) } },
+            onEnhancedModeChange = { on -> screenScope.launch { settings.setEnhancedMode(on) } },
             onOpenApps = {
                 showCaptureSetupSheet = false
                 showAppFilterSheet = true
@@ -1395,6 +1445,10 @@ fun CaptureSetupBottomSheet(
     appFilterMode: AppFilterMode,
     selectedCount: Int,
     trafficCount: Int,
+    captureRecordMode: String,
+    enhancedMode: Boolean,
+    onRecordModeChange: (String) -> Unit,
+    onEnhancedModeChange: (Boolean) -> Unit,
     onOpenApps: () -> Unit,
     onOpenRules: () -> Unit,
     onOpenCert: () -> Unit,
@@ -1440,6 +1494,39 @@ fun CaptureSetupBottomSheet(
             )
 
             Spacer(modifier = Modifier.height(12.dp))
+
+            // ── Record mode: VPN or Proxy ──────────────────────
+            Text("Record Mode", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+            Spacer(modifier = Modifier.height(4.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("VPN" to "Routes all traffic through a local VPN tunnel", "PROXY" to "Starts a local HTTP proxy server").forEach { (mode, desc) ->
+                    val active = captureRecordMode == mode
+                    Box(
+                        Modifier.weight(1f).clip(RoundedCornerShape(12.dp))
+                            .background(if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                            .clickable { onRecordModeChange(mode) }
+                            .padding(12.dp)
+                    ) {
+                        Column {
+                            Text(mode, fontWeight = FontWeight.Bold, fontSize = 12.sp, color = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface)
+                            Text(desc, fontSize = 10.sp, color = if (active) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f) else MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // ── Enhanced mode ──────────────────────────────────
+            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Enhanced Mode", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
+                    Text("Richer packet analysis, dynamic logging, extended trace", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(checked = enhancedMode, onCheckedChange = onEnhancedModeChange)
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
 
             // Each chip reflects the REAL probe result. "Unavailable"/"Not running" render in a
             // visually distinct style so they can never be mistaken for "granted".

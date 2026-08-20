@@ -89,6 +89,9 @@ object AppSettingsKeys {
     val SELECTED_PACKAGES = androidx.datastore.preferences.core.stringSetPreferencesKey("selected_packages")
     val REMEMBER_LAST_APP_FILTER = booleanPreferencesKey("remember_last_app_filter")
     val CA_INSTALLED_HINT = booleanPreferencesKey("ca_installed_hint")
+    // v4.2: capture mode selection
+    val CAPTURE_RECORD_MODE = stringPreferencesKey("capture_record_mode")  // "VPN" or "PROXY"
+    val ENHANCED_MODE = booleanPreferencesKey("enhanced_mode")             // richer logging + analysis
 }
 
 /**

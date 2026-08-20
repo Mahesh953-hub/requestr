@@ -79,20 +79,30 @@ object PreflightController {
         }
 
         val port = prefs.proxyPort.first()
-        // Resolve actual capture method:
-        // - If CA installed and tier is not root/shizuku (which get their own redirect), use MITM
-        // - Root/Shizuku use their own iptables + MITM combination internally
+        val recordMode = prefs.captureRecordMode.first() // "VPN" or "PROXY"
+        val enhanced = prefs.enhancedMode.first()
+
+        // Resolve capture method. VPN vs PROXY is now a user choice stored in prefs.
         val method = when {
+            // Root/Shizuku always win regardless of mode (they're superior)
             capabilities.isRootUsable -> CaptureMethod.ROOT_IPTABLES
             capabilities.isShizukuUsable -> CaptureMethod.SHIZUKU_TUN
-            capabilities.isCaInstalled -> CaptureMethod.MITM_PROXY  // CA installed: real HTTPS decryption
-            else -> CaptureMethod.VPN_TUN  // No CA, no root: plaintext only via VPN tun
+            // User-chosen record mode
+            recordMode == "PROXY" -> {
+                if (capabilities.isCaInstalled) CaptureMethod.MITM_PROXY
+                else CaptureMethod.HTTP_PROXY
+            }
+            else -> CaptureMethod.VPN_TUN
+        }
+
+        InterceptionStateRepository.markArmed(tier = tier, port = port, method = method)
+        if (enhanced) {
+            android.util.Log.i("Preflight", "Enhanced mode: recordMode=$recordMode method=$method port=$port tier=$tier")
         }
 
         // Step 4 — VPN consent. Non-null intent means the caller must launch it first.
         val consent = VpnService.prepare(context)
 
-        InterceptionStateRepository.markArmed(tier = tier, port = port, method = method)
         return Result.Ready(tier = tier, method = method, port = port, consentIntent = consent)
     }
 

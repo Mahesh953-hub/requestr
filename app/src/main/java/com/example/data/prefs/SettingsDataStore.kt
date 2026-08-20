@@ -62,6 +62,13 @@ class SettingsDataStore(private val context: Context) {
      */
     val caInstalledHint: Flow<Boolean> = prefs.map { it[AppSettingsKeys.CA_INSTALLED_HINT] ?: false }
 
+    /** "VPN" or "PROXY" — which capture mode to use */
+    val captureRecordMode: Flow<String> = prefs.map { p ->
+        (p[AppSettingsKeys.CAPTURE_RECORD_MODE] ?: "VPN").let { if (it in listOf("VPN", "PROXY")) it else "VPN" }
+    }
+
+    val enhancedMode: Flow<Boolean> = prefs.map { it[AppSettingsKeys.ENHANCED_MODE] ?: false }
+
     suspend fun setProxyPort(port: Int) {
         // Keep within the unprivileged, valid TCP range.
         val safe = port.coerceIn(1024, 65535)
@@ -86,6 +93,14 @@ class SettingsDataStore(private val context: Context) {
 
     suspend fun setCaInstalledHint(value: Boolean) {
         store.edit { it[AppSettingsKeys.CA_INSTALLED_HINT] = value }
+    }
+
+    suspend fun setCaptureRecordMode(value: String) {
+        store.edit { it[AppSettingsKeys.CAPTURE_RECORD_MODE] = value }
+    }
+
+    suspend fun setEnhancedMode(value: Boolean) {
+        store.edit { it[AppSettingsKeys.ENHANCED_MODE] = value }
     }
 
     companion object {
