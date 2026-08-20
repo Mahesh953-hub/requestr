@@ -42,8 +42,10 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -69,10 +71,20 @@ fun MusicScreen(
     onBack: (() -> Unit)? = null,
     onMiniSettings: () -> Unit
 ) {
+    val context = LocalContext.current
     val tracks by MusicRepository.tracks.collectAsState()
     val currentTrack by MusicRepository.currentTrack.collectAsState()
     val isPlaying by MusicRepository.isPlaying.collectAsState()
     val positionSec by MusicRepository.currentPositionSec.collectAsState()
+
+    // BUG FIX: Actually trigger the MediaStore scan when the screen is first composed.
+    // Previously, nobody ever called loadLocalLibrary — the track list stayed empty forever
+    // even after READ_MEDIA_AUDIO was granted. Now we scan once on first composition.
+    LaunchedEffect(Unit) {
+        if (tracks.isEmpty()) {
+            MusicRepository.loadLocalLibrary(context)
+        }
+    }
 
     // v3.1 B8: infinite pulse can't be duration-scaled to 0 without flickering forever,
     // so skip it entirely and hold a static value when animations are disabled.

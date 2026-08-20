@@ -850,11 +850,18 @@ private fun AppearanceSelectorCompact(
         Triple("LIGHT", "Light", Icons.Filled.LightMode),
         Triple("DARK", "Dark", Icons.Outlined.DarkMode)
     )
-    // Derived from the real selected theme instead of an isolated local default, so this
-    // row reflects what AccentColorSwatches below is actually showing as selected.
-    val selectedMode = when {
-        currentTheme.equals("EDITORIAL_LIGHT", ignoreCase = true) -> "LIGHT"
-        else -> "DARK"
+    // BUG FIX: Derive the selected mode from the persisted appearanceMode in
+    // SettingsRepository, NOT from the theme name. Previously this only checked
+    // "EDITORIAL_LIGHT" → LIGHT, else → DARK, which meant:
+    //   1. "SYSTEM" could never highlight (always fell through to DARK).
+    //   2. Selecting LIGHT mode then tapping a dark swatch would flip the
+    //      highlight back to DARK, creating visual fighting between mode and swatch.
+    // Now the mode row reflects the actual appearance mode setting, independent of
+    // which accent swatch is highlighted.
+    val settings = com.example.data.repository.SettingsRepository.settings
+        .collectAsState().value
+    val selectedMode = settings.appearanceMode.uppercase().let { mode ->
+        if (mode in listOf("SYSTEM", "LIGHT", "DARK")) mode else "SYSTEM"
     }
 
     Row(
@@ -902,11 +909,24 @@ private fun AccentColorSwatches(
     currentTheme: String,
     onThemeSelected: (String) -> Unit
 ) {
+    // BUG FIX: Filter swatches by the active appearance mode. Previously ALL 7 themes
+    // (2 light + 5 dark) were shown in one flat row — tapping a dark swatch while in
+    // LIGHT mode caused confusing mode/swatch fighting and visual overlap. Now we show
+    // only the themes matching the current mode; in SYSTEM mode we show all.
+    val settings = com.example.data.repository.SettingsRepository.settings
+        .collectAsState().value
+    val appearanceMode = settings.appearanceMode.uppercase()
+    val filteredThemes = when (appearanceMode) {
+        "LIGHT" -> AppThemeMode.values().filter { it.isLight }
+        "DARK" -> AppThemeMode.values().filter { !it.isLight }
+        else -> AppThemeMode.values().toList() // SYSTEM: show all
+    }
+
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        AppThemeMode.values().forEach { mode ->
+        filteredThemes.forEach { mode ->
             val isSelected = currentTheme.equals(mode.name, ignoreCase = true)
             Box(
                 modifier = Modifier
