@@ -26,8 +26,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material3.Button
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -46,6 +51,7 @@ import androidx.compose.ui.unit.sp
 import com.example.data.repository.ToolCategory
 import com.example.data.repository.ToolItem
 import com.example.data.repository.ToolsRepository
+import com.example.ui.components.GlassCard
 import com.example.ui.components.SearchInputField
 import com.example.ui.components.SectionHeader
 
@@ -62,6 +68,7 @@ fun ToolsScreen(
 ) {
     var searchQuery by remember { mutableStateOf("") }
     var selectedCategory by remember { mutableStateOf<ToolCategory?>(null) }
+    var showCustomToolSheet by remember { mutableStateOf(false) }
     val gridState = rememberLazyGridState()
 
     val allTools = remember { ToolsRepository.getToolsCatalog() }
@@ -112,6 +119,140 @@ fun ToolsScreen(
         ) {
             items(filteredTools, key = { it.id }) { tool ->
                 ToolCard(tool = tool, onClick = { onNavigateToTool(tool.id) })
+            }
+
+            // Fix #37 (TODO): "Create Custom Tool" card when Custom category is selected
+            if (selectedCategory == null || selectedCategory == ToolCategory.CUSTOM) {
+                item(key = "create-custom-tool") {
+                    GlassCard(
+                        modifier = Modifier.fillMaxWidth(),
+                        backgroundColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f),
+                        onClick = { showCustomToolSheet = true }
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Add,
+                                contentDescription = "Create custom tool",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                "Create Custom Tool",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                "Chain existing tools or define a regex replace",
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Custom tool creation bottom sheet
+    if (showCustomToolSheet) {
+        var toolName by remember { mutableStateOf("") }
+        var toolOperation by remember { mutableStateOf("regex-replace") }
+        var toolPattern by remember { mutableStateOf("") }
+        var toolReplacement by remember { mutableStateOf("") }
+
+        @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+        androidx.compose.material3.ModalBottomSheet(
+            onDismissRequest = { showCustomToolSheet = false },
+            containerColor = MaterialTheme.colorScheme.surface,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text("Create Custom Tool", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+
+                OutlinedTextField(
+                    value = toolName,
+                    onValueChange = { toolName = it },
+                    label = { Text("Tool Name") },
+                    placeholder = { Text("e.g., Strip HTML Tags") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+
+                // Operation selector
+                Text("Operation", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(
+                        "regex-replace" to "Regex Replace",
+                        "template" to "Template",
+                    ).forEach { (op, label) ->
+                        FilterChip(
+                            selected = toolOperation == op,
+                            onClick = { toolOperation = op },
+                            label = { Text(label, fontSize = 11.sp) }
+                        )
+                    }
+                }
+
+                if (toolOperation == "regex-replace") {
+                    OutlinedTextField(
+                        value = toolPattern,
+                        onValueChange = { toolPattern = it },
+                        label = { Text("Regex Pattern") },
+                        placeholder = { Text("e.g., <[^>]*>") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = toolReplacement,
+                        onValueChange = { toolReplacement = it },
+                        label = { Text("Replacement") },
+                        placeholder = { Text("e.g., (empty to remove)") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                } else {
+                    OutlinedTextField(
+                        value = toolPattern,
+                        onValueChange = { toolPattern = it },
+                        label = { Text("Template (use {input} as placeholder)") },
+                        placeholder = { Text("e.g., Result: {input}") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                }
+
+                Button(
+                    onClick = {
+                        if (toolName.isNotBlank()) {
+                            val toolId = "custom-${toolName.lowercase().replace(Regex("[^a-z0-9]"), "-")}"
+                            ToolsRepository.addCustomTool(
+                                com.example.data.repository.ToolItem(
+                                    id = toolId,
+                                    title = toolName,
+                                    description = if (toolOperation == "regex-replace") "Regex: $toolPattern → $toolReplacement" else "Template: $toolPattern",
+                                    category = ToolCategory.CUSTOM,
+                                    icon = Icons.Default.Add,
+                                )
+                            )
+                            showCustomToolSheet = false
+                        }
+                    },
+                    enabled = toolName.isNotBlank() && toolPattern.isNotBlank(),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Create Tool")
+                }
             }
         }
     }

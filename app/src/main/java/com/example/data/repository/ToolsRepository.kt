@@ -42,7 +42,8 @@ enum class ToolCategory(val displayName: String, val icon: String) {
     HASHES("Hashes & Checksums", "🔢"),
     FORMATTERS("Formatters", "✨"),
     NETWORK("Network & IP", "🌐"),
-    GENERATORS("Generators", "🎲")
+    GENERATORS("Generators", "🎲"),
+    CUSTOM("Custom", "🔧")
 }
 
 data class ToolItem(
@@ -330,6 +331,11 @@ Broadcast: $ip (Derived)
      * Maps toolId to the appropriate function in this repository.
      */
     fun executeToolFunction(toolId: String, input: String): String {
+        // Custom tools first — check if it's a custom regex/template tool
+        customTools[toolId]?.let { customTool ->
+            return executeCustomTool(customTool, input)
+        }
+
         return when (toolId.lowercase().replace(" ", "-").replace("_", "-")) {
             "base64-encode", "base64" -> encodeBase64(input)
             "base64-decode" -> decodeBase64(input)
@@ -350,6 +356,44 @@ Broadcast: $ip (Derived)
             "url-encode" -> java.net.URLEncoder.encode(input, "UTF-8")
             "url-decode" -> java.net.URLDecoder.decode(input, "UTF-8")
             else -> "{\"error\": \"Unknown tool: $toolId\", \"input\": \"${input.take(100)}\"}"
+        }
+    }
+
+    // ── Custom Tools (#37) ──────────────────────────────────────────
+
+    /** User-defined custom tools, stored in-memory. */
+    private val customTools = java.util.concurrent.ConcurrentHashMap<String, CustomTool>()
+
+    data class CustomTool(
+        val id: String,
+        val name: String,
+        val operation: String, // "regex-replace" or "template"
+        val pattern: String,
+        val replacement: String,
+    )
+
+    /** Adds a custom tool to the catalog. */
+    fun addCustomTool(item: ToolItem) {
+        val customTool = CustomTool(
+            id = item.id,
+            name = item.title,
+            operation = if (item.description.startsWith("Regex:")) "regex-replace" else "template",
+            pattern = item.description.substringAfter(": ").substringBefore(" → "),
+            replacement = if (item.description.contains("→")) item.description.substringAfter("→ ") else "",
+        )
+        customTools[customTool.id] = customTool
+    }
+
+    /** Executes a custom tool on the input. */
+    private fun executeCustomTool(tool: CustomTool, input: String): String {
+        return when (tool.operation) {
+            "regex-replace" -> try {
+                input.replace(Regex(tool.pattern), tool.replacement)
+            } catch (e: Exception) {
+                "{\"error\": \"Invalid regex: ${e.message}\"}"
+            }
+            "template" -> tool.pattern.replace("{input}", input)
+            else -> input
         }
     }
 }

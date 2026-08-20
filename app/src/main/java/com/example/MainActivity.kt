@@ -92,6 +92,7 @@ import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.InterceptScreen
 import com.example.ui.screens.MusicScreen
 import com.example.ui.screens.NotesScreen
+import com.example.ui.screens.ChatScreen
 import com.example.ui.screens.OnboardingScreen
 import com.example.ui.screens.SavedApisScreen
 import com.example.ui.screens.SettingsScreen
@@ -122,6 +123,31 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Fix #43 (TODO): Global keyboard shortcuts for power users.
+        // Ctrl+Enter = send request (API Testr), Ctrl+Shift+N = new request,
+        // Escape = back navigation.
+        window.decorView.setOnKeyListener { _, keyCode, event ->
+            if (event.action == android.view.KeyEvent.ACTION_DOWN) {
+                val ctrl = event.isCtrlPressed
+                val shift = event.isShiftPressed
+                when {
+                    ctrl && keyCode == android.view.KeyEvent.KEYCODE_ENTER -> {
+                        // Broadcast send-request intent — ApiTestrScreen picks it up
+                        sendBroadcast(Intent("com.example.requestr.SEND_REQUEST"))
+                        true
+                    }
+                    ctrl && shift && keyCode == android.view.KeyEvent.KEYCODE_N -> {
+                        sendBroadcast(Intent("com.example.requestr.NEW_REQUEST"))
+                        true
+                    }
+                    keyCode == android.view.KeyEvent.KEYCODE_ESCAPE -> {
+                        onBackPressedDispatcher.onBackPressed()
+                        true
+                    }
+                    else -> false
+                }
+            } else false
+        }
         // Load persisted user settings before the UI tree reads them.
         // Fix: v2.1 initialised SettingsRepository with fake true defaults
         // (isRootDetected, isShizukuAvailable, isLsposedInstalled) and
@@ -166,6 +192,7 @@ private fun handleRequestrDeeplink(
         "notes" -> Screen.Notes.route
         "music" -> Screen.Music.route
         "settings" -> Screen.Settings.route
+        "chat" -> "chat"
         "saved" -> Screen.SavedApis.route
         "home" -> Screen.Home.route
         "flow/execute" -> Screen.Flow.route
@@ -528,6 +555,12 @@ fun RequestrApp() {
                             MusicScreen(
                                 onBack = { navController.popBackStack() },
                                 onMiniSettings = { showMiniSettingsForSection = "Music Lounge" }
+                            )
+                        }
+
+                        composable("chat") {
+                            ChatScreen(
+                                onMiniSettings = { showMiniSettingsForSection = "Chats" }
                             )
                         }
 

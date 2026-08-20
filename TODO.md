@@ -18,7 +18,7 @@ These are trust-breaking bugs or missing core features that make the app lie to 
 
 - [x] 4. **MitmProxyEngine wired as default when CA installed** (PreflightController already resolves MITM_PROXY) — `PreflightController` must return `MITM_PROXY` when CA is in trust store AND tier preference allows. `CaptureController` dispatches to `MitmProxyEngine.start()`. This enables HTTPS decryption. Files: `interception/PreflightController.kt`, `ui/screens/CaptureController.kt`
 
-- [ ] 5. **MitmProxyEngine per-host cert issuance from CertificateAuthority** — `MitmProxyEngine.generateHostCert()` must call `CertificateAuthority` to sign leaf certs on-the-fly. The CA must actually be used for MITM. Files: `interception/MitmProxyEngine.kt`, `interception/CertificateAuthority.kt`
+- [x] 5. **MitmProxyEngine per-host cert issuance from CertificateAuthority** — `MitmProxyEngine.generateHostCert()` must call `CertificateAuthority` to sign leaf certs on-the-fly. The CA must actually be used for MITM. Files: `interception/MitmProxyEngine.kt`, `interception/CertificateAuthority.kt`
 
 - [x] 6. **Frida: chip now shows "Detected (CLI only)" — stops lying about in-app integration** — `FridaCaptureEngine` is never started; chip says "Available" but nothing injects. Either wire `FridaCaptureEngine.start()` with script injection + output streaming, or remove the Frida chip from InterceptScreen so the app stops lying. Files: `interception/FridaCaptureEngine.kt`, `ui/screens/InterceptScreen.kt`
 
@@ -52,7 +52,7 @@ These are real gaps that affect functionality but don't actively mislead the use
 
 - [x] 18. **Notes MD/HTML export** — share button in editor exports .md/.html to Downloads/requestr/ — Menu items exist but no implementation. Use `FileExporter` to write .md or .html file + share intent. Files: `ui/screens/NotesScreen.kt`, `data/export/FileExporter.kt`
 
-- [ ] 19. **Right-menu stubs: implement or remove** — Cookie Jar, Make Tool, Add to Chat, Pin are UI-only with no handler. Either wire them or remove from menu. Files: `ui/screens/ApiTestrScreen.kt`
+- [x] 19. **Right-menu stubs: implement or remove** — Cookie Jar, Make Tool, Add to Chat, Pin are UI-only with no handler. Either wire them or remove from menu. Files: `ui/screens/ApiTestrScreen.kt`
 
 - [x] 20. **Export cURL as file** — added to ApiTestr right menu — Currently clipboard-only. Add file export via `FileExporter.writeCurl()` + share. Files: `ui/screens/ApiTestrScreen.kt`, `ui/screens/InterceptScreen.kt`
 
@@ -60,19 +60,19 @@ These are real gaps that affect functionality but don't actively mislead the use
 
 - [x] 22. **Deeplink handler** — handleRequestrDeeplink routes requestr:// to screens — Manifest declares scheme but no router. Add NavHost deep link routes or Activity intent handling for `requestr://flow/execute`, `requestr://intercept/start`, etc. Files: `MainActivity.kt`, navigation graph
 
-- [ ] 23. **Flow UI: port-drag connection creation** — Render port handles on node edges. `detectDragGestures` from port to port. Create connection on drop. Files: `ui/screens/FlowScreen.kt`
+- [x] 23. **Flow UI: port-drag connection creation** — Render port handles on node edges. `detectDragGestures` from port to port. Create connection on drop. Files: `ui/screens/FlowScreen.kt`
 
-- [ ] 24. **Flow UI: long-press context menu** — Edit / Duplicate / Delete / Disconnect options. Currently only delete icon exists. Files: `ui/screens/FlowScreen.kt`
+- [x] 24. **Flow UI: long-press context menu** — Edit / Duplicate / Delete / Disconnect options. Currently only delete icon exists. Files: `ui/screens/FlowScreen.kt`
 
-- [ ] 25. **Flow export/import (n8n-compatible JSON)** — Serialize flow graph to JSON. Deserialize on import. Files: new `flow/FlowSerializer.kt`, `ui/screens/FlowScreen.kt`
+- [x] 25. **Flow export/import (n8n-compatible JSON)** — Serialize flow graph to JSON. Deserialize on import. Files: new `flow/FlowSerializer.kt`, `ui/screens/FlowScreen.kt`
 
-- [ ] 26. **QUIC/HTTP/3 SNI extraction** — Parse QUIC Initial packets for SNI (visible without MITM). Show connection diagnostics. Files: new `interception/QuicParser.kt`
+- [x] 26. **QUIC/HTTP/3 SNI extraction** — Parse QUIC Initial packets for SNI (visible without MITM). Show connection diagnostics. Files: new `interception/QuicParser.kt`
 
-- [ ] 27. **Replay engine in API Testr** — Re-execute captured request with parameterization. Show diff vs original response. Files: `ui/screens/ApiTestrScreen.kt`
+- [x] 27. **Replay engine in API Testr** — Re-execute captured request with parameterization. Show diff vs original response. Files: `ui/screens/ApiTestrScreen.kt`
 
-- [ ] 28. **Diff view** — Structural JSON diff + raw text diff (Myers algorithm). For request vs request, response vs response. Files: new `ui/screens/DiffScreen.kt` or composable
+- [x] 28. **Diff view** — Structural JSON diff + raw text diff (Myers algorithm). For request vs request, response vs response. Files: new `ui/screens/DiffScreen.kt` or composable
 
-- [ ] 29. **HAR import** — Parse .har JSON file into Room entities. Open in Interceptr / API Testr / Flow. Files: new `data/import/HarImporter.kt`
+- [x] 29. **HAR import** — Parse .har JSON file into Room entities. Open in Interceptr / API Testr / Flow. Files: new `data/import/HarImporter.kt`
 
 - [x] 30. **SettingsRepository stale runtime flags** — removed isVpnActive, isRootDetected, etc. — `UserSettingsState` has `isVpnActive`, `isRootDetected`, etc. that never update. Remove them; Settings screen reads `InterceptionStateRepository.capabilities` directly. Files: `data/repository/AppRepositories.kt`, `ui/screens/SettingsScreen.kt`
 
@@ -84,35 +84,35 @@ These are real gaps that affect functionality but don't actively mislead the use
 
 These are polish items, future roadmap features, or items that don't affect current users.
 
-- [ ] 32. **Flow UI: pan/zoom canvas** — Add gesture handling for pan (two-finger drag) and pinch-to-zoom on flow canvas. Files: `ui/screens/FlowScreen.kt`
+- [x] 32. **Flow UI: pan/zoom canvas** — Add gesture handling for pan (two-finger drag) and pinch-to-zoom on flow canvas. Files: `ui/screens/FlowScreen.kt`
 
-- [ ] 33. **Flow UI: fit-to-view / center action** — Button to auto-center and scale canvas to show all nodes. Files: `ui/screens/FlowScreen.kt`
+- [x] 33. **Flow UI: fit-to-view / center action** — Button to auto-center and scale canvas to show all nodes. Files: `ui/screens/FlowScreen.kt`
 
-- [ ] 34. **Flow UI: mini-map** — Small overview of full graph in corner. Files: `ui/screens/FlowScreen.kt`
+- [x] 34. **Flow UI: mini-map** — Small overview of full graph in corner. Files: `ui/screens/FlowScreen.kt`
 
-- [ ] 35. **Music queue drag-reorder / swipe-remove** — Add `Modifier.dragAndDrop` or SwipeToDelete for playlist items. Files: `ui/screens/MusicScreen.kt`
+- [x] 35. **Music queue drag-reorder / swipe-remove** — Add `Modifier.dragAndDrop` or SwipeToDelete for playlist items. Files: `ui/screens/MusicScreen.kt`
 
-- [ ] 36. **Music: YouTube / JioSaavn sources** — Only LOCAL implemented. Others show in UI but non-functional. Implement or remove. Files: `data/music/`, `ui/screens/MusicScreen.kt`
+- [x] 36. **Music: YouTube / JioSaavn sources** — Only LOCAL implemented. Others show in UI but non-functional. Implement or remove. Files: `data/music/`, `ui/screens/MusicScreen.kt`
 
 - [ ] 37. **Custom Tools / adaptor builder** — `ToolsRepository` has `Custom` category but no builder UI. Add create custom tool flow. Files: `ui/screens/ToolWorkspaceScreen.kt`
 
 - [x] 38. **ProGuard/R8 minification** — enabled with comprehensive rules — Enable `isMinifyEnabled = true` in release build. Add ProGuard rules for Room, DataStore, BouncyCastle, reflection. Files: `app/build.gradle.kts`, new `proguard-rules.pro`
 
-- [ ] 39. **Unit tests for capture pipeline** — Zero tests for PacketPump, CaptureEngine, TcpReassembler, HttpParser, TlsDecoder. Add with synthetic pcap fixtures. Files: new `app/src/test/`
+- [x] 39. **Unit tests for capture pipeline** — Zero tests for PacketPump, CaptureEngine, TcpReassembler, HttpParser, TlsDecoder. Add with synthetic pcap fixtures. Files: new `app/src/test/`
 
 - [x] 40. **Removed commented dependencies** in build.gradle.kts — Dead code: accompanist.permissions, camera, coil, play-services-location. Files: `app/build.gradle.kts`
 
 - [x] 41. **CaptureForegroundService removed** — declared but never started, VPN has own notification — Declared in manifest but never started. VPN service has its own foreground notification. Remove the unused service. Files: `AndroidManifest.xml`, `interception/CaptureForegroundService.kt`
 
-- [ ] 42. **Accessibility labels** — Many icon buttons lack `contentDescription`. TalkBack audit needed. Files: across all screens
+- [x] 42. **Accessibility labels** — Many icon buttons lack `contentDescription`. TalkBack audit needed. Files: across all screens
 
 - [ ] 43. **Keyboard shortcuts** — No `Modifier.onKeyEvent` handling for power users. Files: across all screens
 
 - [ ] 44. **Chats section** — Entire subsystem missing. Either implement (provider management, streaming, tool execution) or remove from navigation + drawer. Files: new `ui/screens/ChatScreen.kt`, `data/repository/ChatRepository.kt`, navigation graph
 
-- [ ] 45. **API Discovery** — Aggregate captured traffic into host/endpoint/method/status/content-type/auth patterns. Files: new `data/analysis/ApiDiscovery.kt`
+- [x] 45. **API Discovery** — Aggregate captured traffic into host/endpoint/method/status/content-type/auth patterns. Files: new `data/analysis/ApiDiscovery.kt`
 
-- [ ] 46. **Schema Reconstruction** — Infer JSON Schema / OpenAPI / TypeScript / Python types from response bodies. Files: new `data/analysis/SchemaReconstructor.kt`
+- [x] 46. **Schema Reconstruction** — Infer JSON Schema / OpenAPI / TypeScript / Python types from response bodies. Files: new `data/analysis/SchemaReconstructor.kt`
 
 - [ ] 47. **Plugin architecture** — Plugin lifecycle + permissions + custom decoders/tools. Files: new subsystem
 
@@ -120,7 +120,7 @@ These are polish items, future roadmap features, or items that don't affect curr
 
 - [ ] 49. **CLI** — Command-line interface sharing core with Android. Files: new module
 
-- [ ] 50. **Workspace system** — Import/export workspaces (environments, captures, requests, flows, rules, mocks, tools, schemas, collections, history). Files: new subsystem
+- [x] 50. **Workspace system** — Import/export workspaces (environments, captures, requests, flows, rules, mocks, tools, schemas, collections, history). Files: new subsystem
 
 ---
 

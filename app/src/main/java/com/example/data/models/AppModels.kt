@@ -428,3 +428,11 @@ data class UserSettingsState(
     val musicLibraryScanned: Boolean = false,
     val selectedLocalTrackId: String? = null
 )
+
+/** Chat message for the Chats section (#44). */
+data class ChatMessage(
+    val id: String,
+    val role: String, // "user" or "assistant"
+    val content: String,
+    val timestamp: Long = System.currentTimeMillis(),
+)
