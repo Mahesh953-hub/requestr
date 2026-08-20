@@ -34,7 +34,16 @@ class CaptureEngine(
     private val db: RequestrDatabase,
     private val sessionId: Long,
     var printUndecoded: Boolean = true,
+    var dumpToFile: Boolean = false,
 ) {
+    private val dumpFile: java.io.File? by lazy {
+        if (!dumpToFile) null else {
+            val dir = java.io.File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS), "requestr")
+            dir.mkdirs()
+            java.io.File(dir, "capture_${sessionId}_${System.currentTimeMillis()}.hex").also { Log.i(TAG, "Dump file: ${it.absolutePath}") }
+        }
+    }
+    private val dumpWriter: java.io.BufferedWriter? by lazy { dumpFile?.bufferedWriter() }
     private val reassembler = TcpReassembler()
     private val pendingRequests = LinkedHashMap<String, ParsedHttpMessage>() // keyed by stream key
     // Streams that upgraded to WebSocket — subsequent bytes are WS frames (Fix #14)
@@ -76,13 +85,17 @@ class CaptureEngine(
                         requestBody = null,
                         statusCode = 0,
                         responseHeaders = mapOf("x-undecoded" to "tls-detected", "x-bytes" to "${clientBytes.size}"),
-                        responseBody = clientBytes.take(128).joinToString(" ") { "%02x".format(it) },
+                        responseBody = clientBytes.copyOfRange(0, minOf(128, clientBytes.size)).joinToString(" ") { "%02x".format(it) },
                         timestamp = System.currentTimeMillis(),
                         sessionId = sessionId,
                     )
                     kotlinx.coroutines.runBlocking {
                         try { db.capturedTrafficDao().insert(entity); transactionCount++; Log.i(TAG, "Undecoded TLS persisted: ${stream.sniHost ?: stream.dstIp}") } catch (_: Exception) {}
                     }
+                }
+                // Dump to file if enabled
+                if (dumpFile != null) {
+                    try { dumpWriter?.appendLine("[${System.currentTimeMillis()}] TLS ${stream.sniHost ?: stream.dstIp}:${stream.dstPort} ← ${clientBytes.size}B → ${scHex(clientBytes.copyOfRange(0, minOf(128, clientBytes.size)))}"); dumpWriter?.flush() } catch (_: Exception) {}
                 }
                 stream.clientToServer.reset()
                 stream.serverToClient.reset()
@@ -406,6 +419,8 @@ class CaptureEngine(
             }
         }.onFailure { Log.w(TAG, "Failed to apply response modification: ${it.message}") }
     }
+
+    private fun scHex(bytes: ByteArray) = bytes.joinToString("") { "%02x".format(it) }
 
     companion object {
         private const val TAG = "CaptureEngine"

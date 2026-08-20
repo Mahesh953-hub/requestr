@@ -70,6 +70,7 @@ class SettingsDataStore(private val context: Context) {
     val enhancedMode: Flow<Boolean> = prefs.map { it[AppSettingsKeys.ENHANCED_MODE] ?: false }
     val loggingEnabled: Flow<Boolean> = prefs.map { it[AppSettingsKeys.LOGGING_ENABLED] ?: false }
     val printUndecoded: Flow<Boolean> = prefs.map { it[AppSettingsKeys.PRINT_UNDECODED] ?: true }
+    val dumpToFile: Flow<Boolean> = prefs.map { it[AppSettingsKeys.DUMP_TO_FILE] ?: false }
 
     suspend fun setProxyPort(port: Int) {
         // Keep within the unprivileged, valid TCP range.
@@ -109,6 +110,9 @@ class SettingsDataStore(private val context: Context) {
     }
     suspend fun setPrintUndecoded(value: Boolean) {
         store.edit { it[AppSettingsKeys.PRINT_UNDECODED] = value }
+    }
+    suspend fun setDumpToFile(value: Boolean) {
+        store.edit { it[AppSettingsKeys.DUMP_TO_FILE] = value }
     }
 
     companion object {

@@ -136,6 +136,7 @@ class RequestrVpnService : VpnService() {
                 )
 
                 val printUndecoded = prefs.printUndecoded.first()
+                val dumpToFile = prefs.dumpToFile.first()
                 pumpJob = scope.launch {
                     PacketPump(
                         input = FileInputStream(tun.fileDescriptor),
@@ -143,6 +144,7 @@ class RequestrVpnService : VpnService() {
                         sessionId = newId,
                         db = db,
                         printUndecoded = printUndecoded,
+                        dumpToFile = dumpToFile,
                     ).run(this)
                 }
 

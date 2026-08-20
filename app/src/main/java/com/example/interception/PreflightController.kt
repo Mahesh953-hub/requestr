@@ -47,8 +47,21 @@ object PreflightController {
      */
     suspend fun run(context: Context): Result {
         val prefs = SettingsDataStore.get(context)
+        val recordMode = prefs.captureRecordMode.first() // "VPN" or "PROXY"
+        val enhanced = prefs.enhancedMode.first()
 
-        // Step 1 — real CA check. Probe the trust store; the cached hint is never sufficient.
+        // Step 1 — app selection check (before consent so we never prompt then fail)
+        val filterMode = prefs.appFilterMode.first()
+        val selected = prefs.selectedPackages.first()
+        if (filterMode == AppFilterMode.SELECTED_APPS && selected.isEmpty()) {
+            return Result.AppSelectionRequired
+        }
+
+        // Step 2 — probe capabilities
+        CapabilityProbe.probeAll(context)
+        val capabilities: CapabilityState = InterceptionStateRepository.capabilities.value
+
+        // CA check: only required for MITM_PROXY mode (TLS decryption)
         val caState = CapabilityProbe.probeCaInstalled()
         InterceptionStateRepository.updateCapabilities(ca = caState)
         val caInstalled = caState.let {
@@ -57,51 +70,60 @@ object PreflightController {
         }
         prefs.setCaInstalledHint(caInstalled)
 
-        if (!caInstalled) {
+        // Resolve capture method and tier
+        val method: CaptureMethod
+        val tier: ActiveTier
+        val port: Int
+
+        when {
+            // Root/Shizuku always win
+            capabilities.isRootUsable -> {
+                method = CaptureMethod.ROOT_IPTABLES
+                tier = ActiveTier.ROOT
+                port = prefs.proxyPort.first()
+                if (!caInstalled) return Result.CaRequired(CertificateAuthority.buildInstallIntent(context))
+            }
+            capabilities.isShizukuUsable -> {
+                method = CaptureMethod.SHIZUKU_TUN
+                tier = ActiveTier.SHIZUKU
+                port = prefs.proxyPort.first()
+                if (!caInstalled) return Result.CaRequired(CertificateAuthority.buildInstallIntent(context))
+            }
+            recordMode == "PROXY" -> {
+                // PROXY mode: MITM if CA installed, plain HTTP proxy otherwise
+                tier = ActiveTier.PROXY
+                port = prefs.proxyPort.first()
+                if (caInstalled) {
+                    method = CaptureMethod.MITM_PROXY
+                } else {
+                    method = CaptureMethod.HTTP_PROXY
+                    // HTTP_PROXY does NOT need CA — skip the CA requirement
+                }
+            }
+            else -> {
+                // VPN mode: no port, TUN captures all IP directly
+                method = CaptureMethod.VPN_TUN
+                tier = ActiveTier.VPN
+                port = 0  // VPN does NOT use a port
+            }
+        }
+
+        // MITM_PROXY still needs CA — check here (after method resolution)
+        if (method == CaptureMethod.MITM_PROXY && !caInstalled) {
             return Result.CaRequired(CertificateAuthority.buildInstallIntent(context))
         }
 
-        // Step 3 (checked before consent so we never prompt for VPN then fail) — app selection.
-        val filterMode = prefs.appFilterMode.first()
-        val selected = prefs.selectedPackages.first()
-        if (filterMode == AppFilterMode.SELECTED_APPS && selected.isEmpty()) {
-            return Result.AppSelectionRequired
-        }
-
-        // Step 2 — resolve the tier from genuine probes, honouring a forced-VPN preference.
-        CapabilityProbe.probeAll(context)
-        val capabilities: CapabilityState = InterceptionStateRepository.capabilities.value
-        val tierPreference = prefs.captureTierPreference.first()
-
-        val tier = when (tierPreference) {
-            CaptureTierPreference.FORCE_VPN_ONLY -> ActiveTier.VPN
-            CaptureTierPreference.AUTO -> capabilities.resolveAutoTier()
-        }
-
-        val port = prefs.proxyPort.first()
-        val recordMode = prefs.captureRecordMode.first() // "VPN" or "PROXY"
-        val enhanced = prefs.enhancedMode.first()
-
-        // Resolve capture method. VPN vs PROXY is now a user choice stored in prefs.
-        val method = when {
-            // Root/Shizuku always win regardless of mode (they're superior)
-            capabilities.isRootUsable -> CaptureMethod.ROOT_IPTABLES
-            capabilities.isShizukuUsable -> CaptureMethod.SHIZUKU_TUN
-            // User-chosen record mode
-            recordMode == "PROXY" -> {
-                if (capabilities.isCaInstalled) CaptureMethod.MITM_PROXY
-                else CaptureMethod.HTTP_PROXY
-            }
-            else -> CaptureMethod.VPN_TUN
+        // Only VPN mode needs VPN consent. PROXY mode does not.
+        val consent = if (method == CaptureMethod.VPN_TUN) {
+            VpnService.prepare(context)
+        } else {
+            null
         }
 
         InterceptionStateRepository.markArmed(tier = tier, port = port, method = method)
         if (enhanced) {
-            android.util.Log.i("Preflight", "Enhanced mode: recordMode=$recordMode method=$method port=$port tier=$tier")
+            android.util.Log.i("Preflight", "Enhanced: mode=$recordMode method=$method port=$port tier=$tier")
         }
-
-        // Step 4 — VPN consent. Non-null intent means the caller must launch it first.
-        val consent = VpnService.prepare(context)
 
         return Result.Ready(tier = tier, method = method, port = port, consentIntent = consent)
     }

@@ -23,7 +23,7 @@ enum class InterceptionStatus {
 }
 
 /** Which engine is actually running. Surfaced to the user so the tier is never a mystery. */
-enum class ActiveTier { NONE, VPN, SHIZUKU, ROOT }
+enum class ActiveTier { NONE, VPN, PROXY, SHIZUKU, ROOT }
 
 /**
  * Concrete capture transport. Each value corresponds to a specific engine implementation.
@@ -143,6 +143,7 @@ data class InterceptionState(
         get() = when (tier) {
             ActiveTier.ROOT -> "Using: Root capture"
             ActiveTier.SHIZUKU -> "Using: Shizuku capture"
+            ActiveTier.PROXY -> "Using: Proxy capture"
             ActiveTier.VPN -> "Using: VPN capture (no root)"
             ActiveTier.NONE -> ""
         }

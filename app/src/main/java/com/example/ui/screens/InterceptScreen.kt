@@ -206,6 +206,7 @@ fun InterceptScreen(
     val enhancedMode by settings.enhancedMode.collectAsState(initial = false)
     val loggingEnabled by settings.loggingEnabled.collectAsState(initial = false)
     val printUndecoded by settings.printUndecoded.collectAsState(initial = true)
+    val dumpToFile by settings.dumpToFile.collectAsState(initial = false)
 
     // isCapturing is now derived from the real engine status rather than a free-floating boolean.
     val isCapturing = interceptionState.isActive
@@ -647,10 +648,12 @@ fun InterceptScreen(
             enhancedMode = enhancedMode,
             loggingEnabled = loggingEnabled,
             printUndecoded = printUndecoded,
+            dumpToFile = dumpToFile,
             onRecordModeChange = { mode -> screenScope.launch { settings.setCaptureRecordMode(mode) } },
             onEnhancedModeChange = { on -> screenScope.launch { settings.setEnhancedMode(on) } },
             onLoggingChange = { on -> screenScope.launch { settings.setLoggingEnabled(on) } },
             onPrintUndecodedChange = { on -> screenScope.launch { settings.setPrintUndecoded(on) } },
+            onDumpToFileChange = { on -> screenScope.launch { settings.setDumpToFile(on) } },
             onOpenApps = {
                 showCaptureSetupSheet = false
                 showAppFilterSheet = true
@@ -1455,10 +1458,12 @@ fun CaptureSetupBottomSheet(
     enhancedMode: Boolean,
     loggingEnabled: Boolean,
     printUndecoded: Boolean,
+    dumpToFile: Boolean,
     onRecordModeChange: (String) -> Unit,
     onEnhancedModeChange: (Boolean) -> Unit,
     onLoggingChange: (Boolean) -> Unit,
     onPrintUndecodedChange: (Boolean) -> Unit,
+    onDumpToFileChange: (Boolean) -> Unit,
     onOpenApps: () -> Unit,
     onOpenRules: () -> Unit,
     onOpenCert: () -> Unit,
@@ -1556,6 +1561,17 @@ fun CaptureSetupBottomSheet(
                     Text("Show TLS/TCP entries in capture list without decryption", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Switch(checked = printUndecoded, onCheckedChange = onPrintUndecodedChange)
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // ── Dump to file ────────────────────────────────────
+            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Dump to File", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
+                    Text("Save raw hex capture to Downloads/requestr/ for external analysis", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(checked = dumpToFile, onCheckedChange = onDumpToFileChange)
             }
 
             Spacer(modifier = Modifier.height(14.dp))

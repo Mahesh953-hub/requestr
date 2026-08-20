@@ -94,6 +94,7 @@ object AppSettingsKeys {
     val ENHANCED_MODE = booleanPreferencesKey("enhanced_mode")             // richer logging + analysis
     val LOGGING_ENABLED = booleanPreferencesKey("logging_enabled")         // show debug overlay
     val PRINT_UNDECODED = booleanPreferencesKey("print_undecoded")         // show raw TLS/TCP in list
+    val DUMP_TO_FILE = booleanPreferencesKey("dump_to_file")               // dump raw packets to disk
 }
 
 /**
