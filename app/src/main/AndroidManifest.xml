@@ -96,10 +96,9 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
-        <service
-            android:name=".interception.CaptureForegroundService"
-            android:foregroundServiceType="dataSync"
-            android:exported="false" />
+
+        <!-- Fix #41 (TODO): CaptureForegroundService removed — RequestrVpnService has its own
+             foreground notification; this was declared but never started (duplicate). -->
 
     </application>
 

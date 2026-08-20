@@ -678,10 +678,34 @@ fun SettingsScreen(
                             modifier = Modifier.padding(top = 4.dp)
                         )
 
-                        // B11: CaWhitelistService.promoteToSystem() was a fully-built root/Shizuku
-                        // system-store installer with no UI trigger anywhere in the app. This
-                        // button wires it up, gated on a real capability probe, and re-reads the
-                        // trust-store state afterward instead of assuming success.
+                        // Fix #21 (TODO): auto-promote to system store when root/Shizuku
+                        // transitions to GRANTED and CA is in user store. Previously the user
+                        // had to manually tap the button. Now we observe the capability state
+                        // and trigger automatically (with a result toast).
+                        var autoPromoteTriggered by remember { mutableStateOf(false) }
+                        LaunchedEffect(capabilities.root, capabilities.shizuku, capabilities.ca) {
+                            if (autoPromoteTriggered) return@LaunchedEffect
+                            if (capabilities.ca == CaState.SYSTEM_STORE) return@LaunchedEffect
+                            val canAutoPromote = capabilities.root == RootState.GRANTED ||
+                                capabilities.shizuku == ShizukuState.GRANTED
+                            if (canAutoPromote) {
+                                autoPromoteTriggered = true
+                                runCatching {
+                                    com.example.interception.CaWhitelistService.promoteToSystem(settingsContext)
+                                }.onSuccess { newState ->
+                                    if (newState == CaState.SYSTEM_STORE) {
+                                        android.widget.Toast.makeText(
+                                            settingsContext,
+                                            "CA auto-promoted to system trust store",
+                                            android.widget.Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                }
+                                CapabilityProbe.probeAll(settingsContext)
+                            }
+                        }
+
+                        // B11: CaWhitelistService.promoteToSystem() button as manual fallback.
                         val canPromote = capabilities.root == RootState.GRANTED ||
                             capabilities.shizuku == ShizukuState.GRANTED
                         if (canPromote && capabilities.ca != CaState.SYSTEM_STORE) {

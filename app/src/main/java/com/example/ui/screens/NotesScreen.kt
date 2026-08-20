@@ -21,6 +21,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
@@ -114,6 +118,45 @@ fun NotesScreen(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    // Fix #18 (TODO): Export note as MD or HTML file
+                    val notesContext = androidx.compose.ui.platform.LocalContext.current
+                    val notesScope = rememberCoroutineScope()
+                    IconButton(onClick = {
+                        notesScope.launch(Dispatchers.IO) {
+                            val text = when (editFormat) {
+                                com.example.data.models.NoteFormatType.HTML -> editContent
+                                com.example.data.models.NoteFormatType.MARKDOWN -> editContent
+                                com.example.data.models.NoteFormatType.CHECKLIST -> editContent
+                                else -> editContent
+                            }
+                            val ext = when (editFormat) {
+                                com.example.data.models.NoteFormatType.HTML -> ".html"
+                                com.example.data.models.NoteFormatType.MARKDOWN -> ".md"
+                                else -> ".txt"
+                            }
+                            val safeName = editTitle.ifBlank { "note" }.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+                            val fileName = "$safeName$ext"
+                            val exportDir = com.example.data.export.FileExporter.getExportFolder(notesContext)
+                            val file = java.io.File(exportDir, fileName)
+                            file.writeText(text)
+                            com.example.data.export.FileExporter.shareFile(
+                                notesContext, file,
+                                when (editFormat) {
+                                    com.example.data.models.NoteFormatType.HTML -> "text/html"
+                                    else -> "text/markdown"
+                                },
+                                "Exported: $editTitle"
+                            )
+                        }
+                    }) {
+                        Icon(
+                            imageVector = Icons.Default.Share,
+                            contentDescription = "Export",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(4.dp))
                     Button(
                         onClick = { isPreviewMode = !isPreviewMode },
                         shape = RoundedCornerShape(8.dp),

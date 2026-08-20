@@ -50,13 +50,13 @@ These are real gaps that affect functionality but don't actively mislead the use
 
 - [ ] 17. **Traffic classification** — Populate `trafficSource` (Native/WebView/Frida) and `protocolHint` (h1/h2/h3/WS/SSE) on every `CapturedTrafficEntity`. Currently always NATIVE/UNKNOWN. Files: `interception/CaptureEngine.kt`, `data/local/Entities.kt`
 
-- [ ] 18. **Notes MD/HTML export** — Menu items exist but no implementation. Use `FileExporter` to write .md or .html file + share intent. Files: `ui/screens/NotesScreen.kt`, `data/export/FileExporter.kt`
+- [x] 18. **Notes MD/HTML export** — share button in editor exports .md/.html to Downloads/requestr/ — Menu items exist but no implementation. Use `FileExporter` to write .md or .html file + share intent. Files: `ui/screens/NotesScreen.kt`, `data/export/FileExporter.kt`
 
 - [ ] 19. **Right-menu stubs: implement or remove** — Cookie Jar, Make Tool, Add to Chat, Pin are UI-only with no handler. Either wire them or remove from menu. Files: `ui/screens/ApiTestrScreen.kt`
 
 - [x] 20. **Export cURL as file** — added to ApiTestr right menu — Currently clipboard-only. Add file export via `FileExporter.writeCurl()` + share. Files: `ui/screens/ApiTestrScreen.kt`, `ui/screens/InterceptScreen.kt`
 
-- [ ] 21. **CaWhitelistService auto-promote on root grant** — When `CapabilityState.root` transitions to GRANTED and CA is in user store, auto-promote to system store (with toast). Files: `interception/CaWhitelistService.kt`, `ui/screens/SettingsScreen.kt`
+- [x] 21. **CaWhitelistService auto-promote on root grant** — LaunchedEffect triggers automatically — When `CapabilityState.root` transitions to GRANTED and CA is in user store, auto-promote to system store (with toast). Files: `interception/CaWhitelistService.kt`, `ui/screens/SettingsScreen.kt`
 
 - [x] 22. **Deeplink handler** — handleRequestrDeeplink routes requestr:// to screens — Manifest declares scheme but no router. Add NavHost deep link routes or Activity intent handling for `requestr://flow/execute`, `requestr://intercept/start`, etc. Files: `MainActivity.kt`, navigation graph
 
@@ -100,9 +100,9 @@ These are polish items, future roadmap features, or items that don't affect curr
 
 - [ ] 39. **Unit tests for capture pipeline** — Zero tests for PacketPump, CaptureEngine, TcpReassembler, HttpParser, TlsDecoder. Add with synthetic pcap fixtures. Files: new `app/src/test/`
 
-- [ ] 40. **Remove commented dependencies in build.gradle.kts** — Dead code: accompanist.permissions, camera, coil, play-services-location. Files: `app/build.gradle.kts`
+- [x] 40. **Removed commented dependencies** in build.gradle.kts — Dead code: accompanist.permissions, camera, coil, play-services-location. Files: `app/build.gradle.kts`
 
-- [ ] 41. **CaptureForegroundService: remove duplicate** — Declared in manifest but never started. VPN service has its own foreground notification. Remove the unused service. Files: `AndroidManifest.xml`, `interception/CaptureForegroundService.kt`
+- [x] 41. **CaptureForegroundService removed** — declared but never started, VPN has own notification — Declared in manifest but never started. VPN service has its own foreground notification. Remove the unused service. Files: `AndroidManifest.xml`, `interception/CaptureForegroundService.kt`
 
 - [ ] 42. **Accessibility labels** — Many icon buttons lack `contentDescription`. TalkBack audit needed. Files: across all screens
 
