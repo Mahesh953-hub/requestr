@@ -97,6 +97,66 @@ object CaptureLogRepository {
         )
         Unit
     }
+
+    /**
+     * Seeds default intercept rules on first launch. These are practical, useful-out-of-the-box
+     * rules that demonstrate the rules engine and provide real utility:
+     *
+     * 1. Block common ad/tracker domains
+     * 2. Block analytics telemetry
+     * 3. Log authentication endpoints (useful for debugging OAuth flows)
+     * 4. Block known fingerprint/tracking scripts
+     * 5. Log API error responses (5xx) for debugging
+     *
+     * Called once when the database is created (empty rules table).
+     */
+    suspend fun seedDefaultRules(context: Context) = withContext(Dispatchers.IO) {
+        val dao = RequestrDatabase.get(context).interceptRuleDao()
+        val existing = dao.getEnabledRules()
+        if (existing.isNotEmpty()) return@withContext // Already seeded or user has rules
+
+        val defaults = listOf(
+            InterceptRuleEntity(
+                name = "Block Ad Trackers",
+                pattern = ".*(doubleclick\\.net|googlesyndication\\.com|adservice\\.google\\.com|ads\\.facebook\\.com|analyticsengine\\.s3\\.amazonaws\\.com).*",
+                domain = "doubleclick.net",
+                action = RuleAction.BLOCK,
+                enabled = true,
+            ),
+            InterceptRuleEntity(
+                name = "Block Analytics",
+                pattern = ".*(google-analytics\\.com|analytics\\.google\\.com|segment\\.io|mixpanel\\.com|amplitude\\.com|hotjar\\.com).*",
+                domain = "google-analytics.com",
+                action = RuleAction.BLOCK,
+                enabled = true,
+            ),
+            InterceptRuleEntity(
+                name = "Log Auth Endpoints",
+                pattern = ".*(auth|login|oauth|token|signin|signup|session).*",
+                domain = "",
+                action = RuleAction.LOG_ONLY,
+                enabled = true,
+            ),
+            InterceptRuleEntity(
+                name = "Block Fingerprinting",
+                pattern = ".*(fingerprint|fpjs\\.io|fingerprintjs\\.com|browser-update\\.org|cdn\\.cookielaw\\.org).*",
+                domain = "fpjs.io",
+                action = RuleAction.BLOCK,
+                enabled = true,
+            ),
+            InterceptRuleEntity(
+                name = "Log API Errors",
+                pattern = ".*/api/.*",
+                domain = "",
+                action = RuleAction.LOG_ONLY,
+                enabled = true,
+            ),
+        )
+
+        defaults.forEach { rule ->
+            runCatching { dao.insert(rule) }
+        }
+    }
 }
 
 /**

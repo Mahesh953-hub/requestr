@@ -160,4 +160,43 @@ object CertificateAuthority {
             append("-----END CERTIFICATE-----\n")
         }
     }
+
+    /** Exports the CA certificate as raw DER bytes (.cert/.cer format). */
+    suspend fun exportDer(context: Context): ByteArray = withContext(Dispatchers.IO) {
+        getOrCreate(context).certificate.encoded
+    }
+
+    /**
+     * Exports the full CA keypair as PKCS#12 (.p12) bytes.
+     * Password: "requestr-ca-local"
+     */
+    suspend fun exportP12(context: Context): ByteArray = withContext(Dispatchers.IO) {
+        val material = getOrCreate(context)
+        val ks = KeyStore.getInstance("PKCS12")
+        ks.load(null, null)
+        ks.setKeyEntry(KEYSTORE_ALIAS, material.keyPair.private, keystorePassword, arrayOf(material.certificate))
+        val baos = java.io.ByteArrayOutputStream()
+        ks.store(baos, keystorePassword)
+        baos.toByteArray()
+    }
+
+    /**
+     * Returns the OpenSSL subject hash for the CA certificate.
+     * This is the filename format used by Android system trust store:
+     * /system/etc/security/cacerts/<hash>.0
+     */
+    suspend fun getSubjectHash(context: Context): String = withContext(Dispatchers.IO) {
+        val material = getOrCreate(context)
+        // Android uses OpenSSL's X509_NAME_hash which is:
+        // first 4 bytes of MD5(DER-encoded subject) as little-endian unsigned int, hex formatted
+        val subjectDer = material.certificate.subjectX500Principal.encoded
+        val md = java.security.MessageDigest.getInstance("MD5")
+        val digest = md.digest(subjectDer)
+        // First 4 bytes as little-endian unsigned long
+        val hash = (digest[0].toLong() and 0xFF) or
+                ((digest[1].toLong() and 0xFF) shl 8) or
+                ((digest[2].toLong() and 0xFF) shl 16) or
+                ((digest[3].toLong() and 0xFF) shl 24)
+        String.format("%08x", hash)
+    }
 }

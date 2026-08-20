@@ -116,6 +116,10 @@ class MainActivity : ComponentActivity() {
         ApiCollectionsRepository.init(applicationContext)
         // v3.5: backs FlowRepository's nodes/connections from Room so positions survive restart.
         FlowRepository.init(applicationContext)
+        // v3.5.1: Seed default intercept rules on first launch (ad blockers, auth loggers, etc.)
+        kotlinx.coroutines.MainScope().launch(kotlinx.coroutines.Dispatchers.IO) {
+            com.example.data.interception.CaptureLogRepository.seedDefaultRules(applicationContext)
+        }
         // v3.2 Part C (C1): loads persisted Environments from the unified DataStore (was never
         // initialised before C1, so ApiTestrScreen's EnvironmentRepository.active() always read
         // the in-memory seed defaults only — now it reflects migrated + newly-saved data too).

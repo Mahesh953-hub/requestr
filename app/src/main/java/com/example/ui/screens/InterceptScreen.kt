@@ -71,6 +71,9 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -649,7 +652,7 @@ fun InterceptScreen(
                 screenScope.launch {
                     runCatching {
                         val pem = CertificateAuthority.exportPem(screenContext)
-                        val file = com.example.data.export.FileExporter.writePem(screenContext, pem)
+                        val file = com.example.data.export.FileExporter.writeCaPem(screenContext, pem)
                         com.example.data.export.FileExporter.shareFile(
                             screenContext, file,
                             "application/x-pem-file",
@@ -803,14 +806,11 @@ fun InterceptScreen(
         )
     }
 
-    // Rules & Modifiers Sheet
+    // Rules & Modifiers Sheet — reads/writes Room-persisted intercept_rules table
     if (showRulesConfigSheet) {
         RulesConfigBottomSheet(
-            rules = trafficRules,
+            context = screenContext,
             onDismiss = { showRulesConfigSheet = false },
-            onToggleRule = { id -> TrafficInterceptorRepository.toggleRule(id) },
-            onDeleteRule = { id -> TrafficInterceptorRepository.deleteRule(id) },
-            onAddRule = { rule -> TrafficInterceptorRepository.addRule(rule) }
         )
     }
 
@@ -1835,13 +1835,21 @@ fun AppFilterBottomSheet(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RulesConfigBottomSheet(
-    rules: List<TrafficRuleItem>,
+    context: android.content.Context,
     onDismiss: () -> Unit,
-    onToggleRule: (String) -> Unit,
-    onDeleteRule: (String) -> Unit,
-    onAddRule: (TrafficRuleItem) -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val scope = rememberCoroutineScope()
+    val dao = remember { com.example.data.local.RequestrDatabase.get(context).interceptRuleDao() }
+    val rules by dao.observeAll().collectAsState(initial = emptyList())
+    var showAddForm by remember { mutableStateOf(false) }
+
+    // Add Rule form state
+    var ruleName by remember { mutableStateOf("") }
+    var rulePattern by remember { mutableStateOf("") }
+    var ruleDomain by remember { mutableStateOf("") }
+    var ruleAction by remember { mutableStateOf(com.example.data.local.RuleAction.BLOCK) }
+    var ruleEnabled by remember { mutableStateOf(true) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -1854,6 +1862,7 @@ fun RulesConfigBottomSheet(
                 .fillMaxWidth()
                 .padding(horizontal = 20.dp, vertical = 12.dp)
         ) {
+            // Header
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -1865,36 +1874,199 @@ fun RulesConfigBottomSheet(
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface
                 )
-                IconButton(onClick = onDismiss) {
-                    Icon(imageVector = Icons.Default.Close, contentDescription = "Close", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row {
+                    IconButton(onClick = { showAddForm = !showAddForm }) {
+                        Icon(
+                            imageVector = Icons.Default.Add,
+                            contentDescription = "Add Rule",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(imageVector = Icons.Default.Close, contentDescription = "Close", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
             }
 
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(300.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(rules, key = { it.id }) { rule ->
-                    GlassCard(
-                        modifier = Modifier.fillMaxWidth(),
-                        backgroundColor = MaterialTheme.colorScheme.surfaceVariant
-                    ) {
+            // Add Rule Form (expandable)
+            if (showAddForm) {
+                GlassCard(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    backgroundColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("New Rule", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+
+                        // Rule Name
+                        OutlinedTextField(
+                            value = ruleName,
+                            onValueChange = { ruleName = it },
+                            label = { Text("Rule Name", fontSize = 11.sp) },
+                            placeholder = { Text("e.g., Block Ads", fontSize = 11.sp) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            textStyle = LocalTextStyle.current.copy(fontSize = 13.sp)
+                        )
+
+                        // URL Pattern (regex/glob)
+                        OutlinedTextField(
+                            value = rulePattern,
+                            onValueChange = { rulePattern = it },
+                            label = { Text("URL Pattern (regex)", fontSize = 11.sp) },
+                            placeholder = { Text("e.g., .*(ads|tracker|analytics).*", fontSize = 11.sp) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            textStyle = LocalTextStyle.current.copy(fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                        )
+
+                        // Domain (for quick block checks)
+                        OutlinedTextField(
+                            value = ruleDomain,
+                            onValueChange = { ruleDomain = it },
+                            label = { Text("Target Domain (optional)", fontSize = 11.sp) },
+                            placeholder = { Text("e.g., ads.example.com", fontSize = 11.sp) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            textStyle = LocalTextStyle.current.copy(fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                        )
+
+                        // Action selector
+                        Text("Action", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            com.example.data.local.RuleAction.values().forEach { action ->
+                                val selected = ruleAction == action
+                                FilterChip(
+                                    selected = selected,
+                                    onClick = { ruleAction = action },
+                                    label = { Text(action.name.replace("_", " "), fontSize = 10.sp) },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
+                                    )
+                                )
+                            }
+                        }
+
+                        // Enabled toggle
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(rule.name, fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
-                                Text(rule.urlPattern, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary, fontFamily = FontFamily.Monospace)
-                                Text("Action: ${rule.action.name}", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            IconButton(onClick = { onDeleteRule(rule.id) }) {
-                                Icon(imageVector = Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
+                            Text("Enabled", fontSize = 12.sp)
+                            Switch(checked = ruleEnabled, onCheckedChange = { ruleEnabled = it })
+                        }
+
+                        // Save button
+                        Button(
+                            onClick = {
+                                if (ruleName.isNotBlank() && rulePattern.isNotBlank()) {
+                                    scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                        dao.insert(
+                                            com.example.data.local.InterceptRuleEntity(
+                                                name = ruleName.trim(),
+                                                pattern = rulePattern.trim(),
+                                                domain = ruleDomain.trim(),
+                                                action = ruleAction,
+                                                enabled = ruleEnabled,
+                                            )
+                                        )
+                                    }
+                                    // Reset form
+                                    ruleName = ""
+                                    rulePattern = ""
+                                    ruleDomain = ""
+                                    ruleAction = com.example.data.local.RuleAction.BLOCK
+                                    ruleEnabled = true
+                                    showAddForm = false
+                                }
+                            },
+                            enabled = ruleName.isNotBlank() && rulePattern.isNotBlank(),
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Add Rule")
+                        }
+                    }
+                }
+            }
+
+            // Rules list
+            if (rules.isEmpty()) {
+                Text(
+                    "No rules configured. Tap + to add one.",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = 20.dp).fillMaxWidth(),
+                    textAlign = TextAlign.Center
+                )
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(300.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(rules, key = { it.id }) { rule ->
+                        GlassCard(
+                            modifier = Modifier.fillMaxWidth(),
+                            backgroundColor = if (rule.enabled) MaterialTheme.colorScheme.surfaceVariant
+                                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(rule.name, fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                                        if (!rule.enabled) {
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("DISABLED", fontSize = 9.sp, color = MaterialTheme.colorScheme.error)
+                                        }
+                                    }
+                                    Text(rule.pattern, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary, fontFamily = FontFamily.Monospace, maxLines = 1)
+                                    if (rule.domain.isNotBlank()) {
+                                        Text("Domain: ${rule.domain}", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                    Text(
+                                        "Action: ${rule.action.name}",
+                                        fontSize = 10.sp,
+                                        color = when (rule.action) {
+                                            com.example.data.local.RuleAction.BLOCK -> MaterialTheme.colorScheme.error
+                                            com.example.data.local.RuleAction.LOG_ONLY -> MaterialTheme.colorScheme.tertiary
+                                            else -> MaterialTheme.colorScheme.secondary
+                                        }
+                                    )
+                                }
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    // Toggle enabled
+                                    Switch(
+                                        checked = rule.enabled,
+                                        onCheckedChange = { newVal ->
+                                            scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                                dao.update(rule.copy(enabled = newVal))
+                                            }
+                                        },
+                                        modifier = Modifier.height(24.dp)
+                                    )
+                                    // Delete
+                                    IconButton(
+                                        onClick = {
+                                            scope.launch(kotlinx.coroutines.Dispatchers.IO) { dao.delete(rule) }
+                                        },
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(imageVector = Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(16.dp))
+                                    }
+                                }
                             }
                         }
                     }

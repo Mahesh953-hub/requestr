@@ -576,11 +576,10 @@ fun SettingsScreen(
 
                             Button(
                                 onClick = {
-                                    // Exports the genuine CA as PEM file.
                                     settingsScope.launch {
                                         runCatching {
                                             val pem = CertificateAuthority.exportPem(settingsContext)
-                                            val file = com.example.data.export.FileExporter.writePem(settingsContext, pem)
+                                            val file = com.example.data.export.FileExporter.writeCaPem(settingsContext, pem)
                                             com.example.data.export.FileExporter.shareFile(
                                                 settingsContext, file,
                                                 "application/x-pem-file",
@@ -595,9 +594,89 @@ fun SettingsScreen(
                             ) {
                                 Icon(imageVector = Icons.Default.Download, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(14.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text("Export PEM", color = MaterialTheme.colorScheme.onPrimary, fontSize = 11.sp)
+                                Text(".pem", color = MaterialTheme.colorScheme.onPrimary, fontSize = 11.sp)
                             }
                         }
+
+                        // Additional CA export formats: .0 (system hash), .cert (DER), .p12 (PKCS#12)
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            // Export as .0 (Android system trust store format)
+                            Button(
+                                onClick = {
+                                    settingsScope.launch {
+                                        runCatching {
+                                            val pem = CertificateAuthority.exportPem(settingsContext)
+                                            val hash = CertificateAuthority.getSubjectHash(settingsContext)
+                                            val file = com.example.data.export.FileExporter.writeCaSystemHash(settingsContext, pem, hash)
+                                            com.example.data.export.FileExporter.shareFile(
+                                                settingsContext, file,
+                                                "application/x-x509-ca-cert",
+                                                "requestr CA ($hash.0)"
+                                            )
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(8.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+                            ) {
+                                Text(".0", color = MaterialTheme.colorScheme.onSecondaryContainer, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+
+                            // Export as .cert (DER binary)
+                            Button(
+                                onClick = {
+                                    settingsScope.launch {
+                                        runCatching {
+                                            val der = CertificateAuthority.exportDer(settingsContext)
+                                            val file = com.example.data.export.FileExporter.writeCaDer(settingsContext, der)
+                                            com.example.data.export.FileExporter.shareFile(
+                                                settingsContext, file,
+                                                "application/x-x509-ca-cert",
+                                                "requestr Root CA (DER)"
+                                            )
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(8.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+                            ) {
+                                Text(".cert", color = MaterialTheme.colorScheme.onSecondaryContainer, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+
+                            // Export as .p12 (PKCS#12 with keypair)
+                            Button(
+                                onClick = {
+                                    settingsScope.launch {
+                                        runCatching {
+                                            val p12 = CertificateAuthority.exportP12(settingsContext)
+                                            val file = com.example.data.export.FileExporter.writeCaP12(settingsContext, p12)
+                                            com.example.data.export.FileExporter.shareFile(
+                                                settingsContext, file,
+                                                "application/x-pkcs12",
+                                                "requestr Root CA (PKCS#12)"
+                                            )
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(8.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+                            ) {
+                                Text(".p12", color = MaterialTheme.colorScheme.onSecondaryContainer, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+
+                        Text(
+                            "Exports to: Downloads/requestr/",
+                            fontSize = 9.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
 
                         // B11: CaWhitelistService.promoteToSystem() was a fully-built root/Shizuku
                         // system-store installer with no UI trigger anywhere in the app. This
