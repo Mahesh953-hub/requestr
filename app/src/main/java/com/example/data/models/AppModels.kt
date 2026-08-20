@@ -372,7 +372,8 @@ data class MusicTrackItem(
     val source: MusicSourceType = MusicSourceType.SYNTH_LOFI,
     val albumCoverHex: Long = 0xFF1E3A8A,
     val contentUri: String? = null,
-    val albumArtUri: String? = null
+    val albumArtUri: String? = null,
+    val filePath: String? = null  // absolute path for MediaPlayer playback
 )
 
 enum class AppearanceMode(val displayName: String) {

@@ -146,18 +146,11 @@ fun GlassCard(
     val appliedRadius = cornerRadius ?: settings.cornerRadiusDp.dp
     val shape = RoundedCornerShape(appliedRadius)
 
-    val cardModifier = if (onClick != null) {
-        modifier
-            .clip(shape)
-            .background(backgroundColor)
-            .border(1.dp, borderColor, shape)
-            .clickable(onClick = onClick)
-    } else {
-        modifier
-            .clip(shape)
-            .background(backgroundColor)
-            .border(1.dp, borderColor, shape)
-    }
+    val cardModifier = modifier
+        .background(backgroundColor, shape)
+        .border(1.dp, borderColor, shape)
+        .clip(shape)
+        .run { if (onClick != null) this.clickable(onClick = onClick) else this }
 
     Box(modifier = cardModifier) {
         content()

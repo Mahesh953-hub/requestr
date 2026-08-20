@@ -211,6 +211,7 @@ fun AppNavigationDrawer(
                         DrawerNavItem("tools", "Security & Dev Tools", Icons.Default.Tune),
                         DrawerNavItem("notes", "Notes & Documentation", Icons.Default.Notes),
                         DrawerNavItem("flow", "Flow Automation (n8n)", Icons.Default.Code),
+                        DrawerNavItem("chat", "AI Chat Assistant", Icons.Default.AutoAwesome),
                         DrawerNavItem("music", "Synth LoFi Lounge", Icons.Default.MusicNote)
                     )
 

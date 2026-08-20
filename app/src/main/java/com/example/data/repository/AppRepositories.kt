@@ -329,6 +329,11 @@ object MusicRepository {
     private val _currentPositionSec = MutableStateFlow(0)
     val currentPositionSec: StateFlow<Int> = _currentPositionSec.asStateFlow()
 
+    // ── Real MediaPlayer-backed playback ───────────────────────────
+    @Volatile private var mediaPlayer: android.media.MediaPlayer? = null
+    private var positionUpdateJob: kotlinx.coroutines.Job? = null
+    private var currentPlayTrackId: String? = null
+
     /** Scan the device's local music library and populate the track list. */
     suspend fun loadLocalLibrary(context: android.content.Context) {
         val local = com.example.data.music.LocalMusicScanner.scanLocalTracks(context)
@@ -345,31 +350,63 @@ object MusicRepository {
     }
 
     fun togglePlayPause() {
-        _isPlaying.value = !_isPlaying.value
+        val mp = mediaPlayer
+        if (mp == null) {
+            // No player yet – start fresh for the current track
+            playCurrentTrack()
+            return
+        }
+        try {
+            if (mp.isPlaying) {
+                mp.pause()
+                _isPlaying.value = false
+                cancelPositionUpdates()
+            } else {
+                mp.start()
+                _isPlaying.value = true
+                startPositionUpdates()
+            }
+        } catch (_: Exception) {
+            // Player in error state – recreate
+            releasePlayer()
+            playCurrentTrack()
+        }
     }
 
     fun nextTrack() {
         val current = _tracks.value
         if (current.isEmpty()) return
-        val curId = _currentTrack.value?.id ?: return
+        val curId = currentPlayTrackId ?: _currentTrack.value.id
         val index = current.indexOfFirst { it.id == curId }
         val nextIndex = (index + 1) % current.size
-        _currentTrack.value = current[nextIndex]
+        val track = current[nextIndex]
+        _currentTrack.value = track
         _currentPositionSec.value = 0
+        releasePlayer()
+        playCurrentTrack()
     }
 
     fun prevTrack() {
         val current = _tracks.value
         if (current.isEmpty()) return
-        val curId = _currentTrack.value?.id ?: return
+        val curId = currentPlayTrackId ?: _currentTrack.value.id
         val index = current.indexOfFirst { it.id == curId }
         val prevIndex = if (index - 1 < 0) current.size - 1 else index - 1
-        _currentTrack.value = current[prevIndex]
+        val track = current[prevIndex]
+        _currentTrack.value = track
         _currentPositionSec.value = 0
+        releasePlayer()
+        playCurrentTrack()
     }
 
     fun seekTo(sec: Int) {
-        _currentPositionSec.value = sec.coerceIn(0, _currentTrack.value?.durationSec ?: 0)
+        val mp = mediaPlayer
+        if (mp != null) {
+            try {
+                mp.seekTo(sec * 1000)
+                _currentPositionSec.value = sec
+            } catch (_: Exception) { }
+        }
     }
 
     fun selectTrack(id: String) {
@@ -377,22 +414,107 @@ object MusicRepository {
         if (found != null) {
             _currentTrack.value = found
             _currentPositionSec.value = 0
-            _isPlaying.value = true
+            releasePlayer()
+            playCurrentTrack()
         }
     }
 
     fun stopMusic() {
+        releasePlayer()
         _isPlaying.value = false
         _currentPositionSec.value = 0
+        currentPlayTrackId = null
     }
 
     /** Removes a track from the playlist (Fix #35). If it's the current track, stops playback. */
     fun removeTrack(id: String) {
-        val wasCurrent = _currentTrack.value.id == id
+        val wasCurrent = currentPlayTrackId == id || _currentTrack.value.id == id
         _tracks.value = _tracks.value.filter { it.id != id }
         if (wasCurrent) {
             stopMusic()
         }
+    }
+
+    // ── Internal media player lifecycle ────────────────────────────
+
+    private val playbackScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.Dispatchers.Main + kotlinx.coroutines.SupervisorJob()
+    )
+
+    private fun playCurrentTrack() {
+        val track = _currentTrack.value
+        if (track.filePath.isNullOrBlank()) return // no local file to play
+
+        playbackScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                releasePlayerSync()
+                val mp = android.media.MediaPlayer().apply {
+                    setDataSource(track.filePath)
+                    setOnPreparedListener {
+                        it.start()
+                        _isPlaying.value = true
+                        currentPlayTrackId = track.id
+                        startPositionUpdates()
+                    }
+                    setOnCompletionListener {
+                        _isPlaying.value = false
+                        cancelPositionUpdates()
+                        // Auto-advance to next track on main thread
+                        playbackScope.launch { nextTrack() }
+                    }
+                    setOnErrorListener { _, what, extra ->
+                        _isPlaying.value = false
+                        cancelPositionUpdates()
+                        android.util.Log.e("MusicRepo", "MediaPlayer error what=$what extra=$extra")
+                        true
+                    }
+                    prepareAsync()
+                }
+                mediaPlayer = mp
+            } catch (e: Exception) {
+                _isPlaying.value = false
+                android.util.Log.e("MusicRepo", "Failed to play: ${e.message}")
+            }
+        }
+    }
+
+    @Volatile private var trackingPosition = false
+
+    private fun startPositionUpdates() {
+        cancelPositionUpdates()
+        trackingPosition = true
+        positionUpdateJob = playbackScope.launch {
+            while (trackingPosition) {
+                val mp = mediaPlayer
+                if (mp != null && mp.isPlaying) {
+                    try {
+                        _currentPositionSec.value = mp.currentPosition / 1000
+                    } catch (_: Exception) { }
+                }
+                kotlinx.coroutines.delay(250)
+            }
+        }
+    }
+
+    private fun cancelPositionUpdates() {
+        trackingPosition = false
+        positionUpdateJob?.cancel()
+        positionUpdateJob = null
+    }
+
+    private fun releasePlayer() {
+        cancelPositionUpdates()
+        releasePlayerSync()
+    }
+
+    private fun releasePlayerSync() {
+        val mp = mediaPlayer
+        mediaPlayer = null
+        currentPlayTrackId = null
+        try {
+            mp?.stop()
+            mp?.release()
+        } catch (_: Exception) { }
     }
 }
 

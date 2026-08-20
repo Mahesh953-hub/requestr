@@ -334,7 +334,8 @@ fun RequestrApp() {
             Screen.Tools.route,
             Screen.Notes.route,
             Screen.Flow.route,
-            Screen.Music.route
+            Screen.Music.route,
+            "chat"
         )
 
         var isMiniPlayerDismissed by remember { mutableStateOf(false) }
@@ -431,6 +432,7 @@ fun RequestrApp() {
                                         "notes" -> Screen.Notes.route
                                         "flow" -> Screen.Flow.route
                                         "music" -> Screen.Music.route
+                                        "chat" -> "chat"
                                         "settings" -> Screen.Settings.route
                                         else -> Screen.Home.route
                                     }

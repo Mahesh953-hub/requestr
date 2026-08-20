@@ -59,7 +59,8 @@ object ToolsRepository {
     // Icon shortcuts (Fix 07)
     private val Ic = Icons.Default
 
-    fun getToolsCatalog(): List<ToolItem> = listOf(
+    fun getToolsCatalog(): List<ToolItem> {
+        val builtIn = listOf(
         ToolItem("jwt-decoder",     "JWT Token Decoder",        "Decode Header, Payload claims and inspect signatures", ToolCategory.DECODERS,   Ic.Key),
         ToolItem("base64",          "Base64 Encoder / Decoder", "RFC 4648 Base64 text & binary converter",              ToolCategory.DECODERS,   Ic.DataObject),
         ToolItem("url-encoder",     "URL / URI Percent Encoder","Encode & decode query strings & path parameters",       ToolCategory.DECODERS,   Ic.Link),
@@ -79,7 +80,23 @@ object ToolsRepository {
         ToolItem("uuid-gen",        "UUID v4 Generator",        "Generate cryptographically secure RFC 4122 UUIDs",     ToolCategory.GENERATORS, Ic.Token),
         ToolItem("random-string",   "Secure Random String",     "Alphanumeric passwords, tokens, entropy keys",          ToolCategory.GENERATORS, Ic.Password),
         ToolItem("lorem-ipsum",     "Lorem Ipsum Generator",    "Generate mock payload strings and paragraphs",          ToolCategory.GENERATORS, Ic.Notes)
-    )
+        )
+        // Append user-created custom tools so they appear in the catalog
+        val userTools = customTools.values.map { ct ->
+            ToolItem(
+                id = ct.id,
+                title = ct.name,
+                description = when (ct.operation) {
+                    "regex-replace" -> "Custom regex: ${ct.pattern} → ${ct.replacement}"
+                    "template" -> "Template: ${ct.pattern}"
+                    else -> ct.operation
+                },
+                category = ToolCategory.CUSTOM,
+                icon = Ic.Build
+            )
+        }
+        return builtIn + userTools
+    }
 
     // ==========================================
     // 1. DECODERS

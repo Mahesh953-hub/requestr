@@ -71,7 +71,7 @@ fun ToolsScreen(
     var showCustomToolSheet by remember { mutableStateOf(false) }
     val gridState = rememberLazyGridState()
 
-    val allTools = remember { ToolsRepository.getToolsCatalog() }
+    val allTools = ToolsRepository.getToolsCatalog()
 
     val filteredTools = remember(searchQuery, selectedCategory) {
         allTools.filter { tool ->

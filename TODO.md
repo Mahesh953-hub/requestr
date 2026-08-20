@@ -94,7 +94,7 @@ These are polish items, future roadmap features, or items that don't affect curr
 
 - [x] 36. **Music: YouTube / JioSaavn sources** — Only LOCAL implemented. Others show in UI but non-functional. Implement or remove. Files: `data/music/`, `ui/screens/MusicScreen.kt`
 
-- [ ] 37. **Custom Tools / adaptor builder** — `ToolsRepository` has `Custom` category but no builder UI. Add create custom tool flow. Files: `ui/screens/ToolWorkspaceScreen.kt`
+- [x] 37. **Custom Tools / adaptor builder** — `ToolsRepository` has `Custom` category but no builder UI. Add create custom tool flow. Files: `ui/screens/ToolWorkspaceScreen.kt`
 
 - [x] 38. **ProGuard/R8 minification** — enabled with comprehensive rules — Enable `isMinifyEnabled = true` in release build. Add ProGuard rules for Room, DataStore, BouncyCastle, reflection. Files: `app/build.gradle.kts`, new `proguard-rules.pro`
 
@@ -106,9 +106,9 @@ These are polish items, future roadmap features, or items that don't affect curr
 
 - [x] 42. **Accessibility labels** — Many icon buttons lack `contentDescription`. TalkBack audit needed. Files: across all screens
 
-- [ ] 43. **Keyboard shortcuts** — No `Modifier.onKeyEvent` handling for power users. Files: across all screens
+- [x] 43. **Keyboard shortcuts** — Ctrl+Enter, Ctrl+Shift+N, Escape handled in MainActivity.onKeyListener. Per-screen shortcuts follow via broadcast intents. Files: `MainActivity.kt`
 
-- [ ] 44. **Chats section** — Entire subsystem missing. Either implement (provider management, streaming, tool execution) or remove from navigation + drawer. Files: new `ui/screens/ChatScreen.kt`, `data/repository/ChatRepository.kt`, navigation graph
+- [x] 44. **Chats section** — ChatScreen + ChatRepository implemented (OpenAI-compatible + local fallback). Navigation wired in NavHost, nav drawer, HomeScreen section nav, and deep links. Provider URL/key/model configurable. Files: `ui/screens/ChatScreen.kt`, `data/repository/ChatRepository.kt`, `MainActivity.kt`, `AppNavigationDrawer.kt`
 
 - [x] 45. **API Discovery** — Aggregate captured traffic into host/endpoint/method/status/content-type/auth patterns. Files: new `data/analysis/ApiDiscovery.kt`
 
@@ -132,7 +132,11 @@ These are polish items, future roadmap features, or items that don't affect curr
 | v3.5.1 | Music scan trigger, Theme selector SYSTEM highlight + swatch filtering | 2026-08-20 |
 | v3.5.2 | CA multi-format export (.pem/.0/.cert/.p12), Default rules seeded, Add Rule form, Rules persist to Room | 2026-08-20 |
 | v3.6 | TODO #1 (verified), #2 hot-reload filter, #6 Frida chip honest, #7 all rule actions, #10 (verified), #12 (verified) | 2026-08-20 |
+| v3.7 | FlowExecutor, WS/SSE parsers, deeplinks, ProGuard, Flow export, DNS, QUIC, Notes export, HAR import, Diff view | 2026-08-20 |
+| v3.8 | DNS capture, QUIC SNI, Flow export/import, Notes export, HAR import, API Discovery, Schema, Workspace | 2026-08-20 |
+| v3.9 | Custom tools, Chats, Diff view, HAR import, API Discovery, Schema, Workspace | 2026-08-20 |
+| v4.0 | **ProGuard fix** (-dontoptimize + comprehensive keep rules → APK 10→15MB), **MediaPlayer** audio playback, custom tools in catalog, Chat nav wiring, GlassCard border fix, keyboard shortcuts | 2026-08-20 |
 
----
+**Remaining (separate modules):** #47 Plugin architecture, #48 Local API, #49 CLI
 
 *This file is the single source of truth for remaining work. Update it as items are completed.*

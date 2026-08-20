@@ -30,7 +30,8 @@ object LocalMusicScanner {
                 MediaStore.Audio.Media.ARTIST,
                 MediaStore.Audio.Media.ALBUM,
                 MediaStore.Audio.Media.DURATION,
-                MediaStore.Audio.Media.ALBUM_ID
+                MediaStore.Audio.Media.ALBUM_ID,
+                MediaStore.Audio.Media.DATA
             )
             val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0"
             val sortOrder = "${MediaStore.Audio.Media.TITLE} ASC"
@@ -46,6 +47,7 @@ object LocalMusicScanner {
                 val albumCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
                 val durationCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
                 val albumIdCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM_ID)
+                val dataCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATA)
 
                 while (cursor.moveToNext()) {
                     val id = cursor.getLong(idCol)
@@ -54,6 +56,7 @@ object LocalMusicScanner {
                     val album = cursor.getString(albumCol) ?: "Unknown Album"
                     val durationMs = cursor.getInt(durationCol)
                     val albumId = cursor.getLong(albumIdCol)
+                    val filePath = cursor.getString(dataCol)
 
                     val contentUri = ContentUris.withAppendedId(uri, id)
                     val albumArtUri = ContentUris.withAppendedId(
@@ -73,7 +76,8 @@ object LocalMusicScanner {
                             source = MusicSourceType.LOCAL,
                             albumCoverHex = fallbackColor.toLong() and 0xFFFFFFFFL,
                             contentUri = contentUri.toString(),
-                            albumArtUri = albumArtUri.toString()
+                            albumArtUri = albumArtUri.toString(),
+                            filePath = filePath
                         )
                     )
                 }
