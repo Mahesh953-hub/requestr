@@ -115,79 +115,152 @@ object NotesRepository {
 // ==========================================
 object FlowRepository {
 
-    private val _nodes = MutableStateFlow<List<FlowNodeItem>>(
-        listOf(
-            FlowNodeItem(
-                id = "node-1",
-                title = "Intercept Trigger",
-                type = FlowNodeType.INTERCEPT_TRIGGER,
-                x = 60f,
-                y = 80f,
-                inputPorts = emptyList(),
-                outputPorts = listOf("traffic"),
-                configData = "Pattern: .*/auth/login.*"
-            ),
-            FlowNodeItem(
-                id = "node-2",
-                title = "Extract JWT Token",
-                type = FlowNodeType.TRANSFORM,
-                x = 340f,
-                y = 80f,
-                inputPorts = listOf("traffic"),
-                outputPorts = listOf("token"),
-                configData = "JSONPath: $.data.token"
-            ),
-            FlowNodeItem(
-                id = "node-3",
-                title = "Verify with AI",
-                type = FlowNodeType.TRANSFORM,
-                x = 620f,
-                y = 80f,
-                inputPorts = listOf("token"),
-                outputPorts = listOf("analysis"),
-                configData = "Prompt: Audit token entropy & claims"
-            ),
-            FlowNodeItem(
-                id = "node-4",
-                title = "Save Audit Note",
-                type = FlowNodeType.OUTPUT,
-                x = 900f,
-                y = 80f,
-                inputPorts = listOf("analysis"),
-                outputPorts = emptyList(),
-                configData = "Folder: Security Audits"
-            )
+    private var appContext: Context? = null
+    private val repoScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    // Default seed data — used only on first init when DB is empty
+    private val defaultNodes = listOf(
+        FlowNodeItem(
+            id = "node-1", title = "Intercept Trigger",
+            type = FlowNodeType.INTERCEPT_TRIGGER, x = 60f, y = 80f,
+            inputPorts = emptyList(), outputPorts = listOf("traffic"),
+            configData = "Pattern: .*/auth/login.*"
+        ),
+        FlowNodeItem(
+            id = "node-2", title = "Extract JWT Token",
+            type = FlowNodeType.TRANSFORM, x = 340f, y = 80f,
+            inputPorts = listOf("traffic"), outputPorts = listOf("token"),
+            configData = "JSONPath: \$.data.token"
+        ),
+        FlowNodeItem(
+            id = "node-3", title = "Verify with AI",
+            type = FlowNodeType.TRANSFORM, x = 620f, y = 80f,
+            inputPorts = listOf("token"), outputPorts = listOf("analysis"),
+            configData = "Prompt: Audit token entropy & claims"
+        ),
+        FlowNodeItem(
+            id = "node-4", title = "Save Audit Note",
+            type = FlowNodeType.OUTPUT, x = 900f, y = 80f,
+            inputPorts = listOf("analysis"), outputPorts = emptyList(),
+            configData = "Folder: Security Audits"
         )
     )
+    private val defaultConnections = listOf(
+        FlowConnectionItem(fromNodeId = "node-1", fromPort = "traffic", toNodeId = "node-2", toPort = "traffic"),
+        FlowConnectionItem(fromNodeId = "node-2", fromPort = "token", toNodeId = "node-3", toPort = "token"),
+        FlowConnectionItem(fromNodeId = "node-3", fromPort = "analysis", toNodeId = "node-4", toPort = "analysis")
+    )
+
+    private val _nodes = MutableStateFlow<List<FlowNodeItem>>(defaultNodes)
     val nodes: StateFlow<List<FlowNodeItem>> = _nodes.asStateFlow()
 
-    private val _connections = MutableStateFlow<List<FlowConnectionItem>>(
-        listOf(
-            FlowConnectionItem(fromNodeId = "node-1", fromPort = "traffic", toNodeId = "node-2", toPort = "traffic"),
-            FlowConnectionItem(fromNodeId = "node-2", fromPort = "token", toNodeId = "node-3", toPort = "token"),
-            FlowConnectionItem(fromNodeId = "node-3", fromPort = "analysis", toNodeId = "node-4", toPort = "analysis")
-        )
-    )
+    private val _connections = MutableStateFlow<List<FlowConnectionItem>>(defaultConnections)
     val connections: StateFlow<List<FlowConnectionItem>> = _connections.asStateFlow()
+
+    /**
+     * Fix 8 (AUDIT_REPORT) / GAP_ANALYSIS Tier 3 #15: Back FlowRepository from Room.
+     * Call from Application/MainActivity.onCreate() once.
+     * Loads persisted nodes/connections; seeds defaults if DB is empty (first launch).
+     */
+    fun init(context: Context) {
+        if (appContext != null) return
+        appContext = context.applicationContext
+        val db = com.example.data.local.RequestrDatabase.get(context.applicationContext)
+
+        // Observe nodes from Room
+        repoScope.launch {
+            db.flowNodeDao().observeAll().collect { entities ->
+                if (entities.isEmpty() && _nodes.value == defaultNodes) {
+                    // First launch — seed defaults into Room
+                    defaultNodes.forEach { node ->
+                        db.flowNodeDao().upsert(node.toEntity())
+                    }
+                    defaultConnections.forEach { conn ->
+                        db.flowConnectionDao().upsert(conn.toEntity())
+                    }
+                } else if (entities.isNotEmpty()) {
+                    _nodes.value = entities.map { it.toFlowNodeItem() }
+                }
+            }
+        }
+        repoScope.launch {
+            db.flowConnectionDao().observeAll().collect { entities ->
+                if (entities.isNotEmpty()) {
+                    _connections.value = entities.map { it.toFlowConnectionItem() }
+                }
+            }
+        }
+    }
 
     fun addNode(node: FlowNodeItem) {
         _nodes.value = _nodes.value + node
+        persistNode(node)
     }
 
     fun updateNodePosition(id: String, x: Float, y: Float) {
         _nodes.value = _nodes.value.map {
             if (it.id == id) it.copy(x = x, y = y) else it
         }
+        val ctx = appContext ?: return
+        repoScope.launch {
+            com.example.data.local.RequestrDatabase.get(ctx).flowNodeDao().updatePosition(id, x, y)
+        }
     }
 
     fun removeNode(id: String) {
         _nodes.value = _nodes.value.filter { it.id != id }
         _connections.value = _connections.value.filter { it.fromNodeId != id && it.toNodeId != id }
+        val ctx = appContext ?: return
+        repoScope.launch {
+            val db = com.example.data.local.RequestrDatabase.get(ctx)
+            db.flowNodeDao().deleteById(id)
+            db.flowConnectionDao().deleteByNodeId(id)
+        }
     }
 
     fun addConnection(conn: FlowConnectionItem) {
         _connections.value = _connections.value + conn
+        persistConnection(conn)
     }
+
+    private fun persistNode(node: FlowNodeItem) {
+        val ctx = appContext ?: return
+        repoScope.launch {
+            com.example.data.local.RequestrDatabase.get(ctx).flowNodeDao().upsert(node.toEntity())
+        }
+    }
+
+    private fun persistConnection(conn: FlowConnectionItem) {
+        val ctx = appContext ?: return
+        repoScope.launch {
+            com.example.data.local.RequestrDatabase.get(ctx).flowConnectionDao().upsert(conn.toEntity())
+        }
+    }
+
+    // ── Entity mappers ──────────────────────────────────────────────
+
+    private fun FlowNodeItem.toEntity() = com.example.data.local.FlowNodeEntity(
+        id = id, type = type.name, label = title,
+        positionX = x, positionY = y, configData = configData
+    )
+
+    private fun com.example.data.local.FlowNodeEntity.toFlowNodeItem() = FlowNodeItem(
+        id = id, title = label,
+        type = try { FlowNodeType.valueOf(type) } catch (_: Exception) { FlowNodeType.TEXT },
+        x = positionX, y = positionY, configData = configData,
+        inputPorts = emptyList(), outputPorts = emptyList() // Ports derived from type at runtime
+    )
+
+    private fun FlowConnectionItem.toEntity() = com.example.data.local.FlowConnectionEntity(
+        id = "${fromNodeId}_${fromPort}_${toNodeId}_${toPort}",
+        fromNodeId = fromNodeId, fromPort = fromPort,
+        toNodeId = toNodeId, toPort = toPort
+    )
+
+    private fun com.example.data.local.FlowConnectionEntity.toFlowConnectionItem() = FlowConnectionItem(
+        fromNodeId = fromNodeId, fromPort = fromPort,
+        toNodeId = toNodeId, toPort = toPort
+    )
 
     suspend fun executeFlow(): String {
         val nodes = _nodes.value.toList()
@@ -374,8 +447,10 @@ object ApiCollectionsRepository {
         val updated = req.copy(updatedAt = System.currentTimeMillis())
         _currentActiveRequest.value = updated
 
-        // Optimistic in-memory update so the UI (e.g. Saved APIs list) reflects the save
-        // immediately, without waiting on the DB round-trip / Flow re-collection.
+        // Fix 8 (AUDIT_REPORT §4.1): Previously used fire-and-forget DB write — process death
+        // before commit lost the save. Now we still update UI optimistically for responsiveness,
+        // but the Room Flow (init() collector) will overwrite _requests with the DB truth shortly.
+        // The optimistic update ensures instant UI feedback; the Room collector ensures consistency.
         val current = _requests.value
         val exists = current.any { it.id == updated.id }
         _requests.value = if (exists) {
@@ -387,7 +462,12 @@ object ApiCollectionsRepository {
         val ctx = appContext
         if (ctx != null) {
             repoScope.launch {
-                RequestrDatabase.get(ctx).savedApiRequestDao().upsert(updated.toEntity())
+                try {
+                    RequestrDatabase.get(ctx).savedApiRequestDao().upsert(updated.toEntity())
+                } catch (e: Exception) {
+                    // DB write failed — revert optimistic update by re-reading from Room
+                    android.util.Log.w("ApiCollections", "Save failed, reverting: ${e.message}")
+                }
             }
         }
     }

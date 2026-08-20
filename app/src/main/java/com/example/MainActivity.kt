@@ -70,6 +70,7 @@ import com.example.data.models.ApiRequestItem
 import com.example.data.models.CapturedTrafficItem
 import com.example.data.models.NoteItem
 import com.example.data.repository.ApiCollectionsRepository
+import com.example.data.repository.FlowRepository
 import com.example.data.repository.MusicRepository
 import com.example.data.repository.NotesRepository
 import com.example.data.repository.SettingsRepository
@@ -113,6 +114,8 @@ class MainActivity : ComponentActivity() {
         // v3.1 fix (A4): backs ApiCollectionsRepository's saved-requests state with the real
         // Room-persisted `saved_api_requests` table instead of an in-memory-only StateFlow.
         ApiCollectionsRepository.init(applicationContext)
+        // v3.5: backs FlowRepository's nodes/connections from Room so positions survive restart.
+        FlowRepository.init(applicationContext)
         // v3.2 Part C (C1): loads persisted Environments from the unified DataStore (was never
         // initialised before C1, so ApiTestrScreen's EnvironmentRepository.active() always read
         // the in-memory seed defaults only — now it reflects migrated + newly-saved data too).

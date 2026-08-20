@@ -79,7 +79,15 @@ object PreflightController {
         }
 
         val port = prefs.proxyPort.first()
-        val method = capabilities.resolveAutoCaptureMethod()
+        // Resolve actual capture method:
+        // - If CA installed and tier is not root/shizuku (which get their own redirect), use MITM
+        // - Root/Shizuku use their own iptables + MITM combination internally
+        val method = when {
+            capabilities.isRootUsable -> CaptureMethod.ROOT_IPTABLES
+            capabilities.isShizukuUsable -> CaptureMethod.SHIZUKU_TUN
+            capabilities.isCaInstalled -> CaptureMethod.MITM_PROXY  // CA installed: real HTTPS decryption
+            else -> CaptureMethod.VPN_TUN  // No CA, no root: plaintext only via VPN tun
+        }
 
         // Step 4 — VPN consent. Non-null intent means the caller must launch it first.
         val consent = VpnService.prepare(context)
@@ -88,12 +96,65 @@ object PreflightController {
         return Result.Ready(tier = tier, method = method, port = port, consentIntent = consent)
     }
 
-    /** Starts capture. Only call after [run] returned [Result.Ready] with consent satisfied. */
-    fun startCapture(context: Context) {
-        RequestrVpnService.start(context)
+    // ── Engine instances (singleton per method; lazy so they don't allocate until needed) ──
+    private val mitmProxy by lazy { MitmProxyEngine() }
+    private val rootEngine by lazy { RootIptablesEngine() }
+    private val shizukuEngine by lazy { ShizukuTunEngine() }
+    private val httpProxy by lazy { HttpProxyEngine() }
+
+    /**
+     * Starts capture using the engine appropriate for the resolved [CaptureMethod].
+     * Only call after [run] returned [Result.Ready] with consent satisfied.
+     *
+     * Previously this unconditionally called `RequestrVpnService.start()` regardless of
+     * the resolved method — Root/Shizuku/MITM tiers were cosmetic (AUDIT_REPORT Fix #1/#2).
+     */
+    fun startCapture(context: Context, method: CaptureMethod = CaptureMethod.VPN_TUN, port: Int = 8080) {
+        when (method) {
+            CaptureMethod.VPN_TUN -> {
+                RequestrVpnService.start(context)
+            }
+            CaptureMethod.MITM_PROXY -> {
+                // MITM proxy runs as a local CONNECT proxy. For full capture, VPN still
+                // routes traffic to it — but the MITM engine handles TLS termination.
+                mitmProxy.start(context, port)
+            }
+            CaptureMethod.ROOT_IPTABLES -> {
+                // Root: iptables redirect to MITM proxy port, no VPN needed
+                val mitmPort = mitmProxy.start(context, port)
+                val uid = android.os.Process.myUid()
+                rootEngine.start(mitmPort, uid)
+            }
+            CaptureMethod.SHIZUKU_TUN -> {
+                // Shizuku: same approach as root but via Shizuku shell
+                val mitmPort = mitmProxy.start(context, port)
+                shizukuEngine.start(mitmPort)
+            }
+            CaptureMethod.HTTP_PROXY -> {
+                httpProxy.start(port)
+            }
+            CaptureMethod.ROOT_FRIDA -> {
+                // Frida requires external frida-server; start VPN as fallback for traffic
+                // capture, Frida scripts handled separately
+                RequestrVpnService.start(context)
+            }
+        }
     }
 
-    fun stopCapture(context: Context) {
-        RequestrVpnService.stop(context)
+    fun stopCapture(context: Context, method: CaptureMethod = CaptureMethod.VPN_TUN) {
+        when (method) {
+            CaptureMethod.VPN_TUN -> RequestrVpnService.stop(context)
+            CaptureMethod.MITM_PROXY -> mitmProxy.stop()
+            CaptureMethod.ROOT_IPTABLES -> {
+                rootEngine.stop(android.os.Process.myUid())
+                mitmProxy.stop()
+            }
+            CaptureMethod.SHIZUKU_TUN -> {
+                shizukuEngine.stop(mitmProxy.port)
+                mitmProxy.stop()
+            }
+            CaptureMethod.HTTP_PROXY -> httpProxy.stop()
+            CaptureMethod.ROOT_FRIDA -> RequestrVpnService.stop(context)
+        }
     }
 }

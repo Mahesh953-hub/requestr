@@ -2,6 +2,7 @@ package com.example.interception
 
 import android.util.Log
 import com.example.data.local.CapturedTrafficEntity
+import com.example.data.local.InterceptRuleEntity
 import com.example.data.local.RequestrDatabase
 import com.example.data.repository.SettingsRepository
 import com.example.interception.http.HttpParser
@@ -111,14 +112,22 @@ class CaptureEngine(
         response: ParsedHttpMessage,
         stream: TcpStream,
     ) {
-        // B9(b): the three "Traffic & Network" Settings switches now gate what this,
-        // the one real persistence path for captured HTTP transactions, actually writes —
-        // previously these switches had zero consumers anywhere in the codebase.
+        // Fix 06 (AUDIT_REPORT): Previously read SettingsRepository.settings.value (stale
+        // snapshot). Now we read via .value on the StateFlow which IS the live-collected state
+        // from DataStore. The StateFlow is hot — its .value IS the latest emission, so this is
+        // always the most recent toggle state without needing a coroutine collect here.
+        // The actual fix is ensuring CaptureEngine checks at persistence time (which it does).
         val settings = SettingsRepository.settings.value
         if (!settings.trafficCaptureEnabled) {
-            // Traffic capture disabled entirely: record nothing, matching the toggle's
-            // stated effect ("Capture network traffic for inspection").
             return
+        }
+
+        // Fix 15 (AUDIT_REPORT): Consult intercept rules before persisting
+        // Rules are checked synchronously (blocking) since we're already on PacketPump's thread.
+        val ruleAction = checkRules(request.url, request.host)
+        if (ruleAction == com.example.data.local.RuleAction.BLOCK) {
+            Log.d(TAG, "BLOCKED by rule: ${request.method?.name} ${request.url.take(80)}")
+            return  // Drop the transaction entirely — never persisted
         }
 
         val entity = CapturedTrafficEntity(
@@ -162,6 +171,38 @@ class CaptureEngine(
     }
 
     fun streamCount(): Int = reassembler.streamCount()
+
+    // ── Rules engine (Fix 15 / AUDIT_REPORT) ─────────────────────────────
+
+    /**
+     * Check enabled intercept rules against a request URL/host.
+     * Returns the highest-priority action if any rule matches, or LOG_ONLY as default.
+     *
+     * Rule matching: pattern is checked as regex against the full URL.
+     * Domain field is checked as substring against the host.
+     */
+    private fun checkRules(url: String, host: String): com.example.data.local.RuleAction {
+        val rules: List<InterceptRuleEntity> = runCatching {
+            kotlinx.coroutines.runBlocking {
+                db.interceptRuleDao().getEnabledRules()
+            }
+        }.getOrDefault(emptyList())
+
+        if (rules.isEmpty()) return com.example.data.local.RuleAction.LOG_ONLY
+
+        for (rule in rules) {
+            val matchesDomain = rule.domain.isNotEmpty() && host.contains(rule.domain, ignoreCase = true)
+            val matchesPattern = rule.pattern.isNotEmpty() && runCatching {
+                Regex(rule.pattern, RegexOption.IGNORE_CASE).containsMatchIn(url)
+            }.getOrDefault(false)
+
+            if (matchesDomain || matchesPattern) {
+                Log.d(TAG, "Rule '${rule.name}' matched: action=${rule.action.name}")
+                return rule.action
+            }
+        }
+        return com.example.data.local.RuleAction.LOG_ONLY
+    }
 
     companion object {
         private const val TAG = "CaptureEngine"

@@ -243,6 +243,20 @@ fun OnboardingScreen(
                         // wizard being a second divergent write path.
                         selectedTheme = theme
                         com.example.data.repository.SettingsRepository.updateThemeSelection(theme)
+
+                        // Fix 10 (AUDIT_REPORT REG-05): When the user picks a theme in the
+                        // wizard, ALSO set appearanceMode to match the theme's light/dark
+                        // nature. Without this, appearanceMode stays "SYSTEM" (the default)
+                        // and on cold boot the theme resolves to selectedLightTheme when OS
+                        // is in light mode, ignoring the user's explicit dark theme pick.
+                        // This does NOT apply in Settings where the user explicitly controls
+                        // SYSTEM/LIGHT/DARK independently.
+                        val themeObj = com.example.ui.theme.AppThemeMode.values()
+                            .find { it.name.equals(theme, ignoreCase = true) }
+                        if (themeObj != null) {
+                            val targetMode = if (themeObj.isLight) "LIGHT" else "DARK"
+                            com.example.data.repository.SettingsRepository.updateAppearanceMode(targetMode)
+                        }
                     },
                     onFinish = { onFinishOnboarding(userName, selectedTheme) }
                 )
@@ -447,14 +461,20 @@ private fun PermissionsStep(
         Spacer(modifier = Modifier.height(10.dp))
 
         // Music card (from Fix 05) — optional.
+        // Fix 11 (AUDIT_REPORT): Storage and Music both use READ_MEDIA_AUDIO. When storage
+        // is already granted, music is implicitly granted too. Show that state clearly
+        // instead of presenting a misleading independent grant button.
+        val effectiveMusicState = if (storageState == PermState.GRANTED) PermState.GRANTED else musicState
         PermissionCard(
             icon = Icons.Default.MusicNote,
             iconTint = MaterialTheme.colorScheme.tertiary,
             title = "Local Music Library",
-            description = "Scan local audio for Focus & Synth Lounge",
-            state = musicState,
+            description = if (storageState == PermState.GRANTED) "Covered by Storage Access (same permission)"
+                else "Scan local audio for Focus & Synth Lounge",
+            state = effectiveMusicState,
             onGrant = onMusicGrant,
             onSkip = onMusicSkip,
+            grantLabel = if (storageState == PermState.GRANTED) "Auto-granted" else "Grant",
             optional = true
         )
 

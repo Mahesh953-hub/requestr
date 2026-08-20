@@ -143,3 +143,50 @@ interface SavedApiRequestDao {
     @Query("DELETE FROM saved_api_requests")
     suspend fun clearAll()
 }
+
+// ── Flow DAOs (Fix 8 / AUDIT_REPORT §5.2, GAP_ANALYSIS Tier 3 #15) ─────
+
+@Dao
+interface FlowNodeDao {
+    @Query("SELECT * FROM flow_nodes WHERE flowId = :flowId ORDER BY createdAt ASC")
+    fun observeAll(flowId: String = "default"): Flow<List<FlowNodeEntity>>
+
+    @Query("SELECT * FROM flow_nodes WHERE flowId = :flowId")
+    suspend fun getAll(flowId: String = "default"): List<FlowNodeEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(node: FlowNodeEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(nodes: List<FlowNodeEntity>)
+
+    @Query("UPDATE flow_nodes SET positionX = :x, positionY = :y WHERE id = :id")
+    suspend fun updatePosition(id: String, x: Float, y: Float)
+
+    @Query("DELETE FROM flow_nodes WHERE id = :id")
+    suspend fun deleteById(id: String)
+
+    @Query("DELETE FROM flow_nodes WHERE flowId = :flowId")
+    suspend fun clearFlow(flowId: String = "default")
+}
+
+@Dao
+interface FlowConnectionDao {
+    @Query("SELECT * FROM flow_connections WHERE flowId = :flowId ORDER BY createdAt ASC")
+    fun observeAll(flowId: String = "default"): Flow<List<FlowConnectionEntity>>
+
+    @Query("SELECT * FROM flow_connections WHERE flowId = :flowId")
+    suspend fun getAll(flowId: String = "default"): List<FlowConnectionEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(connection: FlowConnectionEntity)
+
+    @Query("DELETE FROM flow_connections WHERE id = :id")
+    suspend fun deleteById(id: String)
+
+    @Query("DELETE FROM flow_connections WHERE fromNodeId = :nodeId OR toNodeId = :nodeId")
+    suspend fun deleteByNodeId(nodeId: String)
+
+    @Query("DELETE FROM flow_connections WHERE flowId = :flowId")
+    suspend fun clearFlow(flowId: String = "default")
+}

@@ -195,7 +195,20 @@ fun NotesScreen(
                 ) {
                     LazyColumn(modifier = Modifier.padding(14.dp)) {
                         item {
-                            Text(editContent, color = MaterialTheme.colorScheme.secondary, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+                            // Fix 16 (AUDIT_REPORT §11.2): HTML preview now renders via
+                            // HtmlCompat instead of showing raw tags as monospace text.
+                            // Markdown shows as-is (monospace) since no MD render lib exists.
+                            if (editFormat == NoteFormatType.HTML) {
+                                val annotated = remember(editContent) {
+                                    val spanned = androidx.core.text.HtmlCompat.fromHtml(
+                                        editContent, androidx.core.text.HtmlCompat.FROM_HTML_MODE_COMPACT
+                                    )
+                                    androidx.compose.ui.text.AnnotatedString(spanned.toString())
+                                }
+                                Text(annotated, color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp)
+                            } else {
+                                Text(editContent, color = MaterialTheme.colorScheme.secondary, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+                            }
                         }
                     }
                 }

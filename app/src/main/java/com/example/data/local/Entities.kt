@@ -155,3 +155,40 @@ data class SavedAssertion(
     val expectedValue: String = "",
     val enabled: Boolean = true,
 )
+
+// ── Flow persistence (Fix 8 / AUDIT_REPORT, Fix 15 / GAP_ANALYSIS) ─────
+
+/**
+ * Persisted Flow node. Previously `FlowRepository` held nodes in-memory only — positions
+ * and configuration were lost on restart (UNTESTED_AREAS §5.2, GAP_ANALYSIS Tier 3 #15).
+ */
+@Entity(tableName = "flow_nodes", indices = [Index("flowId")])
+data class FlowNodeEntity(
+    @PrimaryKey val id: String,
+    /** Which flow graph this node belongs to. */
+    val flowId: String = "default",
+    val type: String,  // FlowNodeType enum name
+    val label: String = "",
+    val positionX: Float = 0f,
+    val positionY: Float = 0f,
+    /** JSON-encoded configuration (tool ID, API ID, script, etc.) */
+    val configData: String = "",
+    val createdAt: Long = System.currentTimeMillis(),
+)
+
+/**
+ * Persisted Flow connection between two node ports.
+ */
+@Entity(
+    tableName = "flow_connections",
+    indices = [Index("flowId"), Index("fromNodeId"), Index("toNodeId")]
+)
+data class FlowConnectionEntity(
+    @PrimaryKey val id: String,
+    val flowId: String = "default",
+    val fromNodeId: String,
+    val fromPort: String = "output",
+    val toNodeId: String,
+    val toPort: String = "input",
+    val createdAt: Long = System.currentTimeMillis(),
+)

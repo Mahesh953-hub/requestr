@@ -99,7 +99,7 @@ class CaptureController(
     }
 
     private fun startCaptureAndWatcher(method: com.example.data.interception.CaptureMethod, port: Int) {
-        PreflightController.startCapture(context)
+        PreflightController.startCapture(context, method, port)
         watcher.start(method, port)
     }
 
@@ -111,7 +111,8 @@ class CaptureController(
 
     fun requestStop() {
         watcher.stop()
-        PreflightController.stopCapture(context)
+        val currentMethod = InterceptionStateRepository.state.value.captureMethod
+        PreflightController.stopCapture(context, currentMethod)
     }
 
     /** Re-probes the trust store after the CA install activity returns. Never assumes success. */

@@ -18,12 +18,11 @@ import androidx.room.TypeConverters
         CaptureSessionEntity::class,
         InterceptRuleEntity::class,
         SavedApiRequestEntity::class,
+        FlowNodeEntity::class,
+        FlowConnectionEntity::class,
     ],
-    // v3.2 Part C — C2: bumped 2 -> 3 for SavedApiRequestEntity.chainExtractions.
-    // v3.4 Part C — C3: bumped 3 -> 4 for SavedApiRequestEntity.assertions. Schema is young;
-    // destructive migration (below) is acceptable pre-1.0 and avoids shipping a broken upgrade
-    // path for a single additive column.
-    version = 4,
+    // v3.5: bumped 4 -> 5 for FlowNodeEntity + FlowConnectionEntity (Flow persistence).
+    version = 5,
     exportSchema = false,
 )
 @TypeConverters(RequestrTypeConverters::class)
@@ -33,6 +32,8 @@ abstract class RequestrDatabase : RoomDatabase() {
     abstract fun captureSessionDao(): CaptureSessionDao
     abstract fun interceptRuleDao(): InterceptRuleDao
     abstract fun savedApiRequestDao(): SavedApiRequestDao
+    abstract fun flowNodeDao(): FlowNodeDao
+    abstract fun flowConnectionDao(): FlowConnectionDao
 
     companion object {
         @Volatile
