@@ -293,28 +293,8 @@ class CaptureEngine(
      * Rule matching: pattern is checked as regex against the full URL.
      * Domain field is checked as substring against the host.
      */
-    private fun checkRules(url: String, host: String): com.example.data.local.RuleAction {
-        val rules: List<InterceptRuleEntity> = runCatching {
-            kotlinx.coroutines.runBlocking {
-                db.interceptRuleDao().getEnabledRules()
-            }
-        }.getOrDefault(emptyList())
-
-        if (rules.isEmpty()) return com.example.data.local.RuleAction.LOG_ONLY
-
-        for (rule in rules) {
-            val matchesDomain = rule.domain.isNotEmpty() && host.contains(rule.domain, ignoreCase = true)
-            val matchesPattern = rule.pattern.isNotEmpty() && runCatching {
-                Regex(rule.pattern, RegexOption.IGNORE_CASE).containsMatchIn(url)
-            }.getOrDefault(false)
-
-            if (matchesDomain || matchesPattern) {
-                Log.d(TAG, "Rule '${rule.name}' matched: action=${rule.action.name}")
-                return rule.action
-            }
-        }
-        return com.example.data.local.RuleAction.LOG_ONLY
-    }
+    private fun checkRules(url: String, host: String): com.example.data.local.RuleAction =
+        RuleEnforcer.checkRules(db, url, host)
 
     /**
      * Persists a WebSocket frame as a fake transaction so it appears in the capture log.
@@ -349,71 +329,22 @@ class CaptureEngine(
     }
 
     /** Returns the first matching rule entity (for accessing replacementValue). */
-    private fun getMatchingRule(url: String, host: String): InterceptRuleEntity? {
-        val rules: List<InterceptRuleEntity> = runCatching {
-            kotlinx.coroutines.runBlocking {
-                db.interceptRuleDao().getEnabledRules()
-            }
-        }.getOrDefault(emptyList())
-
-        for (rule in rules) {
-            val matchesDomain = rule.domain.isNotEmpty() && host.contains(rule.domain, ignoreCase = true)
-            val matchesPattern = rule.pattern.isNotEmpty() && runCatching {
-                Regex(rule.pattern, RegexOption.IGNORE_CASE).containsMatchIn(url)
-            }.getOrDefault(false)
-            if (matchesDomain || matchesPattern) return rule
-        }
-        return null
-    }
+    private fun getMatchingRule(url: String, host: String): InterceptRuleEntity? =
+        RuleEnforcer.getMatchingRule(db, url, host)
 
     /**
      * Applies request modifications from a rule's replacementValue (JSON config).
      * Format: {"addHeaders":{"X-Custom":"value"}, "removeHeaders":["Cookie"], "bodyReplace":"new body"}
      */
-    private fun applyRequestModification(request: ParsedHttpMessage, config: String) {
-        runCatching {
-            val json = org.json.JSONObject(config)
-            if (json.has("addHeaders")) {
-                val headers = json.getJSONObject("addHeaders")
-                val mutable = request.headers.toMutableMap()
-                headers.keys().forEach { key -> mutable[key] = headers.getString(key) }
-                request.headers = mutable
-            }
-            if (json.has("removeHeaders")) {
-                val toRemove = json.getJSONArray("removeHeaders")
-                val mutable = request.headers.toMutableMap()
-                for (i in 0 until toRemove.length()) {
-                    mutable.remove(toRemove.getString(i))
-                }
-                request.headers = mutable
-            }
-            if (json.has("bodyReplace")) {
-                request.body = json.getString("bodyReplace")
-            }
-        }.onFailure { Log.w(TAG, "Failed to apply request modification: ${it.message}") }
-    }
+    private fun applyRequestModification(request: ParsedHttpMessage, config: String) =
+        RuleEnforcer.applyRequestModification(request, config)
 
     /**
      * Applies response modifications from a rule's replacementValue (JSON config).
      * Format: {"statusCode":200, "addHeaders":{"X-Mock":"true"}, "bodyReplace":"{}"}
      */
-    private fun applyResponseModification(response: ParsedHttpMessage, config: String) {
-        runCatching {
-            val json = org.json.JSONObject(config)
-            if (json.has("statusCode")) {
-                response.statusCode = json.getInt("statusCode")
-            }
-            if (json.has("addHeaders")) {
-                val headers = json.getJSONObject("addHeaders")
-                val mutable = response.headers.toMutableMap()
-                headers.keys().forEach { key -> mutable[key] = headers.getString(key) }
-                response.headers = mutable
-            }
-            if (json.has("bodyReplace")) {
-                response.body = json.getString("bodyReplace")
-            }
-        }.onFailure { Log.w(TAG, "Failed to apply response modification: ${it.message}") }
-    }
+    private fun applyResponseModification(response: ParsedHttpMessage, config: String) =
+        RuleEnforcer.applyResponseModification(response, config)
 
     private fun scHex(bytes: ByteArray) = bytes.joinToString("") { "%02x".format(it) }
 

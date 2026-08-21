@@ -87,8 +87,18 @@ object HttpParser {
 
     /**
      * Attempt to parse an HTTP response from the server→client buffer.
+     *
+     * [sentRequestMethod] matters for body framing: a response to HEAD carries
+     * no body even when a Content-Length header is present, and neither do
+     * 1xx / 204 / 304 responses (RFC 7230 §3.3). Without this, callers that
+     * stream bytes (the MITM relay) would stall waiting for body bytes that
+     * never arrive.
      */
-    fun tryParseResponse(bytes: ByteArray, sentRequestUrl: String? = null): ParsedHttpMessage? {
+    fun tryParseResponse(
+        bytes: ByteArray,
+        sentRequestUrl: String? = null,
+        sentRequestMethod: HttpMethod? = null,
+    ): ParsedHttpMessage? {
         val buf = bytes.copyOf(bytes.size.coerceAtMost(MAX_HEADERS_BYTES))
         val headerEnd = findHeaderEnd(buf) ?: return null
         val headerBlock = buf.copyOf(headerEnd)
@@ -119,10 +129,17 @@ object HttpParser {
         val transferEncoding = headers["transfer-encoding"]
         val isChunked = transferEncoding != null && transferEncoding.contains("chunked", ignoreCase = true)
 
+        // RFC 7230 §3.3: these responses never carry a body, regardless of headers.
+        val bodyless = sentRequestMethod == HttpMethod.HEAD ||
+            statusCode in 100..199 || statusCode == 204 || statusCode == 304
+
         val body: String
         val totalNeeded: Int
 
-        if (isChunked) {
+        if (bodyless) {
+            totalNeeded = headerEnd + 4
+            body = ""
+        } else if (isChunked) {
             val (chunkedBody, consumed) = decodeChunked(bytes, headerEnd + 4)
             body = chunkedBody
             totalNeeded = consumed

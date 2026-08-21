@@ -123,7 +123,24 @@ object PreflightController {
     }
 
     // ── Engine instances (singleton per method; lazy so they don't allocate until needed) ──
-    private val mitmProxy by lazy { MitmProxyEngine() }
+    //
+    // MitmProxyEngine is constructed on first use with the caller's context so its
+    // onDecryptedTransaction callback can persist decrypted HTTP transactions into
+    // Room (they then show up live in the capture list UI, which observes the DAO).
+    private var mitmProxy: MitmProxyEngine? = null
+
+    @Synchronized
+    private fun mitmProxy(context: Context): MitmProxyEngine =
+        mitmProxy ?: MitmProxyEngine(
+            onDecryptedTransaction = { entity ->
+                val appContext = context.applicationContext
+                kotlinx.coroutines.runBlocking(kotlinx.coroutines.Dispatchers.IO) {
+                    com.example.data.local.RequestrDatabase.get(appContext)
+                        .capturedTrafficDao().insert(entity)
+                }
+            },
+        ).also { mitmProxy = it }
+
     private val rootEngine by lazy { RootIptablesEngine() }
     private val shizukuEngine by lazy { ShizukuTunEngine() }
     private val httpProxy by lazy { HttpProxyEngine() }
@@ -143,17 +160,19 @@ object PreflightController {
             CaptureMethod.MITM_PROXY -> {
                 // MITM proxy runs as a local CONNECT proxy. For full capture, VPN still
                 // routes traffic to it — but the MITM engine handles TLS termination.
-                mitmProxy.start(context, port)
+                // Decrypted transactions are persisted to Room via the engine's
+                // onDecryptedTransaction callback (see mitmProxy(context)).
+                mitmProxy(context).start(context, port)
             }
             CaptureMethod.ROOT_IPTABLES -> {
                 // Root: iptables redirect to MITM proxy port, no VPN needed
-                val mitmPort = mitmProxy.start(context, port)
+                val mitmPort = mitmProxy(context).start(context, port)
                 val uid = android.os.Process.myUid()
                 rootEngine.start(mitmPort, uid)
             }
             CaptureMethod.SHIZUKU_TUN -> {
                 // Shizuku: same approach as root but via Shizuku shell
-                val mitmPort = mitmProxy.start(context, port)
+                val mitmPort = mitmProxy(context).start(context, port)
                 shizukuEngine.start(mitmPort)
             }
             CaptureMethod.HTTP_PROXY -> {
@@ -170,14 +189,14 @@ object PreflightController {
     fun stopCapture(context: Context, method: CaptureMethod = CaptureMethod.VPN_TUN) {
         when (method) {
             CaptureMethod.VPN_TUN -> RequestrVpnService.stop(context)
-            CaptureMethod.MITM_PROXY -> mitmProxy.stop()
+            CaptureMethod.MITM_PROXY -> mitmProxy?.stop()
             CaptureMethod.ROOT_IPTABLES -> {
                 rootEngine.stop(android.os.Process.myUid())
-                mitmProxy.stop()
+                mitmProxy?.stop()
             }
             CaptureMethod.SHIZUKU_TUN -> {
-                shizukuEngine.stop(mitmProxy.port)
-                mitmProxy.stop()
+                shizukuEngine.stop(mitmProxy?.port ?: 0)
+                mitmProxy?.stop()
             }
             CaptureMethod.HTTP_PROXY -> httpProxy.stop()
             CaptureMethod.ROOT_FRIDA -> RequestrVpnService.stop(context)
