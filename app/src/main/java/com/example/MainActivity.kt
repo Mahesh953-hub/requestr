@@ -164,6 +164,10 @@ class MainActivity : ComponentActivity() {
         ApiCollectionsRepository.init(applicationContext)
         // v3.5: backs FlowRepository's nodes/connections from Room so positions survive restart.
         FlowRepository.init(applicationContext)
+        // R3 fix: gives ApiTestrRepository a Context so its OkHttpClient can attach
+        // OkHttpProxyInterceptor, wiring requestr's own API Testr traffic into the OkHttp
+        // runtime-instrumentation plane (see OkHttpAdapter in HttpStackAdapters.kt).
+        com.example.data.repository.ApiTestrRepository.init(applicationContext)
         // v3.5.1: Seed default intercept rules on first launch (ad blockers, auth loggers, etc.)
         kotlinx.coroutines.MainScope().launch(kotlinx.coroutines.Dispatchers.IO) {
             com.example.data.interception.CaptureLogRepository.seedDefaultRules(applicationContext)

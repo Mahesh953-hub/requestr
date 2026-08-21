@@ -1,10 +1,12 @@
 package com.example.data.repository
 
+import android.content.Context
 import com.example.data.models.ApiRequestItem
 import com.example.data.models.ApiResponseData
 import com.example.data.models.AuthType
 import com.example.data.models.HttpMethod
 import com.example.data.models.RequestBodyType
+import com.example.interception.OkHttpProxyInterceptor
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
@@ -17,23 +19,47 @@ import okhttp3.Response
 
 object ApiTestrRepository {
 
+    // R3 fix: ApiTestrRepository was the most user-facing/traffic-generating OkHttpClient
+    // owner in the app with no Context available to it, so OkHttpProxyInterceptor (which
+    // records every real request/response pair for the OkHttp runtime-instrumentation
+    // plane -- see HttpStackAdapters.kt's OkHttpAdapter) was never attached to any live
+    // client. Follows the same lazy-Context-init pattern as FlowRepository.init() /
+    // SettingsRepository.init() in AppRepositories.kt, called once from
+    // MainActivity.onCreate(). Note this means API Testr's own outbound calls now always
+    // show up in the OkHttp instrumentation plane (OkHttpProxyInterceptor.intercept()
+    // records events even when no capture tier's proxy port is active -- see its own
+    // port <= 0 branch), which is the intended, documented scope: this only ever
+    // instruments requestr's own outbound traffic, never a third-party app's (that would
+    // require the separate Observer SDK, S1).
+    private var appContext: Context? = null
+
+    /** Call once from MainActivity.onCreate() so [client] can attach [OkHttpProxyInterceptor]. */
+    fun init(context: Context) {
+        if (appContext != null) return
+        appContext = context.applicationContext
+    }
+
     private val client: OkHttpClient by lazy {
-        OkHttpClient.Builder()
+        val builder = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(20, TimeUnit.SECONDS)
             .writeTimeout(15, TimeUnit.SECONDS)
             .followRedirects(true)
-            .build()
+        appContext?.let { builder.addInterceptor(OkHttpProxyInterceptor(it)) }
+        builder.build()
     }
 
     suspend fun executeRequest(requestItem: ApiRequestItem, followRedirects: Boolean = true): ApiResponseData = withContext(Dispatchers.IO) {
         // Per-request client that respects the follow-redirects toggle
-        val reqClient = if (followRedirects) client else OkHttpClient.Builder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
-            .writeTimeout(15, TimeUnit.SECONDS)
-            .followRedirects(false)
-            .build()
+        val reqClient = if (followRedirects) client else run {
+            val builder = OkHttpClient.Builder()
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(20, TimeUnit.SECONDS)
+                .writeTimeout(15, TimeUnit.SECONDS)
+                .followRedirects(false)
+            appContext?.let { builder.addInterceptor(OkHttpProxyInterceptor(it)) }
+            builder.build()
+        }
         val startDns = System.currentTimeMillis()
         val urlBuilder = requestItem.url.trim()
         
