@@ -1,8 +1,17 @@
 package com.example.interception.quic
 
+import com.example.interception.http.HpackHuffman
+
 /**
  * QPACK decoder (RFC 9204) — header compression for HTTP/3.
  * Handles literal and indexed entries from the static table.
+ *
+ * v5.6 (P2): [decodeStr] now actually Huffman-decodes when the H bit is set, via
+ * [HpackHuffman] — RFC 9204 §4.1.2 mandates reusing the RFC 7541 Appendix B table
+ * unmodified, so QPACK shares the exact decode tree [com.example.interception.http.Http2Parser]
+ * already built for HPACK rather than re-deriving it. Previously both the Huffman and
+ * non-Huffman branches did a plain UTF-8 decode, silently corrupting any Huffman-coded
+ * QPACK string (headers routinely are, since it is the default encoder mode).
  */
 object QpackDecoder {
 
@@ -118,7 +127,8 @@ object QpackDecoder {
         val firstByte = bytes[offset].toInt() and 0xFF
         val huffman = firstByte and 0x80 != 0
         val (pos, len) = decodeInt(bytes, offset, 7)
-        val value = if (huffman) String(bytes, pos, len, Charsets.UTF_8) else String(bytes, pos, len, Charsets.UTF_8)
+        if (len < 0 || pos + len > bytes.size) return bytes.size to ""
+        val value = if (huffman) HpackHuffman.decode(bytes, pos, len) else String(bytes, pos, len, Charsets.UTF_8)
         return (pos + len) to value
     }
 }
