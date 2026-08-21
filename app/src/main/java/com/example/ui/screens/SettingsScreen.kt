@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.PlayArrow
@@ -739,6 +740,134 @@ fun SettingsScreen(
                         Text(
                             "OkHttp adapter reports requestr's own outbound calls made via OkHttpProxyInterceptor. Third-party apps need the Requestr Observer SDK (see sdk/) to report their own traffic.",
                             fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            // Section 5.5c: Browser Bridge (B1-B7) -- CDP connect/disconnect toggle + live
+            // connection state, mirroring the Runtime Instrumentation card above. This is the
+            // only user-reachable entry point for B1 (CdpClient)/B2 (CdpNetworkAdapter)/B3
+            // (CdpFetchAdapter)/B4 (InitiatorResolver, used inside B2)/B5 (ServiceWorkerObserver)
+            // /B6 (BrowserStorageObserver) -- BrowserBridgeManager owns all of their lifecycles.
+            item {
+                SettingsSectionHeader("BROWSER BRIDGE (CDP)")
+                GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surface) {
+                    val cdpState by com.example.browser.BrowserBridgeManager.connectionState.collectAsState()
+                    val cdpStatus by com.example.browser.BrowserBridgeManager.statusMessage.collectAsState()
+                    val cdpEventsIngested by com.example.browser.BrowserBridgeManager.eventsIngested.collectAsState()
+                    val swState by com.example.browser.BrowserBridgeManager.serviceWorkerState.collectAsState()
+                    val storageState by com.example.browser.BrowserBridgeManager.storageState.collectAsState()
+                    var cdpHostPortInput by remember { mutableStateOf(com.example.browser.BrowserBridgeManager.DEFAULT_HOST_PORT) }
+
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(imageVector = Icons.Default.Language, contentDescription = "Browser Bridge", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Chrome DevTools Protocol", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        // Live connection-state indicator, same DISCONNECTED/CONNECTING/CONNECTED/
+                        // FAILED vocabulary as CdpClient.State.
+                        val (stateLabel, stateColor) = when (cdpState) {
+                            com.example.browser.CdpClient.State.CONNECTED -> "Connected" to Color(0xFF10B981)
+                            com.example.browser.CdpClient.State.CONNECTING -> "Connecting..." to Color(0xFFF59E0B)
+                            com.example.browser.CdpClient.State.FAILED -> "Failed" to MaterialTheme.colorScheme.error
+                            com.example.browser.CdpClient.State.DISCONNECTED -> "Disconnected" to MaterialTheme.colorScheme.onSurfaceVariant
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(modifier = Modifier.size(8.dp).background(stateColor, CircleShape))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(stateLabel, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = stateColor)
+                        }
+                        Text(cdpStatus, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = cdpHostPortInput,
+                            onValueChange = { cdpHostPortInput = it },
+                            label = { Text("CDP host:port", fontSize = 11.sp) },
+                            singleLine = true,
+                            enabled = cdpState != com.example.browser.CdpClient.State.CONNECTED && cdpState != com.example.browser.CdpClient.State.CONNECTING,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(10.dp),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                unfocusedBorderColor = MaterialTheme.colorScheme.outline,
+                                focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                                unfocusedTextColor = MaterialTheme.colorScheme.onSurface
+                            )
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "Requires Chrome/Chromium running with --remote-debugging-port",
+                                fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Switch(
+                                checked = cdpState == com.example.browser.CdpClient.State.CONNECTED || cdpState == com.example.browser.CdpClient.State.CONNECTING,
+                                onCheckedChange = { checked ->
+                                    if (checked) {
+                                        com.example.browser.BrowserBridgeManager.connect(cdpHostPortInput)
+                                    } else {
+                                        com.example.browser.BrowserBridgeManager.disconnect()
+                                    }
+                                }
+                            )
+                        }
+
+                        if (cdpState == com.example.browser.CdpClient.State.CONNECTED) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            // B2+B4: real correlated network events, not a placeholder count.
+                            Text(
+                                "Network events correlated: $cdpEventsIngested",
+                                fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurface
+                            )
+
+                            // B5: live service worker registrations observed via CDP.
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text("Service Workers: ${swState.size} observed", fontSize = 11.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
+                            swState.values.take(3).forEach { reg ->
+                                Text(
+                                    "· ${reg.scriptUrl ?: reg.scopeUrl} — ${reg.status ?: "unknown"}",
+                                    fontSize = 9.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            // B6: cookies/localStorage/IndexedDB snapshot + manual refresh.
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "Storage: ${storageState.cookies.size} cookies · ${storageState.localStorage.size} localStorage keys · ${storageState.indexedDbDatabases.size} IndexedDB DBs",
+                                    fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                IconButton(onClick = { com.example.browser.BrowserBridgeManager.refreshStorage() }, modifier = Modifier.size(28.dp)) {
+                                    Icon(imageVector = Icons.Default.Refresh, contentDescription = "Refresh storage", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                                }
+                            }
+                            storageState.lastError?.let { err ->
+                                Text("Storage fetch error: $err", fontSize = 9.sp, color = MaterialTheme.colorScheme.error)
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            "Extension bridge: load browser-extension/ (unpacked) in chrome://extensions to relay page-context fetch/XHR data CDP can't see to http://localhost:9876/api/observe.",
+                            fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
