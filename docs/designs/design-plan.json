@@ -1,0 +1,171 @@
+{
+  "title": "Interception overhaul: VPN relay health, TLS handshake failures, HTTP/3 honesty",
+  "summary": "One design direction built entirely from requestr's existing vocabulary — frosted-glass GlassCards over the iOS-style blurred Interceptr header, uppercase letter-spaced section headers from SettingsScreen, BadgePill/MethodBadge/StatusCodeBadge pills, monospace numerics, and the app's status-color set (green #10B981 healthy/decrypted, amber #F59E0B degraded/pending, red #EF4444 failed/blocked, gray #64748B inactive/unknown). Every screen is drawn at 390x844 with the real Intercept status banner, search bar, method chips, and the tri-state capture FAB, so the build agent can map each block onto an existing composable. All three surfaces are presented in both Obsidian Dark (the app's default themeMode = MONOCHROME_DARK) and Editorial Light, since the app decouples them. Surface 1 puts relay health in the Intercept screen as a collapsed GlassCard (status pill, per-transport flow tiles, relayed-vs-dropped bar, throughput, flow-table line) that expands into a bottom sheet with drop-reason bars, per-address-family IPv4/IPv6 NAT rows, and flow-table pressure; the degraded state names each drop reason so drops are attributable rather than mysterious, and the down state shows honest zeroes plus a route back to capture instead of implying traffic. Surface 2 adds a red FAILED pill with a warning glyph plus a 3px left status rail on TLS rows, so FAILED separates from DECRYPTED (green, lock) and SNI/JA3 ONLY (gray, lock) at a glance even in a dense list; its expanded detail leads with a plain-language headline, then category, which side sent the alert, a three-step handshake-stage rail showing exactly where it died, the raw alert record, and a remedy block whose primary action is the actual fix (Install requestr CA for unknown_ca, Extend cipher set for handshake_failure). Surface 3 gives HTTP/3 three distinct row indicators — green lock-open HTTP/3 (decoded), amber key-off HTTP/3 (observed, no keys), gray QUIC (detected only) — deliberately using amber, never red, so a legitimate no-keys state can never read as a bug; the undecrypted detail states plainly that requestr read every packet and that QUIC payloads are encrypted with handshake-derived keys, shows exactly what was decoded from the Initial packet, and offers the path to decodability. Recommended per section: the dark expanded relay readout, the dark unknown_ca failure detail, and the dark traffic-row indicator set, because those three are the highest-risk judgement calls and dark is the shipped default.",
+  "sections": [
+    {
+      "title": "VPN relay health readout",
+      "key": "relay-health",
+      "description": "Live per-flow TCP/UDP/ICMP relay + NAT health, compact on the Intercept screen and expandable into a full detail sheet.",
+      "variations": [
+        {
+          "title": "Healthy under load — compact card (dark)",
+          "key": "healthy-compact-dark",
+          "html_link": "relay-health-healthy-compact-dark.html",
+          "is_recommended": false
+        },
+        {
+          "title": "Healthy under load — compact card (light)",
+          "key": "healthy-compact-light",
+          "html_link": "relay-health-healthy-compact-light.html",
+          "is_recommended": false
+        },
+        {
+          "title": "Healthy under load — expanded detail (dark)",
+          "key": "healthy-detail-dark",
+          "html_link": "relay-health-healthy-detail-dark.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Healthy under load — expanded detail (light)",
+          "key": "healthy-detail-light",
+          "html_link": "relay-health-healthy-detail-light.html",
+          "is_recommended": false
+        },
+        {
+          "title": "Degraded — drops with reasons (dark)",
+          "key": "degraded-detail-dark",
+          "html_link": "relay-health-degraded-detail-dark.html",
+          "is_recommended": false
+        },
+        {
+          "title": "Degraded — drops with reasons (light)",
+          "key": "degraded-detail-light",
+          "html_link": "relay-health-degraded-detail-light.html",
+          "is_recommended": false
+        },
+        {
+          "title": "Relay not active — compact card (dark)",
+          "key": "down-compact-dark",
+          "html_link": "relay-health-down-compact-dark.html",
+          "is_recommended": false
+        },
+        {
+          "title": "Relay not active — compact card (light)",
+          "key": "down-compact-light",
+          "html_link": "relay-health-down-compact-light.html",
+          "is_recommended": false
+        },
+        {
+          "title": "Relay not active — expanded detail (dark)",
+          "key": "down-detail-dark",
+          "html_link": "relay-health-down-detail-dark.html",
+          "is_recommended": false
+        },
+        {
+          "title": "Relay not active — expanded detail (light)",
+          "key": "down-detail-light",
+          "html_link": "relay-health-down-detail-light.html",
+          "is_recommended": false
+        }
+      ]
+    },
+    {
+      "title": "TLS handshake FAILED badge and failure reason",
+      "key": "tls-failed",
+      "description": "FAILED badge in the Connections sheet TLS tab plus the expanded failed-handshake detail with cause, stage, and remedy.",
+      "variations": [
+        {
+          "title": "TLS tab — mixed decrypted / SNI-only / FAILED rows (dark)",
+          "key": "rows-mixed-dark",
+          "html_link": "tls-rows-mixed-dark.html",
+          "is_recommended": false
+        },
+        {
+          "title": "TLS tab — mixed decrypted / SNI-only / FAILED rows (light)",
+          "key": "rows-mixed-light",
+          "html_link": "tls-rows-mixed-light.html",
+          "is_recommended": false
+        },
+        {
+          "title": "Failure detail — unknown_ca, client rejected our CA (dark)",
+          "key": "detail-unknown-ca-dark",
+          "html_link": "tls-failed-detail-unknown-ca-dark.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Failure detail — unknown_ca, client rejected our CA (light)",
+          "key": "detail-unknown-ca-light",
+          "html_link": "tls-failed-detail-unknown-ca-light.html",
+          "is_recommended": false
+        },
+        {
+          "title": "Failure detail — handshake_failure, server alert (dark)",
+          "key": "detail-handshake-failure-dark",
+          "html_link": "tls-failed-detail-handshake-failure-dark.html",
+          "is_recommended": false
+        },
+        {
+          "title": "Failure detail — handshake_failure, server alert (light)",
+          "key": "detail-handshake-failure-light",
+          "html_link": "tls-failed-detail-handshake-failure-light.html",
+          "is_recommended": false
+        }
+      ]
+    },
+    {
+      "title": "HTTP/3 indicator and QUIC detail",
+      "key": "http3-indicator",
+      "description": "Three honest HTTP/3 row states next to HTTP/1.1 and HTTP/2, with QUIC connection facts and a no-keys explanation in the detail sheet.",
+      "variations": [
+        {
+          "title": "Traffic rows — decoded / no-keys / QUIC-only beside h1 and h2 (dark)",
+          "key": "row-indicators-dark",
+          "html_link": "http3-row-indicators-dark.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Traffic rows — decoded / no-keys / QUIC-only beside h1 and h2 (light)",
+          "key": "row-indicators-light",
+          "html_link": "http3-row-indicators-light.html",
+          "is_recommended": false
+        },
+        {
+          "title": "Detail — fully decoded HTTP/3 transaction (dark)",
+          "key": "detail-decoded-dark",
+          "html_link": "http3-detail-decoded-dark.html",
+          "is_recommended": false
+        },
+        {
+          "title": "Detail — fully decoded HTTP/3 transaction (light)",
+          "key": "detail-decoded-light",
+          "html_link": "http3-detail-decoded-light.html",
+          "is_recommended": false
+        },
+        {
+          "title": "Detail — observed but undecrypted, no keys (dark)",
+          "key": "detail-undecrypted-dark",
+          "html_link": "http3-detail-undecrypted-dark.html",
+          "is_recommended": false
+        },
+        {
+          "title": "Detail — observed but undecrypted, no keys (light)",
+          "key": "detail-undecrypted-light",
+          "html_link": "http3-detail-undecrypted-light.html",
+          "is_recommended": false
+        },
+        {
+          "title": "Detail — QUIC detected only, HTTP/3 not claimed (dark)",
+          "key": "detail-quic-only-dark",
+          "html_link": "http3-detail-quic-only-dark.html",
+          "is_recommended": false
+        },
+        {
+          "title": "Detail — QUIC detected only, HTTP/3 not claimed (light)",
+          "key": "detail-quic-only-light",
+          "html_link": "http3-detail-quic-only-light.html",
+          "is_recommended": false
+        }
+      ]
+    }
+  ]
+}

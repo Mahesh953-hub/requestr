@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HTTP/3 detail — observed, no keys · dark · requestr</title>
+<meta name="description" content="requestr HTTP/3 detail for an observed-but-undecrypted QUIC connection, explaining the missing key material honestly and offering the path to make it decodable.">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-text-size-adjust:100%}
+body{background:#050507;min-height:100vh;display:flex;flex-direction:column;align-items:center;
+ padding:22px 12px 34px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+.frame-label{font:700 10px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:1.4px;
+ text-transform:uppercase;color:#A0A0A8;margin-bottom:10px;text-align:center}
+.phone{width:390px;height:844px;background:#0A0A0C;color:#F1F5F9;border:1px solid #282830;border-radius:36px;
+ overflow:hidden;position:relative;box-shadow:0 22px 64px rgba(0,0,0,0.55);display:flex;flex-direction:column}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
+.sysbar{height:28px;flex:0 0 28px;display:flex;align-items:center;justify-content:space-between;padding:0 18px;
+ font:600 11px/1 ui-monospace,Menlo,monospace;color:#F1F5F9;opacity:.85}
+.sysbar .right{display:flex;align-items:center;gap:5px}
+.hdr{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:8px 16px 10px;
+ background:rgba(28,28,33,0.62);backdrop-filter:blur(20px) saturate(140%);-webkit-backdrop-filter:blur(20px) saturate(140%);
+ border-bottom:1px solid #282830}
+.hdr h1{font-size:22px;font-weight:700;letter-spacing:-.5px;color:#F1F5F9}
+.hdr .acts{display:flex;align-items:center;gap:2px}
+.ibtn{width:36px;height:36px;border-radius:18px;display:flex;align-items:center;justify-content:center;color:#FFFFFF}
+.ibtn.muted{color:#A0A0A8}
+.body{flex:1 1 auto;overflow:hidden;display:flex;flex-direction:column;padding:8px 16px 0}
+.card{background:rgba(28,28,33,0.62);border:1px solid #282830;border-radius:16px}
+.card.solid{background:#141417}
+.card.flat{background:#1C1C21}
+.pad10{padding:10px}
+.pad12{padding:12px}
+.pad14{padding:14px}
+.row{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.rowc{display:flex;align-items:center;gap:6px}
+.pill{display:inline-flex;align-items:center;gap:4px;border-radius:6px;padding:2px 6px;white-space:nowrap;
+ font:700 10px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.pill.bd{border-width:1px;border-style:solid}
+.pill svg{display:block}
+.sec{font:700 11px/1.3 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;letter-spacing:1px;
+ text-transform:uppercase;color:#A0A0A8;margin:14px 0 6px}
+.sec:first-child{margin-top:0}
+.dot{width:8px;height:8px;border-radius:50%;flex:0 0 8px}
+.t11{font-size:11px}.t10{font-size:10px}.t9{font-size:9px}.t12{font-size:12px}.t13{font-size:13px}
+.b{font-weight:700}.sb{font-weight:600}
+.dim{color:#A0A0A8}
+.hair{height:1px;background:#282830;opacity:.75;margin:8px 0}
+.tiles{display:flex;gap:8px}
+.tile{flex:1;background:#1C1C21;border:1px solid #282830;border-radius:12px;padding:8px 9px}
+.tile .n{font:700 19px/1.1 ui-monospace,Menlo,monospace;letter-spacing:-.5px}
+.tile .k{font:700 9px/1.4 -apple-system,sans-serif;letter-spacing:1px;text-transform:uppercase;color:#A0A0A8}
+.track{height:8px;border-radius:4px;background:#1C1C21;border:1px solid #282830;overflow:hidden;display:flex}
+.track.thin{height:5px}
+.fill{height:100%}
+.kv{display:flex;gap:6px;align-items:baseline;padding:1px 0}
+.kv .k{font:600 11px/1.5 -apple-system,sans-serif;color:#A0A0A8;flex:0 0 88px}
+.kv .v{font:400 11px/1.5 ui-monospace,Menlo,monospace;color:#F1F5F9;overflow-wrap:anywhere;flex:1}
+.sheet-scrim{position:absolute;inset:0;background:rgba(0,0,0,0.55)}
+.sheet{position:absolute;left:0;right:0;bottom:0;max-height:96%;display:flex;flex-direction:column;
+ background:#141417;border:1px solid #282830;border-bottom:0;border-radius:20px 20px 0 0;padding:10px 18px 10px}
+.grab{width:34px;height:4px;border-radius:2px;background:#282830;margin:0 auto 8px}
+.tabs{display:flex;border-bottom:1px solid #282830;margin-top:10px}
+.tab{flex:1;text-align:center;padding:9px 0;font-size:11px;color:#A0A0A8;white-space:nowrap}
+.tab.on{color:#F1F5F9;font-weight:700;box-shadow:inset 0 -2px 0 #FFFFFF}
+.list{display:flex;flex-direction:column;gap:6px;overflow:hidden}
+.trow{background:rgba(28,28,33,0.62);border:1px solid #282830;border-radius:12px;padding:10px;position:relative;overflow:hidden}
+.trow.mark:before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--mk)}
+.trow.mark{padding-left:12px}
+.btn{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;height:38px;border-radius:10px;
+ background:#FFFFFF;color:#000000;font:600 13px/1 -apple-system,sans-serif}
+.btn.ghost{background:transparent;border:1px solid #282830;color:#F1F5F9}
+.note{border-radius:10px;padding:9px 10px;font-size:11px;line-height:1.45}
+.stage{display:flex;flex-direction:column;gap:0}
+.step{display:flex;gap:8px;align-items:flex-start}
+.rail{width:14px;display:flex;flex-direction:column;align-items:center;flex:0 0 14px}
+.rail .g{width:8px;height:8px;border-radius:50%;margin-top:4px}
+.rail .l{flex:1;width:1px;background:#282830;min-height:12px}
+.step .txt{padding-bottom:8px}
+.bul{font-size:11px;line-height:1.5;color:#A0A0A8;padding-left:12px;position:relative}
+.bul:before{content:"\2022";position:absolute;left:2px;color:#A0A0A8}
+.num{display:flex;gap:7px;font-size:11px;line-height:1.5;color:#F1F5F9;padding:2px 0}
+.num .i{flex:0 0 15px;height:15px;border-radius:4px;background:#1C1C21;border:1px solid #282830;
+ font:700 9px/14px ui-monospace,Menlo,monospace;text-align:center;color:#A0A0A8;margin-top:1px}
+.code{background:#101014;border:1px solid #282830;border-radius:8px;padding:8px;
+ font:400 9.5px/1.55 ui-monospace,Menlo,monospace;white-space:pre;overflow:hidden;color:#F1F5F9}
+.fab{position:absolute;right:20px;bottom:16px;width:56px;height:56px;border-radius:28px;display:flex;
+ align-items:center;justify-content:center}
+.searchbar{display:flex;align-items:center;gap:8px;height:38px;border-radius:12px;background:#1C1C21;
+ border:1px solid #282830;padding:0 10px;color:#A0A0A8;font-size:11px}
+.chips{display:flex;gap:6px;overflow:hidden}
+.chip{border-radius:8px;padding:5px 10px;font:700 11px/1.2 ui-monospace,Menlo,monospace;background:#1C1C21;color:#A0A0A8}
+.chip.on{background:#FFFFFF;color:#000000}
+.empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:0 22px}
+</style>
+</head>
+<body>
+<p class="frame-label">HTTP/3 detail — observed, no keys — Obsidian Dark</p>
+<div class="phone">
+<div class="sysbar mono"><span>9:41</span><span class="right"><svg width="12" height="12" viewBox="0 0 24 24" fill="#F1F5F9" aria-hidden="true"><path d="M2 22h20V2z"/></svg><svg width="13" height="13" viewBox="0 0 24 24" fill="#F1F5F9" aria-hidden="true"><path d="M12 3a9 9 0 0 0-6.36 2.64l1.42 1.42A7 7 0 0 1 12 5c1.93 0 3.68.78 4.95 2.05l1.41-1.41A9 9 0 0 0 12 3zm0 4a5 5 0 0 0-3.54 1.46l1.42 1.42A3 3 0 0 1 12 9c.83 0 1.58.34 2.12.88l1.42-1.42A5 5 0 0 0 12 7zm0 4a1.99 1.99 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg><svg width="12" height="12" viewBox="0 0 24 24" fill="#F1F5F9" aria-hidden="true"><path d="M15.67 4H14V2h-4v2H8.33C7.6 4 7 4.6 7 5.33v15.34C7 21.4 7.6 22 8.33 22h7.34c.73 0 1.33-.6 1.33-1.33V5.33C17 4.6 16.4 4 15.67 4z"/></svg></span></div><div class="hdr"><div class="rowc"><h1>Interceptr</h1></div><div class="acts"><div class="ibtn" data-component-id="intercept-connections-btn" role="button" aria-label="Connections"><svg width="20" height="20" viewBox="0 0 24 24" fill="#FFFFFF" aria-hidden="true"><path d="M12 5c-3.87 0-7 3.13-7 7 0 2.38 1.19 4.47 3 5.74V22h8v-4.26c1.81-1.27 3-3.36 3-5.74 0-3.87-3.13-7-7-7zm1 15h-2v-2h2v2zm.31-4H10.7l-.59-.42C8.79 14.66 8 13.38 8 12c0-2.21 1.79-4 4-4s4 1.79 4 4c0 1.38-.79 2.66-2.11 3.58l-.58.42zM12 1 8.46 4.54l1.42 1.42L12 3.83l2.12 2.13 1.42-1.42z"/></svg></div><div class="ibtn" data-component-id="intercept-capture-setup-btn" role="button" aria-label="Capture setup"><svg width="20" height="20" viewBox="0 0 24 24" fill="#FFFFFF" aria-hidden="true"><path d="M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z"/></svg></div></div></div><div class="body" style="opacity:.4"><div class="card pad10"><div class="row"><div class="rowc" style="min-width:0"><span class="dot" style="background:#10B981"></span><span class="mono t11 b" style="white-space:nowrap">CAPTURING :8443 · VPN_TUN</span></div><span class="mono t10" style="color:#FFFFFF;white-space:nowrap">218 txns · 46.8 MB</span></div><div class="t9 mono dim" style="margin-top:3px">HTTPS DECRYPTED ✓ · 174 txns · 2 HTTP/3 decoded</div></div></div><div class="sheet-scrim"></div><div class="sheet"><div class="grab"></div><div class="row"><div class="rowc"><span class="pill" style="background:#64748B26;color:#64748B;border:1px solid #64748B80">—</span><span class="pill" style="background:#F59E0B26;color:#F59E0B;border:1px solid #F59E0B80">OBSERVED</span></div><div class="rowc"><div class="ibtn" data-component-id="h3-send-to-testr-btn" role="button" aria-label="Send to Testr"><svg width="18" height="18" viewBox="0 0 24 24" fill="#FFFFFF" aria-hidden="true"><path d="M10 6 8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg></div><div class="ibtn muted" data-component-id="h3-detail-close-btn" role="button" aria-label="Close"><svg width="18" height="18" viewBox="0 0 24 24" fill="#A0A0A8" aria-hidden="true"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></div></div></div><div class="mono t11" style="color:#FFFFFF;margin-top:4px;overflow-wrap:anywhere">https://rr3---sn-8pxuuxa.googlevideo.com<span style="white-space:nowrap"> (path not decoded)</span></div><div class="rowc" style="margin-top:5px;flex-wrap:wrap"><span class="pill" style="background:#64748B26;color:#64748B">Native</span> <span class="pill" style="background:#F59E0B26;color:#F59E0B;border:1px solid #F59E0B80"><svg width="10" height="10" viewBox="0 0 24 24" fill="#F59E0B" aria-hidden="true"><path d="M12.65 10a5.99 5.99 0 0 0-7.36-3.86l2.1 2.1A3.99 3.99 0 0 1 10.5 10H2v4h1v4h4v-4h3.53l6.35 6.35 1.41-1.41L4.12 4.71 2.71 6.12 6.6 10h6.05zM17 10h-1.17l4.62 4.62A5.98 5.98 0 0 0 22 12a5.98 5.98 0 0 0-8.28-5.54L15.2 8h1.8a2 2 0 1 1 0 4z"/></svg> HTTP/3</span> <span class="pill" style="background:#F59E0B26;color:#F59E0B">TLSv1.3 offered</span></div><div class="note" style="background:#F59E0B1f;border:1px solid #F59E0B59;margin-top:8px"><div class="rowc"><svg width="15" height="15" viewBox="0 0 24 24" fill="#F59E0B" aria-hidden="true"><path d="M12.65 10a5.99 5.99 0 0 0-7.36-3.86l2.1 2.1A3.99 3.99 0 0 1 10.5 10H2v4h1v4h4v-4h3.53l6.35 6.35 1.41-1.41L4.12 4.71 2.71 6.12 6.6 10h6.05zM17 10h-1.17l4.62 4.62A5.98 5.98 0 0 0 22 12a5.98 5.98 0 0 0-8.28-5.54L15.2 8h1.8a2 2 0 1 1 0 4z"/></svg><span class="t12 b" style="color:#F59E0B">Observed, not decoded — no keys</span></div><div class="t11" style="margin-top:3px;line-height:1.45">A real HTTP/3 connection, and requestr read every packet. This is <span class="b">not</span> a decode error: QUIC payloads are encrypted with handshake-derived keys, and no key material exists for this connection, so frames stay opaque.</div></div><div class="tabs" role="tablist"><div class="tab" role="tab" aria-selected="false">Overview</div><div class="tab" role="tab" aria-selected="false">Headers</div><div class="tab" role="tab" aria-selected="false">Body</div><div class="tab" role="tab" aria-selected="false">Timing</div><div class="tab on" role="tab" aria-selected="true">QUIC</div><div class="tab" role="tab" aria-selected="false">Raw</div></div><div style="overflow:hidden"><div class="row" style="margin-top:9px"><span class="t10 dim">rr3---sn-8pxuuxa.googlevideo.com · —</span><span class="t10 dim mono">21.4 MB observed on the wire</span></div><div class="sec" style="margin:9px 0 5px">QUIC CONNECTION</div><div class="card" style="padding:9px 11px"><div class="kv"><span class="k">QUIC version</span><span class="v">0x00000001 (v1, RFC 9000)</span></div><div class="kv"><span class="k">ALPN</span><span class="v">h3 (from ClientHello)</span></div><div class="kv"><span class="k">SNI</span><span class="v">rr3---sn-8pxuuxa.googlevideo.com</span></div><div class="kv"><span class="k">Dest conn ID</span><span class="v">b41d7ee209fa3c58</span></div><div class="kv"><span class="k">5-tuple</span><span class="v">10.0.0.2:49711 → 172.217.16.42:443</span></div><div class="kv"><span class="k">Observed</span><span class="v">1,842 pkts · 21.4 MB · 6m 02s</span></div><div class="kv"><span class="k">Decoded</span><span class="v">Initial packet only</span></div><div class="kv"><span class="k">Keys</span><span class="v">Initial only · no 1-RTT keys</span></div></div><div class="sec" style="margin:9px 0 5px">WHAT REQUESTR CAN SEE</div><div class="code">Initial packet (v1) → decoded
+  CRYPTO → ClientHello: sni + alpn=h3
+1-RTT packets (1,836) → encrypted
+  QUIC frames / QPACK headers: opaque</div><div class="sec" style="margin:9px 0 5px">TO MAKE THIS DECODABLE</div><div class="card" style="padding:9px 11px"><div class="num"><span class="i">1</span><span>Install the requestr CA and let the MITM tier terminate this connection, so the keys are ours.</span></div><div class="num"><span class="i">2</span><span>Or block UDP/443 for this app so it downgrades to HTTP/2 over TCP, already decrypted by the MITM tier.</span></div><div style="display:flex;gap:8px;margin-top:10px"><div class="btn" data-component-id="h3-force-tcp-fallback-btn" role="button" aria-label="Force TCP fallback"><svg width="15" height="15" viewBox="0 0 24 24" fill="#000000" aria-hidden="true"><path d="M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z"/></svg> Force TCP fallback</div><div class="btn ghost" data-component-id="h3-install-ca-btn" role="button" aria-label="Install requestr CA">Install requestr CA</div></div></div></div></div>
+</div>
+</body>
+</html>
