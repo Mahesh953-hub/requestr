@@ -282,3 +282,37 @@ interface TlsSessionDao {
     @Query("DELETE FROM tls_sessions WHERE sessionId = :sessionId")
     suspend fun clearSession(sessionId: Long)
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// v5.7 DNS query DAO (D2 prerequisite) — real persistence for DnsQueryEntity
+// ═══════════════════════════════════════════════════════════════════
+
+@Dao
+interface DnsQueryDao {
+    @Query("SELECT * FROM dns_queries WHERE sessionId = :sessionId ORDER BY timestamp DESC")
+    fun observeBySession(sessionId: Long): Flow<List<DnsQueryEntity>>
+
+    @Query("SELECT * FROM dns_queries ORDER BY timestamp DESC")
+    fun observeAll(): Flow<List<DnsQueryEntity>>
+
+    @Query("SELECT * FROM dns_queries WHERE sessionId = :sessionId ORDER BY timestamp DESC")
+    suspend fun getBySession(sessionId: Long): List<DnsQueryEntity>
+
+    /** Most recent response (has resolvedIps) for [hostname] at or before [beforeTs] — used by
+     * [com.example.correlation.graph.ConnectionLineage] to find the DNS answer that most likely
+     * caused a later TCP connection to a resolved IP. */
+    @Query(
+        "SELECT * FROM dns_queries WHERE hostname = :hostname AND isResponse = 1 " +
+            "AND timestamp <= :beforeTs ORDER BY timestamp DESC LIMIT 1"
+    )
+    suspend fun getLatestResponseFor(hostname: String, beforeTs: Long): DnsQueryEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(item: DnsQueryEntity): Long
+
+    @Query("SELECT COUNT(*) FROM dns_queries WHERE sessionId = :sessionId")
+    fun observeCount(sessionId: Long): Flow<Int>
+
+    @Query("DELETE FROM dns_queries WHERE sessionId = :sessionId")
+    suspend fun clearSession(sessionId: Long)
+}
