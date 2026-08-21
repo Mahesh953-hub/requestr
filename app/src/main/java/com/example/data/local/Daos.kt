@@ -24,6 +24,10 @@ interface CapturedTrafficDao {
     @Query("SELECT * FROM captured_traffic WHERE sessionId = :sessionId ORDER BY timestamp DESC")
     fun observeBySession(sessionId: Long): Flow<List<CapturedTrafficEntity>>
 
+    // D3: one-shot read used by VisibilityAnalyzer to compute decrypted/undecoded fractions.
+    @Query("SELECT * FROM captured_traffic WHERE sessionId = :sessionId ORDER BY timestamp DESC")
+    suspend fun getBySession(sessionId: Long): List<CapturedTrafficEntity>
+
     // D2: one-shot read used by ConnectionLineage to find the HTTP transaction(s) that belong to
     // a given TCP/TLS connection. CapturedTrafficEntity has no connectionId column (HTTP is
     // parsed out of a TCP stream after the fact, and MITM'd HTTP never sees the raw 5-tuple), so
@@ -240,6 +244,10 @@ interface UdpFlowDao {
     @Query("SELECT * FROM udp_flows ORDER BY startedAt DESC")
     fun observeAll(): Flow<List<UdpFlowEntity>>
 
+    // D3: one-shot read used by VisibilityAnalyzer.
+    @Query("SELECT * FROM udp_flows WHERE sessionId = :sessionId ORDER BY startedAt DESC")
+    suspend fun getBySession(sessionId: Long): List<UdpFlowEntity>
+
     @Query("SELECT * FROM udp_flows WHERE flowId = :flowId")
     suspend fun getById(flowId: String): UdpFlowEntity?
 
@@ -292,6 +300,10 @@ interface TlsSessionDao {
 
     @Query("SELECT * FROM tls_sessions WHERE tlsSessionId = :tlsSessionId")
     suspend fun getById(tlsSessionId: String): TlsSessionEntity?
+
+    // D3: one-shot read used by VisibilityAnalyzer to compute decrypted/SNI-only fractions.
+    @Query("SELECT * FROM tls_sessions WHERE sessionId = :sessionId ORDER BY establishedAt DESC")
+    suspend fun getBySession(sessionId: Long): List<TlsSessionEntity>
 
     // D2: MitmProxyEngine keys tlsSessionId as "$host:$port" (the CONNECT target), which is a
     // different convention from the undecoded path's tlsSessionId == TcpStream.key. Given only a
