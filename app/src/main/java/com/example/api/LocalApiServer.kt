@@ -145,6 +145,8 @@ object LocalApiServer {
 
                 path == "/api/rules" && method == "GET" -> listRules()
 
+                path == "/api/observe" && method == "POST" -> receiveObserverEvents(body)
+
                 path == "/api/plugin/execute" && method == "POST" -> dispatchPlugin(body)
 
                 else -> err(404, "not found: $path")
@@ -269,6 +271,78 @@ object LocalApiServer {
                 """{"id":${rule.id},"name":"${rule.name.replace("\"","\\\"")}","action":"${rule.action.name}","pattern":"${rule.pattern.replace("\"","\\\"")}","enabled":${rule.enabled}}"""
             } + "]")
         } catch (_: Exception) { ok("[]") }
+    }
+
+    /**
+     * Ingest a batch of events POSTed by a third-party app's embedded `requestr-sdk`
+     * (`RequestrObserver.flush()`), matching the shape:
+     * `{"events":[{"url":..,"method":..,"headers":{..},"statusCode":..,"bodySize":..,
+     *   "durationMs":..,"source":"sdk","timestamp":..}, ...]}`
+     *
+     * Persists each event as a [com.example.data.local.CapturedTrafficEntity] row under a
+     * dedicated, always-present [com.example.data.local.CaptureTier.SDK] session so SDK-sourced
+     * traffic shows up in the same Intercept traffic log / [com.example.data.local.CaptureSessionEntity]-
+     * backed UI as VPN/root/Shizuku-captured traffic, rather than being accepted-and-discarded.
+     */
+    private suspend fun receiveObserverEvents(body: String): Triple<Int, String, String> {
+        return try {
+            val json = JSONObject(body)
+            val events = json.optJSONArray("events") ?: return err(400, "missing 'events' array")
+            val dao = db()?.capturedTrafficDao() ?: return err(500, "db unavailable")
+            val sessionId = sdkSessionId()
+            var inserted = 0
+            for (i in 0 until events.length()) {
+                val e = events.optJSONObject(i) ?: continue
+                val url = e.optString("url", "")
+                if (url.isEmpty()) continue
+                val host = runCatching { java.net.URI(url).host }.getOrNull() ?: url
+                val path = runCatching { java.net.URI(url).path }.getOrNull() ?: ""
+                val headersJson = e.optJSONObject("headers")
+                val headers = mutableMapOf<String, String>()
+                headersJson?.keys()?.forEachRemaining { key -> headers[key] = headersJson.optString(key, "") }
+                val statusCodeRaw = e.optInt("statusCode", -1)
+                val entity = com.example.data.local.CapturedTrafficEntity(
+                    sessionId = sessionId,
+                    method = e.optString("method", "GET"),
+                    url = url,
+                    host = host,
+                    path = path,
+                    statusCode = if (statusCodeRaw >= 0) statusCodeRaw else null,
+                    protocol = "sdk",
+                    requestHeaders = headers,
+                    requestSizeBytes = 0,
+                    responseSizeBytes = e.optLong("bodySize", 0),
+                    latencyMs = e.optLong("durationMs", 0),
+                    timestamp = e.optLong("timestamp", System.currentTimeMillis()),
+                    wasDecrypted = true,
+                )
+                dao.insert(entity)
+                inserted++
+            }
+            ok("""{"received":$inserted}""")
+        } catch (e: Exception) {
+            err(400, e.message ?: "bad request")
+        }
+    }
+
+    /**
+     * Every SDK-sourced event needs a `sessionId` to satisfy [com.example.data.local.CapturedTrafficEntity]'s
+     * schema and to let the UI group/filter SDK traffic distinctly from an actual VPN/root
+     * capture run. Rather than requiring the app's own capture engine to be running, this
+     * lazily creates (once) and then reuses a single always-open
+     * [com.example.data.local.CaptureTier.SDK] [com.example.data.local.CaptureSessionEntity] row,
+     * so third-party apps can observe traffic even when the user has never started a capture.
+     */
+    private suspend fun sdkSessionId(): Long {
+        val sessionDao = db()?.captureSessionDao() ?: return 0L
+        val existing = sessionDao.observeAll().first().firstOrNull { it.tier == com.example.data.local.CaptureTier.SDK && it.endedAt == null }
+        if (existing != null) return existing.id
+        return sessionDao.insert(
+            com.example.data.local.CaptureSessionEntity(
+                tier = com.example.data.local.CaptureTier.SDK,
+                port = port,
+            )
+        )
     }
 
     private fun dispatchPlugin(body: String): Triple<Int, String, String> {

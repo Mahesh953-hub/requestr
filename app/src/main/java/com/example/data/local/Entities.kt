@@ -40,8 +40,14 @@ data class CapturedTrafficEntity(
     val isUndecoded: Boolean = false,
 )
 
-/** Capture-tier actually used for a session. Never inferred by the UI — recorded by the engine. */
-enum class CaptureTier { NONE, VPN, SHIZUKU, ROOT }
+/**
+ * Capture-tier actually used for a session. Never inferred by the UI — recorded by the engine.
+ *
+ * [SDK] marks sessions populated by third-party apps embedding the `requestr-sdk` Observer
+ * module (see `RequestrObserver` + `LocalApiServer`'s `/api/observe`) rather than by this app's
+ * own VPN/root/Shizuku capture engines.
+ */
+enum class CaptureTier { NONE, VPN, SHIZUKU, ROOT, SDK }
 
 /**
  * One interception run. `packetCount` here is the real counter the Home card and status

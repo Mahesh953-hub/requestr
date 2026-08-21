@@ -18,3 +18,4 @@ local.properties
 debug.keystore
 *.pemcli/build/
 cli/build/
+sdk/build/

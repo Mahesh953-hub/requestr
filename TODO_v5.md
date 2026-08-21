@@ -87,7 +87,7 @@
 
 | # | Status | Item | Files |
 |---|--------|------|-------|
-| T1 | [ ] TODO | PCAP subsystem: PacketCaptureEngine + PcapWriter | `interception/packet/PacketCaptureEngine.kt` |
+| T1 | [x] DONE (v5.6) | PCAP export wired end-to-end: `PCAP_ENABLED` DataStore preference → `RequestrVpnService` starts/stops `PacketCaptureEngine` with the VPN tun session lifetime → `PacketPump.writeToPcap()` mirrors every raw packet read off the tun fd → Capture Setup sheet has a "PCAP Export" toggle + a "Share PCAP capture" action (FileProvider share of the last `.pcap`). Scope limit: only the VPN_TUN tier (and its ROOT_FRIDA fallback) produces PCAP output — MITM_PROXY/HTTP_PROXY/ROOT_IPTABLES/SHIZUKU_TUN route through other engines that never construct a `PacketPump`. No separate `PcapWriter` file exists; the PCAP-format writer logic already lived inline in `PacketCaptureEngine.kt`. | `interception/packet/PacketCaptureEngine.kt`, `interception/PacketPump.kt`, `interception/RequestrVpnService.kt`, `ui/screens/InterceptScreen.kt` |
 | T2 | [ ] TODO | Gateway mode: external network interception | `interception/gateway/GatewayEngine.kt` |
 
 ### Models & Storage
@@ -110,7 +110,7 @@
 
 | # | Status | Item | Files |
 |---|--------|------|-------|
-| S1 | [ ] TODO | Requestr Observer SDK module | `requestr-sdk/` — new Gradle module |
+| S1 | [x] DONE (v5.6) | Requestr Observer SDK module: registered `sdk/` as a real `com.android.library` Gradle module (`settings.gradle.kts`, `sdk/build.gradle.kts`), builds standalone (`./gradlew :sdk:assembleDebug` → `sdk-debug.aar`). `RequestrObserver.observe()`/`flush()` batch-POST JSON to `LocalApiServer`'s new `/api/observe` endpoint, which persists each event as a `CapturedTrafficEntity` row (new `CaptureTier.SDK`, a lazily-created always-open `CaptureSessionEntity`) — full round-trip SDK → `/api/observe` → Room `captured_traffic` table → same Intercept traffic log UI real capture sessions use. | `sdk/build.gradle.kts`, `sdk/src/main/java/com/requestr/sdk/RequestrObserver.kt`, `app/src/main/java/com/example/api/LocalApiServer.kt`, `app/src/main/java/com/example/data/local/Entities.kt` |
 | S2 | [ ] TODO | HTTP stack auto-detection | `runtime/http/HttpStackDetector.kt` |
 
 ---
