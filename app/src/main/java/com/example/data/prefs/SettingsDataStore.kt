@@ -71,6 +71,7 @@ class SettingsDataStore(private val context: Context) {
     val loggingEnabled: Flow<Boolean> = prefs.map { it[AppSettingsKeys.LOGGING_ENABLED] ?: false }
     val printUndecoded: Flow<Boolean> = prefs.map { it[AppSettingsKeys.PRINT_UNDECODED] ?: true }
     val dumpToFile: Flow<Boolean> = prefs.map { it[AppSettingsKeys.DUMP_TO_FILE] ?: false }
+    val pcapEnabled: Flow<Boolean> = prefs.map { it[AppSettingsKeys.PCAP_ENABLED] ?: false }
 
     suspend fun setProxyPort(port: Int) {
         // Keep within the unprivileged, valid TCP range.
@@ -113,6 +114,9 @@ class SettingsDataStore(private val context: Context) {
     }
     suspend fun setDumpToFile(value: Boolean) {
         store.edit { it[AppSettingsKeys.DUMP_TO_FILE] = value }
+    }
+    suspend fun setPcapEnabled(value: Boolean) {
+        store.edit { it[AppSettingsKeys.PCAP_ENABLED] = value }
     }
 
     companion object {

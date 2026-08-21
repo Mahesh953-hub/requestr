@@ -69,6 +69,26 @@ class PacketPump(
     /** TCP reassembly + HTTP/TLS pipeline. Feeds decoded transactions into Room. */
     private val captureEngine = CaptureEngine(db, sessionId, printUndecoded, dumpToFile, captureEnabled)
 
+    /**
+     * T1: PCAP export. [com.example.interception.packet.PacketCaptureEngine] is started/stopped
+     * by [RequestrVpnService] (which owns the [AppSettingsKeys.PCAP_ENABLED] preference and the
+     * application [android.content.Context] the file writer needs) -- this pump just feeds it
+     * every raw IP packet actually read off the tun fd. The engine's own `active`/`output`
+     * guards make this call a no-op when the preference is off, so no flag needs to be threaded
+     * through here.
+     */
+    private fun writeToPcap(packet: ByteArray, length: Int) {
+        if (!com.example.interception.packet.PacketCaptureEngine.isActive()) return
+        val nowMs = System.currentTimeMillis()
+        com.example.interception.packet.PacketCaptureEngine.writePacket(
+            timestampSec = nowMs / 1000,
+            timestampUsec = (nowMs % 1000) * 1000,
+            data = packet,
+            offset = 0,
+            len = length,
+        )
+    }
+
     suspend fun run(scope: CoroutineScope) {
         val buffer = ByteBuffer.allocate(MAX_PACKET)
 
@@ -118,6 +138,10 @@ class PacketPump(
             6 -> parseIpv6(packet, length)
             else -> return
         }
+
+        // T1: mirror every packet that reaches this point (i.e. every packet the pump actually
+        // read off the tun fd) into the .pcap file, if the user turned that export on.
+        writeToPcap(packet, length)
 
         // Route to the capture engine: TCP reassembly → HTTP → Room.
         captureEngine.ingest(packet, length, version)

@@ -209,6 +209,7 @@ fun InterceptScreen(
     val loggingEnabled by settings.loggingEnabled.collectAsState(initial = false)
     val printUndecoded by settings.printUndecoded.collectAsState(initial = true)
     val dumpToFile by settings.dumpToFile.collectAsState(initial = false)
+    val pcapEnabled by settings.pcapEnabled.collectAsState(initial = false)
 
     // isCapturing is now derived from the real engine status rather than a free-floating boolean.
     val isCapturing = interceptionState.isActive
@@ -680,11 +681,13 @@ fun InterceptScreen(
             loggingEnabled = loggingEnabled,
             printUndecoded = printUndecoded,
             dumpToFile = dumpToFile,
+            pcapEnabled = pcapEnabled,
             onRecordModeChange = { mode -> screenScope.launch { settings.setCaptureRecordMode(mode) } },
             onEnhancedModeChange = { on -> screenScope.launch { settings.setEnhancedMode(on) } },
             onLoggingChange = { on -> screenScope.launch { settings.setLoggingEnabled(on) } },
             onPrintUndecodedChange = { on -> screenScope.launch { settings.setPrintUndecoded(on) } },
             onDumpToFileChange = { on -> screenScope.launch { settings.setDumpToFile(on) } },
+            onPcapEnabledChange = { on -> screenScope.launch { settings.setPcapEnabled(on) } },
             onOpenApps = {
                 showCaptureSetupSheet = false
                 showAppFilterSheet = true
@@ -711,6 +714,19 @@ fun InterceptScreen(
                 screenScope.launch { CaptureLogRepository.clearAll(screenContext) }
                 showCaptureSetupSheet = false
             },
+            onExportPcap = {
+                // T1: hand the last-written .pcap (from PacketCaptureEngine, populated by
+                // RequestrVpnService/PacketPump while a capture ran) to the system share sheet
+                // via the same FileProvider path used for HAR/CA exports elsewhere in this file.
+                com.example.interception.packet.PacketCaptureEngine.getLastFile()?.let { file ->
+                    com.example.data.export.FileExporter.shareFile(
+                        screenContext, file,
+                        "application/vnd.tcpdump.pcap",
+                        "requestr PCAP capture"
+                    )
+                }
+            },
+            hasPcapFile = com.example.interception.packet.PacketCaptureEngine.getLastFile() != null,
             onDismiss = { showCaptureSetupSheet = false }
         )
     }
@@ -1727,11 +1743,13 @@ fun CaptureSetupBottomSheet(
     loggingEnabled: Boolean,
     printUndecoded: Boolean,
     dumpToFile: Boolean,
+    pcapEnabled: Boolean,
     onRecordModeChange: (String) -> Unit,
     onEnhancedModeChange: (Boolean) -> Unit,
     onLoggingChange: (Boolean) -> Unit,
     onPrintUndecodedChange: (Boolean) -> Unit,
     onDumpToFileChange: (Boolean) -> Unit,
+    onPcapEnabledChange: (Boolean) -> Unit,
     onOpenApps: () -> Unit,
     onOpenRules: () -> Unit,
     onOpenCert: () -> Unit,
@@ -1739,6 +1757,8 @@ fun CaptureSetupBottomSheet(
     onOpenPrivileges: () -> Unit,
     onReprobe: () -> Unit,
     onClearTraffic: () -> Unit,
+    onExportPcap: () -> Unit,
+    hasPcapFile: Boolean,
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -1840,6 +1860,17 @@ fun CaptureSetupBottomSheet(
                     Text("Save raw hex capture to Downloads/requestr/ for external analysis", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Switch(checked = dumpToFile, onCheckedChange = onDumpToFileChange)
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // ── PCAP export ─────────────────────────────────────
+            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("PCAP Export", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
+                    Text("Save raw packets to Downloads/requestr/*.pcap for Wireshark analysis", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(checked = pcapEnabled, onCheckedChange = onPcapEnabledChange)
             }
 
             Spacer(modifier = Modifier.height(14.dp))
@@ -1944,6 +1975,17 @@ fun CaptureSetupBottomSheet(
                 onClick = onClearTraffic,
                 enabled = trafficCount > 0,
                 tint = InterceptorInactiveRed
+            )
+            SetupRow(
+                icon = Icons.Default.Share,
+                title = "Share PCAP capture",
+                // T1: hasPcapFile reflects PacketCaptureEngine.getLastFile() != null, i.e.
+                // whether any .pcap has ever been written this app-session (independent of
+                // whether capture is running right now -- you can share a finished capture).
+                subtitle = if (hasPcapFile) "Send the last .pcap to Wireshark, email, etc."
+                else "No .pcap captured yet -- enable PCAP Export above and run a capture",
+                onClick = onExportPcap,
+                enabled = hasPcapFile
             )
 
             Spacer(modifier = Modifier.height(8.dp))

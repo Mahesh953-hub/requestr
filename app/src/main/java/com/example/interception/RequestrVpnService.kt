@@ -139,6 +139,17 @@ class RequestrVpnService : VpnService() {
                 val printUndecoded = prefs.printUndecoded.first()
                 val dumpToFile = prefs.dumpToFile.first()
                 val captureEnabled = SettingsRepository.settings.value.trafficCaptureEnabled
+
+                // T1: PCAP export — started/stopped alongside the VPN tun so its lifetime
+                // matches one capture session exactly. PacketPump.writeToPcap() is a no-op
+                // when PacketCaptureEngine.isActive() is false, so this preference read is the
+                // only gate; nothing needs to be threaded into PacketPump itself.
+                val pcapEnabled = prefs.pcapEnabled.first()
+                if (pcapEnabled) {
+                    val started = com.example.interception.packet.PacketCaptureEngine.start(applicationContext)
+                    Log.i(TAG, if (started) "PCAP export enabled for session=$newId" else "PCAP export failed to start")
+                }
+
                 pumpJob = scope.launch {
                     PacketPump(
                         input = FileInputStream(tun.fileDescriptor),
@@ -206,6 +217,9 @@ class RequestrVpnService : VpnService() {
         pumpJob = null
         runCatching { tunInterface?.close() }
         tunInterface = null
+        // T1: stop PCAP export with the rest of this session's lifecycle -- flushes and closes
+        // the .pcap file. No-op (guarded by its own `active` flag) if it was never started.
+        runCatching { com.example.interception.packet.PacketCaptureEngine.stop() }
         releaseWakeLock()
         stopForegroundCompat()
     }

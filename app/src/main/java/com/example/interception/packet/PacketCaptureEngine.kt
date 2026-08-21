@@ -21,6 +21,10 @@ object PacketCaptureEngine {
     private var output: OutputStream? = null
     private var packetCount = 0L
     private var active = false
+    // T1: remembered so the Settings/Capture Setup UI can offer a "share last capture"
+    // action without needing to re-derive the timestamped filename itself. Survives
+    // stop() (cleared only when a new session actually starts writing a new file).
+    private var lastFile: File? = null
 
     fun start(context: Context, file: File? = null): Boolean {
         if (active) return true
@@ -35,6 +39,7 @@ object PacketCaptureEngine {
             }
             packetCount = 0
             active = true
+            lastFile = captureFile
             Log.i(TAG, "PCAP started → ${captureFile.absolutePath}")
             true
         } catch (e: Exception) {
@@ -42,6 +47,9 @@ object PacketCaptureEngine {
             false
         }
     }
+
+    /** T1: the most recently written .pcap file (from this session or a prior one), if any. */
+    fun getLastFile(): File? = lastFile
 
     fun stop() {
         active = false

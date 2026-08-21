@@ -95,6 +95,11 @@ object AppSettingsKeys {
     val LOGGING_ENABLED = booleanPreferencesKey("logging_enabled")         // show debug overlay
     val PRINT_UNDECODED = booleanPreferencesKey("print_undecoded")         // show raw TLS/TCP in list
     val DUMP_TO_FILE = booleanPreferencesKey("dump_to_file")               // dump raw packets to disk
+    // v5.6 (T1): export every raw IP packet seen on the VPN tun interface to a standard
+    // .pcap file (via PacketCaptureEngine) for external analysis in Wireshark etc. Only
+    // takes effect for the VPN_TUN / ROOT_FRIDA-fallback capture methods, which are the only
+    // ones that see raw IP packets through PacketPump -- see PreflightController.
+    val PCAP_ENABLED = booleanPreferencesKey("pcap_enabled")
 }
 
 /**
