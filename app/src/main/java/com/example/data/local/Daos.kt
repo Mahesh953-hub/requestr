@@ -257,3 +257,28 @@ interface QuicConnectionDao {
     @Query("DELETE FROM quic_connections WHERE sessionId = :sessionId")
     suspend fun clearSession(sessionId: Long)
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// v5.6 TLS session DAO (M2) — TLS handshake/cipher/cert metadata
+// ═══════════════════════════════════════════════════════════════════
+
+@Dao
+interface TlsSessionDao {
+    @Query("SELECT * FROM tls_sessions WHERE sessionId = :sessionId ORDER BY establishedAt DESC")
+    fun observeBySession(sessionId: Long): Flow<List<TlsSessionEntity>>
+
+    @Query("SELECT * FROM tls_sessions ORDER BY establishedAt DESC")
+    fun observeAll(): Flow<List<TlsSessionEntity>>
+
+    @Query("SELECT * FROM tls_sessions WHERE tlsSessionId = :tlsSessionId")
+    suspend fun getById(tlsSessionId: String): TlsSessionEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(item: TlsSessionEntity)
+
+    @Query("SELECT COUNT(*) FROM tls_sessions WHERE sessionId = :sessionId")
+    fun observeCount(sessionId: Long): Flow<Int>
+
+    @Query("DELETE FROM tls_sessions WHERE sessionId = :sessionId")
+    suspend fun clearSession(sessionId: Long)
+}

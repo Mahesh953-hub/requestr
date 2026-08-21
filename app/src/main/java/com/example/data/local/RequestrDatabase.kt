@@ -23,11 +23,13 @@ import androidx.room.TypeConverters
         TcpConnectionEntity::class,
         UdpFlowEntity::class,
         QuicConnectionEntity::class,
+        TlsSessionEntity::class,
     ],
     // v3.5: bumped 4 -> 5 for FlowNodeEntity + FlowConnectionEntity (Flow persistence).
     // v5.6 (M1): bumped 5 -> 6 to register TcpConnectionEntity/UdpFlowEntity/QuicConnectionEntity,
     // which previously existed as dead code with no table backing them.
-    version = 6,
+    // v5.6 (M2): bumped 6 -> 7 to register TlsSessionEntity (TLS handshake/cipher/cert model).
+    version = 7,
     exportSchema = false,
 )
 @TypeConverters(RequestrTypeConverters::class)
@@ -42,6 +44,7 @@ abstract class RequestrDatabase : RoomDatabase() {
     abstract fun tcpConnectionDao(): TcpConnectionDao
     abstract fun udpFlowDao(): UdpFlowDao
     abstract fun quicConnectionDao(): QuicConnectionDao
+    abstract fun tlsSessionDao(): TlsSessionDao
 
     companion object {
         @Volatile

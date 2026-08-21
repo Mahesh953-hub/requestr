@@ -4,6 +4,7 @@ import android.content.Context
 import com.example.data.local.QuicConnectionEntity
 import com.example.data.local.RequestrDatabase
 import com.example.data.local.TcpConnectionEntity
+import com.example.data.local.TlsSessionEntity
 import com.example.data.local.UdpFlowEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -28,6 +29,14 @@ object ConnectionsRepository {
     /** All QUIC connections observed for a given capture session, most-recent first. */
     fun observeQuicConnections(context: Context, sessionId: Long): Flow<List<QuicConnectionEntity>> =
         RequestrDatabase.get(context).quicConnectionDao().observeBySession(sessionId)
+
+    /** All TLS sessions (M2) observed for a given capture session, most-recent first. */
+    fun observeTlsSessions(context: Context, sessionId: Long): Flow<List<TlsSessionEntity>> =
+        RequestrDatabase.get(context).tlsSessionDao().observeBySession(sessionId)
+
+    /** Every TLS session ever recorded, regardless of session -- used for the "All" view. */
+    fun observeAllTlsSessions(context: Context): Flow<List<TlsSessionEntity>> =
+        RequestrDatabase.get(context).tlsSessionDao().observeAll()
 
     /** Every TCP connection ever recorded, regardless of session -- used for the "All" view. */
     fun observeAllTcpConnections(context: Context): Flow<List<TcpConnectionEntity>> =

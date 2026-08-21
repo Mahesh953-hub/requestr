@@ -1516,6 +1516,11 @@ fun ConnectionsBottomSheet(
         else com.example.data.interception.ConnectionsRepository.observeAllQuicConnections(context)
     }.collectAsState(initial = emptyList())
 
+    val tlsSessions by remember(sessionId) {
+        if (sessionId != null) com.example.data.interception.ConnectionsRepository.observeTlsSessions(context, sessionId)
+        else com.example.data.interception.ConnectionsRepository.observeAllTlsSessions(context)
+    }.collectAsState(initial = emptyList())
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -1560,6 +1565,7 @@ fun ConnectionsBottomSheet(
                     "TCP (${tcpConnections.size})",
                     "UDP (${udpFlows.size})",
                     "QUIC (${quicConnections.size})",
+                    "TLS (${tlsSessions.size})",
                 ).forEachIndexed { idx, title ->
                     Tab(
                         selected = selectedTab == idx,
@@ -1635,6 +1641,53 @@ fun ConnectionsBottomSheet(
                                                 fontSize = 10.sp,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    3 -> {
+                        if (tlsSessions.isEmpty()) {
+                            EmptyConnectionsState("No TLS sessions recorded yet. In MITM/proxy mode this shows negotiated cipher + cert; in VPN mode it shows ClientHello SNI/JA3 only.")
+                        } else {
+                            LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                items(tlsSessions) { tls ->
+                                    GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)) {
+                                        Column(modifier = Modifier.padding(10.dp)) {
+                                            Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                                                Text(tls.sniHost ?: tls.connectionId, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                                                BadgePill(
+                                                    text = if (tls.wasDecrypted) "DECRYPTED" else "SNI/JA3 ONLY",
+                                                    color = if (tls.wasDecrypted) 0xFF10B981 else 0xFF64748B,
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Text(
+                                                listOfNotNull(
+                                                    tls.version,
+                                                    tls.cipherSuite,
+                                                    tls.negotiatedProtocol?.let { "alpn=$it" },
+                                                ).joinToString(" · ").ifEmpty { "no handshake metadata" },
+                                                fontSize = 10.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                            if (tls.peerCertSubject != null) {
+                                                Text(
+                                                    "cert: ${tls.peerCertSubject}",
+                                                    fontSize = 9.sp,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                )
+                                            }
+                                            if (tls.ja3Hash != null) {
+                                                Text(
+                                                    "JA3: ${tls.ja3Hash}",
+                                                    fontSize = 9.sp,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                )
+                                            }
                                         }
                                     }
                                 }

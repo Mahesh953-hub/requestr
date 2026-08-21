@@ -122,6 +122,163 @@ object TlsDecoder {
         return null
     }
 
+    // ── ClientHello full parse (M2) ──────────────────────────────────────
+
+    /**
+     * Human-readable TLS record version, e.g. "TLS 1.2". Used by the "undecoded" capture
+     * path (no MITM) where the record header is the only version signal available — the
+     * real negotiated version requires seeing ServerHello, which we never decrypt here.
+     */
+    fun versionName(bytes: ByteArray, offset: Int = 0): String? {
+        if (bytes.size - offset < 3) return null
+        return when (readU16(bytes, offset + 1)) {
+            0x0301 -> "TLS 1.0"; 0x0302 -> "TLS 1.1"; 0x0303 -> "TLS 1.2"; 0x0304 -> "TLS 1.3"
+            else -> null
+        }
+    }
+
+    /**
+     * Parse the full ClientHello (version, offered cipher suites, extensions, supported
+     * groups, signature algorithms, ALPN, SNI) so callers can compute a JA3 fingerprint via
+     * [TlsClientHello.ja3Hash] and persist a richer TLS session row (M2) than SNI alone.
+     *
+     * Returns null on any structural mismatch (not a ClientHello, truncated buffer, etc.) —
+     * mirrors [extractSni]'s defensive parsing rather than throwing.
+     */
+    fun parseClientHello(bytes: ByteArray, offset: Int = 0): TlsClientHello? {
+        val start = offset
+        if (bytes.size - start < 5) return null
+        if ((bytes[start].toInt() and 0xFF) != 22) return null // not handshake
+        val recordVersion = readU16(bytes, start + 1)
+        if (recordVersion !in 0x0301..0x0304) return null
+
+        val handshakeStart = start + 5
+        if (bytes.size < handshakeStart + 4) return null
+        if ((bytes[handshakeStart].toInt() and 0xFF) != 1) return null // not ClientHello
+
+        val handshakeLen = readU24(bytes, handshakeStart + 1)
+        val clientHelloEnd = handshakeStart + 4 + handshakeLen
+        if (bytes.size < clientHelloEnd) return null
+
+        var pos = handshakeStart + 4
+        val clientVersion = readU16(bytes, pos)
+        pos += 2 + 32 // client version + random
+        if (pos >= bytes.size) return null
+        val sessionIdLen = bytes[pos].toInt() and 0xFF
+        pos += 1 + sessionIdLen
+        if (pos + 2 > bytes.size) return null
+
+        val cipherSuitesLen = readU16(bytes, pos)
+        pos += 2
+        val cipherSuites = mutableListOf<Int>()
+        var cpos = pos
+        while (cpos + 2 <= pos + cipherSuitesLen && cpos + 2 <= bytes.size) {
+            cipherSuites.add(readU16(bytes, cpos))
+            cpos += 2
+        }
+        pos += cipherSuitesLen
+        if (pos + 1 > bytes.size) return null
+
+        val compressionLen = bytes[pos].toInt() and 0xFF
+        val compressionMethods = mutableListOf<Int>()
+        for (i in 0 until compressionLen) {
+            if (pos + 1 + i < bytes.size) compressionMethods.add(bytes[pos + 1 + i].toInt() and 0xFF)
+        }
+        pos += 1 + compressionLen
+
+        val extensions = mutableListOf<Int>()
+        val supportedGroups = mutableListOf<Int>()
+        val signatureAlgorithms = mutableListOf<Int>()
+        var alpn: String? = null
+        var sni: String? = null
+
+        if (pos + 2 <= bytes.size) {
+            val extensionsLen = readU16(bytes, pos)
+            pos += 2
+            val extensionsEnd = pos + extensionsLen
+
+            while (pos + 4 <= extensionsEnd && pos + 4 <= bytes.size) {
+                val extType = readU16(bytes, pos)
+                val extLen = readU16(bytes, pos + 2)
+                val extDataStart = pos + 4
+                extensions.add(extType)
+
+                if (extDataStart + extLen <= bytes.size) {
+                    when (extType) {
+                        0x0000 -> { // server_name (SNI)
+                            var p = extDataStart
+                            if (p + 2 <= bytes.size) {
+                                val listEnd = p + 2 + readU16(bytes, p)
+                                p += 2
+                                while (p + 3 <= listEnd && p + 3 <= bytes.size) {
+                                    val nameType = bytes[p].toInt() and 0xFF
+                                    val nameLen = readU16(bytes, p + 1)
+                                    p += 3
+                                    if (nameType == 0 && nameLen > 0 && p + nameLen <= bytes.size) {
+                                        sni = String(bytes, p, nameLen, Charsets.UTF_8).lowercase().take(256)
+                                    }
+                                    p += nameLen
+                                }
+                            }
+                        }
+                        0x000a -> { // supported_groups
+                            var p = extDataStart
+                            if (p + 2 <= bytes.size) {
+                                val listLen = readU16(bytes, p)
+                                p += 2
+                                var g = p
+                                while (g + 2 <= p + listLen && g + 2 <= bytes.size) {
+                                    supportedGroups.add(readU16(bytes, g))
+                                    g += 2
+                                }
+                            }
+                        }
+                        0x000d -> { // signature_algorithms
+                            var p = extDataStart
+                            if (p + 2 <= bytes.size) {
+                                val listLen = readU16(bytes, p)
+                                p += 2
+                                var s = p
+                                while (s + 2 <= p + listLen && s + 2 <= bytes.size) {
+                                    signatureAlgorithms.add(readU16(bytes, s))
+                                    s += 2
+                                }
+                            }
+                        }
+                        0x0010 -> { // application_layer_protocol_negotiation (ALPN)
+                            var p = extDataStart
+                            if (p + 2 <= bytes.size) {
+                                p += 2 // protocol name list length
+                                if (p + 1 <= bytes.size) {
+                                    val nameLen = bytes[p].toInt() and 0xFF
+                                    p += 1
+                                    if (nameLen > 0 && p + nameLen <= bytes.size) {
+                                        alpn = String(bytes, p, nameLen, Charsets.UTF_8)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                pos = extDataStart + extLen
+            }
+        }
+
+        return TlsClientHello(
+            version = when (clientVersion) {
+                0x0301 -> "TLS 1.0"; 0x0302 -> "TLS 1.1"; 0x0303 -> "TLS 1.2"; 0x0304 -> "TLS 1.3"
+                else -> "0x%04x".format(clientVersion)
+            },
+            cipherSuites = cipherSuites,
+            compressionMethods = compressionMethods,
+            extensions = extensions,
+            supportedGroups = supportedGroups,
+            signatureAlgorithms = signatureAlgorithms,
+            alpn = alpn,
+            sni = sni,
+        )
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────
 
     private fun readU16(buf: ByteArray, off: Int): Int =

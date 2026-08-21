@@ -192,6 +192,13 @@ class MitmProxyEngine(
             val upstreamInput = upstreamSsl.getInputStream()
             val upstreamOutput = upstreamSsl.getOutputStream()
 
+            // M2: persist a TlsSessionEntity for this MITM'd handshake. Unlike the
+            // undecoded/VPN path (CaptureEngine, ClientHello-only), we actually completed
+            // both TLS legs here, so we know the *negotiated* cipher/protocol/ALPN from the
+            // client-facing session and the *real* peer certificate from the upstream leg
+            // (the client-facing cert is ours, not the server's — no signal there).
+            persistMitmTlsSession(db, host, port, sslSocket, upstreamSsl)
+
             // Inspecting bidirectional relay: parse decrypted HTTP/1.x with
             // HttpParser, enforce rules on the parsed messages, persist each
             // transaction, and forward the (possibly modified) bytes.
@@ -577,6 +584,52 @@ class MitmProxyEngine(
             .getCertificate(builder.build(signer))
 
         return cert to keyPair
+    }
+
+    // ── TLS session persistence (M2) ─────────────────────────────────────
+
+    /**
+     * Reads the negotiated cipher suite / protocol / ALPN off the client-facing
+     * [SSLSession] and the peer certificate chain off the upstream leg, then upserts a
+     * [TlsSessionEntity]. Keyed by `host:port` (one row per MITM'd host per proxy lifetime;
+     * re-negotiations on the same host just refresh the row, matching how [certCache]
+     * already treats a host as a single logical connection target).
+     *
+     * Never throws — a failure here must not break the relay that already started.
+     */
+    private fun persistMitmTlsSession(
+        db: RequestrDatabase,
+        host: String,
+        port: Int,
+        clientFacingSocket: SSLSocket,
+        upstreamSocket: SSLSocket,
+    ) {
+        runCatching {
+            val clientSession: SSLSession = clientFacingSocket.session
+            val upstreamSession: SSLSession = upstreamSocket.session
+            val peerCert = upstreamSession.peerCertificates?.firstOrNull() as? X509Certificate
+            val connectionId = "$host:$port"
+            val entity = com.example.data.local.TlsSessionEntity(
+                tlsSessionId = connectionId,
+                sessionId = sessionId.get(),
+                connectionId = connectionId,
+                sniHost = host,
+                version = clientSession.protocol,
+                cipherSuite = clientSession.cipherSuite,
+                negotiatedProtocol = runCatching {
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                        clientFacingSocket.applicationProtocol?.ifBlank { null }
+                    } else null
+                }.getOrNull(),
+                ja3Hash = null, // JA3 needs the raw ClientHello, which SSLSocket already consumed
+                handshakeState = com.example.interception.tls.TlsHandshakeState.ESTABLISHED.name,
+                wasDecrypted = true,
+                peerCertSubject = peerCert?.subjectX500Principal?.name,
+                peerCertIssuer = peerCert?.issuerX500Principal?.name,
+            )
+            kotlinx.coroutines.runBlocking { db.tlsSessionDao().upsert(entity) }
+            Log.i(TAG, "TLS session persisted: $host cipher=${entity.cipherSuite} alpn=${entity.negotiatedProtocol}")
+        }.onFailure { e -> Log.w(TAG, "Failed to persist MITM TLS session for $host: ${e.message}") }
     }
 
     // ── SSL context ─────────────────────────────────────────────────────

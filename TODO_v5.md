@@ -94,8 +94,8 @@
 
 | # | Status | Item | Files |
 |---|--------|------|-------|
-| M1 | [~] PARTIAL | TCP/UDP/QUIC connection entities | `Entities.kt` — `TcpConnectionEntity`, `UdpFlowEntity`, `QuicConnectionEntity` are defined but **not registered** in `RequestrDatabase`'s `entities = [...]` list, have no DAOs, and have zero constructor call sites anywhere — dead code, not actually persisted |
-| M2 | [ ] TODO | TLS session/handshake/metadata entities | `interception/tls/TlsSession.kt` etc. |
+| M1 | ✅ DONE | TCP/UDP/QUIC connection entities | Registered in `RequestrDatabase` (v5→v6) with `TcpConnectionDao`/`UdpFlowDao`/`QuicConnectionDao`. `CaptureEngine.persistTcpConnection()` upserts TCP connection state (throttled 2s, flushed on close) from `ingest()`. `PacketPump.persistUdpFlow()` upserts every UDP packet's flow row; `persistQuicConnection()` inserts a QUIC connection row on successful SNI extraction. Surfaced via new "Connections" bottom sheet (TCP/UDP/QUIC tabs) in `InterceptScreen.kt`, backed by new `ConnectionsRepository` |
+| M2 | ✅ DONE | TLS session/handshake/metadata entities | New `TlsSessionEntity` + `TlsSessionDao` registered in `RequestrDatabase` (v6→v7). `MitmProxyEngine.persistMitmTlsSession()` reads the negotiated cipher/protocol/ALPN off the client-facing `SSLSession` and the peer cert off the upstream leg after both TLS legs complete, upserted with `wasDecrypted=true`. `CaptureEngine`'s existing undecoded-TLS path now calls new `TlsDecoder.parseClientHello()` (full ClientHello parse: version, ciphers, extensions, ALPN, SNI) to persist a `wasDecrypted=false` row with JA3 fingerprint (`TlsClientHello.ja3Hash()`) when no MITM occurred. Surfaced as a 4th "TLS" tab in the "Connections" bottom sheet (`InterceptScreen.kt`), showing DECRYPTED vs SNI/JA3-ONLY badge, cipher/version/ALPN, cert subject, and JA3 hash |
 
 ### Provenance & Diagnostics
 

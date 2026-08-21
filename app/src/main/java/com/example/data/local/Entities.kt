@@ -235,3 +235,41 @@ data class QuicConnectionEntity(
     val dstConnectionId: String,
     val establishedAt: Long = System.currentTimeMillis(),
 )
+
+// ═══════════════════════════════════════════════════════════════════
+// v5.6 TLS session model (M2)
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Persisted counterpart of [com.example.interception.tls.TlsSession].
+ *
+ * Two producers write this table:
+ *  - [com.example.interception.MitmProxyEngine] — one row per MITM'd CONNECT tunnel,
+ *    populated from the *real* client-side [javax.net.ssl.SSLSession] (negotiated cipher
+ *    suite, protocol version, ALPN, peer certificate chain from the upstream leg) plus the
+ *    ClientHello JA3 fingerprint parsed from the raw bytes before we terminated TLS.
+ *  - [com.example.interception.CaptureEngine] — one row per non-MITM'd (VPN/undecoded) TLS
+ *    stream, populated from [com.example.interception.tls.TlsDecoder.parseClientHello] only
+ *    (SNI/JA3/offered ciphers — no server-side fields since we never decrypt that path).
+ *
+ * [handshakeState] and [wasDecrypted] tell the UI which producer wrote the row so it can be
+ * honest about what is/isn't known (mirrors the wasDecrypted/isUndecoded pattern already used
+ * on [CapturedTrafficEntity]).
+ */
+@Entity(tableName = "tls_sessions", indices = [Index("sessionId"), Index("sniHost"), Index("connectionId")])
+data class TlsSessionEntity(
+    @PrimaryKey val tlsSessionId: String,
+    val sessionId: Long,
+    val connectionId: String,
+    val sniHost: String?,
+    val version: String?,               // negotiated (MITM) or ClientHello-offered (undecoded)
+    val cipherSuite: String?,           // negotiated cipher suite name; null when undecoded
+    val negotiatedProtocol: String?,    // ALPN result: h2, http/1.1, null if unknown
+    val ja3Hash: String?,
+    val handshakeState: String,         // CLIENT_HELLO, ESTABLISHED, FAILED (TlsHandshakeState.name)
+    val wasDecrypted: Boolean,          // true = MITM'd (real cipher/cert data), false = SNI/JA3-only
+    val peerCertSubject: String?,
+    val peerCertIssuer: String?,
+    val establishedAt: Long = System.currentTimeMillis(),
+    val handshakeDurationMs: Long = 0,
+)

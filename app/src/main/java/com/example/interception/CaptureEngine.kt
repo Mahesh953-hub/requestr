@@ -5,6 +5,7 @@ import com.example.data.local.CapturedTrafficEntity
 import com.example.data.local.InterceptRuleEntity
 import com.example.data.local.RequestrDatabase
 import com.example.data.local.TcpConnectionEntity
+import com.example.data.local.TlsSessionEntity
 import com.example.data.repository.SettingsRepository
 import com.example.interception.grpc.GrpcDetector
 import com.example.interception.grpc.ProtobufDecoder
@@ -130,8 +131,31 @@ class CaptureEngine(
             val clientBytes = stream.clientToServer.bytes()
             if (TlsDecoder.looksLikeTls(clientBytes)) {
                 stream.isTls = true
-                stream.sniHost = TlsDecoder.extractSni(clientBytes)
+                val clientHello = TlsDecoder.parseClientHello(clientBytes)
+                stream.sniHost = clientHello?.sni ?: TlsDecoder.extractSni(clientBytes)
                 Log.i(TAG, "TLS: ${stream.sniHost ?: "unknown"} (${stream.key}) bytes=${clientBytes.size}")
+
+                // M2: persist a TlsSessionEntity for this handshake. We never decrypt this path
+                // (no MITM here), so only what's visible on the wire in ClientHello is known:
+                // SNI, offered version/ciphers/ALPN and their JA3 fingerprint. No cipher suite
+                // was *negotiated* from our point of view and no certificate was seen.
+                runCatching {
+                    val tlsEntity = TlsSessionEntity(
+                        tlsSessionId = stream.key,
+                        sessionId = sessionId,
+                        connectionId = stream.key,
+                        sniHost = stream.sniHost,
+                        version = clientHello?.version ?: TlsDecoder.versionName(clientBytes),
+                        cipherSuite = null,
+                        negotiatedProtocol = clientHello?.alpn,
+                        ja3Hash = clientHello?.ja3Hash(),
+                        handshakeState = com.example.interception.tls.TlsHandshakeState.CLIENT_HELLO.name,
+                        wasDecrypted = false,
+                        peerCertSubject = null,
+                        peerCertIssuer = null,
+                    )
+                    runBlocking { db.tlsSessionDao().upsert(tlsEntity) }
+                }.onFailure { e -> Log.w(TAG, "Failed to persist TLS session: ${e.message}") }
 
                 if (printUndecoded) {
                     val entity = CapturedTrafficEntity(
