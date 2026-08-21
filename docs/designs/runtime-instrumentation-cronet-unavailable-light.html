@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Runtime instrumentation — Cronet unavailable with reason · light · requestr</title>
+<meta name="description" content="Expanded requestr Runtime Instrumentation card in a degraded state: Cronet adapter unavailable with a concrete reason, OkHttp capturing, WebView idle, and confidence-scored fingerprint verdicts.">
+<style>
+:root{
+--pageBg:#E7E4DA;--bg:#F4F2EC;--onBg:#111111;--border:#E5E2D8;--sh:.20;
+--hdrBg:rgba(250,248,243,0.75);--cardBg:rgba(250,248,243,0.75);--surface:#FFFFFF;--flat:#FAF8F3;
+--primary:#F28C28;--onPrimary:#111111;--knOn:#FFFFFF;
+--dim:#555555;--mut:#888888;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-text-size-adjust:100%}
+body{background:var(--pageBg);min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:22px 12px 34px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+.fl{font:700 10px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:1.4px;text-transform:uppercase;color:var(--dim);margin-bottom:10px;text-align:center}
+.phone{width:390px;height:844px;background:var(--bg);color:var(--onBg);border:1px solid var(--border);border-radius:36px;overflow:hidden;position:relative;box-shadow:0 22px 60px rgba(0,0,0,var(--sh));display:flex;flex-direction:column}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
+.sysbar{height:28px;flex:0 0 28px;display:flex;align-items:center;justify-content:space-between;padding:0 18px;font:600 11px/1 ui-monospace,Menlo,monospace;color:var(--onBg);opacity:.85}
+.sysbar .r{display:flex;align-items:center;gap:5px}
+.hdr{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:8px 16px 10px;background:var(--hdrBg);backdrop-filter:blur(20px) saturate(140%);-webkit-backdrop-filter:blur(20px) saturate(140%);border-bottom:1px solid var(--border)}
+.hdr h1{font-size:22px;font-weight:700;letter-spacing:-.5px;color:var(--onBg)}
+.ibtn{width:36px;height:36px;border-radius:18px;display:flex;align-items:center;justify-content:center;color:var(--primary)}
+.ibtn.mut{color:var(--dim)}
+.scroll{flex:1 1 auto;overflow-y:auto;overflow-x:hidden;padding:8px 16px 28px;scrollbar-width:none}
+.scroll::-webkit-scrollbar{display:none}
+.ctx{opacity:.5}
+.card{background:var(--cardBg);border:1px solid var(--border);border-radius:16px}
+.card.solid{background:var(--surface)}
+.card.flat{background:var(--flat)}
+.p10{padding:10px}.p12{padding:12px}.p14{padding:14px}
+.row{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.rowc{display:flex;align-items:center;gap:6px}
+.pill{display:inline-flex;align-items:center;gap:4px;border-radius:6px;padding:2px 6px;white-space:nowrap;font:700 10px/1.45 ui-monospace,Menlo,Consolas,monospace}
+.pill.o{background:transparent;border:1px solid}
+.sec{font:700 11px/1.3 -apple-system,sans-serif;letter-spacing:1px;text-transform:uppercase;color:var(--dim);margin:16px 0 6px}
+.sub{font:700 10px/1.3 -apple-system,sans-serif;letter-spacing:.8px;text-transform:uppercase;color:var(--dim);margin:12px 0 6px}
+.dot{width:8px;height:8px;border-radius:50%;flex:0 0 8px}
+.t9{font-size:9px}.t10{font-size:10px}.t11{font-size:11px}.t12{font-size:12px}.t13{font-size:13px}
+.b{font-weight:700}.sb{font-weight:600}.dim{color:var(--dim)}.mut{color:var(--mut)}
+.hair{height:1px;background:var(--border);opacity:.75;margin:10px 0}
+.inp{flex:1;height:40px;border-radius:10px;border:1px solid var(--border);background:var(--surface);padding:0 10px;font:400 12px ui-monospace,Menlo,monospace;color:var(--onBg);min-width:0}
+.inp::placeholder{color:var(--mut)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:40px;border-radius:10px;padding:0 14px;font:700 12px -apple-system,sans-serif;white-space:nowrap;border:1px solid transparent;cursor:default}
+.btn.primary{background:var(--primary);color:var(--onPrimary)}
+.vrow{position:relative;padding:8px 10px 8px 12px;background:var(--surface);border:1px solid var(--border);border-radius:12px;margin-bottom:6px}
+.vrow:before{content:"";position:absolute;left:0;top:10px;bottom:10px;width:3px;border-radius:2px;background:var(--c)}
+.track{height:6px;border-radius:3px;background:var(--flat);border:1px solid var(--border);overflow:hidden;display:flex}
+.track.thin{height:4px}
+.fill{height:100%}
+.g{color:#10B981}.a{color:#F59E0B}.r{color:#EF4444}.gy{color:#64748B}
+.reason{display:flex;gap:6px;align-items:flex-start;margin-top:4px;padding:7px 8px;border-radius:8px;background:#EF44440D;border:1px solid #EF444440}
+</style>
+</head>
+<body>
+<div class="fl">Runtime instrumentation · Cronet unavailable (degraded) · Editorial light · requestr</div>
+<div class="phone">
+  <div class="sysbar mono"><span>9:41</span><span class="r"><svg width="12" height="12" viewBox="0 0 24 24" fill="#111111" aria-hidden="true"><path d="M2 22h20V2z"/></svg><svg width="13" height="13" viewBox="0 0 24 24" fill="#111111" aria-hidden="true"><path d="M12 3a9 9 0 0 0-6.36 2.64l1.42 1.42A7 7 0 0 1 12 5c1.93 0 3.68.78 4.95 2.05l1.41-1.41A9 9 0 0 0 12 3zm0 4a5 5 0 0 0-3.54 1.46l1.42 1.42A3 3 0 0 1 12 9c.83 0 1.58.34 2.12.88l1.42-1.42A5 5 0 0 0 12 7zm0 4a1.99 1.99 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg><svg width="12" height="12" viewBox="0 0 24 24" fill="#111111" aria-hidden="true"><path d="M15.67 4H14V2h-4v2H8.33C7.6 4 7 4.6 7 5.33v15.34C7 21.4 7.6 22 8.33 22h7.34c.73 0 1.33-.6 1.33-1.33V5.33C17 4.6 16.4 4 15.67 4z"/></svg></span></div>
+
+  <div class="hdr">
+    <div class="rowc"><div class="ibtn" role="button" aria-label="Back"><svg width="22" height="22" viewBox="0 0 24 24" fill="#F28C28" aria-hidden="true"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20z"/></svg></div><h1>Settings &amp; Config</h1></div>
+    <div class="ibtn mut" role="button" aria-label="Quick settings"><svg width="20" height="20" viewBox="0 0 24 24" fill="#555555" aria-hidden="true"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94 0 .31.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6a3.6 3.6 0 1 1 0-7.2 3.6 3.6 0 0 1 0 7.2z"/></svg></div>
+  </div>
+
+  <div class="scroll">
+    <div class="ctx">
+      <div class="sec">LOCAL REST API &amp; CLI</div>
+      <div class="card solid p12">
+        <div class="rowc"><svg width="18" height="18" viewBox="0 0 24 24" fill="#F28C28" aria-hidden="true"><path d="M4 3h16a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zm.5 2.5v13h15v-13h-15zm4.6 2.1 1.4 1.4L8.3 10l2.2 2.2-1.4 1.4L5.5 10zm4.9 6h6v2h-6z"/></svg><span class="t13 b">Embedded HTTP API Server</span></div>
+        <div class="t10 dim" style="margin-top:4px">Server running on port 9876 · <span class="mono">curl http://127.0.0.1:9876/api/ping</span></div>
+      </div>
+    </div>
+
+    <div class="sec">RUNTIME INSTRUMENTATION</div>
+    <div class="card solid p14" data-component-id="runtime-instrumentation-card">
+      <div class="row">
+        <div class="rowc"><svg width="18" height="18" viewBox="0 0 24 24" fill="#F28C28" aria-hidden="true"><path d="M4 3h16a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zm.5 2.5v13h15v-13h-15zm4.6 2.1 1.4 1.4L8.3 10l2.2 2.2-1.4 1.4L5.5 10zm4.9 6h6v2h-6z"/></svg><span class="t13 b">HTTP Stack Adapters</span></div>
+        <span class="pill" style="background:#F59E0B26;color:#F59E0B;border:1px solid #F59E0B80">DEGRADED</span>
+      </div>
+      <div class="rowc" style="margin-top:6px"><span class="dot" style="background:#F59E0B"></span><span class="t11 sb">Active — 3 adapters registered · 1 capturing, 1 ready, 1 unavailable</span></div>
+      <div class="t10 dim" style="margin-top:4px">Polling registered adapters for real request/response events. Third-party apps need the Requestr Observer SDK (sdk/) to report their own traffic.</div>
+
+      <div class="sub">ADAPTERS</div>
+
+      <div class="vrow" style="--c:#10B981">
+        <div class="row">
+          <div class="rowc"><svg width="14" height="14" viewBox="0 0 24 24" fill="#10B981" aria-hidden="true"><path d="M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z"/></svg><span class="t12 b">OkHttp</span></div>
+          <div class="rowc"><span class="pill" style="background:#10B98126;color:#10B981;border:1px solid #10B98180">CAPTURING</span><span class="mono t11 b g">1,284</span><span class="t9 dim">events</span></div>
+        </div>
+        <div class="t9 dim mono" style="margin-top:3px">requestr outbound · OkHttpProxyInterceptor</div>
+      </div>
+
+      <div class="vrow" style="--c:#EF4444">
+        <div class="row">
+          <div class="rowc"><svg width="14" height="14" viewBox="0 0 24 24" fill="#EF4444" aria-hidden="true"><path d="M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z"/></svg><span class="t12 b">Cronet</span></div>
+          <div class="rowc"><span class="pill" style="background:#EF444426;color:#EF4444;border:1px solid #EF444480">UNAVAILABLE</span><span class="mono t11 b r">0</span><span class="t9 dim">events</span></div>
+        </div>
+        <div class="reason">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="#EF4444" aria-hidden="true" style="flex:0 0 14px;margin-top:1px"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>
+          <span class="t10" style="color:#111111"><span class="b">org.chromium.net.CronetEngine not on classpath.</span> Install the Cronet provider (<span class="mono">cronet-api</span> + <span class="mono">cronet-shared</span>) to enable <span class="mono">RequestFinishedInfo.Listener</span> capture with body accumulation and proxy routing.</span>
+        </div>
+      </div>
+
+      <div class="vrow" style="--c:#64748B">
+        <div class="row">
+          <div class="rowc"><svg width="14" height="14" viewBox="0 0 24 24" fill="#64748B" aria-hidden="true"><path d="M4 5h16a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm5-1h6l1 2H9z"/></svg><span class="t12 b">WebView</span></div>
+          <div class="rowc"><span class="pill" style="background:#64748B26;color:#64748B;border:1px solid #64748B80">IDLE</span><span class="mono t11 b gy">0</span><span class="t9 dim">events</span></div>
+        </div>
+        <div class="t9 dim mono" style="margin-top:3px">shouldInterceptRequest + MAIN-world fetch/XHR bridge ready</div>
+      </div>
+
+      <div class="sub">OFFSCREEN WEBVIEW CAPTURE</div>
+      <div class="row" style="gap:8px">
+        <input class="inp mono" placeholder="https://example.com" data-component-id="webview-capture-url" aria-label="Offscreen WebView capture URL">
+        <button class="btn primary" data-component-id="webview-capture-start" aria-label="Start offscreen WebView capture">Start</button>
+      </div>
+      <div class="rowc" style="margin-top:6px"><span class="dot" style="background:#64748B"></span><span class="t10 dim">Idle · 0 captured · load a URL and start to capture page fetch/XHR through the proxy</span></div>
+
+      <div class="hair"></div>
+
+      <div class="row">
+        <div class="rowc"><svg width="16" height="16" viewBox="0 0 24 24" fill="#F28C28" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16zm0-12a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm0 2a2 2 0 1 1 0 4 2 2 0 0 1 0-4z"/></svg><span class="t12 b">HTTP Stack Fingerprinting</span></div>
+        <span class="mono t9 dim">5 signals</span>
+      </div>
+      <div class="t10 dim" style="margin-top:4px">Multi-signal confidence-scored verdicts from TLS/HTTP fingerprints — not User-Agent string matching.</div>
+      <div class="mono t10 dim" style="margin-top:5px">Session sess_8f3a2c · 88 requests fingerprinted</div>
+
+      <div style="margin-top:9px">
+
+        <div class="vrow" style="--c:#10B981">
+          <div class="row">
+            <span class="t12 b">OkHttp</span>
+            <div class="rowc"><span class="pill" style="background:#10B98126;color:#10B981;border:1px solid #10B98180">DETECTED</span><span class="mono t11 b g">94%</span><svg width="16" height="16" viewBox="0 0 24 24" fill="#555555" aria-hidden="true"><path d="M7.41 8.59 12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg></div>
+          </div>
+          <div class="mono t9 dim" style="margin-top:3px">JA3<span class="g">✓</span> ALPN<span class="g">✓</span> H2<span class="g">✓</span> HDR<span class="g">✓</span> CACHE<span class="g">✓</span></div>
+          <div class="track thin" style="margin-top:5px"><span class="fill" style="width:94%;background:#10B981"></span></div>
+        </div>
+
+        <div class="vrow" style="--c:#EF4444">
+          <div class="row">
+            <span class="t12 b">Cronet</span>
+            <div class="rowc"><span class="pill" style="background:#EF444426;color:#EF4444;border:1px solid #EF444480">UNKNOWN</span><span class="mono t11 b r">—</span><svg width="16" height="16" viewBox="0 0 24 24" fill="#555555" aria-hidden="true"><path d="M7.41 8.59 12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg></div>
+          </div>
+          <div class="mono t9 dim" style="margin-top:3px">adapter unavailable · 0 Cronet handshakes to fingerprint</div>
+        </div>
+
+        <div class="vrow" style="--c:#F59E0B">
+          <div class="row">
+            <span class="t12 b">HttpURLConnection</span>
+            <div class="rowc"><span class="pill o" style="border-color:#F59E0B80;color:#F59E0B">POSSIBLE</span><span class="mono t11 b a">41%</span><svg width="16" height="16" viewBox="0 0 24 24" fill="#555555" aria-hidden="true"><path d="M7.41 8.59 12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg></div>
+          </div>
+          <div class="mono t9 dim" style="margin-top:3px">JA3<span class="r">✗</span> ALPN<span class="r">✗</span> H2<span class="r">✗</span> HDR<span class="g">✓</span> UA<span class="g">✓</span></div>
+          <div class="track thin" style="margin-top:5px"><span class="fill" style="width:41%;background:#F59E0B"></span></div>
+        </div>
+
+        <div class="vrow" style="--c:#64748B">
+          <div class="row">
+            <span class="t12 b">Volley</span>
+            <div class="rowc"><span class="pill" style="background:#64748B26;color:#64748B;border:1px solid #64748B80">UNKNOWN</span><span class="mono t11 b gy">—</span><svg width="16" height="16" viewBox="0 0 24 24" fill="#555555" aria-hidden="true"><path d="M7.41 8.59 12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg></div>
+          </div>
+          <div class="mono t9 dim" style="margin-top:3px">shares HttpURLConnection UA · indistinguishable by header alone</div>
+        </div>
+
+      </div>
+
+      <div class="t9 dim" style="margin-top:8px">UNKNOWN means insufficient signals captured, never a guessed stack. JA3/ALPN/H2 require a TLS handshake; plaintext HTTP falls back to header-order + cache-shape signals.</div>
+    </div>
+
+    <div class="ctx">
+      <div class="sec">BROWSER BRIDGE (CDP)</div>
+      <div class="card solid p12">
+        <div class="rowc"><svg width="18" height="18" viewBox="0 0 24 24" fill="#F28C28" aria-hidden="true"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM18.92 8h-2.95a15.65 15.65 0 0 0-1.38-3.56A8.03 8.03 0 0 1 18.92 8zM12 4.04c.83 1.2 1.48 2.53 1.91 3.96h-3.82c.43-1.43 1.08-2.76 1.91-3.96zM4.26 14C4.1 13.36 4 12.69 4 12s.1-1.36.26-2h3.38c-.08.66-.14 1.32-.14 2 0 .68.06 1.34.14 2H4.26z"/></svg><span class="t13 b">Chrome DevTools Protocol</span></div>
+        <div class="rowc" style="margin-top:6px"><span class="dot" style="background:#64748B"></span><span class="t11 sb gy">Disconnected</span></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+</body>
+</html>

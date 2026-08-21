@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Browser Bridge (CDP) — reconnecting with backoff · dark · requestr</title>
+<meta name="description" content="Expanded requestr Browser Bridge (CDP) Settings card in a reconnecting state with exponential backoff: attempt counter, retry schedule, last error, and stale last-known targets.">
+<style>
+:root{
+--pageBg:#050507;--bg:#0A0A0C;--onBg:#F1F5F9;--border:#282830;--sh:.55;
+--hdrBg:rgba(28,28,33,0.62);--cardBg:rgba(28,28,33,0.62);--surface:#141417;--flat:#1C1C21;
+--primary:#FFFFFF;--onPrimary:#000000;--knOn:#000000;
+--dim:#A0A0A8;--mut:#6B6B73;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-text-size-adjust:100%}
+body{background:var(--pageBg);min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:22px 12px 34px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+.fl{font:700 10px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:1.4px;text-transform:uppercase;color:var(--dim);margin-bottom:10px;text-align:center}
+.phone{width:390px;height:844px;background:var(--bg);color:var(--onBg);border:1px solid var(--border);border-radius:36px;overflow:hidden;position:relative;box-shadow:0 22px 60px rgba(0,0,0,var(--sh));display:flex;flex-direction:column}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
+.sysbar{height:28px;flex:0 0 28px;display:flex;align-items:center;justify-content:space-between;padding:0 18px;font:600 11px/1 ui-monospace,Menlo,monospace;color:var(--onBg);opacity:.85}
+.sysbar .r{display:flex;align-items:center;gap:5px}
+.hdr{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:8px 16px 10px;background:var(--hdrBg);backdrop-filter:blur(20px) saturate(140%);-webkit-backdrop-filter:blur(20px) saturate(140%);border-bottom:1px solid var(--border)}
+.hdr h1{font-size:22px;font-weight:700;letter-spacing:-.5px;color:var(--onBg)}
+.ibtn{width:36px;height:36px;border-radius:18px;display:flex;align-items:center;justify-content:center;color:var(--primary)}
+.ibtn.mut{color:var(--dim)}
+.scroll{flex:1 1 auto;overflow-y:auto;overflow-x:hidden;padding:8px 16px 28px;scrollbar-width:none}
+.scroll::-webkit-scrollbar{display:none}
+.ctx{opacity:.5}
+.card{background:var(--cardBg);border:1px solid var(--border);border-radius:16px}
+.card.solid{background:var(--surface)}
+.card.flat{background:var(--flat)}
+.p10{padding:10px}.p12{padding:12px}.p14{padding:14px}
+.row{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.rowc{display:flex;align-items:center;gap:6px}
+.col{display:flex;flex-direction:column;min-width:0}
+.pill{display:inline-flex;align-items:center;gap:4px;border-radius:6px;padding:2px 6px;white-space:nowrap;font:700 10px/1.45 ui-monospace,Menlo,Consolas,monospace}
+.sec{font:700 11px/1.3 -apple-system,sans-serif;letter-spacing:1px;text-transform:uppercase;color:var(--dim);margin:16px 0 6px}
+.sub{font:700 10px/1.3 -apple-system,sans-serif;letter-spacing:.8px;text-transform:uppercase;color:var(--dim);margin:12px 0 6px}
+.dot{width:8px;height:8px;border-radius:50%;flex:0 0 8px}
+.pulse{box-shadow:0 0 0 3px #F59E0B33}
+.t9{font-size:9px}.t10{font-size:10px}.t11{font-size:11px}.t12{font-size:12px}.t13{font-size:13px}
+.b{font-weight:700}.sb{font-weight:600}.dim{color:var(--dim)}.mut{color:var(--mut)}
+.hair{height:1px;background:var(--border);opacity:.75;margin:10px 0}
+.kv{display:flex;gap:6px;align-items:baseline;padding:2px 0}
+.kv .k{font:600 10px/1.5 -apple-system,sans-serif;color:var(--dim);flex:0 0 76px}
+.kv .v{font:400 10px/1.5 ui-monospace,Menlo,monospace;color:var(--onBg);word-break:break-all;flex:1}
+.inp{flex:1;height:40px;border-radius:10px;border:1px solid var(--border);background:var(--surface);padding:0 10px;font:400 12px ui-monospace,Menlo,monospace;color:var(--onBg);min-width:0}
+.inp::placeholder{color:var(--mut)}
+.inp[disabled]{opacity:.6}
+.swt{width:52px;height:32px;border-radius:16px;background:var(--flat);border:1px solid var(--border);display:flex;align-items:center;padding:2px;flex:0 0 52px}
+.swt.on{background:var(--primary);border-color:var(--primary)}
+.swt .kn{width:26px;height:26px;border-radius:13px;background:var(--surface);box-shadow:0 0 0 1px var(--border)}
+.swt.on .kn{transform:translateX(20px);background:var(--knOn);box-shadow:none}
+.vrow{position:relative;padding:8px 10px 8px 12px;background:var(--surface);border:1px solid var(--border);border-radius:12px;margin-bottom:6px}
+.vrow:before{content:"";position:absolute;left:0;top:10px;bottom:10px;width:3px;border-radius:2px;background:var(--c)}
+.url{font:400 9px/1.3 ui-monospace,Menlo,monospace;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.stale{opacity:.45}
+.ell{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.g{color:#10B981}.a{color:#F59E0B}.r{color:#EF4444}.gy{color:#64748B}.bl{color:#38BDF8}
+.bo{display:flex;gap:4px;margin-top:6px;flex-wrap:wrap}
+.bo span{font:700 9px/1 ui-monospace,Menlo,monospace;padding:3px 5px;border-radius:4px;background:var(--surface);border:1px solid var(--border);color:var(--dim)}
+.bo span.cur{background:#F59E0B26;color:#F59E0B;border-color:#F59E0B80}
+.bo span.done{color:#64748B}
+</style>
+</head>
+<body>
+<div class="fl">Browser Bridge (CDP) · reconnecting with backoff · Obsidian dark · requestr</div>
+<div class="phone">
+  <div class="sysbar mono"><span>9:41</span><span class="r"><svg width="12" height="12" viewBox="0 0 24 24" fill="#F1F5F9" aria-hidden="true"><path d="M2 22h20V2z"/></svg><svg width="13" height="13" viewBox="0 0 24 24" fill="#F1F5F9" aria-hidden="true"><path d="M12 3a9 9 0 0 0-6.36 2.64l1.42 1.42A7 7 0 0 1 12 5c1.93 0 3.68.78 4.95 2.05l1.41-1.41A9 9 0 0 0 12 3zm0 4a5 5 0 0 0-3.54 1.46l1.42 1.42A3 3 0 0 1 12 9c.83 0 1.58.34 2.12.88l1.42-1.42A5 5 0 0 0 12 7zm0 4a1.99 1.99 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg><svg width="12" height="12" viewBox="0 0 24 24" fill="#F1F5F9" aria-hidden="true"><path d="M15.67 4H14V2h-4v2H8.33C7.6 4 7 4.6 7 5.33v15.34C7 21.4 7.6 22 8.33 22h7.34c.73 0 1.33-.6 1.33-1.33V5.33C17 4.6 16.4 4 15.67 4z"/></svg></span></div>
+
+  <div class="hdr">
+    <div class="rowc"><div class="ibtn" role="button" aria-label="Back"><svg width="22" height="22" viewBox="0 0 24 24" fill="#F1F5F9" aria-hidden="true"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20z"/></svg></div><h1>Settings &amp; Config</h1></div>
+    <div class="ibtn mut" role="button" aria-label="Quick settings"><svg width="20" height="20" viewBox="0 0 24 24" fill="#A0A0A8" aria-hidden="true"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94 0 .31.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6a3.6 3.6 0 1 1 0-7.2 3.6 3.6 0 0 1 0 7.2z"/></svg></div>
+  </div>
+
+  <div class="scroll">
+    <div class="ctx">
+      <div class="sec">RUNTIME INSTRUMENTATION</div>
+      <div class="card solid p12">
+        <div class="rowc"><svg width="18" height="18" viewBox="0 0 24 24" fill="#FFFFFF" aria-hidden="true"><path d="M4 3h16a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zm.5 2.5v13h15v-13h-15zm4.6 2.1 1.4 1.4L8.3 10l2.2 2.2-1.4 1.4L5.5 10zm4.9 6h6v2h-6z"/></svg><span class="t13 b">HTTP Stack Adapters</span></div>
+        <div class="rowc" style="margin-top:6px"><span class="dot" style="background:#10B981"></span><span class="t11 sb">Active — 3 adapters · 2 capturing</span></div>
+      </div>
+    </div>
+
+    <div class="sec">BROWSER BRIDGE (CDP)</div>
+    <div class="card solid p14" data-component-id="cdp-card">
+      <div class="row">
+        <div class="rowc"><svg width="18" height="18" viewBox="0 0 24 24" fill="#FFFFFF" aria-hidden="true"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM18.92 8h-2.95a15.65 15.65 0 0 0-1.38-3.56A8.03 8.03 0 0 1 18.92 8zM12 4.04c.83 1.2 1.48 2.53 1.91 3.96h-3.82c.43-1.43 1.08-2.76 1.91-3.96zM4.26 14C4.1 13.36 4 12.69 4 12s.1-1.36.26-2h3.38c-.08.66-.14 1.32-.14 2 0 .68.06 1.34.14 2H4.26z"/></svg><span class="t13 b">Chrome DevTools Protocol</span></div>
+        <span class="pill" style="background:#F59E0B26;color:#F59E0B;border:1px solid #F59E0B80">RECONNECTING</span>
+      </div>
+      <div class="rowc" style="margin-top:6px"><span class="dot pulse" style="background:#F59E0B"></span><span class="t11 sb">Reconnecting… <span class="dim">·</span> <span class="mono">ws://localhost:9222</span> lost</span></div>
+      <div class="t10 dim" style="margin-top:3px">4 targets were attached · streams paused until the connection is restored</div>
+
+      <div class="row" style="gap:8px;margin-top:9px">
+        <input class="inp mono" value="localhost:9222" disabled data-component-id="cdp-hostport" aria-label="CDP host:port">
+        <div class="swt on" role="switch" aria-checked="true" aria-label="CDP connect toggle" data-component-id="cdp-connect-switch"><span class="kn"></span></div>
+      </div>
+      <div class="t9 dim" style="margin-top:6px">Toggling off cancels the retry loop and detaches all targets.</div>
+
+      <div class="card flat p12" style="margin-top:10px">
+        <div class="row">
+          <div class="rowc"><svg width="15" height="15" viewBox="0 0 24 24" fill="#F59E0B" aria-hidden="true"><path d="M17.65 6.35A7.96 7.96 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg><span class="t11 b">Reconnect with backoff</span></div>
+          <span class="pill" style="background:#F59E0B26;color:#F59E0B;border:1px solid #F59E0B80">attempt 3/∞</span>
+        </div>
+        <div class="rowc" style="margin-top:6px"><span class="dot pulse" style="background:#F59E0B"></span><span class="t11 b a">Next retry in 4s</span></div>
+        <div class="bo"><span class="done">1s</span><span class="done">2s</span><span class="cur">4s</span><span>8s</span><span>16s</span><span>30s cap</span></div>
+        <div class="mono t10 dim" style="margin-top:6px">elapsed since drop: 9s · 2 failed attempts</div>
+        <div class="hair"></div>
+        <div class="kv"><span class="k">last error</span><span class="v">WebSocket closed (1006) — server unreachable</span></div>
+        <div class="kv"><span class="k">endpoint</span><span class="v">ws://localhost:9222</span></div>
+        <div class="kv"><span class="k">targets</span><span class="v">4 attached (sessionId routing paused)</span></div>
+      </div>
+
+      <div class="row" style="margin-top:14px"><span class="sub" style="margin:0">LAST KNOWN TARGETS</span><span class="mono t9 a">stale · refreshes on reconnect</span></div>
+
+      <div class="stale" style="margin-top:6px">
+        <div class="vrow" style="--c:#64748B">
+          <div class="row">
+            <div class="rowc" style="min-width:0;flex:1"><svg width="14" height="14" viewBox="0 0 24 24" fill:#64748B" aria-hidden="true"><path d="M4 5h16a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm5-1h6l1 2H9z"/></svg><div class="col" style="min-width:0;flex:1"><span class="t12 b ell">requestr — API Client</span><span class="url">app.requestr.dev/client</span></div></div>
+            <span class="pill" style="background:var(--flat);color:var(--dim);border:1px solid var(--border)">128 req</span>
+          </div>
+        </div>
+        <div class="vrow" style="--c:#64748B">
+          <div class="row">
+            <div class="rowc" style="min-width:0;flex:1"><svg width="14" height="14" viewBox="0 0 24 24" fill:#64748B" aria-hidden="true"><path d="M4 5h16a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm5-1h6l1 2H9z"/></svg><div class="col" style="min-width:0;flex:1"><span class="t12 b ell">Stripe Dashboard</span><span class="url">dashboard.stripe.com/payments</span></div></div>
+            <span class="pill" style="background:var(--flat);color:var(--dim);border:1px solid var(--border)">64 req</span>
+          </div>
+        </div>
+        <div class="vrow" style="--c:#64748B">
+          <div class="row">
+            <div class="rowc" style="min-width:0;flex:1"><svg width="14" height="14" viewBox="0 0 24 24" fill:#64748B" aria-hidden="true"><path d="M4 5h16a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm5-1h6l1 2H9z"/></svg><div class="col" style="min-width:0;flex:1"><span class="t12 b ell">GitHub: Pull requests</span><span class="url">github.com/Mahesh953-hub/requestr/pulls</span></div></div>
+            <span class="pill" style="background:var(--flat);color:var(--dim);border:1px solid var(--border)">312 req</span>
+          </div>
+        </div>
+        <div class="vrow" style="--c:#64748B">
+          <div class="row">
+            <div class="rowc" style="min-width:0;flex:1"><svg width="14" height="14" viewBox="0 0 24 24" fill:#64748B" aria-hidden="true"><path d="M4 5h16a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm5-1h6l1 2H9z"/></svg><div class="col" style="min-width:0;flex:1"><span class="t12 b ell">n8n workflows</span><span class="url">n8n.local:5678/workflow/4</span></div></div>
+            <span class="pill" style="background:var(--flat);color:var(--dim);border:1px solid var(--border)">9 req</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="t9 dim" style="margin-top:10px">Targets, storage, and service workers reload automatically once the connection is restored — last-known values are shown above until then.</div>
+    </div>
+
+    <div class="ctx">
+      <div class="sec">PLUGIN MANAGER</div>
+      <div class="card solid p12">
+        <div class="rowc"><svg width="18" height="18" viewBox="0 0 24 24" fill="#FFFFFF" aria-hidden="true"><path d="M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5a2.5 2.5 0 0 0-5 0V5H4a2 2 0 0 0-2 2v3.8h1.5a2.5 2.5 0 0 1 0 5H2V19c0 1.1.9 2 2 2h3.8v-1.5a2.5 2.5 0 0 1 5 0V21H17c1.1 0 2-.9 2-2v-4h1.5a2.5 2.5 0 0 0 0-5z"/></svg><span class="t13 b">Installed Plugins</span></div>
+        <div class="t10 dim" style="margin-top:4px">3 plugins loaded · 1 disabled</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+</body>
+</html>
