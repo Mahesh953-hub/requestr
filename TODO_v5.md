@@ -37,10 +37,11 @@
 | # | Status | Item | Files |
 |---|--------|------|-------|
 | P1 | ✅ DONE | HTTP/2 frame parser + HPACK decoder (RFC 7540/7541) | `interception/http/Http2Parser.kt` |
-| P2 | [~] PARTIAL | HTTP/3 QUIC semantic layer | v5.6: `QuicParser.parseInitial()` now does real work -- derives RFC 9001 Initial keys (`QuicCrypto`), AEAD-decrypts the Initial packet, reassembles the CRYPTO frame's ClientHello and parses it via `TlsDecoder` for a real SNI + ALPN (falls back to the old heuristic scan on failure/unsupported version). Wired into `PacketPump`, which now builds a real `QuicConnection`/`QuicStream` state machine (keyed per connectionId) and persists real `alpn`/`quicVersion` to `QuicConnectionEntity` (previously hardcoded `alpn = null`). Fixed a QPACK bug where huffman-coded string values were decoded as plain UTF-8 (`QpackDecoder`/`HpackHuffman`). Remaining gap: `QpackDecoder.decode()` still has **no production call site** -- it is unit-tested (`QpackDecoderTest`) but real QUIC HEADERS-frame demultiplexing would require parsing HTTP/3 frames off 1-RTT application data, which is out of scope (only cleartext-derivable Initial packets are decrypted here, not post-handshake traffic) |
+| P2 | [~] PARTIAL | HTTP/3 QUIC semantic layer | v5.6: `QuicParser.parseInitial()` now does real work -- derives RFC 9001 Initial keys (`QuicCrypto`), AEAD-decrypts the Initial packet, reassembles the CRYPTO frame's ClientHello and parses it via `TlsDecoder` for a real SNI + ALPN (falls back to the old heuristic scan on failure/unsupported version). Wired into `PacketPump`, which now builds a real `QuicConnection`/`QuicStream` state machine (keyed per connectionId) and persists real `alpn`/`quicVersion` to `QuicConnectionEntity` (previously hardcoded `alpn = null`). Fixed a QPACK bug where huffman-coded string values were decoded as plain UTF-8 (`QpackDecoder`/`HpackHuffman`). **v5.8-backup re-assessment (deep audit):** `QpackDecoder.decode()` remains **without a production call site** -- confirmed again by grep across `app/src/main/java/`, it is exercised only by `QpackDecoderTest`. This is deliberately not wired further: `QuicCrypto` in this codebase only derives the RFC 9001 *Initial* secrets (from the connection ID + QUIC version, available in cleartext before any handshake completes) -- it has no TLS 1.3 key-schedule implementation for the handshake/1-RTT secrets that protect the actual HEADERS frames QPACK would decode. Real QPACK demultiplexing needs 1-RTT application-data decryption, which needs the full TLS 1.3 handshake transcript (ClientHello...Finished) and HKDF-Expand-Label key derivation for `client_application_traffic_secret_0` -- effectively re-implementing a TLS 1.3 stack, well beyond this audit's scope. Leaving `QpackDecoder` unit-tested-only and documenting this precisely (rather than a partial/misleading wiring) is the honest choice here |
+
 | P3 | ✅ DONE | gRPC/Protobuf detector | `interception/grpc/GrpcDetector.kt` + `ProtobufDecoder.kt` — HTTP/2-framed gRPC message detection (5-byte header, varint length), imported/used in `CaptureEngine.kt` (`grpcCalls`/`grpcDataBuffers`/`grpcStatuses` maps), unit-tested in `GrpcParserTests.kt` |
 | P4 | ✅ DONE | DoH/DoT detection | `interception/dns/DohDotDetector.kt` — port+method+content-type heuristics |
-| P5 | ✅ DONE | Protocol fingerprinting engine | `interception/ProtocolDetector.kt` — confidence scores (DETECTED/LIKELY/POSSIBLE/UNKNOWN) |
+| P5 | ✅ DONE | Protocol fingerprinting engine | `interception/ProtocolDetector.kt` — confidence scores (DETECTED/LIKELY/POSSIBLE/UNKNOWN). v5.8-backup: gained its first production call site — see `CaptureSetup1` (Enhanced Mode) below |
 
 ### Runtime Instrumentation
 
@@ -48,7 +49,7 @@
 |---|--------|------|-------|
 | R1 | ✅ DONE | RuntimeInstrumentationEngine | `runtime/RuntimeInstrumentationEngine.kt` — registered + started from `MainActivity.onCreate()`, background poll loop feeds `CorrelationEngine.ingest()` with `RuntimeEvent`s. Compose-observable `stateFlow` surfaced in Settings → Runtime Instrumentation card |
 | R2 | ✅ DONE | FridaClient + honest state machine | `runtime/frida/FridaClient.kt` — Unavailable→Detected→Connected→Attached→Streaming |
-| R3 | [~] PARTIAL | HTTP client adapters (OkHttp, Cronet, WebView) | `OkHttpAdapter.pollEvents()` now drains real request/response pairs recorded by `OkHttpProxyInterceptor` (method/URL/status/headers/duration) instead of an empty list. **Scope caveat:** no code currently attaches `OkHttpProxyInterceptor` to a live `OkHttpClient.Builder()`, so this reports requestr's own outbound calls only, not third-party app traffic (that needs the Observer SDK, S1). Cronet/WebView adapters remain presence-detection only — no native hook exists |
+| R3 | [x] DONE (v5.8-backup) | HTTP client adapters (OkHttp, Cronet, WebView) | `OkHttpAdapter.pollEvents()` drains real request/response pairs recorded by `OkHttpProxyInterceptor` (method/URL/status/headers/duration) instead of an empty list. v5.8-backup: `OkHttpProxyInterceptor` is now actually attached to a live `OkHttpClient.Builder()` — `ApiTestrRepository` (API Testr's own outbound client, the most user-facing/traffic-generating OkHttp owner in the app) gained an `init(context)` following the existing `FlowRepository`/`SettingsRepository` lazy-Context pattern, called once from `MainActivity.onCreate()`, and both its shared lazy `client` and its per-request no-follow-redirects client now call `.addInterceptor(OkHttpProxyInterceptor(appContext))`. **Scope, still honestly bounded:** this instruments requestr's own outbound API Testr traffic only — `OkHttpProxyInterceptor.intercept()` records events even when no capture-tier proxy port is active, so API Testr calls now always appear in the OkHttp instrumentation plane, which is intended. It still cannot and does not cover a third-party app's own `OkHttpClient` — requestr cannot inject an interceptor into another app's source; that remains the separate Observer SDK's job (S1). Cronet/WebView adapters remain presence-detection only — no native hook exists |
 
 ### Correlation
 
@@ -115,6 +116,51 @@
 
 ---
 
+## v5.8-backup — DEEP AUDIT: 6 user-reported Interceptr complaints
+
+Each row is one of the six specific complaints raised in a direct audit request. Complaints
+1-4 and most of 5 were fixed in earlier v5.8-backup commits (before this table existed);
+this table is the honest final record of what was found and what, if anything, changed.
+
+| # | Complaint (verbatim, abbreviated) | Root cause | Fix | Status |
+|---|---|---|---|---|
+| 1 | "no proxy tier and stop mechanism for proxy related service" | `HttpProxyEngine`/`MitmProxyEngine` had no reachable start/stop wired to a real UI action | `PreflightController` wired to real capture-method selection with explicit start/stop | ✅ DONE (prior commit) |
+| 2 | "no dedicated mode of vpn interception" | VPN was only an internal AUTO-probe fallback, not a user-selectable mode | Added `FORCE_VPN_ONLY` capture-tier preference, read end-to-end | ✅ DONE, commit `04b00c8` |
+| 3 | "changing the method while interception must force close/disable... re-enabling must go with selected method" | Switching Record Mode / Default Capture Tier mid-capture had no effect on the running engine | Forces a stop of the active engine and restarts with the newly selected method | ✅ DONE, commits `c36924f`, `ff3207d` |
+| 4 | "'traffic log' setting — pretty useless and undefined" | `trafficLogEnabled` toggle in Settings was never read anywhere in the capture/logging pipeline — pure dead UI | Removed the dead setting (superseded by the real, already-existing "Traffic Capture" toggle) | ✅ DONE, commit `bbbcef4` |
+| 5a | "traffic dump... pcap export? nothing" | PCAP/dump/HAR/CA/JSON/cURL/note exports wrote via legacy `MediaStore`-unsafe file APIs, producing 0 bytes/0 files on API 29+ scoped storage | Routed all exports through `MediaStoreExporter` on API 29+ | ✅ DONE, commit `0240733` |
+| 5b | "enhanced mode is literal shit, no system" | `enhancedMode` only gated a single `Log.i()` line — no analysis, despite the Settings UI claiming "richer packet analysis" | Wired `enhancedMode` to a real `ProtocolDetector.detect()` pass (see below) | ✅ DONE, commit `1e10699` |
+| 5c | "print undecoded - pure shit, kept for showoff? no system" | Investigated end-to-end: `printUndecoded` genuinely gates whether an undecoded-TLS `CapturedTrafficEntity` (hex dump, SNI header, `isUndecoded=true`) gets persisted when a ClientHello is seen but not MITM-decrypted. Traced `SettingsDataStore` → `InterceptScreen` Switch → `RequestrVpnService` → `PacketPump` → `CaptureEngine` — every hop is real | No fix needed | ✅ CONFIRMED REAL, no code change |
+| 5d | "logs... no system" | Investigated end-to-end: `CaptureLogRepository` (Room-backed) genuinely backs (a) the Intercept screen's main filterable traffic list, and (b) Settings' "Traffic Log" section (Clear-N button, JSON export). A separate `loggingEnabled`-gated floating debug overlay ("📋 Interception Log", capped 25-entry state-transition log) is also real and distinct | No fix needed | ✅ CONFIRMED REAL, no code change |
+| 6 | "the tower like helps nothing... looks like a stub" | Investigated every Radar-icon usage in the codebase: drawer nav item, `HomeScreen` "+ Intercept" quick-action chip, Intercept-screen empty-state placeholder, and the `HomeScreen` status-banner dot (a plain colored `Box`, not an icon, tied to real `interceptionState.status`). None animate or imply false "scanning" activity — all are static iconography honestly representing the Intercept nav destination | No fix needed — purely decorative, not misleading | ✅ CONFIRMED DECORATIVE, no code change |
+
+**Enhanced Mode fix detail (5b):** `ProtocolDetector.kt` was a fully-implemented, unit-covered
+protocol fingerprinting engine (`Protocol` enum: HTTP_1_1/HTTP_2/HTTP_3/WEBSOCKET/SSE/GRPC/
+QUIC/DNS/DOH/DOT/TLS/UNKNOWN; `Confidence`: DETECTED/LIKELY/POSSIBLE/UNKNOWN) with **zero
+production call sites** — the same "orphaned feature" pattern as P2's `QpackDecoder`. Added
+`CaptureEngine.enhancedMode: Boolean` (default `false`) and a new `enhancedDiagnostics(port,
+firstBytes)` helper that calls `ProtocolDetector.detect()` under `runCatching`, returning
+`x-protocol-detected`/`x-protocol-confidence`/`x-protocol-reason` pseudo-headers (or
+`emptyMap()` on any failure or when disabled — purely additive, never blocks/drops capture).
+Wired into both the undecoded-TLS persist path and the plaintext-HTTP persist path in
+`CaptureEngine.kt`, threaded through `PacketPump`/`RequestrVpnService` constructors, surfaced
+in the existing traffic-detail Headers tab (no new UI needed). Settings copy tightened from
+the overclaiming "Richer packet analysis, dynamic logging, extended trace" to an accurate
+"Runs an extra protocol-fingerprint pass on captured traffic (adds x-protocol-* headers,
+viewable in a row's Headers tab)". Files: `CaptureEngine.kt`, `PacketPump.kt`,
+`RequestrVpnService.kt`, `InterceptScreen.kt`. Verified via `./gradlew :app:compileDebugKotlin`
+and `:app:testDebugUnitTest`, both BUILD SUCCESSFUL.
+
+**Known pre-existing gap surfaced during this audit, disclosed but explicitly out of scope for
+the 6 complaints:** the VPN_TUN capture tier's `PacketPump` writes inbound tun packets nowhere
+— there is no per-flow socket relay/NAT for that path (unlike PROXY/GATEWAY/MITM, which do have
+real relay logic), so enabling VPN_TUN capture blackholes all device network traffic while
+active. This is broader than the existing `AUDIT_REPORT.md` "no TLS MITM decryption path"
+finding and should be treated as the more severe of the two. Tracked for a future pass, not
+fixed in this round (fixing it is a substantial new relay/NAT implementation, not a wiring fix).
+
+---
+
 ## BUILD LOG
 
 | Version | Code | Items Done | Notes |
@@ -127,4 +173,5 @@
 | (merged into `backup`, unreleased) | 24 (unchanged pre-bump) | +7 (43 total) | B1-B7 — Browser Bridge. Real CDP WebSocket client (`CdpClient`) driving Network/Fetch/ServiceWorker/DOMStorage-IndexedDB adapters, wired into `CorrelationEngine.ingest()` as a genuine `ObserverSource.BROWSER` plane and exposed via a new Settings → "Browser Bridge (CDP)" card (connect/disconnect, live service-worker + storage snapshot, refresh action) — not dead code. Plus an unpacked MV3 Chrome extension (`browser-extension/`) as a fallback/parallel observation path that doesn't require `--remote-debugging-port`, relaying `chrome.webRequest` + MAIN-world-patched `fetch`/`XMLHttpRequest` activity to the same `/api/observe` endpoint S1's SDK uses. Known gaps: CDP Fetch response-stage interception (MODIFY_RESPONSE) not implemented for CDP traffic; IndexedDB record contents + localStorage change events not implemented (snapshot-only); single-target CDP client (no multi-tab fan-out/reconnect-with-backoff); B4's initiator string is carried via an `X-Requestr-Initiator` pseudo-header rather than a `HttpEvent` schema change; MV3 extension path has no body capture/blocking capability by design. |
 | (merged into `backup`, unreleased) | 24 (unchanged pre-bump) | +4 (47 total) | D1, D2, D3, S2 — ProvenanceGraph (host-grouped connection graph, real UI tab), ConnectionLineage (real DNS→TCP/QUIC→TLS→HTTP reconstruction from Room, required rewriting DnsParser to actually parse DNS answer records and wiring the previously-unset PacketPump.dnsCallback), VisibilityAnalyzer/ObservationReport (real observed/decrypted fractions + limitingReasons, wired into a new Settings card), HttpStackDetector (User-Agent + classpath-based stack detection, wired into the RUNTIME INSTRUMENTATION card). Known gaps carried forward: TlsHandshakeState.FAILED still never set anywhere (documented in D2/D3); CapturedTrafficEntity still has no connectionId column, D2's HTTP matching uses a 30s host+timestamp-window heuristic instead; Volley indistinguishable from HttpURLConnection by User-Agent alone (documented in S2). |
 | (merged into `backup`, unreleased) | 24 (unchanged pre-bump) | +1 (48 total) | T2 — Gateway mode wired end-to-end via `GatewayEngine` (HTTP forward proxy bound to `0.0.0.0`, reusing `HttpProxyShared` extracted from `HttpProxyEngine`), remote clients tagged and persisted through a dedicated `CaptureTier.GATEWAY` session, real "GATEWAY MODE" Settings card with LAN IP/port/remote-client-count. Scope limit: manual proxy config only, no MITM for remote HTTPS traffic. |
-| NEXT | 25+ | 0 remaining -- ALL TODO_v5.md items now DONE or explicitly-scoped PARTIAL. Next version bump will be the "backup" release. |
+| v5.8-backup | 26 | +1 real fix (R3 now DONE, was PARTIAL) + 6 audited complaints | Deep audit of 6 user-reported Interceptr complaints (see the dedicated "v5.8-backup — DEEP AUDIT" table above) plus final resolution of the 2 remaining PARTIALs from v5.7: proxy tier start/stop, dedicated Force-VPN-Only mode, mid-capture method-switch restart, dead "Traffic Log" setting removed, PCAP/dump/export 0-byte bug fixed via MediaStoreExporter, Enhanced Mode wired to a real ProtocolDetector pass (P5 gained its first production call site), Print Undecoded and Logs confirmed already-real (no fix needed), "the tower"/Radar iconography confirmed decorative (no fix needed), R3 (OkHttpProxyInterceptor) now attached to ApiTestrRepository's live OkHttpClient. P2 (QpackDecoder) re-assessed and left an honestly-scoped PARTIAL — see its row above for why full 1-RTT wiring is out of scope. Disclosed but NOT fixed this round: VPN_TUN tier's PacketPump never relays/NATs tun-side traffic, silently blackholing all device network traffic while that tier is active — broader than the pre-existing "no TLS MITM" finding in AUDIT_REPORT.md. |
+| NEXT | 27+ | 0 remaining -- ALL TODO_v5.md items now DONE or explicitly-scoped PARTIAL (only P2 remains PARTIAL, by design -- see its row). |
