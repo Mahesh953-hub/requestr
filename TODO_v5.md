@@ -13,7 +13,7 @@
 | C1 | ✅ DONE | Wire MITM into default path | `PreflightController.run()` defaults to `MITM_PROXY` when CA installed, VPN otherwise | Capture Setup → Record Mode (VPN/PROXY) |
 | C2 | ✅ DONE | System CA install via root | `CertificateAuthority.installToSystem()` — handles Android 14+ APEX and legacy paths | Settings → CA Root Certificate |
 | C3 | ✅ DONE | Regenerate CA button | `CertificateAuthority.regenerate()` — deletes + recreates + toast feedback | Settings → CA Root Certificate |
-| C4 | [~] PARTIAL | Feed decrypted bytes to capture log | MitmProxyEngine relays decrypted stream but doesn't persist to Room yet | MITM_PROXY via rule engine + parse-on-relay needed |
+| C4 | ✅ DONE | Feed decrypted bytes to capture log | `MitmProxyEngine.onDecryptedTransaction` callback wired in `PreflightController.mitmProxy()` → persists `CapturedTrafficEntity` into Room via `capturedTrafficDao().insert()` | MITM_PROXY via rule engine + parse-on-relay |
 | C5 | ✅ DONE | TLS discard fixed | `if (stream.isTls && !stream.decryptedByMitm) return` — allows MITM streams through | — |
 | C6 | ✅ DONE | wasDecrypted + isUndecoded markers | `wasDecrypted = true` when MITM-decrypted, `isUndecoded = true` on SNI-only rows | — |
 | C7 | ✅ DONE | decryptedTransactionCount | Added to `InterceptionState`, mutator `addDecryptedTransactions()` | — |
@@ -37,8 +37,8 @@
 | # | Status | Item | Files |
 |---|--------|------|-------|
 | P1 | ✅ DONE | HTTP/2 frame parser + HPACK decoder (RFC 7540/7541) | `interception/http/Http2Parser.kt` |
-| P2 | [~] PARTIAL | HTTP/3 QUIC semantic layer | `interception/quic/QuicParser.kt` — SNI extraction done; full session/frame parsing + QPACK not yet |
-| P3 | [ ] TODO | gRPC/Protobuf detector | `interception/grpc/GrpcDetector.kt` — needs HTTP/2 + protobuf varint parsing |
+| P2 | [~] PARTIAL | HTTP/3 QUIC semantic layer | Only `QuicParser.extractSni()` is wired (called from `PacketPump`). `QuicConnection`/`QuicStream`/`QpackDecoder` (session state machine + RFC 9204 QPACK static table) exist but have zero call sites anywhere in `app/src/main/java` outside their own files — still SNI-only, no real session/frame parsing |
+| P3 | ✅ DONE | gRPC/Protobuf detector | `interception/grpc/GrpcDetector.kt` + `ProtobufDecoder.kt` — HTTP/2-framed gRPC message detection (5-byte header, varint length), imported/used in `CaptureEngine.kt` (`grpcCalls`/`grpcDataBuffers`/`grpcStatuses` maps), unit-tested in `GrpcParserTests.kt` |
 | P4 | ✅ DONE | DoH/DoT detection | `interception/dns/DohDotDetector.kt` — port+method+content-type heuristics |
 | P5 | ✅ DONE | Protocol fingerprinting engine | `interception/ProtocolDetector.kt` — confidence scores (DETECTED/LIKELY/POSSIBLE/UNKNOWN) |
 
@@ -94,7 +94,7 @@
 
 | # | Status | Item | Files |
 |---|--------|------|-------|
-| M1 | ✅ DONE | TCP/UDP/QUIC connection entities | `Entities.kt` — TcpConnectionEntity, UdpFlowEntity, QuicConnectionEntity |
+| M1 | [~] PARTIAL | TCP/UDP/QUIC connection entities | `Entities.kt` — `TcpConnectionEntity`, `UdpFlowEntity`, `QuicConnectionEntity` are defined but **not registered** in `RequestrDatabase`'s `entities = [...]` list, have no DAOs, and have zero constructor call sites anywhere — dead code, not actually persisted |
 | M2 | [ ] TODO | TLS session/handshake/metadata entities | `interception/tls/TlsSession.kt` etc. |
 
 ### Provenance & Diagnostics
