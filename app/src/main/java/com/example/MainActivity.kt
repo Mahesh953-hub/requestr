@@ -176,6 +176,9 @@ class MainActivity : ComponentActivity() {
         com.example.plugin.PluginManager.scanExternalPlugins(applicationContext)
         // v4.0: Initialize Local API server (doesn't start it)
         com.example.api.LocalApiServer.init(applicationContext)
+        // T2: Initialize Gateway mode engine (doesn't start it -- see SettingsScreen's
+        // "GATEWAY MODE" card for the manual start/stop toggle).
+        com.example.interception.gateway.GatewayEngine.init(applicationContext)
         // v5.5 (R1+R3): register the HTTP-stack instrumentation adapters and start the
         // engine so RuntimeInstrumentationEngine is no longer fully dead code — it now
         // actually polls adapter events and feeds them into CorrelationEngine as
