@@ -136,16 +136,19 @@ fun NotesScreen(
                             }
                             val safeName = editTitle.ifBlank { "note" }.replace(Regex("[^a-zA-Z0-9._-]"), "_")
                             val fileName = "$safeName$ext"
-                            val exportDir = com.example.data.export.FileExporter.getExportFolder(notesContext)
-                            val file = java.io.File(exportDir, fileName)
-                            file.writeText(text)
+                            val mimeType = when (editFormat) {
+                                com.example.data.models.NoteFormatType.HTML -> "text/html"
+                                else -> "text/markdown"
+                            }
+                            // Complaint #5 fix: this used to write via a raw File in
+                            // getExportFolder() (Downloads/requestr on API 29+), which scoped
+                            // storage silently blocks -- the file never actually landed on disk.
+                            // Route through MediaStoreExporter like every other export writer.
+                            val target = com.example.data.export.MediaStoreExporter.writeText(
+                                notesContext, fileName, mimeType, text
+                            ) ?: return@launch
                             com.example.data.export.FileExporter.shareFile(
-                                notesContext, file,
-                                when (editFormat) {
-                                    com.example.data.models.NoteFormatType.HTML -> "text/html"
-                                    else -> "text/markdown"
-                                },
-                                "Exported: $editTitle"
+                                notesContext, target, mimeType, "Exported: $editTitle"
                             )
                         }
                     }) {

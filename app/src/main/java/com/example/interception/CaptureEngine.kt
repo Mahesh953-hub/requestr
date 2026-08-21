@@ -1,6 +1,8 @@
 package com.example.interception
 
+import android.content.Context
 import android.util.Log
+import com.example.data.export.MediaStoreExporter
 import com.example.data.local.CapturedTrafficEntity
 import com.example.data.local.InterceptRuleEntity
 import com.example.data.local.RequestrDatabase
@@ -36,24 +38,43 @@ import kotlinx.coroutines.runBlocking
  * - WebSocket message capture
  */
 class CaptureEngine(
+    private val context: Context,
     private val db: RequestrDatabase,
     private val sessionId: Long,
     var printUndecoded: Boolean = true,
     var dumpToFile: Boolean = false,
     var captureEnabled: Boolean = true,
 ) {
-    private val dumpFile: java.io.File? by lazy {
+    // Complaint #5 audit fix: this used to build a path via
+    // `Environment.getExternalStoragePublicDirectory(DIRECTORY_DOWNLOADS)` and open a raw
+    // `File`/`bufferedWriter()` on it. On API 29+ (this app's targetSdk is 36) scoped storage
+    // silently blocks that write, so "Dump to file" produced zero actual bytes on disk despite
+    // logging a path and never reporting an error. Now routed through [MediaStoreExporter],
+    // which uses `MediaStore.Downloads` on API 29+ (falling back to the old direct-File
+    // approach pre-29, where it still works).
+    private val dumpTarget: MediaStoreExporter.ExportTarget? by lazy {
         if (!dumpToFile) null else {
-            val dir = java.io.File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS), "requestr")
-            dir.mkdirs()
-            java.io.File(dir, "capture_${sessionId}_${System.currentTimeMillis()}.hex").also { Log.i(TAG, "Dump file: ${it.absolutePath}") }
+            val name = "capture_${sessionId}_${System.currentTimeMillis()}.hex"
+            MediaStoreExporter.create(context, name, "text/plain")?.also {
+                Log.i(TAG, "Dump target: Downloads/requestr/$name")
+            } ?: run {
+                Log.w(TAG, "Failed to create dump-to-file target $name")
+                null
+            }
         }
     }
-    private val dumpWriter: java.io.BufferedWriter? by lazy { dumpFile?.bufferedWriter() }
+    private val dumpWriter: java.io.BufferedWriter? by lazy {
+        dumpTarget?.let { target ->
+            runCatching { MediaStoreExporter.openOutputStream(context, target)?.bufferedWriter() }
+                .onFailure { e -> Log.w(TAG, "Failed to open dump writer: ${e.message}") }
+                .getOrNull()
+        }
+    }
     private val reassembler = TcpReassembler()
     private val pendingRequests = LinkedHashMap<String, ParsedHttpMessage>() // keyed by stream key
     // Streams that upgraded to WebSocket — subsequent bytes are WS frames (Fix #14)
     private val wsStreams = mutableSetOf<String>()
+
 
     // ── HTTP/2 / gRPC state ─────────────────────────────────────────────
     // Streams identified as HTTP/2 (plaintext h2c or MITM-decrypted h2).
@@ -177,7 +198,7 @@ class CaptureEngine(
                     }
                 }
                 // Dump to file if enabled
-                if (dumpFile != null) {
+                if (dumpTarget != null) {
                     try { dumpWriter?.appendLine("[${System.currentTimeMillis()}] TLS ${stream.sniHost ?: stream.dstIp}:${stream.dstPort} ← ${clientBytes.size}B → ${scHex(clientBytes.copyOfRange(0, minOf(128, clientBytes.size)))}"); dumpWriter?.flush() } catch (_: Exception) {}
                 }
                 stream.clientToServer.reset()

@@ -1120,9 +1120,10 @@ fun SettingsScreen(
                                     settingsScope.launch {
                                         runCatching {
                                             val pem = CertificateAuthority.exportPem(settingsContext)
-                                            val file = com.example.data.export.FileExporter.writeCaPem(settingsContext, pem)
+                                            val target = com.example.data.export.FileExporter.writeCaPem(settingsContext, pem)
+                                                ?: error("Failed to write requestr-ca.pem to Downloads/requestr/")
                                             com.example.data.export.FileExporter.shareFile(
-                                                settingsContext, file,
+                                                settingsContext, target,
                                                 "application/x-pem-file",
                                                 "requestr Root CA (PEM)"
                                             )
@@ -1151,9 +1152,10 @@ fun SettingsScreen(
                                         runCatching {
                                             val pem = CertificateAuthority.exportPem(settingsContext)
                                             val hash = CertificateAuthority.getSubjectHash(settingsContext)
-                                            val file = com.example.data.export.FileExporter.writeCaSystemHash(settingsContext, pem, hash)
+                                            val target = com.example.data.export.FileExporter.writeCaSystemHash(settingsContext, pem, hash)
+                                                ?: error("Failed to write $hash.0 to Downloads/requestr/")
                                             com.example.data.export.FileExporter.shareFile(
-                                                settingsContext, file,
+                                                settingsContext, target,
                                                 "application/x-x509-ca-cert",
                                                 "requestr CA ($hash.0)"
                                             )
@@ -1173,9 +1175,10 @@ fun SettingsScreen(
                                     settingsScope.launch {
                                         runCatching {
                                             val der = CertificateAuthority.exportDer(settingsContext)
-                                            val file = com.example.data.export.FileExporter.writeCaDer(settingsContext, der)
+                                            val target = com.example.data.export.FileExporter.writeCaDer(settingsContext, der)
+                                                ?: error("Failed to write requestr-ca.cert to Downloads/requestr/")
                                             com.example.data.export.FileExporter.shareFile(
-                                                settingsContext, file,
+                                                settingsContext, target,
                                                 "application/x-x509-ca-cert",
                                                 "requestr Root CA (DER)"
                                             )
@@ -1195,9 +1198,10 @@ fun SettingsScreen(
                                     settingsScope.launch {
                                         runCatching {
                                             val p12 = CertificateAuthority.exportP12(settingsContext)
-                                            val file = com.example.data.export.FileExporter.writeCaP12(settingsContext, p12)
+                                            val target = com.example.data.export.FileExporter.writeCaP12(settingsContext, p12)
+                                                ?: error("Failed to write requestr-ca.p12 to Downloads/requestr/")
                                             com.example.data.export.FileExporter.shareFile(
-                                                settingsContext, file,
+                                                settingsContext, target,
                                                 "application/x-pkcs12",
                                                 "requestr Root CA (PKCS#12)"
                                             )
@@ -1427,9 +1431,10 @@ fun SettingsScreen(
                                             }
                                         }
                                     ).toString(2)
-                                    val file = com.example.data.export.FileExporter.writeJson(settingsContext, json)
+                                    val target = com.example.data.export.FileExporter.writeJson(settingsContext, json)
+                                        ?: error("Failed to write traffic-log JSON to Downloads/requestr/")
                                     com.example.data.export.FileExporter.shareFile(
-                                        settingsContext, file,
+                                        settingsContext, target,
                                         "application/json",
                                         "requestr Traffic Log"
                                     )

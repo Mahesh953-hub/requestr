@@ -1067,9 +1067,10 @@ fun ApiTestrScreen(
                 }
                 kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
                     runCatching {
-                        val file = com.example.data.export.FileExporter.writeCurl(appContext, curl)
+                        val target = com.example.data.export.FileExporter.writeCurl(appContext, curl)
+                            ?: error("Failed to write cURL export to Downloads/requestr/")
                         com.example.data.export.FileExporter.shareFile(
-                            appContext, file,
+                            appContext, target,
                             "application/x-shellscript",
                             "cURL export"
                         )

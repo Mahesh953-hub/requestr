@@ -3,4 +3,16 @@
     <external-files-path
         name="exports"
         path="Documents/requestr/exports/" />
+    <!--
+      Complaint #5 fix: on API < 29, MediaStoreExporter.create() falls back to a raw File under
+      Environment.getExternalStoragePublicDirectory(DIRECTORY_DOWNLOADS)/requestr, i.e. the public
+      Download/requestr/ tree, NOT the app-scoped external-files-path above (which maps to
+      Android/data/<pkg>/files/Documents/requestr/exports/, a different directory entirely).
+      FileExporter.shareFile() calls FileProvider.getUriForFile() on that File, so a matching
+      <external-path> (rooted at Environment.getExternalStorageDirectory()) must be declared here
+      or sharing throws "Failed to find configured root" on pre-29 devices.
+    -->
+    <external-path
+        name="downloads_requestr"
+        path="Download/requestr/" />
 </paths>

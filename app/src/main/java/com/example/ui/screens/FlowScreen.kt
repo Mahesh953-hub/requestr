@@ -134,9 +134,10 @@ fun FlowScreen(
                                 nodes,
                                 connections
                             )
-                            val file = com.example.data.export.FileExporter.writeJson(flowContext, json)
+                            val target = com.example.data.export.FileExporter.writeJson(flowContext, json)
+                                ?: error("Failed to write flow export to Downloads/requestr/")
                             com.example.data.export.FileExporter.shareFile(
-                                flowContext, file,
+                                flowContext, target,
                                 "application/json",
                                 "Flow export"
                             )

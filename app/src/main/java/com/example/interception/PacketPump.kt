@@ -1,5 +1,6 @@
 package com.example.interception
 
+import android.content.Context
 import android.util.Log
 import com.example.data.interception.InterceptionStateRepository
 import com.example.data.local.QuicConnectionEntity
@@ -36,6 +37,7 @@ import kotlinx.coroutines.withContext
  * row. Counters reflect only bytes actually observed.
  */
 class PacketPump(
+    private val context: Context,
     private val input: FileInputStream,
     private val output: FileOutputStream,
     private val sessionId: Long,
@@ -67,7 +69,7 @@ class PacketPump(
     private val quicConnectionState = LinkedHashMap<String, com.example.interception.quic.QuicConnection>()
 
     /** TCP reassembly + HTTP/TLS pipeline. Feeds decoded transactions into Room. */
-    private val captureEngine = CaptureEngine(db, sessionId, printUndecoded, dumpToFile, captureEnabled)
+    private val captureEngine = CaptureEngine(context, db, sessionId, printUndecoded, dumpToFile, captureEnabled)
 
     /**
      * T1: PCAP export. [com.example.interception.packet.PacketCaptureEngine] is started/stopped

@@ -2,10 +2,9 @@ package com.example.interception
 
 import android.content.Context
 import android.util.Log
-import com.example.data.export.FileExporter
+import com.example.data.export.MediaStoreExporter
 import com.example.data.interception.RootType
 import java.io.File
-import java.io.FileOutputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -52,6 +51,13 @@ object RootModuleGenerator {
 
     // ── module generation ─────────────────────────────────────────────────
 
+    /**
+     * Generates the module zip and returns a human-readable description of where it landed
+     * (a Downloads/requestr/ display name), or null if generation failed. Currently unused by
+     * any UI screen (no caller wired the root-module-flash feature up yet), but fixed to use
+     * [MediaStoreExporter] like every other writer for the same complaint #5 reason: the old
+     * raw-File write into [FileExporter.getExportFolder] silently failed on API 29+.
+     */
     fun generateModule(context: Context): String? {
         val rootType = detectRootType()
         if (rootType == RootType.NONE) {
@@ -69,28 +75,36 @@ object RootModuleGenerator {
         ).format(java.util.Date())
 
         val moduleName = "requestr-module-$rootType-$timestamp"
-        val exportDir = FileExporter.getExportFolder(context)
-
-        if (!exportDir.exists()) exportDir.mkdirs()
-
-        val zipFile = File(exportDir, "$moduleName.zip")
+        val displayName = "$moduleName.zip"
 
         return runCatching {
-            ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
-                writeModuleProp(zos, rootType, moduleName)
-                writeCustomizeScript(zos, rootType)
-                writePostFsDataScript(zos)
-                writeServiceScript(zos)
-                writeCaInstallScript(zos)
-                writeEntry(zos, "system/etc/security/cacerts/requestr_ca.crt", caPem.toByteArray())
-                writeEntry(zos, "requestr-iptables.rules", buildIptablesRules().toByteArray())
+            val (target, stream) = MediaStoreExporter.createAndOpen(context, displayName, "application/zip")
+                ?: error("Failed to create $displayName in Downloads/requestr/")
+
+            var byteCount = 0L
+            stream.use { out ->
+                val counting = object : java.io.OutputStream() {
+                    override fun write(b: Int) { out.write(b); byteCount++ }
+                    override fun write(b: ByteArray, off: Int, len: Int) { out.write(b, off, len); byteCount += len }
+                }
+                ZipOutputStream(counting).use { zos ->
+                    writeModuleProp(zos, rootType, moduleName)
+                    writeCustomizeScript(zos, rootType)
+                    writePostFsDataScript(zos)
+                    writeServiceScript(zos)
+                    writeCaInstallScript(zos)
+                    writeEntry(zos, "system/etc/security/cacerts/requestr_ca.crt", caPem.toByteArray())
+                    writeEntry(zos, "requestr-iptables.rules", buildIptablesRules().toByteArray())
+                }
             }
 
-            Log.i(TAG, "Module generated: ${zipFile.absolutePath} (${zipFile.length()} bytes)")
-            zipFile.absolutePath
+            Log.i(TAG, "Module generated: Downloads/requestr/$displayName (${byteCount} bytes)")
+            "Downloads/requestr/$displayName"
         }.getOrElse { e ->
             Log.e(TAG, "Failed to generate module: ${e.message}")
-            zipFile.delete()
+            // Note: on failure a partially-written MediaStore entry may remain in
+            // Downloads/requestr/ (no File handle to delete anymore now that this writes via
+            // MediaStoreExporter) -- acceptable since this feature currently has no UI caller.
             null
         }
     }

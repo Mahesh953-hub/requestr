@@ -716,17 +716,18 @@ fun InterceptScreen(
             },
             onExportPcap = {
                 // T1: hand the last-written .pcap (from PacketCaptureEngine, populated by
-                // RequestrVpnService/PacketPump while a capture ran) to the system share sheet
-                // via the same FileProvider path used for HAR/CA exports elsewhere in this file.
-                com.example.interception.packet.PacketCaptureEngine.getLastFile()?.let { file ->
+                // RequestrVpnService/PacketPump while a capture ran) to the system share sheet.
+                // Complaint #5 fix: PacketCaptureEngine now writes via MediaStore, so this is an
+                // ExportTarget (a content:// Uri on API 29+) rather than a plain File.
+                com.example.interception.packet.PacketCaptureEngine.getLastExport()?.let { target ->
                     com.example.data.export.FileExporter.shareFile(
-                        screenContext, file,
+                        screenContext, target,
                         "application/vnd.tcpdump.pcap",
                         "requestr PCAP capture"
                     )
                 }
             },
-            hasPcapFile = com.example.interception.packet.PacketCaptureEngine.getLastFile() != null,
+            hasPcapFile = com.example.interception.packet.PacketCaptureEngine.getLastExport() != null,
             onDismiss = { showCaptureSetupSheet = false }
         )
     }
@@ -768,9 +769,10 @@ fun InterceptScreen(
                 screenScope.launch {
                     runCatching {
                         val pem = CertificateAuthority.exportPem(screenContext)
-                        val file = com.example.data.export.FileExporter.writeCaPem(screenContext, pem)
+                        val target = com.example.data.export.FileExporter.writeCaPem(screenContext, pem)
+                            ?: error("Failed to write requestr-ca.pem to Downloads/requestr/")
                         com.example.data.export.FileExporter.shareFile(
-                            screenContext, file,
+                            screenContext, target,
                             "application/x-pem-file",
                             "requestr Root CA (PEM)"
                         )
@@ -870,9 +872,10 @@ fun InterceptScreen(
                             val host = try {
                                 android.net.Uri.parse(item.url).host ?: "unknown"
                             } catch (_: Exception) { "unknown" }
-                            val file = com.example.data.export.FileExporter.writeHarBlocking(screenContext, har, host)
+                            val target = com.example.data.export.FileExporter.writeHarBlocking(screenContext, har, host)
+                                ?: error("Failed to write HAR export to Downloads/requestr/")
                             com.example.data.export.FileExporter.shareFile(
-                                screenContext, file,
+                                screenContext, target,
                                 "application/json",
                                 "requestr HAR export"
                             )

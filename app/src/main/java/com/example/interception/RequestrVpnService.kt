@@ -152,6 +152,7 @@ class RequestrVpnService : VpnService() {
 
                 pumpJob = scope.launch {
                     PacketPump(
+                        context = applicationContext,
                         input = FileInputStream(tun.fileDescriptor),
                         output = FileOutputStream(tun.fileDescriptor),
                         sessionId = newId,
