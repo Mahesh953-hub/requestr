@@ -3,17 +3,14 @@ package com.example.interception
 import android.util.Log
 import com.example.data.interception.CaptureMethod
 import com.example.data.interception.InterceptionStateRepository
+import com.example.interception.HttpProxyShared.copyToStream
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import java.io.InputStream
-import java.io.OutputStream
-import java.net.HttpURLConnection
 import java.net.ServerSocket
 import java.net.Socket
-import java.net.URL
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -25,6 +22,11 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * This is NOT a MITM — TLS traffic passes through as CONNECT tunnels.
  * MITM decryption requires a separate MitmProxyEngine with per-host cert generation.
+ *
+ * Request parsing / CONNECT tunneling / upstream forwarding is shared with
+ * [com.example.interception.gateway.GatewayEngine] (T2) via [HttpProxyShared] rather than
+ * duplicated — that engine reuses this same plumbing but binds to 0.0.0.0 and additionally
+ * accepts connections from OTHER LAN devices.
  */
 class HttpProxyEngine(
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
@@ -39,7 +41,6 @@ class HttpProxyEngine(
 
     companion object {
         private const val TAG = "HttpProxy"
-        private const val BUFFER_SIZE = 8192
     }
 
     fun start(port: Int = 0): Int {
@@ -86,7 +87,7 @@ class HttpProxyEngine(
                 val input = sock.getInputStream()
                 val output = sock.getOutputStream()
 
-                val requestLine = readLine(input) ?: return
+                val requestLine = HttpProxyShared.readLine(input) ?: return
                 val parts = requestLine.split(" ")
                 if (parts.size < 2) return
 
@@ -97,7 +98,7 @@ class HttpProxyEngine(
                 // Parse headers
                 val headers = mutableMapOf<String, String>()
                 while (true) {
-                    val line = readLine(input) ?: break
+                    val line = HttpProxyShared.readLine(input) ?: break
                     if (line.isEmpty()) break
                     val colon = line.indexOf(':')
                     if (colon > 0) {
@@ -108,7 +109,7 @@ class HttpProxyEngine(
                 val isConnect = method.equals("CONNECT", ignoreCase = true)
 
                 if (isConnect) {
-                    handleConnectTunnel(sock, rawUrl, output)
+                    HttpProxyShared.handleConnectTunnel(sock, rawUrl, output)
                 } else {
                     val bodyLen = headers["Content-Length"]?.toIntOrNull() ?: 0
                     val bodyBytes = if (bodyLen > 0) input.readNBytes(bodyLen) else ByteArray(0)
@@ -116,7 +117,7 @@ class HttpProxyEngine(
 
                     // Forward to upstream
                     val t0 = System.currentTimeMillis()
-                    val (status, respHeaders, respBody) = forwardRequest(rawUrl, method, headers, bodyStr)
+                    val (status, respHeaders, respBody) = HttpProxyShared.forwardRequest(rawUrl, method, headers, bodyStr)
                     val latency = System.currentTimeMillis() - t0
 
                     // Send response back
@@ -137,85 +138,5 @@ class HttpProxyEngine(
         } catch (e: Exception) {
             if (running.get()) Log.w(TAG, "Client handler error: ${e.message}")
         }
-    }
-
-    private fun handleConnectTunnel(client: Socket, target: String, output: OutputStream) {
-        val (host, port) = parseHostPort(target, 443)
-        output.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray())
-        output.flush()
-
-        Socket(host, port).use { upstream ->
-            val t1 = Thread { client.getInputStream().copyTo(upstream.getOutputStream(), BUFFER_SIZE) }
-            val t2 = Thread { upstream.getInputStream().copyTo(client.getOutputStream(), BUFFER_SIZE) }
-            t1.start(); t2.start()
-            t1.join(30_000); t2.join(30_000)
-        }
-    }
-
-    private fun forwardRequest(
-        rawUrl: String, method: String, reqHeaders: Map<String, String>, body: String
-    ): Triple<Int, Map<String, String>, String> {
-        val url = if (rawUrl.startsWith("http")) rawUrl else "http://$rawUrl"
-        return runCatching {
-            val conn = URL(url).openConnection() as HttpURLConnection
-            conn.requestMethod = method
-            conn.connectTimeout = 15_000
-            conn.readTimeout = 20_000
-            reqHeaders.forEach { (k, v) ->
-                if (!k.equals("Host", ignoreCase = true) && !k.equals("Proxy-Connection", ignoreCase = true)) {
-                    conn.setRequestProperty(k, v)
-                }
-            }
-            if (body.isNotEmpty() && method != "GET" && method != "HEAD") {
-                conn.doOutput = true
-                conn.outputStream.use { it.write(body.toByteArray()) }
-            }
-
-            val status = conn.responseCode
-            val respHeaders = conn.headerFields
-                .filterKeys { it != null }
-                .mapValues { it.value.joinToString(", ") }
-                .filterKeys { it != "Transfer-Encoding" }
-
-            val respBody = runCatching {
-                conn.inputStream.use { it.readBytes().toString(Charsets.UTF_8) }
-            }.getOrElse {
-                conn.errorStream?.use { it.readBytes().toString(Charsets.UTF_8) } ?: ""
-            }
-
-            Triple(status, respHeaders, respBody)
-        }.getOrElse { e ->
-            Triple(502, mapOf("X-Proxy-Error" to (e.message ?: "unknown")), "{\"error\":\"${e.message}\"}")
-        }
-    }
-
-    private fun readLine(input: InputStream): String? {
-        val sb = StringBuilder()
-        var prev = -1
-        while (true) {
-            val b = input.read()
-            if (b == -1) return sb.toString().ifEmpty { null }
-            if (b == '\n'.code && prev == '\r'.code) {
-                sb.setLength(sb.length - 1)
-                return sb.toString()
-            }
-            sb.append(b.toChar())
-            prev = b
-        }
-    }
-
-    private fun parseHostPort(target: String, defaultPort: Int): Pair<String, Int> {
-        val colon = target.lastIndexOf(':')
-        return if (colon > 0) {
-            target.substring(0, colon) to (target.substring(colon + 1).toIntOrNull() ?: defaultPort)
-        } else {
-            target to defaultPort
-        }
-    }
-
-    private fun InputStream.copyTo(out: OutputStream, bufSize: Int = BUFFER_SIZE) {
-        val buf = ByteArray(bufSize)
-        var n: Int
-        while (read(buf).also { n = it } != -1) { out.write(buf, 0, n) }
     }
 }

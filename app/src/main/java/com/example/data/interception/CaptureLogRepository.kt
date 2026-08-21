@@ -7,6 +7,7 @@ import com.example.data.local.RequestrDatabase
 import com.example.data.local.RuleAction
 import com.example.data.models.CapturedTrafficItem
 import com.example.data.models.HttpMethod
+import com.example.data.models.TrafficSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -187,6 +188,10 @@ internal fun CapturedTrafficEntity.toUiModel(): CapturedTrafficItem = CapturedTr
     isPinned = false,
     isBlocked = false,
     isModified = false,
+    // T2: rows written by GatewayEngine set sourceIp to the remote LAN client's address —
+    // surface that distinctly in the traffic list/detail sheet rather than as plain "Native".
+    trafficSource = if (sourceIp != null) TrafficSource.GATEWAY else TrafficSource.NATIVE,
+    tags = if (sourceIp != null) listOf("gateway:$sourceIp") else emptyList(),
 )
 
 private fun httpStatusMessage(code: Int): String = when (code) {

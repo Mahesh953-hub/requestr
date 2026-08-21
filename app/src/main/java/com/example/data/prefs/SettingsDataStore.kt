@@ -73,6 +73,12 @@ class SettingsDataStore(private val context: Context) {
     val dumpToFile: Flow<Boolean> = prefs.map { it[AppSettingsKeys.DUMP_TO_FILE] ?: false }
     val pcapEnabled: Flow<Boolean> = prefs.map { it[AppSettingsKeys.PCAP_ENABLED] ?: false }
 
+    /** T2: whether GatewayEngine (LAN proxy for remote devices) is enabled. */
+    val gatewayModeEnabled: Flow<Boolean> = prefs.map { it[AppSettingsKeys.GATEWAY_MODE_ENABLED] ?: false }
+
+    /** T2: port GatewayEngine listens on, bound to 0.0.0.0 so LAN clients can reach it. */
+    val gatewayPort: Flow<Int> = prefs.map { it[AppSettingsKeys.GATEWAY_PORT] ?: DEFAULT_GATEWAY_PORT }
+
     suspend fun setProxyPort(port: Int) {
         // Keep within the unprivileged, valid TCP range.
         val safe = port.coerceIn(1024, 65535)
@@ -119,8 +125,18 @@ class SettingsDataStore(private val context: Context) {
         store.edit { it[AppSettingsKeys.PCAP_ENABLED] = value }
     }
 
+    suspend fun setGatewayModeEnabled(value: Boolean) {
+        store.edit { it[AppSettingsKeys.GATEWAY_MODE_ENABLED] = value }
+    }
+
+    suspend fun setGatewayPort(port: Int) {
+        val safe = port.coerceIn(1024, 65535)
+        store.edit { it[AppSettingsKeys.GATEWAY_PORT] = safe }
+    }
+
     companion object {
         const val DEFAULT_PROXY_PORT = 9000
+        const val DEFAULT_GATEWAY_PORT = 8888
 
         @Volatile
         private var INSTANCE: SettingsDataStore? = null

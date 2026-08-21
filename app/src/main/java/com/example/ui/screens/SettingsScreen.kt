@@ -68,6 +68,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -472,6 +473,146 @@ fun SettingsScreen(
                         ) { checked ->
                             settingsScope.launch { interceptionDataStore.setRememberLastAppFilter(checked) }
                         }
+                    }
+                }
+            }
+
+            // Section 4.5 (T2): Gateway Mode — lets OTHER devices on the same LAN/hotspot
+            // configure this device as their HTTP proxy and have THEIR traffic captured
+            // through the same pipeline as on-device captures. Deliberately separate from
+            // Section 4 above: Gateway mode is NOT gated by PreflightController's
+            // CaptureMethod/ActiveTier resolution (which only covers this device's own
+            // traffic) — it is toggled directly via GatewayEngine.start()/stop(), same
+            // pattern as the "LOCAL REST API & CLI" LocalApiServer card below.
+            item {
+                SettingsSectionHeader("GATEWAY MODE")
+                GlassCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    backgroundColor = MaterialTheme.colorScheme.surface
+                ) {
+                    val gatewayRunning by com.example.interception.gateway.GatewayEngine.isRunningFlow.collectAsState()
+                    val gatewayRemoteClients by com.example.interception.gateway.GatewayEngine.remoteClientsFlow.collectAsState()
+                    val gatewayModeEnabledPref by interceptionDataStore.gatewayModeEnabled.collectAsState(initial = false)
+                    val gatewayPortPref by interceptionDataStore.gatewayPort.collectAsState(
+                        initial = com.example.data.prefs.SettingsDataStore.DEFAULT_GATEWAY_PORT
+                    )
+                    var gatewayPortInput by remember(gatewayPortPref) { mutableStateOf(gatewayPortPref.toString()) }
+                    val gatewayLanIp = remember(settingsContext, gatewayRunning) {
+                        com.example.interception.gateway.GatewayEngine.getLanIpAddress(settingsContext)
+                    }
+
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            "Let another device on this Wi-Fi/hotspot use this phone as its HTTP proxy. That device's traffic is captured into the same traffic log below, tagged \"Gateway\".",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column {
+                                Text(
+                                    if (gatewayRunning) "Running" else "Stopped",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    if (gatewayRunning) {
+                                        gatewayLanIp?.let { "Configure proxy: $it:${com.example.interception.gateway.GatewayEngine.port}" }
+                                            ?: "No LAN address found -- connect to Wi-Fi/hotspot first"
+                                    } else {
+                                        "Not listening"
+                                    },
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp,
+                                    color = if (gatewayRunning && gatewayLanIp != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = gatewayRunning,
+                                onCheckedChange = { checked ->
+                                    if (checked) {
+                                        val portToUse = gatewayPortInput.toIntOrNull() ?: gatewayPortPref
+                                        com.example.interception.gateway.GatewayEngine.start(settingsContext, portToUse)
+                                    } else {
+                                        com.example.interception.gateway.GatewayEngine.stop()
+                                    }
+                                    settingsScope.launch { interceptionDataStore.setGatewayModeEnabled(checked) }
+                                }
+                            )
+                        }
+
+                        Column {
+                            Text("Gateway Port", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                            Spacer(modifier = Modifier.height(4.dp))
+                            OutlinedTextField(
+                                value = gatewayPortInput,
+                                onValueChange = {
+                                    gatewayPortInput = it
+                                    it.toIntOrNull()?.let { p ->
+                                        settingsScope.launch { interceptionDataStore.setGatewayPort(p) }
+                                    }
+                                },
+                                enabled = !gatewayRunning,
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(10.dp),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                    unfocusedBorderColor = MaterialTheme.colorScheme.outline,
+                                    focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                                    unfocusedTextColor = MaterialTheme.colorScheme.onSurface
+                                )
+                            )
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "Remote clients observed: ${gatewayRemoteClients.size}",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            if (gatewayRunning && gatewayLanIp != null) {
+                                val clipboardManager = LocalClipboardManager.current
+                                val proxyConfigString = "$gatewayLanIp:${com.example.interception.gateway.GatewayEngine.port}"
+                                Row(
+                                    modifier = Modifier.clickable {
+                                        clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(proxyConfigString))
+                                    },
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(imageVector = Icons.Default.ContentCopy, contentDescription = "Copy", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Copy $proxyConfigString", fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
+                                }
+                            }
+                        }
+
+                        if (gatewayRemoteClients.isNotEmpty()) {
+                            Text(
+                                gatewayRemoteClients.joinToString(", "),
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        Text(
+                            "HTTP requests from that device are fully inspected. HTTPS (CONNECT) traffic passes through encrypted -- it shows up as a connection but its content isn't decrypted unless the remote device installs requestr's CA, the same way on-device MITM capture works.",
+                            fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }

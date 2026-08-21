@@ -38,6 +38,12 @@ data class CapturedTrafficEntity(
     val wasDecrypted: Boolean = false,
     /** True when this row is an SNI-only observation (no body decrypted). */
     val isUndecoded: Boolean = false,
+    /**
+     * T2 (Gateway mode): the remote LAN client's IP address, set only when this row was
+     * captured by [com.example.interception.gateway.GatewayEngine] proxying traffic that
+     * originated on ANOTHER device (not this one). Null for every other capture path.
+     */
+    val sourceIp: String? = null,
 )
 
 /**
@@ -46,8 +52,13 @@ data class CapturedTrafficEntity(
  * [SDK] marks sessions populated by third-party apps embedding the `requestr-sdk` Observer
  * module (see `RequestrObserver` + `LocalApiServer`'s `/api/observe`) rather than by this app's
  * own VPN/root/Shizuku capture engines.
+ *
+ * [GATEWAY] marks the single dedicated session used by
+ * [com.example.interception.gateway.GatewayEngine] for traffic proxied on behalf of OTHER
+ * devices on the same LAN/hotspot (T2), independent of whatever on-device VPN/root/Shizuku
+ * tier is (or isn't) simultaneously running.
  */
-enum class CaptureTier { NONE, VPN, SHIZUKU, ROOT, SDK }
+enum class CaptureTier { NONE, VPN, SHIZUKU, ROOT, SDK, GATEWAY }
 
 /**
  * One interception run. `packetCount` here is the real counter the Home card and status

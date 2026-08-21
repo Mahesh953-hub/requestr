@@ -202,6 +202,8 @@ enum class TrafficSource(val label: String) {
     WEBVIEW("WebView"),
     BROWSER("Browser"),
     FRIDA("Frida"),
+    /** T2: request was proxied on behalf of another device on the LAN via GatewayEngine. */
+    GATEWAY("Gateway"),
     UNKNOWN("Unknown"),
 }
 
