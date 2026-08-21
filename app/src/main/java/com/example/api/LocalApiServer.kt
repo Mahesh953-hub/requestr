@@ -6,6 +6,9 @@ import com.example.data.local.RequestrDatabase
 import com.example.data.repository.FlowRepository
 import com.example.data.repository.ToolsRepository
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -27,8 +30,17 @@ object LocalApiServer {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var appContext: Context? = null
 
-    @Volatile var isRunning: Boolean = false
-        private set
+    // Compose-observable: a plain @Volatile var never triggers recomposition because
+    // Compose's snapshot system only tracks State/StateFlow reads, not raw field reads.
+    // SettingsScreen's Switch previously read the old `isRunning` field directly, so the
+    // label + Switch state never updated after tapping it even though start()/stop() were
+    // toggling the server correctly underneath. Exposing a StateFlow lets the UI
+    // `collectAsState()` it and recompose immediately on start/stop.
+    private val _isRunning = MutableStateFlow(false)
+    val isRunningFlow: StateFlow<Boolean> = _isRunning.asStateFlow()
+
+    /** Backward-compatible synchronous snapshot (non-Compose-observable). */
+    val isRunning: Boolean get() = _isRunning.value
 
     @Volatile var port: Int = 9876
         private set
@@ -39,20 +51,20 @@ object LocalApiServer {
     }
 
     fun start(port: Int = 9876) {
-        if (isRunning || appContext == null) return
+        if (_isRunning.value || appContext == null) return
         this.port = port
-        isRunning = true
+        _isRunning.value = true
 
         serverJob = scope.launch {
             try {
                 serverSocket = ServerSocket(port, 10, java.net.InetAddress.getByName("127.0.0.1"))
                 Log.i(TAG, "API server started on 127.0.0.1:$port")
-                while (isActive && isRunning) {
+                while (isActive && _isRunning.value) {
                     try {
                         val client = serverSocket?.accept() ?: break
                         launch { handleClient(client) }
                     } catch (_: Exception) {
-                        if (isRunning) Log.w(TAG, "Accept interrupted")
+                        if (_isRunning.value) Log.w(TAG, "Accept interrupted")
                     }
                 }
             } catch (e: Exception) {
@@ -64,7 +76,7 @@ object LocalApiServer {
     }
 
     fun stop() {
-        isRunning = false
+        _isRunning.value = false
         try { serverSocket?.close() } catch (_: Exception) {}
         serverSocket = null
         serverJob?.cancel()

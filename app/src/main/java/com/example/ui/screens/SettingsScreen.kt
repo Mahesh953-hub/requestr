@@ -524,6 +524,11 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth(),
                     backgroundColor = MaterialTheme.colorScheme.surface
                 ) {
+                    // Compose-observable: collectAsState() on the StateFlow so the label
+                    // and Switch recompose immediately when start()/stop() flip the flag,
+                    // instead of reading the old plain @Volatile field which never
+                    // triggered recomposition.
+                    val apiServerRunning by com.example.api.LocalApiServer.isRunningFlow.collectAsState()
                     Column(modifier = Modifier.padding(14.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(imageVector = Icons.Default.Terminal, contentDescription = "Terminal", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
@@ -539,13 +544,13 @@ fun SettingsScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column {
-                                Text(if (com.example.api.LocalApiServer.isRunning) "Server running on port 9876" else "Server stopped", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
-                                if (com.example.api.LocalApiServer.isRunning) {
+                                Text(if (apiServerRunning) "Server running on port 9876" else "Server stopped", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
+                                if (apiServerRunning) {
                                     Text("curl http://127.0.0.1:9876/api/ping", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = MaterialTheme.colorScheme.primary)
                                 }
                             }
                             Switch(
-                                checked = com.example.api.LocalApiServer.isRunning,
+                                checked = apiServerRunning,
                                 onCheckedChange = { checked ->
                                     if (checked) {
                                         com.example.api.LocalApiServer.start(9876)
