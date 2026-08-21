@@ -1903,7 +1903,8 @@ fun CaptureSetupBottomSheet(
             }
 
             Text(
-                text = "Capture tier is chosen automatically: root first, then Shizuku, then VPN.",
+                text = "Capture tier is chosen automatically: root first, then Shizuku, then VPN -- unless " +
+                    "\"Force VPN Only\" is selected under Settings \u2192 Default Capture Tier, which always uses VPN.",
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -1929,6 +1930,26 @@ fun CaptureSetupBottomSheet(
                     }
                 }
             }
+
+            // Complaint #1 fix: PROXY mode silently resolves to one of two different engines
+            // (HttpProxyEngine or MitmProxyEngine) depending on whether the CA is installed --
+            // previously this choice was entirely invisible to the user. Root/Shizuku also
+            // override Record Mode entirely (PreflightController.run()), so surface the real
+            // resolution here rather than letting "PROXY" imply a single fixed engine.
+            Spacer(modifier = Modifier.height(4.dp))
+            val resolvedMethodNote = when {
+                capabilities.isRootUsable -> "Root is available, so capture will actually run as: Root iptables (Record Mode is ignored while root is usable)."
+                capabilities.isShizukuUsable -> "Shizuku is available, so capture will actually run as: Shizuku Tun (Record Mode is ignored while Shizuku is usable)."
+                captureRecordMode == "PROXY" && capabilities.isCaInstalled -> "Will actually run as: MITM Proxy (CA installed, so HTTPS is decrypted)."
+                captureRecordMode == "PROXY" -> "Will actually run as: HTTP Proxy (CA not installed, so HTTPS bodies cannot be decrypted -- install the CA under Certificate to upgrade to MITM Proxy)."
+                capabilities.isCaInstalled -> "Will actually run as: MITM Proxy (CA installed; VPN Record Mode auto-upgrades to MITM when a CA is present)."
+                else -> "Will actually run as: VPN Tun."
+            }
+            Text(
+                text = resolvedMethodNote,
+                fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
 
             Spacer(modifier = Modifier.height(10.dp))
 
