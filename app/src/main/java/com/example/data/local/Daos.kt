@@ -24,6 +24,17 @@ interface CapturedTrafficDao {
     @Query("SELECT * FROM captured_traffic WHERE sessionId = :sessionId ORDER BY timestamp DESC")
     fun observeBySession(sessionId: Long): Flow<List<CapturedTrafficEntity>>
 
+    // D2: one-shot read used by ConnectionLineage to find the HTTP transaction(s) that belong to
+    // a given TCP/TLS connection. CapturedTrafficEntity has no connectionId column (HTTP is
+    // parsed out of a TCP stream after the fact, and MITM'd HTTP never sees the raw 5-tuple), so
+    // the join has to be by host + a timestamp window instead -- same heuristic CorrelationEngine
+    // already uses for cross-plane matching, not a new invented convention.
+    @Query(
+        "SELECT * FROM captured_traffic WHERE sessionId = :sessionId AND host = :host " +
+            "AND timestamp BETWEEN :fromTs AND :toTs ORDER BY timestamp ASC"
+    )
+    suspend fun getByHostInWindow(sessionId: Long, host: String, fromTs: Long, toTs: Long): List<CapturedTrafficEntity>
+
     @Query("SELECT * FROM captured_traffic WHERE host LIKE '%' || :query || '%' OR url LIKE '%' || :query || '%' ORDER BY timestamp DESC")
     fun search(query: String): Flow<List<CapturedTrafficEntity>>
 
@@ -272,6 +283,13 @@ interface TlsSessionDao {
 
     @Query("SELECT * FROM tls_sessions WHERE tlsSessionId = :tlsSessionId")
     suspend fun getById(tlsSessionId: String): TlsSessionEntity?
+
+    // D2: MitmProxyEngine keys tlsSessionId as "$host:$port" (the CONNECT target), which is a
+    // different convention from the undecoded path's tlsSessionId == TcpStream.key. Given only a
+    // TCP connection's destIp/destPort we can't always reconstruct the MITM key, so
+    // ConnectionLineage also looks TLS sessions up by SNI host within the same capture session.
+    @Query("SELECT * FROM tls_sessions WHERE sessionId = :sessionId AND sniHost = :sniHost ORDER BY establishedAt DESC LIMIT 1")
+    suspend fun getLatestBySniHost(sessionId: Long, sniHost: String): TlsSessionEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(item: TlsSessionEntity)
