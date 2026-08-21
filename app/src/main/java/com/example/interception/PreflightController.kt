@@ -49,6 +49,7 @@ object PreflightController {
         val prefs = SettingsDataStore.get(context)
         val recordMode = prefs.captureRecordMode.first() // "VPN" or "PROXY"
         val enhanced = prefs.enhancedMode.first()
+        val tierPreference = prefs.captureTierPreference.first()
 
         // Step 1 — app selection check (before consent so we never prompt then fail)
         val filterMode = prefs.appFilterMode.first()
@@ -76,6 +77,15 @@ object PreflightController {
         val port: Int
 
         when {
+            // FORCE_VPN_ONLY (Settings > Default Capture Tier) must win over everything else,
+            // including genuine Root/Shizuku availability -- that is the entire point of the
+            // preference (APP_v2.md Bug: FORCE_VPN_ONLY was persisted by SettingsScreen but
+            // never read here, so choosing it had zero effect on which tier actually ran).
+            tierPreference == CaptureTierPreference.FORCE_VPN_ONLY -> {
+                method = CaptureMethod.VPN_TUN
+                tier = ActiveTier.VPN
+                port = 0
+            }
             // Root/Shizuku always win
             capabilities.isRootUsable -> {
                 method = CaptureMethod.ROOT_IPTABLES
