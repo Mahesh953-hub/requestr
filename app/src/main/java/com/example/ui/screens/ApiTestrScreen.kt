@@ -458,20 +458,36 @@ fun ApiTestrScreen(
             ) {
                 when (requestTab) {
                     0 -> {
-                        // Query Params Table
+                        // Query Params: Table + JSON + optional raw text editor
                         KeyValueEditorTable(
                             title = "Query Parameters",
                             items = reqState.queryParams,
                             onItemsChanged = { reqState = reqState.copy(queryParams = it) }
                         )
+                        var showRawEditor by remember { mutableStateOf(false) }
+                        RawEditorToggleRow(showRawEditor) { showRawEditor = !showRawEditor }
+                        if (showRawEditor) {
+                            RawTextEditor(
+                                items = reqState.queryParams,
+                                onItemsChanged = { reqState = reqState.copy(queryParams = it) }
+                            )
+                        }
                     }
                     1 -> {
-                        // Headers Table
+                        // Headers: Table + JSON + optional raw text editor
                         KeyValueEditorTable(
                             title = "Request Headers",
                             items = reqState.headers,
                             onItemsChanged = { reqState = reqState.copy(headers = it) }
                         )
+                        var showRawEditor by remember { mutableStateOf(false) }
+                        RawEditorToggleRow(showRawEditor) { showRawEditor = !showRawEditor }
+                        if (showRawEditor) {
+                            RawTextEditor(
+                                items = reqState.headers,
+                                onItemsChanged = { reqState = reqState.copy(headers = it) }
+                            )
+                        }
                     }
                     2 -> {
                         // Request Body
@@ -1491,4 +1507,54 @@ fun TimelineMetricBar(label: String, time: String, fraction: Float, color: Color
             )
         }
     }
+}
+
+// ─── Raw Text Editor for Query/Headers ───────────────────────────────
+
+@Composable
+private fun RawEditorToggleRow(expanded: Boolean, onToggle: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(if (expanded) "Raw Editor — visible below" else "Raw Editor", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(if (expanded) "Hide" else "Show", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary, modifier = Modifier.clickable { onToggle() })
+    }
+}
+
+@Composable
+private fun RawTextEditor(
+    items: List<KeyValueItem>,
+    onItemsChanged: (List<KeyValueItem>) -> Unit
+) {
+    var rawText by remember(items) {
+        mutableStateOf(items.joinToString("\n") { if (it.isEnabled) "${it.key}: ${it.value}" else "// ${it.key}: ${it.value}" })
+    }
+
+    Text(
+        "One per line. Prefix // to disable. Two-way sync with table above.",
+        fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+    )
+    Spacer(modifier = Modifier.height(4.dp))
+    OutlinedTextField(
+        value = rawText,
+        onValueChange = { newText ->
+            rawText = newText
+            val lines = newText.split("\n")
+            val updated = lines.mapNotNull { line ->
+                if (line.isBlank()) null
+                else {
+                    val disabled = line.startsWith("//")
+                    val content = if (disabled) line.removePrefix("//").trim() else line
+                    val parts = content.split(":", limit = 2)
+                    if (parts.size == 2) KeyValueItem(key = parts[0].trim(), value = parts[1].trim(), isEnabled = !disabled) else null
+                }
+            }
+            onItemsChanged(updated)
+        },
+        textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.fillMaxWidth().height(120.dp)
+    )
 }
