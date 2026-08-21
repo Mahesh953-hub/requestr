@@ -29,7 +29,9 @@ import androidx.room.TypeConverters
     // v5.6 (M1): bumped 5 -> 6 to register TcpConnectionEntity/UdpFlowEntity/QuicConnectionEntity,
     // which previously existed as dead code with no table backing them.
     // v5.6 (M2): bumped 6 -> 7 to register TlsSessionEntity (TLS handshake/cipher/cert model).
-    version = 7,
+    // v5.6 (T2): bumped 7 -> 8 to add CapturedTrafficEntity.sourceIp + CaptureTier.GATEWAY,
+    // used by GatewayEngine to tag/group traffic proxied on behalf of remote LAN devices.
+    version = 8,
     exportSchema = false,
 )
 @TypeConverters(RequestrTypeConverters::class)
