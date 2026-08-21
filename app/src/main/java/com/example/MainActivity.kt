@@ -186,6 +186,12 @@ class MainActivity : ComponentActivity() {
         com.example.runtime.RuntimeInstrumentationEngine.registerAdapter(com.example.runtime.http.CronetAdapter())
         com.example.runtime.RuntimeInstrumentationEngine.registerAdapter(com.example.runtime.http.WebViewAdapter())
         com.example.runtime.RuntimeInstrumentationEngine.start(applicationContext)
+        // B1-B6: initialize the Browser Bridge manager with an app context so its
+        // CdpFetchAdapter (B3) can read the shared intercept_rules Room table. This does NOT
+        // connect to Chrome yet -- that only happens when the user taps "Connect" in
+        // Settings -> Browser Bridge (see SettingsScreen.kt), same lazy-start pattern as
+        // LocalApiServer.init() above.
+        com.example.browser.BrowserBridgeManager.init(applicationContext)
         // v3.2 Part C (C1): loads persisted Environments from the unified DataStore (was never
         // initialised before C1, so ApiTestrScreen's EnvironmentRepository.active() always read
         // the in-memory seed defaults only — now it reflects migrated + newly-saved data too).
