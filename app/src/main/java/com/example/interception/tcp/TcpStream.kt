@@ -48,6 +48,13 @@ data class TcpStream(
     /** SNI hostname extracted from TLS ClientHello, if any. */
     var sniHost: String? = null
 
+    /** Cumulative bytes accepted client→server / server→client (survives buffer drains). */
+    var totalBytesSent: Long = 0
+    var totalBytesReceived: Long = 0
+
+    /** Retransmission count — incremented when a segment fails the sequence-continuity check. */
+    var retransmissions: Int = 0
+
     companion object {
         fun keyFrom(srcIp: String, srcPort: Int, dstIp: String, dstPort: Int, protocol: Int = 6): String =
             "$protocol|$srcIp:$srcPort>$dstIp:$dstPort"
@@ -70,17 +77,18 @@ class DirectionBuffer(val label: String) {
      * of bytes accepted (may be less than [len] if the buffer is full).
      */
     fun write(seq: Long, data: ByteArray, offset: Int, len: Int): Int {
+        val isRetransmission = expectedSeq != -1L && seq < expectedSeq
         if (expectedSeq == -1L) {
             expectedSeq = seq
         }
 
         val accepted = minOf(len, buffer.size - writePos)
-        if (accepted <= 0) return 0
+        if (accepted <= 0) return if (isRetransmission) -1 else 0
 
         System.arraycopy(data, offset, buffer, writePos, accepted)
         writePos += accepted
         expectedSeq = seq + len
-        return accepted
+        return if (isRetransmission) -1 else accepted
     }
 
     /** Snapshot of the buffered bytes without draining. */

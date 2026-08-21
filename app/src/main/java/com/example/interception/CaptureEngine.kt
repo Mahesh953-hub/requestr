@@ -4,6 +4,7 @@ import android.util.Log
 import com.example.data.local.CapturedTrafficEntity
 import com.example.data.local.InterceptRuleEntity
 import com.example.data.local.RequestrDatabase
+import com.example.data.local.TcpConnectionEntity
 import com.example.data.repository.SettingsRepository
 import com.example.interception.grpc.GrpcDetector
 import com.example.interception.grpc.ProtobufDecoder
@@ -69,6 +70,41 @@ class CaptureEngine(
     var transactionCount = 0
         private set
 
+    // ── M1: TCP connection persistence ──────────────────────────────────
+    // Last time (ms) each stream key's connection row was written to Room, so we upsert on
+    // state changes immediately but otherwise only every [TCP_PERSIST_INTERVAL_MS].
+    private val lastTcpPersist = mutableMapOf<String, Long>()
+
+    private fun persistTcpConnection(stream: TcpStream) {
+        val now = System.currentTimeMillis()
+        val last = lastTcpPersist[stream.key]
+        val dueForRefresh = last == null || now - last >= TCP_PERSIST_INTERVAL_MS
+        if (!dueForRefresh && !stream.closed) return
+
+        lastTcpPersist[stream.key] = now
+        val entity = TcpConnectionEntity(
+            connectionId = stream.key,
+            sessionId = sessionId,
+            srcIp = stream.srcIp,
+            destIp = stream.dstIp,
+            srcPort = stream.srcPort,
+            destPort = stream.dstPort,
+            state = when {
+                stream.closed -> "CLOSED"
+                stream.handshakeComplete -> "ESTABLISHED"
+                else -> "SYN_SENT"
+            },
+            establishedAt = stream.establishedAt,
+            closedAt = if (stream.closed) now else null,
+            bytesSent = stream.totalBytesSent,
+            bytesReceived = stream.totalBytesReceived,
+            retransmissions = stream.retransmissions,
+        )
+        runCatching {
+            runBlocking { db.tcpConnectionDao().upsert(entity) }
+        }.onFailure { e -> Log.w(TAG, "Failed to persist TCP connection: ${e.message}") }
+    }
+
     // ── entry point ─────────────────────────────────────────────────────
 
     /**
@@ -80,6 +116,11 @@ class CaptureEngine(
      */
     fun ingest(packet: ByteArray, length: Int, version: Int) {
         val stream = reassembler.feed(packet, length, version) ?: return
+
+        // M1: persist/refresh this stream's TCP connection row. Throttled per-stream so we don't
+        // hit Room on every packet — only on state transitions (new/closed) or every couple of
+        // seconds of activity.
+        persistTcpConnection(stream)
 
         // Only inspect streams that have some data buffered
         if (stream.clientToServer.isEmpty() && stream.serverToClient.isEmpty()) return
@@ -524,6 +565,10 @@ class CaptureEngine(
         grpcCalls.keys.removeAll { it !in activeKeys }
         grpcDataBuffers.keys.removeAll { it !in activeKeys }
         grpcStatuses.keys.removeAll { it !in activeKeys }
+        // M1: drop throttling bookkeeping for streams evicted by the reassembler. Their last
+        // known state was already persisted either on close (immediate write in
+        // persistTcpConnection) or at the last TCP_PERSIST_INTERVAL_MS tick.
+        lastTcpPersist.keys.removeAll { it !in activeKeys }
     }
 
     fun streamCount(): Int = reassembler.streamCount()
@@ -597,5 +642,8 @@ class CaptureEngine(
 
         /** Cap on a buffered partial gRPC message per stream (defends against OOM). */
         private const val MAX_GRPC_BUFFER = 8 * 1024 * 1024
+
+        /** M1: how often (ms) an unchanged TCP connection row gets refreshed in Room. */
+        private const val TCP_PERSIST_INTERVAL_MS = 2_000L
     }
 }

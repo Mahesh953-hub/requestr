@@ -20,9 +20,14 @@ import androidx.room.TypeConverters
         SavedApiRequestEntity::class,
         FlowNodeEntity::class,
         FlowConnectionEntity::class,
+        TcpConnectionEntity::class,
+        UdpFlowEntity::class,
+        QuicConnectionEntity::class,
     ],
     // v3.5: bumped 4 -> 5 for FlowNodeEntity + FlowConnectionEntity (Flow persistence).
-    version = 5,
+    // v5.6 (M1): bumped 5 -> 6 to register TcpConnectionEntity/UdpFlowEntity/QuicConnectionEntity,
+    // which previously existed as dead code with no table backing them.
+    version = 6,
     exportSchema = false,
 )
 @TypeConverters(RequestrTypeConverters::class)
@@ -34,6 +39,9 @@ abstract class RequestrDatabase : RoomDatabase() {
     abstract fun savedApiRequestDao(): SavedApiRequestDao
     abstract fun flowNodeDao(): FlowNodeDao
     abstract fun flowConnectionDao(): FlowConnectionDao
+    abstract fun tcpConnectionDao(): TcpConnectionDao
+    abstract fun udpFlowDao(): UdpFlowDao
+    abstract fun quicConnectionDao(): QuicConnectionDao
 
     companion object {
         @Volatile

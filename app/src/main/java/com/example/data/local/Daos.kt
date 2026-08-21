@@ -190,3 +190,70 @@ interface FlowConnectionDao {
     @Query("DELETE FROM flow_connections WHERE flowId = :flowId")
     suspend fun clearFlow(flowId: String = "default")
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// v5 Connection model DAOs (M1) — TCP/UDP/QUIC connection tracking
+// ═══════════════════════════════════════════════════════════════════
+
+@Dao
+interface TcpConnectionDao {
+    @Query("SELECT * FROM tcp_connections WHERE sessionId = :sessionId ORDER BY establishedAt DESC")
+    fun observeBySession(sessionId: Long): Flow<List<TcpConnectionEntity>>
+
+    @Query("SELECT * FROM tcp_connections ORDER BY establishedAt DESC")
+    fun observeAll(): Flow<List<TcpConnectionEntity>>
+
+    @Query("SELECT * FROM tcp_connections WHERE connectionId = :connectionId")
+    suspend fun getById(connectionId: String): TcpConnectionEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(item: TcpConnectionEntity)
+
+    @Query("SELECT COUNT(*) FROM tcp_connections WHERE sessionId = :sessionId")
+    fun observeCount(sessionId: Long): Flow<Int>
+
+    @Query("DELETE FROM tcp_connections WHERE sessionId = :sessionId")
+    suspend fun clearSession(sessionId: Long)
+}
+
+@Dao
+interface UdpFlowDao {
+    @Query("SELECT * FROM udp_flows WHERE sessionId = :sessionId ORDER BY startedAt DESC")
+    fun observeBySession(sessionId: Long): Flow<List<UdpFlowEntity>>
+
+    @Query("SELECT * FROM udp_flows ORDER BY startedAt DESC")
+    fun observeAll(): Flow<List<UdpFlowEntity>>
+
+    @Query("SELECT * FROM udp_flows WHERE flowId = :flowId")
+    suspend fun getById(flowId: String): UdpFlowEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(item: UdpFlowEntity)
+
+    @Query("SELECT COUNT(*) FROM udp_flows WHERE sessionId = :sessionId")
+    fun observeCount(sessionId: Long): Flow<Int>
+
+    @Query("DELETE FROM udp_flows WHERE sessionId = :sessionId")
+    suspend fun clearSession(sessionId: Long)
+}
+
+@Dao
+interface QuicConnectionDao {
+    @Query("SELECT * FROM quic_connections WHERE sessionId = :sessionId ORDER BY establishedAt DESC")
+    fun observeBySession(sessionId: Long): Flow<List<QuicConnectionEntity>>
+
+    @Query("SELECT * FROM quic_connections ORDER BY establishedAt DESC")
+    fun observeAll(): Flow<List<QuicConnectionEntity>>
+
+    @Query("SELECT * FROM quic_connections WHERE connectionId = :connectionId")
+    suspend fun getById(connectionId: String): QuicConnectionEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(item: QuicConnectionEntity)
+
+    @Query("SELECT COUNT(*) FROM quic_connections WHERE sessionId = :sessionId")
+    fun observeCount(sessionId: Long): Flow<Int>
+
+    @Query("DELETE FROM quic_connections WHERE sessionId = :sessionId")
+    suspend fun clearSession(sessionId: Long)
+}

@@ -2,7 +2,9 @@ package com.example.interception
 
 import android.util.Log
 import com.example.data.interception.InterceptionStateRepository
+import com.example.data.local.QuicConnectionEntity
 import com.example.data.local.RequestrDatabase
+import com.example.data.local.UdpFlowEntity
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
@@ -11,6 +13,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 
 /**
@@ -49,6 +52,10 @@ class PacketPump(
 
     /** Distinct flows seen recently, keyed by 5-tuple, with last-seen timestamps for expiry. */
     private val activeFlows = LinkedHashMap<String, Long>()
+
+    /** M1: last time (ms) each UDP flow / QUIC connection row was upserted, to throttle writes. */
+    private val lastUdpPersist = mutableMapOf<String, Long>()
+    private val quicConnections = mutableSetOf<String>()
 
     /** TCP reassembly + HTTP/TLS pipeline. Feeds decoded transactions into Room. */
     private val captureEngine = CaptureEngine(db, sessionId, printUndecoded, dumpToFile, captureEnabled)
@@ -133,15 +140,72 @@ class PacketPump(
         }
 
         // Fix #26 (TODO): extract SNI from QUIC Initial packets on UDP port 443.
+        // M1/P2: persist a QuicConnectionEntity whenever we successfully decode a QUIC Initial's
+        // SNI — this is real session identity (5-tuple + SNI + version), not a placeholder.
         if (protocol == 17 && (sPort == 443 || dPort == 443)) {
             val quicPayload = packet.copyOfRange(ihl + 8, length)
             val sni = com.example.interception.quic.QuicParser.extractSni(quicPayload)
             if (sni != null) {
                 Log.i(TAG, "QUIC SNI: $sni (${if (dPort == 443) "outbound" else "inbound"})")
+                persistQuicConnection(src, sPort, dst, dPort, sni, quicPayload)
             }
         }
 
+        // M1: general UDP flow tracking (byte counters), covering all UDP traffic including
+        // DNS/QUIC above -- those get the specialized entities too, but every UDP 5-tuple gets
+        // a udp_flows row so "Connections" surfaces the full picture.
+        if (protocol == 17) {
+            persistUdpFlow(src, sPort, dst, dPort, length - ihl - 8)
+        }
+
         trackFlow("$protocol|$src:$sPort>$dst:$dPort")
+    }
+
+    /** M1: upsert a udp_flows row, throttled per 5-tuple so we don't hit Room every packet. */
+    private fun persistUdpFlow(src: String, sPort: Int, dst: String, dPort: Int, payloadLen: Int) {
+        val flowId = "17|$src:$sPort>$dst:$dPort"
+        val now = System.currentTimeMillis()
+        val last = lastUdpPersist[flowId]
+        if (last != null && now - last < UDP_PERSIST_INTERVAL_MS) return
+        lastUdpPersist[flowId] = now
+        val entity = UdpFlowEntity(
+            flowId = flowId,
+            sessionId = sessionId,
+            srcIp = src, destIp = dst,
+            srcPort = sPort, destPort = dPort,
+            transportProtocol = if (sPort == 443 || dPort == 443) "quic" else if (sPort == 53 || dPort == 53) "dns" else "udp",
+            startedAt = now,
+            byteCount = payloadLen.toLong().coerceAtLeast(0),
+        )
+        runCatching {
+            runBlocking { db.udpFlowDao().upsert(entity) }
+        }.onFailure { e -> Log.w(TAG, "Failed to persist UDP flow: ${e.message}") }
+    }
+
+    /** M1/P2: upsert a quic_connections row once per connection (identified by 5-tuple). */
+    private fun persistQuicConnection(src: String, sPort: Int, dst: String, dPort: Int, sni: String, quicPayload: ByteArray) {
+        val connectionId = "quic|$src:$sPort>$dst:$dPort"
+        if (!quicConnections.add(connectionId)) return // already persisted for this 5-tuple
+        val version = if (quicPayload.size >= 5) {
+            ((quicPayload[1].toInt() and 0xFF) shl 24) or
+                ((quicPayload[2].toInt() and 0xFF) shl 16) or
+                ((quicPayload[3].toInt() and 0xFF) shl 8) or
+                (quicPayload[4].toInt() and 0xFF)
+        } else null
+        val entity = QuicConnectionEntity(
+            connectionId = connectionId,
+            sessionId = sessionId,
+            srcIp = src, destIp = dst,
+            srcPort = sPort, destPort = dPort,
+            sniHost = sni,
+            alpn = null, // ALPN extension parsing not yet extracted from the ClientHello (P2 follow-up)
+            quicVersion = version,
+            dstConnectionId = connectionId,
+            establishedAt = System.currentTimeMillis(),
+        )
+        runCatching {
+            runBlocking { db.quicConnectionDao().upsert(entity) }
+        }.onFailure { e -> Log.w(TAG, "Failed to persist QUIC connection: ${e.message}") }
     }
 
     private fun parseIpv6(packet: ByteArray, length: Int) {
@@ -183,6 +247,11 @@ class PacketPump(
 
         captureEngine.prune()
 
+        // M1: bound the UDP/QUIC bookkeeping maps -- drop entries for flows no longer active so
+        // long-running sessions don't leak memory keyed by every 5-tuple ever seen.
+        lastUdpPersist.entries.removeAll { it.value < cutoff }
+        if (quicConnections.size > MAX_TRACKED_FLOWS) quicConnections.clear()
+
         InterceptionStateRepository.updateCounters(
             packetCount = packetCount,
             bytesTransferred = byteCount,
@@ -210,5 +279,6 @@ class PacketPump(
         const val FLUSH_INTERVAL_MS = 1000L
         const val FLOW_TTL_MS = 30_000L
         const val MAX_TRACKED_FLOWS = 512
+        const val UDP_PERSIST_INTERVAL_MS = 2_000L
     }
 }

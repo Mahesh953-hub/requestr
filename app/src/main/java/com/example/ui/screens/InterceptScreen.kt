@@ -245,6 +245,9 @@ fun InterceptScreen(
     var showCertSheet by remember { mutableStateOf(false) }
     var showRootShizukuSheet by remember { mutableStateOf(false) }
     var showCaptureSetupSheet by remember { mutableStateOf(false) }
+    // M1: connection model (TCP/UDP/QUIC) surfaced via a dedicated sheet, mirroring the pattern
+    // used for the other capture-related sheets on this screen.
+    var showConnectionsSheet by remember { mutableStateOf(false) }
 
     val filteredTraffic = remember(capturedTraffic, searchQuery, selectedMethodFilter) {
         val baseFiltered = if (selectedMethodFilter == null) capturedTraffic
@@ -280,6 +283,13 @@ fun InterceptScreen(
                 title = "Interceptr",
                 onMiniSettings = onMiniSettings,
                 actions = {
+                    IconButton(onClick = { showConnectionsSheet = true }) {
+                        Icon(
+                            imageVector = Icons.Default.SettingsInputAntenna,
+                            contentDescription = "Connections",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
                     IconButton(onClick = { showCaptureSetupSheet = true }) {
                         Icon(
                             imageVector = Icons.Default.Tune,
@@ -702,6 +712,16 @@ fun InterceptScreen(
                 showCaptureSetupSheet = false
             },
             onDismiss = { showCaptureSetupSheet = false }
+        )
+    }
+
+    // M1: Connections sheet -- TCP/UDP/QUIC connection rows persisted by the capture engine for
+    // the current (or most recent) session. Genuinely empty until a capture has run.
+    if (showConnectionsSheet) {
+        ConnectionsBottomSheet(
+            context = screenContext,
+            sessionId = interceptionState.sessionId,
+            onDismiss = { showConnectionsSheet = false }
         )
     }
 
@@ -1459,6 +1479,180 @@ fun TrafficItemCard(
     }
 }
 
+
+/**
+ * M1: Connections sheet.
+ *
+ * Surfaces the TCP/UDP/QUIC connection rows the capture engine persists into Room
+ * ([com.example.data.local.TcpConnectionEntity], [com.example.data.local.UdpFlowEntity],
+ * [com.example.data.local.QuicConnectionEntity]) -- this is the UI half of M1, proving the
+ * entities are not just defined but genuinely written and readable.
+ *
+ * Falls back to "every connection ever recorded" when there's no active session id, so the
+ * sheet still shows real history right after a capture stops.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ConnectionsBottomSheet(
+    context: android.content.Context,
+    sessionId: Long?,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var selectedTab by remember { mutableIntStateOf(0) }
+
+    val tcpConnections by remember(sessionId) {
+        if (sessionId != null) com.example.data.interception.ConnectionsRepository.observeTcpConnections(context, sessionId)
+        else com.example.data.interception.ConnectionsRepository.observeAllTcpConnections(context)
+    }.collectAsState(initial = emptyList())
+
+    val udpFlows by remember(sessionId) {
+        if (sessionId != null) com.example.data.interception.ConnectionsRepository.observeUdpFlows(context, sessionId)
+        else com.example.data.interception.ConnectionsRepository.observeAllUdpFlows(context)
+    }.collectAsState(initial = emptyList())
+
+    val quicConnections by remember(sessionId) {
+        if (sessionId != null) com.example.data.interception.ConnectionsRepository.observeQuicConnections(context, sessionId)
+        else com.example.data.interception.ConnectionsRepository.observeAllQuicConnections(context)
+    }.collectAsState(initial = emptyList())
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Connections", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                IconButton(onClick = onDismiss) {
+                    Icon(imageVector = Icons.Default.Close, contentDescription = "Close", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            Text(
+                if (sessionId != null) "Live 5-tuple state from the running capture session"
+                else "No active session -- showing every connection ever recorded",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            TabRow(
+                selectedTabIndex = selectedTab,
+                containerColor = Color.Transparent,
+                indicator = { tabPositions ->
+                    SecondaryIndicator(
+                        modifier = Modifier.tabIndicatorOffset(tabPositions[selectedTab]),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            ) {
+                listOf(
+                    "TCP (${tcpConnections.size})",
+                    "UDP (${udpFlows.size})",
+                    "QUIC (${quicConnections.size})",
+                ).forEachIndexed { idx, title ->
+                    Tab(
+                        selected = selectedTab == idx,
+                        onClick = { selectedTab = idx },
+                        text = { Text(title, fontSize = 11.sp, fontWeight = if (selectedTab == idx) FontWeight.Bold else FontWeight.Normal) }
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Box(modifier = Modifier.fillMaxWidth().height(360.dp)) {
+                when (selectedTab) {
+                    0 -> {
+                        if (tcpConnections.isEmpty()) {
+                            EmptyConnectionsState("No TCP connections recorded yet. Start a capture and browse to see live 5-tuples here.")
+                        } else {
+                            LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                items(tcpConnections) { conn ->
+                                    GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)) {
+                                        Column(modifier = Modifier.padding(10.dp)) {
+                                            Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                                                Text("${conn.srcIp}:${conn.srcPort} → ${conn.destIp}:${conn.destPort}", fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                                                BadgePill(text = conn.state, color = if (conn.state == "CLOSED") 0xFF64748B else 0xFF10B981)
+                                            }
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Text(
+                                                "sent ${conn.bytesSent}B · recv ${conn.bytesReceived}B · retx ${conn.retransmissions}",
+                                                fontSize = 10.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    1 -> {
+                        if (udpFlows.isEmpty()) {
+                            EmptyConnectionsState("No UDP flows recorded yet.")
+                        } else {
+                            LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                items(udpFlows) { flow ->
+                                    GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)) {
+                                        Column(modifier = Modifier.padding(10.dp)) {
+                                            Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                                                Text("${flow.srcIp}:${flow.srcPort} → ${flow.destIp}:${flow.destPort}", fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                                                BadgePill(text = flow.transportProtocol.uppercase(), color = 0xFF0EA5E9)
+                                            }
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Text("${flow.byteCount}B observed", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    2 -> {
+                        if (quicConnections.isEmpty()) {
+                            EmptyConnectionsState("No QUIC connections recorded yet. QUIC session identity is extracted from the Initial packet's SNI.")
+                        } else {
+                            LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                items(quicConnections) { conn ->
+                                    GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)) {
+                                        Column(modifier = Modifier.padding(10.dp)) {
+                                            Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                                                Text(conn.sniHost ?: "${conn.destIp}:${conn.destPort}", fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                                                BadgePill(text = "v${conn.quicVersion?.toString(16) ?: "?"}", color = 0xFF8B5CF6)
+                                            }
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Text(
+                                                "${conn.srcIp}:${conn.srcPort} → ${conn.destIp}:${conn.destPort}",
+                                                fontSize = 10.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmptyConnectionsState(message: String) {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Text(message, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(24.dp))
+    }
+}
 
 /**
  * Capture setup sheet.

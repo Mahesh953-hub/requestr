@@ -112,10 +112,14 @@ class TcpReassembler {
         // Decide direction: client→server vs server→client
         // In a typical capture, the first packet we see is from the client.
         // Heuristic: if srcIp matches the stream's srcIp, it's client→server.
-        val dir = if (srcIp == stream.srcIp) stream.clientToServer else stream.serverToClient
+        val isClientToServer = srcIp == stream.srcIp
+        val dir = if (isClientToServer) stream.clientToServer else stream.serverToClient
         val accepted = dir.write(seqNum, packet, payloadStart, payloadLen)
-        if (accepted > 0) {
+        if (accepted == -1) {
+            stream.retransmissions++
+        } else if (accepted > 0) {
             stream.establishedAt = System.currentTimeMillis()
+            if (isClientToServer) stream.totalBytesSent += accepted else stream.totalBytesReceived += accepted
         }
         return stream
     }
