@@ -85,9 +85,9 @@ class ServiceWorkerObserver(private val client: CdpClient) {
                 val regId = v.optString("registrationId")
                 if (regId.isEmpty()) continue
                 val existing = current[regId] ?: WorkerRegistration(regId, "")
-                existing.scriptUrl = v.optString("scriptURL", existing.scriptUrl)
-                existing.runningStatus = v.optString("runningStatus", existing.runningStatus)
-                existing.status = v.optString("status", existing.status)
+                existing.scriptUrl = v.optString("scriptURL", existing.scriptUrl ?: "").ifEmpty { existing.scriptUrl }
+                existing.runningStatus = v.optString("runningStatus", existing.runningStatus ?: "").ifEmpty { existing.runningStatus }
+                existing.status = v.optString("status", existing.status ?: "").ifEmpty { existing.status }
                 existing.updatedAt = System.currentTimeMillis()
                 current[regId] = existing
             }

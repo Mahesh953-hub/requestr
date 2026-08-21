@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>requestr Browser Bridge</title>
+  <style>
+    body {
+      width: 260px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      margin: 0;
+      padding: 12px 14px;
+      background: #111827;
+      color: #e5e7eb;
+    }
+    h1 {
+      font-size: 14px;
+      margin: 0 0 8px 0;
+      color: #f9fafb;
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 4px 0;
+      font-size: 12px;
+    }
+    .label { color: #9ca3af; }
+    .value { font-weight: 600; }
+    .dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 6px;
+    }
+    .dot.ok { background: #10b981; }
+    .dot.fail { background: #ef4444; }
+    .dot.unknown { background: #6b7280; }
+    .error {
+      margin-top: 8px;
+      font-size: 11px;
+      color: #f87171;
+      word-break: break-word;
+    }
+    input {
+      width: 100%;
+      box-sizing: border-box;
+      background: #1f2937;
+      border: 1px solid #374151;
+      color: #e5e7eb;
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-size: 12px;
+      margin-top: 6px;
+    }
+    button {
+      width: 100%;
+      margin-top: 8px;
+      background: #4f46e5;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .hint {
+      margin-top: 10px;
+      font-size: 10px;
+      color: #6b7280;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <h1>requestr Browser Bridge</h1>
+
+  <div class="row">
+    <span class="label">requestr app</span>
+    <span class="value"><span id="statusDot" class="dot unknown"></span><span id="statusText">checking...</span></span>
+  </div>
+  <div class="row">
+    <span class="label">Events relayed</span>
+    <span class="value" id="relayedCount">0</span>
+  </div>
+  <div class="row">
+    <span class="label">Queued (unsent)</span>
+    <span class="value" id="queuedCount">0</span>
+  </div>
+
+  <div id="errorBox" class="error" style="display:none"></div>
+
+  <label class="label" for="apiBase">Local API server address</label>
+  <input id="apiBase" type="text" placeholder="http://localhost:9876" />
+  <button id="saveBtn">Save</button>
+
+  <div class="hint">
+    Requires requestr's Local API server toggle to be on (Settings &rarr; Local API Server,
+    default port 9876) on the Android device/emulator reachable at the address above.
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
