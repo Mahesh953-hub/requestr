@@ -176,6 +176,16 @@ class MainActivity : ComponentActivity() {
         com.example.plugin.PluginManager.scanExternalPlugins(applicationContext)
         // v4.0: Initialize Local API server (doesn't start it)
         com.example.api.LocalApiServer.init(applicationContext)
+        // v5.5 (R1+R3): register the HTTP-stack instrumentation adapters and start the
+        // engine so RuntimeInstrumentationEngine is no longer fully dead code — it now
+        // actually polls adapter events and feeds them into CorrelationEngine as
+        // RUNTIME-plane ObservationEvents. Cronet/WebView adapters just report presence
+        // (pollEvents() stays empty for them — no native hook exists yet); OkHttp reports
+        // real request/response pairs recorded by OkHttpProxyInterceptor.
+        com.example.runtime.RuntimeInstrumentationEngine.registerAdapter(com.example.runtime.http.OkHttpAdapter())
+        com.example.runtime.RuntimeInstrumentationEngine.registerAdapter(com.example.runtime.http.CronetAdapter())
+        com.example.runtime.RuntimeInstrumentationEngine.registerAdapter(com.example.runtime.http.WebViewAdapter())
+        com.example.runtime.RuntimeInstrumentationEngine.start(applicationContext)
         // v3.2 Part C (C1): loads persisted Environments from the unified DataStore (was never
         // initialised before C1, so ApiTestrScreen's EnvironmentRepository.active() always read
         // the in-memory seed defaults only — now it reflects migrated + newly-saved data too).

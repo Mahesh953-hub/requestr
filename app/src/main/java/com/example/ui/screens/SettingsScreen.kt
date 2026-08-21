@@ -566,6 +566,43 @@ fun SettingsScreen(
                 }
             }
 
+            // Section 5.5b: Runtime Instrumentation (R1+R3) — honest status for the adapter
+            // pattern engine. Started automatically at app launch (see MainActivity); this
+            // card just surfaces real state instead of leaving the whole subsystem invisible.
+            item {
+                SettingsSectionHeader("RUNTIME INSTRUMENTATION")
+                GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surface) {
+                    val instrumentationState by com.example.runtime.RuntimeInstrumentationEngine.stateFlow.collectAsState()
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(imageVector = Icons.Default.Terminal, contentDescription = "Runtime", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("HTTP Stack Adapters", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            when (instrumentationState) {
+                                com.example.runtime.InstrumentationState.ACTIVE -> "Active — polling registered adapters for real request/response events."
+                                com.example.runtime.InstrumentationState.FAILED -> "No adapter reported active (Cronet/WebView only detect class presence)."
+                                com.example.runtime.InstrumentationState.INITIALIZING -> "Starting..."
+                                com.example.runtime.InstrumentationState.STOPPED -> "Stopped."
+                                com.example.runtime.InstrumentationState.NOT_STARTED -> "Not started."
+                            },
+                            fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            "Adapters: " + com.example.runtime.RuntimeInstrumentationEngine.adapterNames().joinToString(", ").ifEmpty { "none registered" },
+                            fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            "OkHttp adapter reports requestr's own outbound calls made via OkHttpProxyInterceptor. Third-party apps need the Requestr Observer SDK (see sdk/) to report their own traffic.",
+                            fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
             // Section 5.6: Plugin Manager
             item {
                 SettingsSectionHeader("PLUGIN MANAGER")
