@@ -116,6 +116,7 @@ fun ApiTestrScreen(
     var reqState by remember(currentRequest) { mutableStateOf(currentRequest) }
     var responseData by remember { mutableStateOf<ApiResponseData?>(null) }
     var isLoading by remember { mutableStateOf(false) }
+    var wsConnected by remember { mutableStateOf(false) }
 
     // v3.4 Part C — C3 (Test assertions / test runner): results of the last "Run Tests" pass
     // against `responseData`. Cleared whenever a fresh Send/Run happens so stale pass/fail
@@ -266,6 +267,14 @@ fun ApiTestrScreen(
                     ) {
                         if (isLoading) {
                             CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
+                        } else if (reqState.method == HttpMethod.WS && wsConnected) {
+                            Icon(imageVector = Icons.Default.Close, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Disconnect", fontWeight = FontWeight.Bold)
+                        } else if (reqState.method == HttpMethod.WS) {
+                            Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Connect", fontWeight = FontWeight.Bold)
                         } else {
                             Icon(imageVector = Icons.Default.PlayArrow, contentDescription = "Play", modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(4.dp))
@@ -291,6 +300,18 @@ fun ApiTestrScreen(
                                 .padding(horizontal = 10.dp, vertical = 10.dp)
                         ) {
                             MethodBadge(method = reqState.method, fontSize = 12)
+                        }
+
+                        // WS connection status indicator
+                        if (reqState.method == HttpMethod.WS) {
+                            val (wsLabel, wsColor) = when {
+                                wsConnected -> "Connected" to Color(0xFF10B981)
+                                isLoading -> "Connecting..." to Color(0xFFF59E0B)
+                                else -> "Disconnected" to MaterialTheme.colorScheme.onSurfaceVariant
+                            }
+                            Text(wsLabel, fontSize = 9.sp, fontWeight = FontWeight.Bold, color = wsColor,
+                                modifier = Modifier.padding(start = 6.dp).clip(RoundedCornerShape(4.dp))
+                                    .background(wsColor.copy(alpha = 0.12f)).padding(horizontal = 5.dp, vertical = 1.dp))
                         }
 
                         DropdownMenu(

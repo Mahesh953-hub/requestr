@@ -194,3 +194,44 @@ data class FlowConnectionEntity(
     val toPort: String = "input",
     val createdAt: Long = System.currentTimeMillis(),
 )
+
+// ═══════════════════════════════════════════════════════════════════
+// v5 Connection model entities
+// ═══════════════════════════════════════════════════════════════════
+
+@Entity(tableName = "tcp_connections", indices = [Index("sessionId"), Index("destIp")])
+data class TcpConnectionEntity(
+    @PrimaryKey val connectionId: String,
+    val sessionId: Long,
+    val srcIp: String, val destIp: String,
+    val srcPort: Int, val destPort: Int,
+    val state: String = "ESTABLISHED",      // SYN_SENT, ESTABLISHED, CLOSE_WAIT, etc.
+    val establishedAt: Long = System.currentTimeMillis(),
+    val closedAt: Long? = null,
+    val bytesSent: Long = 0, val bytesReceived: Long = 0,
+    val retransmissions: Int = 0,
+)
+
+@Entity(tableName = "udp_flows", indices = [Index("sessionId"), Index("destIp")])
+data class UdpFlowEntity(
+    @PrimaryKey val flowId: String,
+    val sessionId: Long,
+    val srcIp: String, val destIp: String,
+    val srcPort: Int, val destPort: Int,
+    val transportProtocol: String = "udp",   // udp, quic, dns, etc.
+    val startedAt: Long = System.currentTimeMillis(),
+    val byteCount: Long = 0,
+)
+
+@Entity(tableName = "quic_connections", indices = [Index("sessionId"), Index("sniHost")])
+data class QuicConnectionEntity(
+    @PrimaryKey val connectionId: String,
+    val sessionId: Long,
+    val srcIp: String, val destIp: String,
+    val srcPort: Int, val destPort: Int,
+    val sniHost: String?,
+    val alpn: String?,
+    val quicVersion: Int?,
+    val dstConnectionId: String,
+    val establishedAt: Long = System.currentTimeMillis(),
+)

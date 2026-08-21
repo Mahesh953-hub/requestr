@@ -606,6 +606,24 @@ fun SettingsScreen(
                 }
             }
 
+            // Section 5.7: Device Capabilities
+            item {
+                SettingsSectionHeader("DEVICE CAPABILITIES")
+                GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surface) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        val caps = capabilities
+                        Text("Android: ${android.os.Build.VERSION.RELEASE} (API ${android.os.Build.VERSION.SDK_INT})", fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurface)
+                        Text("Arch: ${android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown"}", fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurface)
+                        Text("Root: ${if (caps.isRootUsable) "✓ available" else "✗ unavailable"}", fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = if (caps.isRootUsable) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Shizuku: ${if (caps.isShizukuUsable) "✓ available" else "✗ unavailable"}", fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = if (caps.isShizukuUsable) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("CA installed: ${if (caps.isCaInstalled) "✓ yes" else "✗ no"}", fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = if (caps.isCaInstalled) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text("Capability Matrix:", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface)
+                        Text("VPN: ✓ | MITM: ${if (caps.isCaInstalled) "✓" else "✗"} | System CA: ${if (caps.isRootUsable) "✓" else "✗"} | Runtime: ${if (caps.isShizukuUsable) "conditional" else "✗"}", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+
             // Section 6: Root CA Certificate Details
             item {
                 SettingsSectionHeader("CA ROOT CERTIFICATE & TRUST STORE")

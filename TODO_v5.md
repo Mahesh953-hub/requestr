@@ -8,7 +8,7 @@
 
 ### Interception Pipeline — Make It Actually Work
 
-- [ ] **C1** — Wire `MitmProxyEngine` into default capture path. CA installed → MITM_PROXY auto-selected. File: `PreflightController.kt`
+- [x] **C1** — Wire `MitmProxyEngine` into default capture path. CA installed → MITM_PROXY auto-selected. File: `PreflightController.kt`
 - [ ] **C2** — System CA installation via root. `CertificateAuthority.installToSystem()`. Handles Android 14+ APEX path. File: `CertificateAuthority.kt`
 - [ ] **C3** — Regenerate CA button in Settings + Intercept screen. File: `SettingsScreen.kt`, `InterceptScreen.kt`
 - [ ] **C4** — Feed decrypted bytes from `MitmProxyEngine` to `CaptureLogRepository`. Parse HTTP on decrypted stream. File: `MitmProxyEngine.kt`
