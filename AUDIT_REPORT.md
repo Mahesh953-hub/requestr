@@ -375,4 +375,32 @@ The following spec requirements **could not be verified** in this source-only au
 
 ---
 
+## Addendum — v5.8-backup deep audit (2026-08-21, `backup` branch)
+
+The findings above are a point-in-time snapshot of `main` @ v3.4 (2026-08-20) and are stale —
+most CRITICAL items (#1 no-MITM, #2 cosmetic tier selection, #3 CA never used, #4
+CaptureMethodWatcher watches nothing) were subsequently fixed in `backup`'s v5.0-v5.7 work
+(real `MitmProxyEngine`, `HttpProxyEngine`, `RootIptablesEngine` wiring; `CaptureMethodWatcher`
+gated on `decryptedTransactionCount`). See `TODO_v5.md` for the current, maintained item-by-item
+status. This addendum records one **new CRITICAL-severity finding** surfaced during a v5.8-backup
+deep audit of the Interceptr screen that supersedes/broadens the old #1 in severity:
+
+**CRITICAL (NEW) — VPN_TUN tier silently blackholes all device traffic while active.**
+`PacketPump`'s tun `output: FileOutputStream` (the write side back into the kernel's TUN device)
+has no code anywhere that writes to it — there is no per-flow socket relay/NAT for the VPN_TUN
+capture path, unlike the PROXY/GATEWAY/MITM tiers which do have real upstream-relay logic
+(`HttpProxyShared`, `MitmProxyEngine`'s dual-leg relay). `PacketPump` reads every packet off the
+tun fd for inspection (real, that part works) but never forwards it onward, so once
+`RequestrVpnService`'s VPN is established and routes all device traffic through the tun,
+**every packet is read and then dropped** — the device loses all network connectivity while
+VPN_TUN capture is active, for every app, not just the one(s) being observed. This is broader in
+impact than the old #1 finding ("no TLS MITM decryption") because it affects plaintext HTTP,
+DNS, and non-HTTP traffic too, not just HTTPS bodies — and it's a full outage, not a visibility
+gap. Not fixed as part of the v5.8-backup deep audit (fixing it means implementing a real
+per-flow relay/NAT layer for the VPN_TUN path, a substantial new subsystem, not a wiring fix) —
+tracked here for a future pass. See `TODO_v5.md`'s v5.8-backup DEEP AUDIT table for the same
+note in the maintained tracker.
+
+---
+
 *End of Deep Audit Report*
