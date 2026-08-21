@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.PlayArrow
@@ -741,6 +742,51 @@ fun SettingsScreen(
                             "OkHttp adapter reports requestr's own outbound calls made via OkHttpProxyInterceptor. Third-party apps need the Requestr Observer SDK (see sdk/) to report their own traffic.",
                             fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+
+                        // S2: HTTP client stack auto-detection. Two independent, honestly-labelled
+                        // signals -- see HttpStackDetector.kt doc for why they can't be merged
+                        // into one number: classpath presence (requestr's own process only) and
+                        // a per-request User-Agent classification of what was actually captured
+                        // this session (ambiguous/custom UAs fall to UNKNOWN, never guessed).
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                        Text("HTTP Stack Detection", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        val classpathStacks = remember { com.example.runtime.http.HttpStackDetector.detectAvailableOnClasspath() }
+                        Text(
+                            "On requestr's classpath: " + classpathStacks.joinToString(", ") { it.label },
+                            fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        val stackDiagSessionId = InterceptionStateRepository.state.collectAsState().value.sessionId
+                        val stackReport by produceState<com.example.runtime.http.StackDetectionReport?>(initialValue = null, stackDiagSessionId) {
+                            value = if (stackDiagSessionId != null) {
+                                runCatching { com.example.runtime.http.HttpStackDetector.analyzeSession(settingsContext, stackDiagSessionId) }.getOrNull()
+                            } else {
+                                null
+                            }
+                        }
+                        val sr = stackReport
+                        when {
+                            stackDiagSessionId == null -> {
+                                Text("No active/recorded capture session to classify yet.", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            sr == null -> {
+                                Text("Classifying session $stackDiagSessionId…", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            sr.totalRequests == 0 -> {
+                                Text("Session ${sr.sessionId}: no requests captured yet.", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            else -> {
+                                Text(
+                                    "Session ${sr.sessionId} (${sr.totalRequests} req, by default User-Agent): " +
+                                        sr.countsByStack.entries.joinToString(", ") { (stack, count) -> "${stack.label}=$count" },
+                                    fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    "Volley shares HttpURLConnection's default User-Agent and can't be told apart from it by header alone; UNKNOWN means a custom/overridden User-Agent, not a detection failure.",
+                                    fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -932,6 +978,73 @@ fun SettingsScreen(
                         Spacer(modifier = Modifier.height(4.dp))
                         Text("Capability Matrix:", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface)
                         Text("VPN: ✓ | MITM: ${if (caps.isCaInstalled) "✓" else "✗"} | System CA: ${if (caps.isRootUsable) "✓" else "✗"} | Runtime: ${if (caps.isShizukuUsable) "conditional" else "✗"}", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+
+            // Section 5.8: Observation Report (D3) — honest fraction-of-traffic-observed
+            // summary for the active/most-recent capture session, computed by
+            // VisibilityAnalyzer from real persisted rows (no synthetic/demo numbers).
+            item {
+                SettingsSectionHeader("OBSERVATION REPORT")
+                GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surface) {
+                    val diagSessionId = InterceptionStateRepository.state.collectAsState().value.sessionId
+                    val report by produceState<com.example.diagnostics.ObservationReport?>(initialValue = null, diagSessionId) {
+                        value = if (diagSessionId != null) {
+                            runCatching { com.example.diagnostics.VisibilityAnalyzer.analyze(settingsContext, diagSessionId) }.getOrNull()
+                        } else {
+                            null
+                        }
+                    }
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(imageVector = Icons.Default.Visibility, contentDescription = "Observation", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("What did requestr actually see?", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        val r = report
+                        when {
+                            diagSessionId == null -> {
+                                Text("No active/recorded capture session yet.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            r == null -> {
+                                Text("Analyzing session $diagSessionId…", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            r.totalConnections == 0 -> {
+                                Text("Session ${r.sessionId}: no TCP/QUIC connections recorded yet.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            else -> {
+                                Text(
+                                    "Session ${r.sessionId} · ${r.totalConnections} connection(s), ${r.udpFlowCount} UDP flow(s)",
+                                    fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    "TLS decrypted: ${r.tlsDecrypted}/${r.tlsTotal} (${"%.0f".format(r.tlsDecryptedFraction * 100)}%) · SNI-only: ${r.tlsSniOnly} · reported FAILED: ${r.tlsFailedReported}",
+                                    fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    "HTTP decoded: ${r.httpDecrypted}/${r.httpTotal} · undecoded: ${r.httpUndecoded} · plaintext: ${r.httpPlaintext}",
+                                    fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    "Connections reaching HTTP: ${r.connectionsWithHttpDecoded}/${r.totalConnections} (${"%.0f".format(r.httpCoverageFraction * 100)}%) · reaching TLS: ${r.connectionsWithTlsObserved}/${r.totalConnections}",
+                                    fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    "DNS: ${r.dnsResponses} response(s), ${r.dnsResolvedWithIps} resolved to an IP (${"%.0f".format(r.dnsResolutionFraction * 100)}%) of ${r.dnsQueries} query(ies)",
+                                    fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface
+                                )
+                                if (r.limitingReasons.isNotEmpty()) {
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Text("Why not more:", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface)
+                                    r.limitingReasons.forEach { reason ->
+                                        Text("• $reason", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 2.dp))
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

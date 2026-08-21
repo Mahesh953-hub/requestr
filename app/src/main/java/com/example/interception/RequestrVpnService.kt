@@ -156,6 +156,13 @@ class RequestrVpnService : VpnService() {
                         output = FileOutputStream(tun.fileDescriptor),
                         sessionId = newId,
                         db = db,
+                        // D2: previously DnsParser.parse() ran on every UDP:53 packet and the
+                        // result was only Log.d'd -- dnsCallback was declared on PacketPump but
+                        // never set by any caller, so DNS was parsed and discarded. Wiring it
+                        // here is what makes DNS a real first hop for ConnectionLineage instead
+                        // of a documented gap: every query/response is persisted to
+                        // dns_queries and mirrored into CorrelationEngine as a DnsEvent.
+                        dnsCallback = { dns, src, sPort, dst, dPort -> onDnsObserved(newId, dns, src, sPort, dst, dPort) },
                         printUndecoded = printUndecoded,
                         dumpToFile = dumpToFile,
                         captureEnabled = captureEnabled,
@@ -187,6 +194,63 @@ class RequestrVpnService : VpnService() {
                 fail("Capture failed to start: ${t.message ?: t::class.java.simpleName}")
             }
         }
+    }
+
+    /**
+     * D2: callback set on [PacketPump.dnsCallback]. Persists the parsed DNS query/response as a
+     * [com.example.data.local.DnsQueryEntity] row (real Room persistence, replacing the previous
+     * log-and-discard behaviour) and mirrors it into [CorrelationEngine] as a [DnsEvent] so it can
+     * eventually be correlated with runtime/HTTP events on the same host.
+     *
+     * [connectionId] is left null: a DNS query/response happens before any TCP connection exists
+     * for that hostname, so there is no [com.example.interception.TcpStream] key yet to attach it
+     * to. [com.example.correlation.graph.ConnectionLineage] (D2) links a DNS *response* row to a
+     * later TCP connection by matching [DnsQueryEntity.resolvedIps] against the TCP destination
+     * IP instead of by connectionId.
+     *
+     * Called from [PacketPump]'s tun-read loop (a plain callback, not a suspend context), so the
+     * Room write uses `runBlocking` on [Dispatchers.IO] -- the same pattern already used by
+     * [PacketPump.persistUdpFlow]/`persistQuicConnection` for the same reason.
+     */
+    private fun onDnsObserved(
+        sessionId: Long,
+        dns: com.example.interception.dns.DnsParser.DnsQuery,
+        src: String,
+        sPort: Int,
+        dst: String,
+        dPort: Int,
+    ) {
+        if (dns.hostname.isEmpty()) return
+        try {
+            kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+                RequestrDatabase.get(applicationContext).dnsQueryDao().insert(
+                    com.example.data.local.DnsQueryEntity(
+                        sessionId = sessionId,
+                        transactionId = dns.transactionId,
+                        hostname = dns.hostname,
+                        queryType = dns.qtypeName,
+                        isResponse = dns.isResponse,
+                        resolvedIps = dns.resolvedIps,
+                        resolver = "UDP:53",
+                    )
+                )
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Failed to persist DNS query: ${t.message}")
+        }
+
+        com.example.correlation.CorrelationEngine.ingest(
+            com.example.correlation.DnsEvent(
+                eventId = "dns-${dns.transactionId}-${System.currentTimeMillis()}",
+                timestamp = System.currentTimeMillis(),
+                source = com.example.correlation.ObservationEvent.ObserverSource.DNS,
+                connectionId = null,
+                hostname = dns.hostname,
+                recordType = dns.qtypeName,
+                resolvedIps = dns.resolvedIps,
+                resolver = "UDP:53",
+            )
+        )
     }
 
     private fun fail(message: String) {

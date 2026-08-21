@@ -290,3 +290,35 @@ data class TlsSessionEntity(
     val establishedAt: Long = System.currentTimeMillis(),
     val handshakeDurationMs: Long = 0,
 )
+
+// ═══════════════════════════════════════════════════════════════════
+// v5.7 DNS query/response model (D2 prerequisite)
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * A single DNS query or response observed on the tun interface (UDP port 53), written by
+ * [com.example.interception.PacketPump] via [com.example.interception.dns.DnsParser].
+ *
+ * Previously [com.example.interception.dns.DnsParser] parsed real DNS traffic but nothing
+ * consumed the result -- `PacketPump.dnsCallback` was declared but never set by any caller, so
+ * every DNS query/response was parsed and immediately discarded (logged, not persisted). This
+ * table is what makes DNS a genuine first step in [com.example.correlation.graph.ConnectionLineage]
+ * (D2) instead of a documented gap: [resolvedIps] on a response row lets the lineage builder
+ * find the DNS answer that resolved the hostname a later TCP/TLS connection actually dialed.
+ *
+ * Same "never fabricate" rule as the rest of this schema: [resolvedIps] is empty unless
+ * [com.example.interception.dns.DnsParser] genuinely decoded A/AAAA answer records.
+ */
+@Entity(tableName = "dns_queries", indices = [Index("sessionId"), Index("hostname"), Index("timestamp")])
+data class DnsQueryEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val sessionId: Long,
+    val transactionId: Int,
+    val hostname: String,
+    val queryType: String,              // A, AAAA, CNAME, ... (DnsQuery.qtypeName)
+    val isResponse: Boolean,
+    /** IPv4/IPv6 addresses this response resolved [hostname] to; empty for queries. */
+    val resolvedIps: List<String> = emptyList(),
+    val resolver: String = "UDP:53",    // UDP:53 today; DoT/DoH would need a different capture path
+    val timestamp: Long = System.currentTimeMillis(),
+)

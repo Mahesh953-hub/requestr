@@ -24,6 +24,21 @@ interface CapturedTrafficDao {
     @Query("SELECT * FROM captured_traffic WHERE sessionId = :sessionId ORDER BY timestamp DESC")
     fun observeBySession(sessionId: Long): Flow<List<CapturedTrafficEntity>>
 
+    // D3: one-shot read used by VisibilityAnalyzer to compute decrypted/undecoded fractions.
+    @Query("SELECT * FROM captured_traffic WHERE sessionId = :sessionId ORDER BY timestamp DESC")
+    suspend fun getBySession(sessionId: Long): List<CapturedTrafficEntity>
+
+    // D2: one-shot read used by ConnectionLineage to find the HTTP transaction(s) that belong to
+    // a given TCP/TLS connection. CapturedTrafficEntity has no connectionId column (HTTP is
+    // parsed out of a TCP stream after the fact, and MITM'd HTTP never sees the raw 5-tuple), so
+    // the join has to be by host + a timestamp window instead -- same heuristic CorrelationEngine
+    // already uses for cross-plane matching, not a new invented convention.
+    @Query(
+        "SELECT * FROM captured_traffic WHERE sessionId = :sessionId AND host = :host " +
+            "AND timestamp BETWEEN :fromTs AND :toTs ORDER BY timestamp ASC"
+    )
+    suspend fun getByHostInWindow(sessionId: Long, host: String, fromTs: Long, toTs: Long): List<CapturedTrafficEntity>
+
     @Query("SELECT * FROM captured_traffic WHERE host LIKE '%' || :query || '%' OR url LIKE '%' || :query || '%' ORDER BY timestamp DESC")
     fun search(query: String): Flow<List<CapturedTrafficEntity>>
 
@@ -203,6 +218,11 @@ interface TcpConnectionDao {
     @Query("SELECT * FROM tcp_connections ORDER BY establishedAt DESC")
     fun observeAll(): Flow<List<TcpConnectionEntity>>
 
+    // D1: one-shot read used by ProvenanceGraph to build the graph over every connection in a
+    // session without holding a Flow subscription open.
+    @Query("SELECT * FROM tcp_connections WHERE sessionId = :sessionId ORDER BY establishedAt DESC")
+    suspend fun getBySession(sessionId: Long): List<TcpConnectionEntity>
+
     @Query("SELECT * FROM tcp_connections WHERE connectionId = :connectionId")
     suspend fun getById(connectionId: String): TcpConnectionEntity?
 
@@ -224,6 +244,10 @@ interface UdpFlowDao {
     @Query("SELECT * FROM udp_flows ORDER BY startedAt DESC")
     fun observeAll(): Flow<List<UdpFlowEntity>>
 
+    // D3: one-shot read used by VisibilityAnalyzer.
+    @Query("SELECT * FROM udp_flows WHERE sessionId = :sessionId ORDER BY startedAt DESC")
+    suspend fun getBySession(sessionId: Long): List<UdpFlowEntity>
+
     @Query("SELECT * FROM udp_flows WHERE flowId = :flowId")
     suspend fun getById(flowId: String): UdpFlowEntity?
 
@@ -244,6 +268,10 @@ interface QuicConnectionDao {
 
     @Query("SELECT * FROM quic_connections ORDER BY establishedAt DESC")
     fun observeAll(): Flow<List<QuicConnectionEntity>>
+
+    // D1: one-shot read, same rationale as TcpConnectionDao.getBySession above.
+    @Query("SELECT * FROM quic_connections WHERE sessionId = :sessionId ORDER BY establishedAt DESC")
+    suspend fun getBySession(sessionId: Long): List<QuicConnectionEntity>
 
     @Query("SELECT * FROM quic_connections WHERE connectionId = :connectionId")
     suspend fun getById(connectionId: String): QuicConnectionEntity?
@@ -273,6 +301,17 @@ interface TlsSessionDao {
     @Query("SELECT * FROM tls_sessions WHERE tlsSessionId = :tlsSessionId")
     suspend fun getById(tlsSessionId: String): TlsSessionEntity?
 
+    // D3: one-shot read used by VisibilityAnalyzer to compute decrypted/SNI-only fractions.
+    @Query("SELECT * FROM tls_sessions WHERE sessionId = :sessionId ORDER BY establishedAt DESC")
+    suspend fun getBySession(sessionId: Long): List<TlsSessionEntity>
+
+    // D2: MitmProxyEngine keys tlsSessionId as "$host:$port" (the CONNECT target), which is a
+    // different convention from the undecoded path's tlsSessionId == TcpStream.key. Given only a
+    // TCP connection's destIp/destPort we can't always reconstruct the MITM key, so
+    // ConnectionLineage also looks TLS sessions up by SNI host within the same capture session.
+    @Query("SELECT * FROM tls_sessions WHERE sessionId = :sessionId AND sniHost = :sniHost ORDER BY establishedAt DESC LIMIT 1")
+    suspend fun getLatestBySniHost(sessionId: Long, sniHost: String): TlsSessionEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(item: TlsSessionEntity)
 
@@ -280,5 +319,39 @@ interface TlsSessionDao {
     fun observeCount(sessionId: Long): Flow<Int>
 
     @Query("DELETE FROM tls_sessions WHERE sessionId = :sessionId")
+    suspend fun clearSession(sessionId: Long)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// v5.7 DNS query DAO (D2 prerequisite) — real persistence for DnsQueryEntity
+// ═══════════════════════════════════════════════════════════════════
+
+@Dao
+interface DnsQueryDao {
+    @Query("SELECT * FROM dns_queries WHERE sessionId = :sessionId ORDER BY timestamp DESC")
+    fun observeBySession(sessionId: Long): Flow<List<DnsQueryEntity>>
+
+    @Query("SELECT * FROM dns_queries ORDER BY timestamp DESC")
+    fun observeAll(): Flow<List<DnsQueryEntity>>
+
+    @Query("SELECT * FROM dns_queries WHERE sessionId = :sessionId ORDER BY timestamp DESC")
+    suspend fun getBySession(sessionId: Long): List<DnsQueryEntity>
+
+    /** Most recent response (has resolvedIps) for [hostname] at or before [beforeTs] — used by
+     * [com.example.correlation.graph.ConnectionLineage] to find the DNS answer that most likely
+     * caused a later TCP connection to a resolved IP. */
+    @Query(
+        "SELECT * FROM dns_queries WHERE hostname = :hostname AND isResponse = 1 " +
+            "AND timestamp <= :beforeTs ORDER BY timestamp DESC LIMIT 1"
+    )
+    suspend fun getLatestResponseFor(hostname: String, beforeTs: Long): DnsQueryEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(item: DnsQueryEntity): Long
+
+    @Query("SELECT COUNT(*) FROM dns_queries WHERE sessionId = :sessionId")
+    fun observeCount(sessionId: Long): Flow<Int>
+
+    @Query("DELETE FROM dns_queries WHERE sessionId = :sessionId")
     suspend fun clearSession(sessionId: Long)
 }

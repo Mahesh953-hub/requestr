@@ -24,6 +24,7 @@ import androidx.room.TypeConverters
         UdpFlowEntity::class,
         QuicConnectionEntity::class,
         TlsSessionEntity::class,
+        DnsQueryEntity::class,
     ],
     // v3.5: bumped 4 -> 5 for FlowNodeEntity + FlowConnectionEntity (Flow persistence).
     // v5.6 (M1): bumped 5 -> 6 to register TcpConnectionEntity/UdpFlowEntity/QuicConnectionEntity,
@@ -31,6 +32,10 @@ import androidx.room.TypeConverters
     // v5.6 (M2): bumped 6 -> 7 to register TlsSessionEntity (TLS handshake/cipher/cert model).
     // v5.6 (T2): bumped 7 -> 8 to add CapturedTrafficEntity.sourceIp + CaptureTier.GATEWAY,
     // used by GatewayEngine to tag/group traffic proxied on behalf of remote LAN devices.
+    // v5.7 (D2): also part of the 7 -> 8 bump (merged in the same release): registers
+    // DnsQueryEntity -- PacketPump.dnsCallback previously parsed real DNS queries/responses via
+    // DnsParser and discarded them (log-only); this table is what makes DNS a genuine first hop
+    // in ConnectionLineage instead of a documented gap.
     version = 8,
     exportSchema = false,
 )
@@ -47,6 +52,7 @@ abstract class RequestrDatabase : RoomDatabase() {
     abstract fun udpFlowDao(): UdpFlowDao
     abstract fun quicConnectionDao(): QuicConnectionDao
     abstract fun tlsSessionDao(): TlsSessionDao
+    abstract fun dnsQueryDao(): DnsQueryDao
 
     companion object {
         @Volatile
