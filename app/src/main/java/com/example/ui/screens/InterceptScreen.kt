@@ -1463,6 +1463,14 @@ fun TrafficItemCard(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    // T2: rows captured by GatewayEngine on behalf of a remote LAN device
+                    // (sourceIp != null on the entity) are tagged TrafficSource.GATEWAY by
+                    // CaptureLogRepository.toUiModel() -- surface that distinctly here so
+                    // it's visually obvious in the list, not just in the detail sheet.
+                    if (item.trafficSource == com.example.data.models.TrafficSource.GATEWAY) {
+                        BadgePill(text = "GATEWAY", color = 0xFFF59E0B)
+                        Spacer(modifier = Modifier.width(6.dp))
+                    }
                     ProtocolBadge(protocol = item.protocol)
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
