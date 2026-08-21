@@ -11,6 +11,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.platform.LocalContext
 import com.example.data.interception.InterceptionStateRepository
 import com.example.data.prefs.SettingsDataStore
@@ -18,6 +19,10 @@ import com.example.interception.CapabilityProbe
 import com.example.interception.CaptureMethodWatcher
 import com.example.interception.PreflightController
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 
 /**
@@ -52,6 +57,48 @@ class CaptureController(
 ) {
 
     private val watcher = CaptureMethodWatcher()
+    private var methodSwitchObserverJob: Job? = null
+
+    init {
+        startMethodSwitchObserver()
+    }
+
+    /**
+     * Spans every capture method (VPN/Proxy/Root/Shizuku), unlike [RequestrVpnService]'s
+     * `filterObserverJob` which only watches app-filter changes and only exists inside the
+     * VPN-tier service. Before this, changing "Record Mode" (VPN/PROXY) or "Default Capture
+     * Tier" (AUTO/FORCE_VPN_ONLY) while capture was ACTIVE or ARMED silently wrote the new
+     * preference to DataStore and had zero effect on the running engine — the old tier/method
+     * kept running until the user manually stopped and restarted capture (complaint #3: no
+     * method-switch-while-active state machine).
+     *
+     * Mirrors the same drop(1)+stop/delay/start template already proven by
+     * [RequestrVpnService.filterObserverJob], but lives here so it applies regardless of which
+     * engine [PreflightController.run] resolves to.
+     */
+    private fun startMethodSwitchObserver() {
+        methodSwitchObserverJob?.cancel()
+        methodSwitchObserverJob = scope.launch {
+            val prefs = SettingsDataStore.get(context)
+            combine(
+                prefs.captureRecordMode,
+                prefs.captureTierPreference,
+            ) { mode, tierPref -> Pair(mode, tierPref) }
+                .drop(1) // skip the initial emission = current state
+                .collect { (_, _) ->
+                    val state = InterceptionStateRepository.state.value
+                    if (state.isActive || state.isArmed) {
+                        android.util.Log.i(
+                            "CaptureController",
+                            "Capture mode/tier preference changed while ${state.status}; restarting capture with the new resolution",
+                        )
+                        requestStop()
+                        delay(500)
+                        requestStart()
+                    }
+                }
+        }
+    }
 
     /**
      * Runs the full gate and starts capture only if every precondition genuinely passes.
@@ -132,6 +179,12 @@ class CaptureController(
     fun refreshCapabilities() {
         scope.launch { CapabilityProbe.probeAll(context) }
     }
+
+    /** Cancels the mode/tier-preference observer. Called when the owning composable leaves. */
+    fun dispose() {
+        methodSwitchObserverJob?.cancel()
+        methodSwitchObserverJob = null
+    }
 }
 
 /** Wires a [CaptureController] with the activity-result launchers it needs. */
@@ -161,5 +214,10 @@ fun rememberCaptureController(
             onPrompt = onPrompt,
         ).also { controller = it }
     }
+
+    DisposableEffect(created) {
+        onDispose { created.dispose() }
+    }
+
     return created
 }
