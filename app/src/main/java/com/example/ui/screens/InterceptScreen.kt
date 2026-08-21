@@ -1537,6 +1537,36 @@ fun ConnectionsBottomSheet(
         else com.example.data.interception.ConnectionsRepository.observeAllTlsSessions(context)
     }.collectAsState(initial = emptyList())
 
+    // D1: multi-connection provenance graph, grouped by the host each connection actually
+    // dialed (DNS answer / TLS SNI / raw dest IP, see ConnectionLineage.resolveHostFor). This is
+    // a one-shot suspend read (not a Flow) since it recomputes the whole grouping+lineage on
+    // every load rather than incrementally -- refreshed by bumping [provenanceRefreshKey].
+    var provenanceRefreshKey by remember { mutableIntStateOf(0) }
+    var expandedConnectionId by remember { mutableStateOf<String?>(null) }
+    val provenanceGraph by produceState<com.example.correlation.graph.ProvenanceGraphResult?>(
+        initialValue = null,
+        sessionId,
+        provenanceRefreshKey,
+    ) {
+        value = if (sessionId != null) {
+            com.example.correlation.graph.ProvenanceGraph.build(context, sessionId)
+        } else {
+            null
+        }
+    }
+    val expandedLineage by produceState<com.example.correlation.graph.LineageChain?>(
+        initialValue = null,
+        sessionId,
+        expandedConnectionId,
+    ) {
+        val connId = expandedConnectionId
+        value = if (sessionId != null && connId != null) {
+            com.example.correlation.graph.ProvenanceGraph.lineageFor(context, sessionId, connId)
+        } else {
+            null
+        }
+    }
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -1582,6 +1612,7 @@ fun ConnectionsBottomSheet(
                     "UDP (${udpFlows.size})",
                     "QUIC (${quicConnections.size})",
                     "TLS (${tlsSessions.size})",
+                    "Provenance (${provenanceGraph?.hostGroups?.size ?: 0})",
                 ).forEachIndexed { idx, title ->
                     Tab(
                         selected = selectedTab == idx,
@@ -1703,6 +1734,79 @@ fun ConnectionsBottomSheet(
                                                     fontFamily = FontFamily.Monospace,
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                                 )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    4 -> {
+                        val graph = provenanceGraph
+                        if (sessionId == null) {
+                            EmptyConnectionsState("Provenance needs an active capture session -- start a capture to see the DNS→TCP→TLS→HTTP chain for each connection.")
+                        } else if (graph == null) {
+                            EmptyConnectionsState("Building provenance graph...")
+                        } else if (graph.hostGroups.isEmpty()) {
+                            EmptyConnectionsState("No connections recorded yet for this session.")
+                        } else {
+                            LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                items(graph.hostGroups, key = { it.host }) { group ->
+                                    GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)) {
+                                        Column(modifier = Modifier.padding(10.dp)) {
+                                            Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                                                Text(group.host, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                                                BadgePill(text = "${group.connections.size} conn", color = 0xFF6366F1)
+                                            }
+                                            Spacer(modifier = Modifier.height(6.dp))
+                                            group.connections.forEach { node ->
+                                                val isExpanded = expandedConnectionId == node.connectionId
+                                                Column(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .clickable {
+                                                            expandedConnectionId = if (isExpanded) null else node.connectionId
+                                                        }
+                                                        .padding(vertical = 4.dp)
+                                                ) {
+                                                    Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                                                        Text(
+                                                            "${node.transport} · ${node.connectionId}",
+                                                            fontSize = 10.sp,
+                                                            fontFamily = FontFamily.Monospace,
+                                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        )
+                                                        Icon(
+                                                            imageVector = if (isExpanded) Icons.Default.ArrowDownward else Icons.Default.PlayArrow,
+                                                            contentDescription = if (isExpanded) "Collapse" else "Expand",
+                                                            modifier = Modifier.size(14.dp),
+                                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        )
+                                                    }
+                                                    if (isExpanded) {
+                                                        val lineage = expandedLineage
+                                                        if (lineage == null || lineage.connectionId != node.connectionId) {
+                                                            Text("Loading lineage...", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                        } else {
+                                                            Column(modifier = Modifier.padding(start = 8.dp, top = 4.dp)) {
+                                                                lineage.steps.forEach { step ->
+                                                                    Row(verticalAlignment = Alignment.Top) {
+                                                                        BadgePill(
+                                                                            text = step.plane.name,
+                                                                            color = if (step.success) 0xFF10B981 else 0xFF64748B,
+                                                                        )
+                                                                        Spacer(modifier = Modifier.width(6.dp))
+                                                                        Column {
+                                                                            Text(step.label, fontSize = 10.sp, fontWeight = FontWeight.Medium)
+                                                                            Text(step.detail, fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                                        }
+                                                                    }
+                                                                    Spacer(modifier = Modifier.height(6.dp))
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                     }

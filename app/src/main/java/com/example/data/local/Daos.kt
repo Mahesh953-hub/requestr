@@ -214,6 +214,11 @@ interface TcpConnectionDao {
     @Query("SELECT * FROM tcp_connections ORDER BY establishedAt DESC")
     fun observeAll(): Flow<List<TcpConnectionEntity>>
 
+    // D1: one-shot read used by ProvenanceGraph to build the graph over every connection in a
+    // session without holding a Flow subscription open.
+    @Query("SELECT * FROM tcp_connections WHERE sessionId = :sessionId ORDER BY establishedAt DESC")
+    suspend fun getBySession(sessionId: Long): List<TcpConnectionEntity>
+
     @Query("SELECT * FROM tcp_connections WHERE connectionId = :connectionId")
     suspend fun getById(connectionId: String): TcpConnectionEntity?
 
@@ -255,6 +260,10 @@ interface QuicConnectionDao {
 
     @Query("SELECT * FROM quic_connections ORDER BY establishedAt DESC")
     fun observeAll(): Flow<List<QuicConnectionEntity>>
+
+    // D1: one-shot read, same rationale as TcpConnectionDao.getBySession above.
+    @Query("SELECT * FROM quic_connections WHERE sessionId = :sessionId ORDER BY establishedAt DESC")
+    suspend fun getBySession(sessionId: Long): List<QuicConnectionEntity>
 
     @Query("SELECT * FROM quic_connections WHERE connectionId = :connectionId")
     suspend fun getById(connectionId: String): QuicConnectionEntity?

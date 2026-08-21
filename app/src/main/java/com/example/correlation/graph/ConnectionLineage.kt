@@ -39,6 +39,27 @@ object ConnectionLineage {
     /** How long after a TLS/TCP handshake we still consider an HTTP transaction "part of it". */
     private const val HTTP_WINDOW_MS = 30_000L
 
+    /**
+     * D1: exposes the same DNS/TLS host-resolution logic [build] uses internally, so
+     * [ProvenanceGraph] can group connections by the host they actually dialed without
+     * duplicating the DNS-answer / TLS-SNI matching rules.
+     */
+    suspend fun resolveHostFor(context: Context, sessionId: Long, connectionId: String): String? {
+        val db = RequestrDatabase.get(context)
+        val tcp = db.tcpConnectionDao().getById(connectionId)
+        if (tcp != null) {
+            val dnsRow = findDnsAnswerFor(db, sessionId, tcp.destIp, tcp.establishedAt)
+            val tls = findTlsFor(db, sessionId, connectionId, dnsRow?.hostname)
+            return tls?.sniHost ?: dnsRow?.hostname ?: tcp.destIp
+        }
+        val quic = db.quicConnectionDao().getById(connectionId)
+        if (quic != null) {
+            val dnsRow = findDnsAnswerFor(db, sessionId, quic.destIp, quic.establishedAt)
+            return quic.sniHost ?: dnsRow?.hostname ?: quic.destIp
+        }
+        return null
+    }
+
     suspend fun build(context: Context, sessionId: Long, connectionId: String): LineageChain {
         val db = RequestrDatabase.get(context)
         val tcp = db.tcpConnectionDao().getById(connectionId)
