@@ -46,9 +46,9 @@
 
 | # | Status | Item | Files |
 |---|--------|------|-------|
-| R1 | [ ] TODO | RuntimeInstrumentationEngine | `runtime/RuntimeInstrumentationEngine.kt` — adapter pattern for Frida/Xposed/SDK |
+| R1 | ✅ DONE | RuntimeInstrumentationEngine | `runtime/RuntimeInstrumentationEngine.kt` — registered + started from `MainActivity.onCreate()`, background poll loop feeds `CorrelationEngine.ingest()` with `RuntimeEvent`s. Compose-observable `stateFlow` surfaced in Settings → Runtime Instrumentation card |
 | R2 | ✅ DONE | FridaClient + honest state machine | `runtime/frida/FridaClient.kt` — Unavailable→Detected→Connected→Attached→Streaming |
-| R3 | [ ] TODO | HTTP client adapters (OkHttp, Cronet, WebView) | `runtime/http/OkHttpAdapter.kt` etc. — needs native bindings |
+| R3 | [~] PARTIAL | HTTP client adapters (OkHttp, Cronet, WebView) | `OkHttpAdapter.pollEvents()` now drains real request/response pairs recorded by `OkHttpProxyInterceptor` (method/URL/status/headers/duration) instead of an empty list. **Scope caveat:** no code currently attaches `OkHttpProxyInterceptor` to a live `OkHttpClient.Builder()`, so this reports requestr's own outbound calls only, not third-party app traffic (that needs the Observer SDK, S1). Cronet/WebView adapters remain presence-detection only — no native hook exists |
 
 ### Correlation
 
@@ -122,4 +122,5 @@
 | v5.0 | 18 | C1-C17 (17 items) | Critical pipeline fixes — decryption actually works |
 | v5.1 | 19 | +6 (23 total) | Cor1, M1, P1, P5, A4, D4 — observation + HTTP/2 + WS + device caps |
 | v5.2 | 20 | +6 (29 total) | Cor2, P4, R2, A1, A2, A5 — correlation, DoH/DoT, Frida, dynamic press, raw editor |
-| NEXT | 21+ | Remaining 21 | P2, P3, R1, R3, Cat3 items |
+| v5.5 | 23 | +2 (31 total) | R1, R3 — RuntimeInstrumentationEngine wired into app lifecycle + CorrelationEngine, OkHttp adapter drains real events. Also corrected C4/P3 tracker drift (were DONE, mislabeled), downgraded M1 to PARTIAL (dead code, confirmed unregistered in Room), fixed LocalApiServer Switch recomposition bug |
+| NEXT | 24+ | Remaining 19 | P2 (finish QUIC session layer), T1, M1, M2, S1, Cat3 items (B1-B7, T2, D1-D3, S2) |
