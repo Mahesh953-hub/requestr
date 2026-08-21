@@ -44,6 +44,19 @@ class CaptureEngine(
     var printUndecoded: Boolean = true,
     var dumpToFile: Boolean = false,
     var captureEnabled: Boolean = true,
+    // Complaint #5 audit fix: "Enhanced Mode" previously gated nothing but a single
+    // Log.i() debug line in PreflightController, despite its Settings UI claiming "Richer
+    // packet analysis, dynamic logging, extended trace". [ProtocolDetector] is a real,
+    // fully-implemented protocol fingerprinting engine (confidence-scored HTTP/1.1, HTTP/2,
+    // WebSocket, SSE, gRPC, QUIC, DoH/DoT, TLS-version detection) that had ZERO production
+    // call sites anywhere in the codebase -- the same orphaned-feature shape as the
+    // QpackDecoder gap documented under P2. When true, every persisted row (undecoded-TLS
+    // and plaintext HTTP alike) runs through ProtocolDetector and gets real
+    // `x-protocol-detected` / `x-protocol-confidence` / `x-protocol-reason` diagnostic
+    // headers attached -- visible today in the existing Headers tab of the traffic detail
+    // sheet, no new UI needed. This is additive: it never changes what gets captured or
+    // blocks anything, only annotates rows with an extra analysis pass.
+    var enhancedMode: Boolean = false,
 ) {
     // Complaint #5 audit fix: this used to build a path via
     // `Environment.getExternalStoragePublicDirectory(DIRECTORY_DOWNLOADS)` and open a raw
@@ -183,7 +196,8 @@ class CaptureEngine(
                         method = "TLS",
                         url = "https://${stream.sniHost ?: stream.dstIp}",
                         host = stream.sniHost ?: "$stream.dstIp:$stream.dstPort",
-                        requestHeaders = mapOf("x-tls-sni" to (stream.sniHost ?: "—"), "x-capture" to "undecoded"),
+                        requestHeaders = mapOf("x-tls-sni" to (stream.sniHost ?: "—"), "x-capture" to "undecoded") +
+                            enhancedDiagnostics(stream.dstPort, clientBytes),
                         requestBody = null,
                         statusCode = 0,
                         responseHeaders = mapOf("x-undecoded" to "tls-detected", "x-bytes" to "${clientBytes.size}"),
@@ -566,6 +580,17 @@ class CaptureEngine(
             && checkRules(request.url, request.host) != com.example.data.local.RuleAction.LOG_ONLY)
             // ^ if a specific LOG_ONLY rule matched (not the default), force persist
 
+        // Enhanced Mode: an independent ProtocolDetector pass over the same exchange, purely
+        // additive diagnostic headers (never gates persistence/blocking -- see
+        // enhancedDiagnostics doc). Feeds it the real observed request line as firstBytes and
+        // the real response headers as httpMetadata, so e.g. a gRPC/WebSocket/SSE/DoH
+        // content-type match surfaces even for streams the primary parser only classified as
+        // plain HTTP.
+        val enhancedHeaders = enhancedDiagnostics(
+            stream.dstPort,
+            "${(request.method ?: com.example.data.models.HttpMethod.GET).name} ${request.path} ${request.version}".toByteArray(Charsets.UTF_8),
+        )
+
         val entity = CapturedTrafficEntity(
             sessionId = sessionId,
             method = (request.method ?: com.example.data.models.HttpMethod.GET).name,
@@ -574,7 +599,7 @@ class CaptureEngine(
             path = request.path,
             statusCode = if (response.statusCode == 0) null else response.statusCode,
             protocol = response.version.ifEmpty { request.version },
-            requestHeaders = if (SettingsRepository.settings.value.requestLoggingEnabled) request.headers else emptyMap(),
+            requestHeaders = (if (SettingsRepository.settings.value.requestLoggingEnabled) request.headers else emptyMap()) + enhancedHeaders,
             responseHeaders = if (SettingsRepository.settings.value.responseLoggingEnabled) response.headers else emptyMap(),
             requestBody = if (SettingsRepository.settings.value.requestLoggingEnabled) request.body.ifEmpty { null } else null,
             responseBody = if (SettingsRepository.settings.value.responseLoggingEnabled) response.body.ifEmpty { null } else null,
@@ -681,6 +706,30 @@ class CaptureEngine(
         RuleEnforcer.applyResponseModification(response, config)
 
     private fun scHex(bytes: ByteArray) = bytes.joinToString("") { "%02x".format(it) }
+
+    /**
+     * Enhanced Mode's real analysis pass. Runs [ProtocolDetector] against the raw bytes seen on
+     * a stream and returns extra `x-protocol-*` headers describing what it independently
+     * concluded -- a cross-check against whatever the HTTP/TLS parser already decided, useful
+     * for traffic the primary parsers only partially recognize (e.g. an UNKNOWN/POSSIBLE verdict
+     * on a stream the HTTP parser also struggled with is itself a real diagnostic signal).
+     * Returns an empty map when [enhancedMode] is off or detection fails, so callers can always
+     * merge this in with `+` without a null check.
+     */
+    private fun enhancedDiagnostics(port: Int, firstBytes: ByteArray): Map<String, String> {
+        if (!enhancedMode || firstBytes.isEmpty()) return emptyMap()
+        return runCatching {
+            val detection = ProtocolDetector.detect(port, firstBytes)
+            mapOf(
+                "x-protocol-detected" to detection.protocol.label,
+                "x-protocol-confidence" to detection.confidence.name,
+                "x-protocol-reason" to detection.reason.take(120),
+            )
+        }.getOrElse { e ->
+            Log.w(TAG, "Enhanced Mode: ProtocolDetector failed: ${e.message}")
+            emptyMap()
+        }
+    }
 
     companion object {
         private const val TAG = "CaptureEngine"

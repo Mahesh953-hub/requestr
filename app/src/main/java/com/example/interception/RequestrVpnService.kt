@@ -139,6 +139,10 @@ class RequestrVpnService : VpnService() {
                 val printUndecoded = prefs.printUndecoded.first()
                 val dumpToFile = prefs.dumpToFile.first()
                 val captureEnabled = SettingsRepository.settings.value.trafficCaptureEnabled
+                // Complaint #5 audit fix: Enhanced Mode now feeds CaptureEngine's real
+                // ProtocolDetector analysis pass (see CaptureEngine.enhancedDiagnostics) instead
+                // of gating nothing but a debug Log.i() line.
+                val enhancedMode = prefs.enhancedMode.first()
 
                 // T1: PCAP export — started/stopped alongside the VPN tun so its lifetime
                 // matches one capture session exactly. PacketPump.writeToPcap() is a no-op
@@ -167,6 +171,7 @@ class RequestrVpnService : VpnService() {
                         printUndecoded = printUndecoded,
                         dumpToFile = dumpToFile,
                         captureEnabled = captureEnabled,
+                        enhancedMode = enhancedMode,
                     ).run(this)
                 }
 

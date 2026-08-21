@@ -1960,7 +1960,7 @@ fun CaptureSetupBottomSheet(
             Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("Enhanced Mode", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
-                    Text("Richer packet analysis, dynamic logging, extended trace", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Runs an extra protocol-fingerprint pass on captured traffic (adds x-protocol-* headers, viewable in a row's Headers tab)", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Switch(checked = enhancedMode, onCheckedChange = onEnhancedModeChange)
             }

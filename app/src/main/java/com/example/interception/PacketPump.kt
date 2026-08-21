@@ -47,6 +47,7 @@ class PacketPump(
     printUndecoded: Boolean = true,
     dumpToFile: Boolean = false,
     captureEnabled: Boolean = true,
+    enhancedMode: Boolean = false,
 ) {
 
     private var packetCount = 0
@@ -69,7 +70,7 @@ class PacketPump(
     private val quicConnectionState = LinkedHashMap<String, com.example.interception.quic.QuicConnection>()
 
     /** TCP reassembly + HTTP/TLS pipeline. Feeds decoded transactions into Room. */
-    private val captureEngine = CaptureEngine(context, db, sessionId, printUndecoded, dumpToFile, captureEnabled)
+    private val captureEngine = CaptureEngine(context, db, sessionId, printUndecoded, dumpToFile, captureEnabled, enhancedMode)
 
     /**
      * T1: PCAP export. [com.example.interception.packet.PacketCaptureEngine] is started/stopped
