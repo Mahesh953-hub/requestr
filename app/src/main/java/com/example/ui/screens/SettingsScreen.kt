@@ -600,6 +600,51 @@ fun SettingsScreen(
                             "OkHttp adapter reports requestr's own outbound calls made via OkHttpProxyInterceptor. Third-party apps need the Requestr Observer SDK (see sdk/) to report their own traffic.",
                             fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+
+                        // S2: HTTP client stack auto-detection. Two independent, honestly-labelled
+                        // signals -- see HttpStackDetector.kt doc for why they can't be merged
+                        // into one number: classpath presence (requestr's own process only) and
+                        // a per-request User-Agent classification of what was actually captured
+                        // this session (ambiguous/custom UAs fall to UNKNOWN, never guessed).
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                        Text("HTTP Stack Detection", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        val classpathStacks = remember { com.example.runtime.http.HttpStackDetector.detectAvailableOnClasspath() }
+                        Text(
+                            "On requestr's classpath: " + classpathStacks.joinToString(", ") { it.label },
+                            fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        val stackDiagSessionId = InterceptionStateRepository.state.collectAsState().value.sessionId
+                        val stackReport by produceState<com.example.runtime.http.StackDetectionReport?>(initialValue = null, stackDiagSessionId) {
+                            value = if (stackDiagSessionId != null) {
+                                runCatching { com.example.runtime.http.HttpStackDetector.analyzeSession(settingsContext, stackDiagSessionId) }.getOrNull()
+                            } else {
+                                null
+                            }
+                        }
+                        val sr = stackReport
+                        when {
+                            stackDiagSessionId == null -> {
+                                Text("No active/recorded capture session to classify yet.", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            sr == null -> {
+                                Text("Classifying session $stackDiagSessionId…", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            sr.totalRequests == 0 -> {
+                                Text("Session ${sr.sessionId}: no requests captured yet.", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            else -> {
+                                Text(
+                                    "Session ${sr.sessionId} (${sr.totalRequests} req, by default User-Agent): " +
+                                        sr.countsByStack.entries.joinToString(", ") { (stack, count) -> "${stack.label}=$count" },
+                                    fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    "Volley shares HttpURLConnection's default User-Agent and can't be told apart from it by header alone; UNKNOWN means a custom/overridden User-Agent, not a detection failure.",
+                                    fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
                     }
                 }
             }
