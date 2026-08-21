@@ -63,7 +63,9 @@ object AppSettingsKeys {
     val TRANSITION_BEHAVIOR = stringPreferencesKey("transition_behavior")
     val DISPLAY_SCALE = stringPreferencesKey("display_scale")
     val AUTO_RECORDING = booleanPreferencesKey("auto_recording")
-    val TRAFFIC_LOG = booleanPreferencesKey("traffic_log")
+    // TRAFFIC_LOG key removed (complaint #4 audit fix): the "Traffic Log" toggle it backed was
+    // dead UI with no reader anywhere in the app. See AppModels.kt / SettingsScreen.kt for the
+    // full rationale. The legacy migration below intentionally does NOT copy this key forward.
     val RECORDING_NOTIFICATIONS = booleanPreferencesKey("recording_notifications")
     val REMOTE_CONTROL = booleanPreferencesKey("remote_control")
     val REMOTE_COMMANDS = booleanPreferencesKey("remote_commands")
@@ -172,7 +174,6 @@ object LegacyDataMigration {
         str("transition_behavior", AppSettingsKeys.TRANSITION_BEHAVIOR)
         str("display_scale", AppSettingsKeys.DISPLAY_SCALE)
         bool("auto_recording", AppSettingsKeys.AUTO_RECORDING)
-        bool("traffic_log", AppSettingsKeys.TRAFFIC_LOG)
         bool("recording_notifications", AppSettingsKeys.RECORDING_NOTIFICATIONS)
         bool("remote_control", AppSettingsKeys.REMOTE_CONTROL)
         bool("remote_commands", AppSettingsKeys.REMOTE_COMMANDS)

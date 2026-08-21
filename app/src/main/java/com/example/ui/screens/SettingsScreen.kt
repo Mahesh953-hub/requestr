@@ -366,7 +366,14 @@ fun SettingsScreen(
             // Recording
             item { SubsectionTitle("Recording") }
             item { SwitchPreference("Auto Recording", settings.autoRecordingEnabled, "Automatically enter recording state") { SettingsRepository.updateAutoRecording(it) } }
-            item { SwitchPreference("Traffic Log", settings.trafficLogEnabled, "Record intercepted traffic to log") { SettingsRepository.updateTrafficLog(it) } }
+            // Complaint #4 fix: the old "Traffic Log" toggle here was pure dead UI -- nothing
+            // ever read settings.trafficLogEnabled to gate any behaviour. It sat right next to
+            // the genuinely-wired "Traffic Capture" toggle below (Traffic & Network section,
+            // which really does gate persistence via RequestrVpnService -> CaptureEngine), so
+            // the two easily-confused switches made it look like traffic logging could be
+            // turned on/off from two different places when only one of them actually did
+            // anything. Removed rather than wired up, since the real behaviour the user wants
+            // already exists under "Traffic Capture".
             item { SwitchPreference("Recording Notifications", settings.recordingNotificationsEnabled, "Show persistent notification during recording") { SettingsRepository.updateRecordingNotifications(it) } }
 
             // Remote Control

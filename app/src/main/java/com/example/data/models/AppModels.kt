@@ -416,7 +416,9 @@ data class UserSettingsState(
     val displayScale: String = "NORMAL",
     // Fix 02 — Features preferences
     val autoRecordingEnabled: Boolean = false,
-    val trafficLogEnabled: Boolean = true,
+    // trafficLogEnabled removed (complaint #4 audit fix): it was pure dead UI, never read by
+    // any capture/persistence code path. "Traffic Capture" (trafficCaptureEnabled below) is
+    // the real toggle that gates whether captured transactions are persisted.
     val recordingNotificationsEnabled: Boolean = true,
     val remoteControlEnabled: Boolean = false,
     val remoteCommandsEnabled: Boolean = false,

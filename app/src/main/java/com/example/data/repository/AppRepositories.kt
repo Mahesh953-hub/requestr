@@ -767,7 +767,6 @@ object SettingsRepository {
                     transitionBehavior = p[K.TRANSITION_BEHAVIOR] ?: _settings.value.transitionBehavior,
                     displayScale = p[K.DISPLAY_SCALE] ?: _settings.value.displayScale,
                     autoRecordingEnabled = p[K.AUTO_RECORDING] ?: _settings.value.autoRecordingEnabled,
-                    trafficLogEnabled = p[K.TRAFFIC_LOG] ?: _settings.value.trafficLogEnabled,
                     recordingNotificationsEnabled = p[K.RECORDING_NOTIFICATIONS] ?: _settings.value.recordingNotificationsEnabled,
                     remoteControlEnabled = p[K.REMOTE_CONTROL] ?: _settings.value.remoteControlEnabled,
                     remoteCommandsEnabled = p[K.REMOTE_COMMANDS] ?: _settings.value.remoteCommandsEnabled,
@@ -923,10 +922,6 @@ object SettingsRepository {
         _settings.value = _settings.value.copy(autoRecordingEnabled = enabled)
         persist(K.AUTO_RECORDING, enabled)
     }
-    fun updateTrafficLog(enabled: Boolean) {
-        _settings.value = _settings.value.copy(trafficLogEnabled = enabled)
-        persist(K.TRAFFIC_LOG, enabled)
-    }
     fun updateRecordingNotifications(enabled: Boolean) {
         _settings.value = _settings.value.copy(recordingNotificationsEnabled = enabled)
         persist(K.RECORDING_NOTIFICATIONS, enabled)
@@ -1002,7 +997,6 @@ object SettingsRepository {
                 prefs[K.TRANSITION_BEHAVIOR] = newSettings.transitionBehavior
                 prefs[K.DISPLAY_SCALE] = newSettings.displayScale
                 prefs[K.AUTO_RECORDING] = newSettings.autoRecordingEnabled
-                prefs[K.TRAFFIC_LOG] = newSettings.trafficLogEnabled
                 prefs[K.RECORDING_NOTIFICATIONS] = newSettings.recordingNotificationsEnabled
                 prefs[K.REMOTE_CONTROL] = newSettings.remoteControlEnabled
                 prefs[K.REMOTE_COMMANDS] = newSettings.remoteCommandsEnabled
