@@ -55,7 +55,16 @@ android {
     compose = true
     buildConfig = true
   }
-  testOptions { unitTests { isIncludeAndroidResources = true } }
+  testOptions {
+    unitTests {
+      isIncludeAndroidResources = true
+      // P2: QuicParser.parseInitial() calls android.util.Log.d() on its success path (not just
+      // in a catch block like the pre-existing code did), which throws "not mocked" under
+      // plain JVM unit tests without Robolectric. Returning defaults for unmocked Android SDK
+      // calls is the standard fix instead of adding a Robolectric runner to every quic test.
+      isReturnDefaultValues = true
+    }
+  }
   dependenciesInfo {
     includeInApk = false
     includeInBundle = true

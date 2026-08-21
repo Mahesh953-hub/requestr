@@ -57,6 +57,15 @@ class PacketPump(
     private val lastUdpPersist = mutableMapOf<String, Long>()
     private val quicConnections = mutableSetOf<String>()
 
+    /**
+     * P2: in-memory QUIC connection/stream state machine, keyed by the same connectionId used
+     * for the [QuicConnectionEntity] row. Only a connection-level summary is persisted to Room
+     * (the schema has no per-stream columns) -- these live objects are what actually track
+     * [com.example.interception.quic.QuicState] transitions and byte counters in real time, the
+     * way [com.example.interception.tcp.TcpReassembler] tracks per-flow [com.example.interception.tcp.TcpStream] state.
+     */
+    private val quicConnectionState = LinkedHashMap<String, com.example.interception.quic.QuicConnection>()
+
     /** TCP reassembly + HTTP/TLS pipeline. Feeds decoded transactions into Room. */
     private val captureEngine = CaptureEngine(db, sessionId, printUndecoded, dumpToFile, captureEnabled)
 
@@ -139,15 +148,23 @@ class PacketPump(
             }
         }
 
-        // Fix #26 (TODO): extract SNI from QUIC Initial packets on UDP port 443.
-        // M1/P2: persist a QuicConnectionEntity whenever we successfully decode a QUIC Initial's
-        // SNI — this is real session identity (5-tuple + SNI + version), not a placeholder.
+        // Fix #26 / P2: parse QUIC Initial packets on UDP port 443. [QuicParser.parseInitial]
+        // does the real work now -- AEAD-decrypts the Initial packet using the public
+        // RFC 9001 Initial keys (derived from the client DCID) when the version supports it,
+        // recovering the real SNI *and* ALPN from the actual ClientHello, and falls back to
+        // the plaintext heuristic scan (SNI only) for unsupported/gQUIC versions or on any
+        // decrypt failure. Either way this is real session identity, not a placeholder.
         if (protocol == 17 && (sPort == 443 || dPort == 443)) {
             val quicPayload = packet.copyOfRange(ihl + 8, length)
-            val sni = com.example.interception.quic.QuicParser.extractSni(quicPayload)
-            if (sni != null) {
-                Log.i(TAG, "QUIC SNI: $sni (${if (dPort == 443) "outbound" else "inbound"})")
-                persistQuicConnection(src, sPort, dst, dPort, sni, quicPayload)
+            val initial = com.example.interception.quic.QuicParser.parseInitial(quicPayload)
+            if (initial != null) {
+                Log.i(
+                    TAG,
+                    "QUIC ${if (initial.decrypted) "decrypted" else "heuristic"} SNI: " +
+                        "${initial.sniHostname} alpn=${initial.alpn} " +
+                        "(${if (dPort == 443) "outbound" else "inbound"})",
+                )
+                persistQuicConnection(src, sPort, dst, dPort, initial, quicPayload)
             }
         }
 
@@ -182,24 +199,65 @@ class PacketPump(
         }.onFailure { e -> Log.w(TAG, "Failed to persist UDP flow: ${e.message}") }
     }
 
-    /** M1/P2: upsert a quic_connections row once per connection (identified by 5-tuple). */
-    private fun persistQuicConnection(src: String, sPort: Int, dst: String, dPort: Int, sni: String, quicPayload: ByteArray) {
+    /**
+     * M1/P2: upsert a quic_connections row once per connection (identified by 5-tuple), and
+     * maintain the in-memory [com.example.interception.quic.QuicConnection] state machine for
+     * this connectionId (P2) -- the persisted row is a connection-level summary; the live
+     * [com.example.interception.quic.QuicConnection]/[com.example.interception.quic.QuicState]
+     * transition is what makes [com.example.interception.quic.QuicConnection],
+     * [com.example.interception.quic.QuicState] and [com.example.interception.quic.QuicStream]
+     * (previously zero-call-site dead code) an actually-running part of the pipeline.
+     */
+    private fun persistQuicConnection(
+        src: String,
+        sPort: Int,
+        dst: String,
+        dPort: Int,
+        initial: com.example.interception.quic.QuicParser.QuicInitial,
+        quicPayload: ByteArray,
+    ) {
         val connectionId = "quic|$src:$sPort>$dst:$dPort"
-        if (!quicConnections.add(connectionId)) return // already persisted for this 5-tuple
-        val version = if (quicPayload.size >= 5) {
-            ((quicPayload[1].toInt() and 0xFF) shl 24) or
-                ((quicPayload[2].toInt() and 0xFF) shl 16) or
-                ((quicPayload[3].toInt() and 0xFF) shl 8) or
-                (quicPayload[4].toInt() and 0xFF)
-        } else null
+
+        // Advance (or create) the in-memory state machine for every Initial packet we see on
+        // this 5-tuple, regardless of whether we've already persisted the Room row below --
+        // e.g. a retransmitted/second Initial still means "handshake in progress".
+        val conn = quicConnectionState.getOrPut(connectionId) {
+            com.example.interception.quic.QuicConnection(
+                connectionId = connectionId,
+                sessionId = sessionId,
+                srcIp = src, srcPort = sPort,
+                dstIp = dst, dstPort = dPort,
+                sniHost = initial.sniHostname,
+                alpn = initial.alpn,
+                quicVersion = initial.version,
+                dstConnectionId = connectionId,
+            )
+        }
+        conn.bytesReceived += quicPayload.size
+        conn.state = if (initial.decrypted) {
+            com.example.interception.quic.QuicState.HANDSHAKE_IN_PROGRESS
+        } else {
+            com.example.interception.quic.QuicState.INITIALIZING
+        }
+        // Every QUIC stream carrying request/response data multiplexes over this connection;
+        // stream 0 (client-initiated bidirectional control/first-request stream) is the one
+        // concrete stream we can associate with the Initial packet's CRYPTO data itself, so
+        // track it as OPEN the moment the connection is observed -- this is what gives
+        // [com.example.interception.quic.QuicStream] a real call site instead of being an
+        // unused data class, without inventing frame-level stream data we haven't parsed.
+        conn.streams.getOrPut(0) {
+            com.example.interception.quic.QuicStream(streamId = 0, connectionId = connectionId)
+        }
+
+        if (!quicConnections.add(connectionId)) return // Room row already persisted for this 5-tuple
         val entity = QuicConnectionEntity(
             connectionId = connectionId,
             sessionId = sessionId,
             srcIp = src, destIp = dst,
             srcPort = sPort, destPort = dPort,
-            sniHost = sni,
-            alpn = null, // ALPN extension parsing not yet extracted from the ClientHello (P2 follow-up)
-            quicVersion = version,
+            sniHost = initial.sniHostname,
+            alpn = initial.alpn,
+            quicVersion = initial.version,
             dstConnectionId = connectionId,
             establishedAt = System.currentTimeMillis(),
         )
@@ -251,6 +309,7 @@ class PacketPump(
         // long-running sessions don't leak memory keyed by every 5-tuple ever seen.
         lastUdpPersist.entries.removeAll { it.value < cutoff }
         if (quicConnections.size > MAX_TRACKED_FLOWS) quicConnections.clear()
+        if (quicConnectionState.size > MAX_TRACKED_FLOWS) quicConnectionState.clear()
 
         InterceptionStateRepository.updateCounters(
             packetCount = packetCount,
