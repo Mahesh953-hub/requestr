@@ -49,6 +49,9 @@ class PacketPump(
     dumpToFile: Boolean = false,
     captureEnabled: Boolean = true,
     enhancedMode: Boolean = false,
+    /** Task 9: threaded from `SettingsDataStore.requestLogging`/`.responseLogging`. */
+    requestLogging: Boolean = true,
+    responseLogging: Boolean = true,
     /**
      * `VpnService.protect(...)` hook, threaded in from [RequestrVpnService] so relay upstream
      * sockets don't loop back into our own tun. Defaults to [com.example.interception.tun.NoOpProtectHook]
@@ -90,7 +93,7 @@ class PacketPump(
     private val quicConnectionState = LinkedHashMap<String, com.example.interception.quic.QuicConnection>()
 
     /** TCP reassembly + HTTP/TLS pipeline. Feeds decoded transactions into Room. */
-    private val captureEngine = CaptureEngine(context, db, sessionId, printUndecoded, dumpToFile, captureEnabled, enhancedMode)
+    private val captureEngine = CaptureEngine(context, db, sessionId, printUndecoded, dumpToFile, captureEnabled, enhancedMode, requestLogging, responseLogging)
 
     /**
      * T1: PCAP export. [com.example.interception.packet.PacketCaptureEngine] is started/stopped

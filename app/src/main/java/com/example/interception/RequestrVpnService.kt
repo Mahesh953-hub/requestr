@@ -21,7 +21,6 @@ import com.example.data.local.CaptureTier
 import com.example.data.local.RequestrDatabase
 import com.example.data.prefs.AppFilterMode
 import com.example.data.prefs.SettingsDataStore
-import com.example.data.repository.SettingsRepository
 import com.example.interception.tls.TlsKeyLogRegistry
 import com.example.interception.tun.ProtectHook
 import java.io.FileInputStream
@@ -166,7 +165,13 @@ class RequestrVpnService : VpnService() {
 
                 val printUndecoded = prefs.printUndecoded.first()
                 val dumpToFile = prefs.dumpToFile.first()
-                val captureEnabled = SettingsRepository.settings.value.trafficCaptureEnabled
+                // Task 9: read via SettingsDataStore (safe from any process/component) rather
+                // than SettingsRepository.settings.value, which silently returns hardcoded
+                // `true` defaults when the system starts this service without MainActivity
+                // ever having run SettingsRepository.init().
+                val captureEnabled = prefs.trafficCapture.first()
+                val requestLogging = prefs.requestLogging.first()
+                val responseLogging = prefs.responseLogging.first()
                 // Complaint #5 audit fix: Enhanced Mode now feeds CaptureEngine's real
                 // ProtocolDetector analysis pass (see CaptureEngine.enhancedDiagnostics) instead
                 // of gating nothing but a debug Log.i() line.
@@ -200,6 +205,8 @@ class RequestrVpnService : VpnService() {
                         dumpToFile = dumpToFile,
                         captureEnabled = captureEnabled,
                         enhancedMode = enhancedMode,
+                        requestLogging = requestLogging,
+                        responseLogging = responseLogging,
                         protectHook = protectHook,
                     )
                     activePump = pump

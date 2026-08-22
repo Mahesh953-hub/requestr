@@ -8,7 +8,6 @@ import com.example.data.local.InterceptRuleEntity
 import com.example.data.local.RequestrDatabase
 import com.example.data.local.TcpConnectionEntity
 import com.example.data.local.TlsSessionEntity
-import com.example.data.repository.SettingsRepository
 import com.example.interception.grpc.GrpcDetector
 import com.example.interception.grpc.ProtobufDecoder
 import com.example.interception.http.Http2Parser
@@ -57,6 +56,17 @@ class CaptureEngine(
     // sheet, no new UI needed. This is additive: it never changes what gets captured or
     // blocks anything, only annotates rows with an extra analysis pass.
     var enhancedMode: Boolean = false,
+    /**
+     * Task 9: threaded in from [RequestrVpnService] via [PacketPump], which reads
+     * [com.example.data.prefs.SettingsDataStore.requestLogging] / `.responseLogging` directly.
+     * Previously this class read the process-wide settings singleton's `.value` here, which
+     * silently fell back to hardcoded `true` defaults whenever the service ran without
+     * `MainActivity` (e.g. system-initiated VPN restart), because that singleton's `init()` is
+     * only ever called from `onCreate`. `SettingsDataStore` is safe to read from any
+     * process/component.
+     */
+    var requestLogging: Boolean = true,
+    var responseLogging: Boolean = true,
 ) {
     // Complaint #5 audit fix: this used to build a path via
     // `Environment.getExternalStoragePublicDirectory(DIRECTORY_DOWNLOADS)` and open a raw
@@ -553,11 +563,11 @@ class CaptureEngine(
             statusCode = null,
             protocol = "gRPC",
             requestHeaders = if (isClient) {
-                if (SettingsRepository.settings.value.requestLoggingEnabled) call.headers + metaHeaders else metaHeaders
+                if (requestLogging) call.headers + metaHeaders else metaHeaders
             } else metaHeaders,
             responseHeaders = metaHeaders,
-            requestBody = if (isClient && SettingsRepository.settings.value.requestLoggingEnabled) hexDump else null,
-            responseBody = if (!isClient && SettingsRepository.settings.value.responseLoggingEnabled) hexDump else null,
+            requestBody = if (isClient && requestLogging) hexDump else null,
+            responseBody = if (!isClient && responseLogging) hexDump else null,
             requestSizeBytes = if (isClient) (msg.length + GrpcDetector.MESSAGE_HEADER_SIZE).toLong() else 0L,
             responseSizeBytes = if (!isClient) (msg.length + GrpcDetector.MESSAGE_HEADER_SIZE).toLong() else 0L,
             latencyMs = 0L,
@@ -657,10 +667,10 @@ class CaptureEngine(
             path = request.path,
             statusCode = if (response.statusCode == 0) null else response.statusCode,
             protocol = response.version.ifEmpty { request.version },
-            requestHeaders = (if (SettingsRepository.settings.value.requestLoggingEnabled) request.headers else emptyMap()) + enhancedHeaders,
-            responseHeaders = if (SettingsRepository.settings.value.responseLoggingEnabled) response.headers else emptyMap(),
-            requestBody = if (SettingsRepository.settings.value.requestLoggingEnabled) request.body.ifEmpty { null } else null,
-            responseBody = if (SettingsRepository.settings.value.responseLoggingEnabled) response.body.ifEmpty { null } else null,
+            requestHeaders = (if (requestLogging) request.headers else emptyMap()) + enhancedHeaders,
+            responseHeaders = if (responseLogging) response.headers else emptyMap(),
+            requestBody = if (requestLogging) request.body.ifEmpty { null } else null,
+            responseBody = if (responseLogging) response.body.ifEmpty { null } else null,
             requestSizeBytes = request.body.toByteArray(Charsets.UTF_8).size.toLong(),
             responseSizeBytes = response.body.toByteArray(Charsets.UTF_8).size.toLong(),
             latencyMs = 0L, // without proxy we don't have timing between request/response

@@ -79,6 +79,16 @@ class SettingsDataStore(private val context: Context) {
     /** T2: port GatewayEngine listens on, bound to 0.0.0.0 so LAN clients can reach it. */
     val gatewayPort: Flow<Int> = prefs.map { it[AppSettingsKeys.GATEWAY_PORT] ?: DEFAULT_GATEWAY_PORT }
 
+    /**
+     * Readable from any process/component (e.g. [com.example.interception.RequestrVpnService]
+     * restarted by the system without [com.example.MainActivity]), unlike
+     * `SettingsRepository.settings.value`, which only reflects reality once
+     * `SettingsRepository.init()` has run from the Activity.
+     */
+    val trafficCapture: Flow<Boolean> = prefs.map { it[AppSettingsKeys.TRAFFIC_CAPTURE] ?: true }
+    val requestLogging: Flow<Boolean> = prefs.map { it[AppSettingsKeys.REQUEST_LOGGING] ?: true }
+    val responseLogging: Flow<Boolean> = prefs.map { it[AppSettingsKeys.RESPONSE_LOGGING] ?: true }
+
     suspend fun setProxyPort(port: Int) {
         // Keep within the unprivileged, valid TCP range.
         val safe = port.coerceIn(1024, 65535)
