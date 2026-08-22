@@ -138,6 +138,12 @@ object GatewayEngine {
         val remoteAddr = client.inetAddress
         val isRemote = !remoteAddr.isLoopbackAddress
         val clientIp = remoteAddr?.hostAddress ?: "unknown"
+        // Task 12: gateway connections have no TCP 5-tuple key the way TunRelay/CaptureEngine
+        // streams do (this is a plain accepted Socket, not something PacketPump tracks), so the
+        // connection identity is built from the accepted socket's remote address+port — the same
+        // identity `sourceIp` already reflects — plus the CONNECT/absolute-URI target, finalized
+        // per-request below once `rawUrl` is known.
+        val clientEndpoint = "$clientIp:${client.port}"
 
         if (isRemote) {
             _remoteClients.value = _remoteClients.value + clientIp
@@ -184,6 +190,7 @@ object GatewayEngine {
                         sourceIp = if (isRemote) clientIp else null,
                         wasDecrypted = false,
                         isUndecoded = true,
+                        connectionId = "$clientEndpoint>$rawUrl",
                     )
                 } else {
                     val bodyLen = headers["Content-Length"]?.toIntOrNull() ?: 0
@@ -215,6 +222,7 @@ object GatewayEngine {
                         sourceIp = if (isRemote) clientIp else null,
                         wasDecrypted = true,
                         isUndecoded = false,
+                        connectionId = "$clientEndpoint>$rawUrl",
                     )
                 }
             }
@@ -235,6 +243,7 @@ object GatewayEngine {
         sourceIp: String?,
         wasDecrypted: Boolean,
         isUndecoded: Boolean,
+        connectionId: String,
     ) {
         val ctx = appContext ?: return
         val (host, path) = runCatching {
@@ -260,6 +269,7 @@ object GatewayEngine {
             wasDecrypted = wasDecrypted,
             isUndecoded = isUndecoded,
             sourceIp = sourceIp,
+            connectionId = connectionId,
         )
         runCatching { RequestrDatabase.get(ctx).capturedTrafficDao().insert(entity) }
             .onFailure { Log.w(TAG, "Failed to persist gateway transaction: ${it.message}") }

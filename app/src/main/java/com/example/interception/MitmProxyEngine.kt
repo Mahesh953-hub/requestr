@@ -177,7 +177,12 @@ class MitmProxyEngine(
             val sslSocket = sslContext.socketFactory
                 .createSocket(client, host, port, true) as SSLSocket
             sslSocket.useClientMode = false
-            sslSocket.startHandshake()
+            try {
+                sslSocket.startHandshake()
+            } catch (e: javax.net.ssl.SSLException) {
+                persistFailedMitmTlsSession(db, host, port, "client-facing handshake", e)
+                return
+            }
 
             val decryptedInput = sslSocket.getInputStream()
             val decryptedOutput = sslSocket.getOutputStream()
@@ -187,7 +192,12 @@ class MitmProxyEngine(
             val upstreamSsl = SSLContext.getInstance("TLS").apply {
                 init(null, arrayOf(TrustAllCerts), SecureRandom())
             }.socketFactory.createSocket(upstream, host, port, true) as SSLSocket
-            upstreamSsl.startHandshake()
+            try {
+                upstreamSsl.startHandshake()
+            } catch (e: javax.net.ssl.SSLException) {
+                persistFailedMitmTlsSession(db, host, port, "upstream handshake", e)
+                return
+            }
 
             val upstreamInput = upstreamSsl.getInputStream()
             val upstreamOutput = upstreamSsl.getOutputStream()
@@ -209,7 +219,7 @@ class MitmProxyEngine(
                     clientWriteLock, host, port, pending)
             }
             val t2 = Thread {
-                inspectServerToClient(db, upstreamInput, decryptedOutput, clientWriteLock, pending)
+                inspectServerToClient(db, upstreamInput, decryptedOutput, clientWriteLock, pending, host, port)
             }
             t1.start(); t2.start()
             t1.join(60_000); t2.join(60_000)
@@ -291,6 +301,8 @@ class MitmProxyEngine(
         clientOut: OutputStream,
         clientWriteLock: Any,
         pending: ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>,
+        host: String,
+        port: Int,
     ) {
         val buffer = ByteArrayOutputStream()
         val chunk = ByteArray(BUFFER_SIZE)
@@ -328,7 +340,7 @@ class MitmProxyEngine(
                     } else {
                         val raw = bytes.copyOfRange(0, response.consumedBytes)
                         bytes = bytes.copyOfRange(response.consumedBytes, bytes.size)
-                        handleParsedResponse(db, response, raw, clientOut, clientWriteLock, pending)
+                        handleParsedResponse(db, response, raw, clientOut, clientWriteLock, pending, host, port)
                         buffer.reset()
                         buffer.write(bytes)
                     }
@@ -394,6 +406,8 @@ class MitmProxyEngine(
         clientOut: OutputStream,
         clientWriteLock: Any,
         pending: ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>,
+        host: String,
+        port: Int,
     ) {
         // Interim 1xx responses (e.g. 100 Continue) precede the final response:
         // forward them without consuming the request pairing. 101 is terminal
@@ -421,7 +435,7 @@ class MitmProxyEngine(
         }
         if (request != null) {
             val latencyMs = System.currentTimeMillis() - pair!!.second
-            emitTransaction(request, response, latencyMs)
+            emitTransaction(request, response, latencyMs, "$host:$port")
         }
     }
 
@@ -432,6 +446,7 @@ class MitmProxyEngine(
         request: ParsedHttpMessage,
         response: ParsedHttpMessage,
         latencyMs: Long,
+        connectionId: String,
     ) {
         val callback = onDecryptedTransaction ?: return
         val logRequests = SettingsRepository.settings.value.requestLoggingEnabled
@@ -454,6 +469,11 @@ class MitmProxyEngine(
             timestamp = System.currentTimeMillis(),
             wasDecrypted = true,
             isUndecoded = false,
+            // Task 12: MITM rows use "$host:$port" (the CONNECT target), matching
+            // persistMitmTlsSession's convention -- the engine never sees the raw 5-tuple, only
+            // the CONNECT target, so this is the exact identity ConnectionLineage.findTlsFor's
+            // two-step lookup already handles.
+            connectionId = connectionId,
         )
         runCatching { callback(entity) }
             .onSuccess {
@@ -630,6 +650,47 @@ class MitmProxyEngine(
             kotlinx.coroutines.runBlocking { db.tlsSessionDao().upsert(entity) }
             Log.i(TAG, "TLS session persisted: $host cipher=${entity.cipherSuite} alpn=${entity.negotiatedProtocol}")
         }.onFailure { e -> Log.w(TAG, "Failed to persist MITM TLS session for $host: ${e.message}") }
+    }
+
+    /**
+     * Task 11: persist a FAILED [com.example.data.local.TlsSessionEntity] when either leg of
+     * the MITM handshake throws. This covers the TLS 1.3 encrypted-alert case
+     * [com.example.interception.tls.TlsDecoder.parseAlert] cannot see on the wire — the MITM
+     * proxy is a real TLS endpoint, so [javax.net.ssl.SSLHandshakeException]/[SSLException] is
+     * an unambiguous, first-class failure signal, not a heuristic.
+     *
+     * Uses the same `"$host:$port"` [connectionId] convention as [persistMitmTlsSession] so a
+     * later successful re-handshake on the same host overwrites this row rather than
+     * duplicating it. Never throws — a failure here must not break the caller's early return.
+     */
+    private fun persistFailedMitmTlsSession(
+        db: RequestrDatabase,
+        host: String,
+        port: Int,
+        stage: String,
+        cause: Exception,
+    ) {
+        runCatching {
+            val connectionId = "$host:$port"
+            val entity = com.example.data.local.TlsSessionEntity(
+                tlsSessionId = connectionId,
+                sessionId = sessionId.get(),
+                connectionId = connectionId,
+                sniHost = host,
+                version = null,
+                cipherSuite = null,
+                negotiatedProtocol = null,
+                ja3Hash = null,
+                handshakeState = com.example.interception.tls.TlsHandshakeState.FAILED.name,
+                wasDecrypted = false,
+                peerCertSubject = null,
+                peerCertIssuer = null,
+                failureReason = "$stage: ${cause.javaClass.simpleName}: ${cause.message}",
+                failedAt = System.currentTimeMillis(),
+            )
+            kotlinx.coroutines.runBlocking { db.tlsSessionDao().upsert(entity) }
+            Log.w(TAG, "MITM TLS handshake FAILED: $host stage=$stage cause=${cause.message}")
+        }.onFailure { e -> Log.w(TAG, "Failed to persist FAILED MITM TLS session for $host: ${e.message}") }
     }
 
     // ── SSL context ─────────────────────────────────────────────────────

@@ -140,6 +140,59 @@ class CaptureEngine(
         }.onFailure { e -> Log.w(TAG, "Failed to persist TCP connection: ${e.message}") }
     }
 
+    // ── Task 11: real TLS FAILED handshake state ──────────────────────────
+    // Before this, the only two writers of TlsSessionEntity.handshakeState were CLIENT_HELLO
+    // (below, right after ClientHello parse) and MitmProxyEngine's ESTABLISHED -- FAILED was
+    // defined but never reachable. This upserts FAILED with a real reason onto the same row
+    // (tlsSessionId = stream.key), driven by TlsDecoder.findAlertInRecords (task 7) and the
+    // real TCP handshake phase (task 1) via TlsFailureClassifier.classifyTlsOutcome.
+    private fun persistTlsFailureIfNeeded(stream: TcpStream) {
+        if (!stream.isTls || stream.tlsOutcomeRecorded) return
+
+        val alert = runCatching {
+            TlsDecoder.findAlertInRecords(stream.clientToServer.bytes())
+                ?: TlsDecoder.findAlertInRecords(stream.serverToClient.bytes())
+        }.getOrNull()
+
+        val outcome = com.example.interception.tls.classifyTlsOutcome(
+            phase = stream.handshakePhase,
+            alert = alert,
+            hasEstablishedRow = false,
+        ) ?: run {
+            // Nothing to report yet unless the handshake is done (RESET/CLOSED) or a fatal
+            // alert arrived -- keep watching future packets on this stream.
+            if (stream.handshakePhase != com.example.interception.tcp.TcpHandshakePhase.RESET &&
+                stream.handshakePhase != com.example.interception.tcp.TcpHandshakePhase.CLOSED
+            ) {
+                return
+            }
+            null
+        } ?: return
+
+        stream.tlsOutcomeRecorded = true
+        runCatching {
+            val now = System.currentTimeMillis()
+            val entity = TlsSessionEntity(
+                tlsSessionId = stream.key,
+                sessionId = sessionId,
+                connectionId = stream.key,
+                sniHost = stream.sniHost,
+                version = null,
+                cipherSuite = null,
+                negotiatedProtocol = null,
+                ja3Hash = null,
+                handshakeState = com.example.interception.tls.TlsHandshakeState.FAILED.name,
+                wasDecrypted = false,
+                peerCertSubject = null,
+                peerCertIssuer = null,
+                failureReason = outcome.reason,
+                failedAt = now,
+            )
+            runBlocking { db.tlsSessionDao().upsert(entity) }
+            Log.i(TAG, "TLS handshake FAILED: ${stream.sniHost ?: stream.dstIp} reason=${outcome.reason}")
+        }.onFailure { e -> Log.w(TAG, "Failed to persist FAILED TLS session: ${e.message}") }
+    }
+
     // ── entry point ─────────────────────────────────────────────────────
 
     /**
@@ -206,6 +259,7 @@ class CaptureEngine(
                         sessionId = sessionId,
                         wasDecrypted = false,
                         isUndecoded = true,
+                        connectionId = stream.key,
                     )
                     kotlinx.coroutines.runBlocking {
                         try { db.capturedTrafficDao().insert(entity); transactionCount++; Log.i(TAG, "Undecoded TLS persisted: ${stream.sniHost ?: stream.dstIp}") } catch (_: Exception) {}
@@ -221,7 +275,10 @@ class CaptureEngine(
             }
         }
 
-        if (stream.isTls && !stream.decryptedByMitm) return // allow MITM-decrypted streams through
+        if (stream.isTls && !stream.decryptedByMitm) {
+            persistTlsFailureIfNeeded(stream)
+            return // allow MITM-decrypted streams through
+        }
 
         // ── HTTP/2 detection (plaintext h2c or MITM-decrypted h2) ───────
         // gRPC rides on HTTP/2, so this check must run before the HTTP/1.x
@@ -506,6 +563,7 @@ class CaptureEngine(
             latencyMs = 0L,
             timestamp = System.currentTimeMillis(),
             wasDecrypted = stream.decryptedByMitm,
+            connectionId = stream.key,
         )
 
         runCatching {
@@ -608,6 +666,7 @@ class CaptureEngine(
             latencyMs = 0L, // without proxy we don't have timing between request/response
             timestamp = System.currentTimeMillis(),
             wasDecrypted = false,
+            connectionId = stream.key,
         )
 
         runCatching {
@@ -681,6 +740,7 @@ class CaptureEngine(
             latencyMs = 0L,
             timestamp = System.currentTimeMillis(),
             wasDecrypted = false,
+            connectionId = stream.key,
         )
         runCatching {
             kotlinx.coroutines.runBlocking { db.capturedTrafficDao().insert(entity) }

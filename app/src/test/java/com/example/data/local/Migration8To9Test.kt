@@ -51,7 +51,17 @@ class Migration8To9Test {
         db.close()
 
         // Real migration path -- this is what dies if a destructive fallback is reintroduced.
-        db = helper.runMigrationsAndValidate(testDbName, 9, true, RequestrDatabase.MIGRATION_8_9)
+        //
+        // validateDroppedTables is false here, not true: this migration also creates
+        // connect_attempts (Section C), whose @Entity/@Dao (ConnectAttemptEntity) is registered
+        // only on the SDK scope's branch, not in this worktree's @Database entity list. With
+        // validateDroppedTables = true, Room's schema validator throws "Migration didn't
+        // properly handle: Unexpected table connect_attempts" because it sees a table with no
+        // matching entity here -- that is an artifact of this scope not carrying the SDK
+        // scope's entity, not a bug in the migration SQL. The explicit table/index assertions
+        // below are what actually prove Section C is correct; the user reconciles the exported
+        // schema JSON once both scopes' entity lists are merged.
+        db = helper.runMigrationsAndValidate(testDbName, 9, false, RequestrDatabase.MIGRATION_8_9)
 
         // Pre-existing rows survived, and the new columns exist and are null on old rows.
         db.query("SELECT connectionId FROM captured_traffic WHERE host = 'example.com'").use { c ->
@@ -75,6 +85,24 @@ class Migration8To9Test {
             db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = '$table'").use { c ->
                 assertTrue("table $table must exist after migration", c.moveToFirst())
             }
+        }
+
+        // Section C: connect_attempts (SDK scope's ConnectAttemptEntity) and its three indices
+        // exist. This is the assertion that would have caught the original cross-scope bug: the
+        // SDK branch registers ConnectAttemptEntity in the @Database entity list without ever
+        // creating this table itself, so if this migration didn't create it, Room would throw at
+        // database-open time on every launch once the two branches are merged.
+        db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'connect_attempts'").use { c ->
+            assertTrue("connect_attempts table must exist after migration", c.moveToFirst())
+        }
+        listOf(
+            "index_connect_attempts_sessionId",
+            "index_connect_attempts_targetHost",
+            "index_connect_attempts_timestamp",
+        ).forEach { indexName ->
+            db.query(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name = '$indexName'"
+            ).use { c -> assertTrue("index $indexName must exist after migration", c.moveToFirst()) }
         }
 
         // A round-trip insert carrying the new fields works.
