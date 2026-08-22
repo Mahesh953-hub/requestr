@@ -68,10 +68,25 @@ class PacketPump(
      * (the VPN_TUN blackhole recorded in AUDIT_REPORT.md's v5.8-backup addendum). Exposed so the
      * service can stop it and the UI can observe [TunRelay.stats].
      */
-    val relay: TunRelay = TunRelay(
-        protectHook,
-        com.example.interception.tun.TunWriter(com.example.interception.tun.TunSink { datagram -> output.write(datagram) }),
-    )
+    private val tunWriter = com.example.interception.tun.TunWriter(com.example.interception.tun.TunSink { datagram -> output.write(datagram) })
+
+    val relay: TunRelay = TunRelay(protectHook, tunWriter)
+
+    /**
+     * ICMP echo relay (task 6), isolated from [relay]'s TCP/UDP flow tables and selector loop.
+     * Wired in as [TunRelay.icmpGuestHandler] below so a failure inside [IcmpRelay] can never
+     * propagate into TCP/UDP handling -- [TunRelay.offer] only ever calls this handler and
+     * [IcmpRelay.offer] itself never throws (every failure is counted, not propagated). Exposed
+     * (not private), matching [relay]'s own visibility, so a future relay-health UI surface
+     * (task 14) can read [com.example.interception.tun.IcmpRelay.unrelayableCount] /
+     * `outstandingCount()` the same way [RequestrVpnService] already reaches [relay]'s stats via
+     * its `activePump` reference.
+     */
+    val icmpRelay = com.example.interception.tun.IcmpRelay(protectHook, tunWriter)
+
+    init {
+        relay.icmpGuestHandler = { datagram, header -> icmpRelay.offer(datagram, header) }
+    }
 
     /** Distinct flows seen recently, keyed by 5-tuple, with last-seen timestamps for expiry. */
     private val activeFlows = LinkedHashMap<String, Long>()
@@ -149,6 +164,7 @@ class PacketPump(
             flusher.cancel()
             relayJob.cancel()
             relay.stop()
+            icmpRelay.stop()
             flushNow()
         }
     }
