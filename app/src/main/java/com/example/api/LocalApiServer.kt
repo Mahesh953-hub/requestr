@@ -98,17 +98,36 @@ object LocalApiServer {
                 val method = parts[0].uppercase()
                 val path = parts[1]
                 var contentLength = 0
+                // W4: raw header name order+casing as they arrived on the wire, plus an
+                // optional calibration tag -- see the doc on `calibrationStackHeader` below.
+                val rawHeaderNames = mutableListOf<String>()
+                var calibrationStack: String? = null
                 while (true) {
                     val hdr = reader.readLine() ?: break
                     if (hdr.isEmpty()) break
+                    val colon = hdr.indexOf(':')
+                    if (colon > 0) rawHeaderNames.add(hdr.substring(0, colon).trim())
                     if (hdr.startsWith("Content-Length:", ignoreCase = true))
                         contentLength = hdr.substringAfter(":").trim().toIntOrNull() ?: 0
+                    if (hdr.startsWith("$CALIBRATION_STACK_HEADER:", ignoreCase = true))
+                        calibrationStack = hdr.substringAfter(":").trim()
                 }
                 val body = if (contentLength > 0) {
                     val buf = CharArray(contentLength)
                     reader.read(buf, 0, contentLength)
                     String(buf)
                 } else ""
+
+                if (calibrationStack != null && rawHeaderNames.isNotEmpty()) {
+                    // See StackFingerprinter.calibrate(): a stack issues one real request to
+                    // this loopback server tagged with its own name, so the exact header order
+                    // and casing it put on the wire is captured here -- the only place it can
+                    // be, since this server IS the wire endpoint for that request.
+                    com.example.runtime.http.StackSignalStore.registerRequestHeaderOrder(
+                        "calibrate:$calibrationStack",
+                        rawHeaderNames,
+                    )
+                }
 
                 val (status, ct, resp) = route(method, path, body)
                 writer.write("HTTP/1.1 $status ${statusText(status)}\r\n")
@@ -121,6 +140,16 @@ object LocalApiServer {
             }
         } catch (_: Exception) { }
     }
+
+    /**
+     * Header name a calibration probe (see `StackFingerprinter.calibrate`) sets to its own
+     * [com.example.runtime.http.HttpStack] name, so [handleClient] knows which stack's real
+     * request this is and can record its wire-level header order under a synthetic
+     * `calibrate:<stack>` connection id in [com.example.runtime.http.StackSignalStore]. Never
+     * inspected by any other route -- purely a signal-capture side channel for W4.
+     */
+    const val CALIBRATION_STACK_HEADER = "X-Requestr-Calibrate-Stack"
+
 
     // ── Router ────────────────────────────────────────────────────
 
