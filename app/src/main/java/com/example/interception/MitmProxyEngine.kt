@@ -192,12 +192,34 @@ class MitmProxyEngine(
             val upstreamInput = upstreamSsl.getInputStream()
             val upstreamOutput = upstreamSsl.getOutputStream()
 
+            // W5: the MITM proxy terminates TLS itself, so tlsSessionId/connectionId have
+            // historically been keyed as "$host:$port" -- a real key, but a different
+            // convention than the 5-tuple ConnectionLineage joins on for the VPN/tun path.
+            // client (the accepted Socket) and upstream (the Socket this engine itself opened)
+            // together give the real 5-tuple this MITM'd connection corresponds to, so register
+            // the host:port alias against the canonical ConnectionKey.forTcp key instead of
+            // inventing a third convention.
+            val canonicalConnectionId = runCatching {
+                com.example.correlation.ConnectionKey.forTcp(
+                    srcIp = client.inetAddress?.hostAddress ?: return@runCatching null,
+                    srcPort = client.port,
+                    dstIp = upstream.inetAddress?.hostAddress ?: return@runCatching null,
+                    dstPort = port,
+                )
+            }.getOrNull()
+            if (canonicalConnectionId != null) {
+                com.example.correlation.ConnectionAliasRegistry.register(
+                    alias = com.example.correlation.ConnectionKey.forHostPort(host, port),
+                    canonical = canonicalConnectionId,
+                )
+            }
+
             // M2: persist a TlsSessionEntity for this MITM'd handshake. Unlike the
             // undecoded/VPN path (CaptureEngine, ClientHello-only), we actually completed
             // both TLS legs here, so we know the *negotiated* cipher/protocol/ALPN from the
             // client-facing session and the *real* peer certificate from the upstream leg
             // (the client-facing cert is ours, not the server's — no signal there).
-            persistMitmTlsSession(db, host, port, sslSocket, upstreamSsl)
+            persistMitmTlsSession(db, host, port, sslSocket, upstreamSsl, canonicalConnectionId)
 
             // Inspecting bidirectional relay: parse decrypted HTTP/1.x with
             // HttpParser, enforce rules on the parsed messages, persist each
@@ -593,7 +615,10 @@ class MitmProxyEngine(
      * [SSLSession] and the peer certificate chain off the upstream leg, then upserts a
      * [TlsSessionEntity]. Keyed by `host:port` (one row per MITM'd host per proxy lifetime;
      * re-negotiations on the same host just refresh the row, matching how [certCache]
-     * already treats a host as a single logical connection target).
+     * already treats a host as a single logical connection target) -- that primary key is
+     * left untouched so no existing row is orphaned, but [connectionId] carries the real
+     * canonical 5-tuple key (see [ConnectionAliasRegistry] registration in [handleClient]),
+     * which is the field [com.example.correlation.graph.ConnectionLineage] joins on (W5).
      *
      * Never throws — a failure here must not break the relay that already started.
      */
@@ -603,16 +628,17 @@ class MitmProxyEngine(
         port: Int,
         clientFacingSocket: SSLSocket,
         upstreamSocket: SSLSocket,
+        canonicalConnectionId: String?,
     ) {
         runCatching {
             val clientSession: SSLSession = clientFacingSocket.session
             val upstreamSession: SSLSession = upstreamSocket.session
             val peerCert = upstreamSession.peerCertificates?.firstOrNull() as? X509Certificate
-            val connectionId = com.example.correlation.ConnectionKey.forHostPort(host, port)
+            val aliasConnectionId = com.example.correlation.ConnectionKey.forHostPort(host, port)
             val entity = com.example.data.local.TlsSessionEntity(
-                tlsSessionId = connectionId,
+                tlsSessionId = aliasConnectionId,
                 sessionId = sessionId.get(),
-                connectionId = connectionId,
+                connectionId = canonicalConnectionId ?: aliasConnectionId,
                 sniHost = host,
                 version = clientSession.protocol,
                 cipherSuite = clientSession.cipherSuite,
