@@ -215,9 +215,9 @@ class RequestrVpnService : VpnService() {
 
                 Log.i(TAG, "Capture started on tun, session=$newId port=$port")
 
-                // Fix #2 (TODO): Hot-reload app filter. VpnService.Builder doesn't
-                // support dynamic app list changes after establish(), so we tear down
-                // and re-establish the tun when the user changes the filter.
+                // Hot-reload app filter. VpnService.Builder doesn't support dynamic app list
+                // changes after establish(), so we tear down and re-establish the tun when the
+                // user changes the filter.
                 filterObserverJob?.cancel()
                 filterObserverJob = scope.launch {
                     val prefs2 = SettingsDataStore.get(applicationContext)

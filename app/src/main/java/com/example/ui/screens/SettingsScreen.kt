@@ -1368,10 +1368,10 @@ fun SettingsScreen(
                             Text("Regenerate CA", color = MaterialTheme.colorScheme.onErrorContainer, fontSize = 12.sp)
                         }
 
-                        // Fix #21 (TODO): auto-promote to system store when root/Shizuku
-                        // transitions to GRANTED and CA is in user store. Previously the user
-                        // had to manually tap the button. Now we observe the capability state
-                        // and trigger automatically (with a result toast).
+                        // Auto-promote to system store when root/Shizuku transitions to
+                        // GRANTED and the CA is in the user store. Previously the user had to
+                        // manually tap the button. Now we observe the capability state and
+                        // trigger automatically (with a result toast either way).
                         var autoPromoteTriggered by remember { mutableStateOf(false) }
                         LaunchedEffect(capabilities.root, capabilities.shizuku, capabilities.ca) {
                             if (autoPromoteTriggered) return@LaunchedEffect
@@ -1390,6 +1390,12 @@ fun SettingsScreen(
                                             android.widget.Toast.LENGTH_SHORT
                                         ).show()
                                     }
+                                }.onFailure { e ->
+                                    android.widget.Toast.makeText(
+                                        settingsContext,
+                                        "CA auto-promotion failed: ${e.message ?: e::class.java.simpleName}",
+                                        android.widget.Toast.LENGTH_SHORT
+                                    ).show()
                                 }
                                 CapabilityProbe.probeAll(settingsContext)
                             }

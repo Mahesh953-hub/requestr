@@ -198,7 +198,8 @@ class PacketPump(
             s to d
         } else 0 to 0
 
-        // Fix #16 (TODO): intercept DNS queries on UDP port 53.
+        // DNS interception on UDP port 53: parses queries/responses and forwards them via
+        // dnsCallback (see RequestrVpnService.onDnsObserved) for real persistence.
         if (protocol == 17 && (sPort == 53 || dPort == 53)) {
             val udpPayload = packet.copyOfRange(ihl + 8, length)
             val query = com.example.interception.dns.DnsParser.parse(udpPayload, sPort, dPort)
