@@ -98,7 +98,7 @@ class CdpFetchAdapter(
         client.send("Fetch.disable", sessionId = sessionId)
     }
 
-    private fun handleRequestPaused(event: JSONObject) {
+    internal fun handleRequestPaused(event: JSONObject) {
         if (isResponseStage(event)) {
             handleResponseStagePaused(event)
         } else {

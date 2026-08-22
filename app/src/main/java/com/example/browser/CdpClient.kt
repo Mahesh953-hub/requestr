@@ -362,12 +362,25 @@ class CdpClient(
     internal fun dispatchForTest(text: String) = dispatch(text)
 
     /**
+     * Test-only hook: when set, [send] routes every call here -- recording (or synthesizing a
+     * response for) `method`/`params`/`sessionId` -- instead of requiring a live, `CONNECTED`
+     * `WebSocket`. Lets adapters that hold a `CdpClient` (e.g. [CdpFetchAdapter],
+     * [CdpNetworkAdapter]) be unit-tested without ever opening a real socket, mirroring
+     * [dispatchForTest]'s role on the receive side.
+     */
+    internal var sendHookForTest: ((method: String, params: JSONObject, sessionId: String?, callback: (JSONObject?, String?) -> Unit) -> Unit)? = null
+
+    /**
      * Send a CDP command, e.g. send("Network.enable", JSONObject(), sessionId = "S1") { ... }.
      * `sessionId` must be non-null for any per-target command once auto-attach is flattened;
      * browser-level commands (e.g. `Target.setAutoAttach` itself) pass `sessionId = null`.
      * Fire-and-forget if [callback] is left default and the caller doesn't care about the result.
      */
     fun send(method: String, params: JSONObject = JSONObject(), sessionId: String? = null, callback: (JSONObject?, String?) -> Unit = { _, _ -> }) {
+        sendHookForTest?.let { hook ->
+            hook(method, params, sessionId, callback)
+            return
+        }
         val socket = webSocket
         if (socket == null || _state.value != State.CONNECTED) {
             callback(null, "Not connected")
