@@ -385,21 +385,55 @@ gated on `decryptedTransactionCount`). See `TODO_v5.md` for the current, maintai
 status. This addendum records one **new CRITICAL-severity finding** surfaced during a v5.8-backup
 deep audit of the Interceptr screen that supersedes/broadens the old #1 in severity:
 
-**CRITICAL (NEW) — VPN_TUN tier silently blackholes all device traffic while active.**
+**CRITICAL (NEW), NOW FIXED — VPN_TUN tier silently blackholed all device traffic while active.**
 `PacketPump`'s tun `output: FileOutputStream` (the write side back into the kernel's TUN device)
-has no code anywhere that writes to it — there is no per-flow socket relay/NAT for the VPN_TUN
-capture path, unlike the PROXY/GATEWAY/MITM tiers which do have real upstream-relay logic
-(`HttpProxyShared`, `MitmProxyEngine`'s dual-leg relay). `PacketPump` reads every packet off the
-tun fd for inspection (real, that part works) but never forwards it onward, so once
-`RequestrVpnService`'s VPN is established and routes all device traffic through the tun,
-**every packet is read and then dropped** — the device loses all network connectivity while
-VPN_TUN capture is active, for every app, not just the one(s) being observed. This is broader in
-impact than the old #1 finding ("no TLS MITM decryption") because it affects plaintext HTTP,
-DNS, and non-HTTP traffic too, not just HTTPS bodies — and it's a full outage, not a visibility
-gap. Not fixed as part of the v5.8-backup deep audit (fixing it means implementing a real
-per-flow relay/NAT layer for the VPN_TUN path, a substantial new subsystem, not a wiring fix) —
-tracked here for a future pass. See `TODO_v5.md`'s v5.8-backup DEEP AUDIT table for the same
-note in the maintained tracker.
+previously had no code anywhere that wrote to it — there was no per-flow socket relay/NAT for the
+VPN_TUN capture path, unlike the PROXY/GATEWAY/MITM tiers which do have real upstream-relay logic
+(`HttpProxyShared`, `MitmProxyEngine`'s dual-leg relay). `PacketPump` read every packet off the
+tun fd for inspection (real, that part worked) but never forwarded it onward, so once
+`RequestrVpnService`'s VPN was established and routed all device traffic through the tun,
+**every packet was read and then dropped** — the device lost all network connectivity while
+VPN_TUN capture was active, for every app, not just the one(s) being observed. This was broader in
+impact than the old #1 finding ("no TLS MITM decryption") because it affected plaintext HTTP,
+DNS, and non-HTTP traffic too, not just HTTPS bodies — a full outage, not a visibility gap.
+
+**Fixed this round** with a new `interception/tun/` subsystem: `TunRelay.kt` (userspace TCP+UDP
+relay — real flow tables, `VpnService.protect()`-guarded upstream sockets, `MutableStateFlow`
+health counters), `RelayFlow.kt` (per-flow TCP/UDP relay state), `TunWriter.kt` (serializes writes
+back into the tun fd), `IcmpRelay.kt` + `IcmpIdMap.kt` (ICMP echo relay: unprivileged ping-socket
+primary path, protected-TCP-probe fallback), `IpFragmentReassembler.kt` (IPv4/IPv6 fragment
+reassembly + IPv6 extension-header walking), `IpPacketBuilder.kt` (IP/TCP/UDP/ICMP packet
+construction), `IpAddressCodec.kt` (address family helpers). `RequestrVpnService` now also adds an
+IPv6 ULA address + `::/0` route to the tun builder (previously IPv4-only), and `PacketPump`/
+`TcpReassembler`'s IPv6 parsing was rewritten to walk real extension headers instead of assuming a
+fixed offset. A relay-health card and detail sheet were added to `InterceptScreen.kt` (task 14),
+bound to `TunRelay.stats`/`IcmpRelay.unrelayableCount`/`IcmpRelay.lastPathUsed` via
+`collectAsStateWithLifecycle`.
+
+**Verification honesty — implemented but NOT device-verified end-to-end.** This fix is verified by
+`TunRelayTest.kt`/`IcmpRelayTest.kt` (loopback-socket unit tests) and the standard build gates
+(`:app:compileDebugKotlin`, `:app:testDebugUnitTest`, `:app:assembleDebug`, `:app:assembleRelease`,
+all green). It has **not** been exercised end-to-end on a real device or emulator with a real
+kernel TUN datapath: this account's Redroid tier exposes `/dev/net/tun` inside the container but
+has no real kernel networking stack backing it, so `VpnService.Builder.establish()`'s actual
+packet flow cannot be driven here (see `/memory/knowledge/setup-learnings/android.md`), and
+VPN/root/Shizuku interception in general cannot be driven on non-rooted Redroid at all (see
+`/memory/testing/requestr/known-issues.md`). Do not read "fixed" above as "proven on-device" —
+it is proven by unit test and code inspection only. The same caveat applies to the IPv6 route/
+relay flows and the ICMP echo relay described above; all three should be device-verified before
+this is treated as fully closed.
+
+**Known gap, not implemented — QUIC handshake / 1-RTT decryption.** HTTP/3 (QUIC) traffic is
+still surfaced only as opaque UDP/QUIC-Initial-only flows, never as decoded HTTP/3 request/
+response rows: `QuicCrypto` only derives the RFC 9001 *Initial* secrets (available in cleartext
+before any handshake completes); there is no TLS 1.3 key-schedule implementation for the
+handshake/1-RTT secrets HTTP/3's actual HEADERS/DATA frames are protected with, and
+`QpackDecoder.decode()` remains without a production call site. This was evaluated for this round
+and explicitly descoped, not attempted partially. See `TODO_v5.md`'s P2 row for the same note in
+the maintained tracker.
+
+See `TODO_v5.md`'s v5.8-backup DEEP AUDIT table and BUILD LOG for the same notes in the maintained
+tracker.
 
 ---
 
