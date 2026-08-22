@@ -71,10 +71,14 @@ object CertificateAuthority {
     private val legacyInternalKeystorePassword = "requestr-ca-local".toCharArray()
 
     init {
-        // Register BC so SHA256withRSA and the cert builders resolve on Android.
+        // Install the full BouncyCastle provider at position 1 so it shadows the platform's
+        // stripped-down BC copy. The platform copy exposes SHA256withRSA inconsistently and
+        // produces signatures that cannot be verified by standard TLS clients, breaking MITM.
         runCatching {
-            if (java.security.Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
-                java.security.Security.addProvider(BouncyCastleProvider())
+            val existing = java.security.Security.getProvider(BouncyCastleProvider.PROVIDER_NAME)
+            if (existing == null || existing !is org.bouncycastle.jce.provider.BouncyCastleProvider) {
+                existing?.let { java.security.Security.removeProvider(BouncyCastleProvider.PROVIDER_NAME) }
+                java.security.Security.insertProviderAt(org.bouncycastle.jce.provider.BouncyCastleProvider(), 1)
             }
         }
     }
@@ -206,7 +210,8 @@ object CertificateAuthority {
 
     /** Creates a genuine self-signed CA certificate with the correct CA extensions. */
     private suspend fun generate(context: Context): CaMaterial {
-        val generator = KeyPairGenerator.getInstance("RSA")
+        val bcProvider = org.bouncycastle.jce.provider.BouncyCastleProvider()
+        val generator = KeyPairGenerator.getInstance("RSA", bcProvider)
         generator.initialize(2048, SecureRandom())
         val keyPair = generator.generateKeyPair()
 
@@ -238,12 +243,8 @@ object CertificateAuthority {
             JcaX509ExtensionUtils().createSubjectKeyIdentifier(keyPair.public),
         )
 
-        // Do NOT pin to a named provider.  On Android the platform already ships a
-        // stripped BouncyCastle instance, so `.setProvider("BC")` resolves to the
-        // platform copy which does NOT expose SHA256withRSA under that alias.
-        // Letting the JCA choose (with our full BC provider registered first) avoids
-        // the "no such algorithm: SHA256WITHRSA for provider BC" crash.
         val signer = JcaContentSignerBuilder("SHA256withRSA")
+            .setProvider(bcProvider)
             .build(keyPair.private)
 
         val certificate = JcaX509CertificateConverter()

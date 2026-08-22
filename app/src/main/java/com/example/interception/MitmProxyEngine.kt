@@ -28,7 +28,6 @@ import org.bouncycastle.asn1.x509.GeneralNames
 import org.bouncycastle.asn1.x509.KeyUsage
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
-import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -90,6 +89,13 @@ class MitmProxyEngine(
      * by the callback are caught and logged so they can never kill a relay.
      */
     private val onDecryptedTransaction: ((CapturedTrafficEntity) -> Unit)? = null,
+    /**
+     * Optional JSSE provider name for the client-facing TLS context (e.g. "SunJSSE").
+     * Defaults to null so the platform's default provider (Conscrypt on Android) is used.
+     * Exposed as a test seam so Robolectric/JVM tests can avoid Conscrypt's limitation
+     * that prevents startHandshake() on a socket that already exchanged plain HTTP data.
+     */
+    private val sslContextProvider: String? = null,
 ) {
     private var serverSocket: ServerSocket? = null
     private var acceptJob: Job? = null
@@ -122,7 +128,7 @@ class MitmProxyEngine(
         running.set(true)
 
         InterceptionStateRepository.markActive(
-            sessionId = sessionId.get(), tier = ActiveTier.VPN,
+            sessionId = sessionId.get(), tier = ActiveTier.PROXY,
             port = serverSocket!!.localPort, method = CaptureMethod.MITM_PROXY,
         )
 
@@ -149,6 +155,7 @@ class MitmProxyEngine(
 
     private suspend fun handleClient(context: Context, client: Socket) {
         try {
+            runCatching { client.setTcpNoDelay(true) }
             val input = client.getInputStream()
             val output = client.getOutputStream()
 
@@ -158,6 +165,12 @@ class MitmProxyEngine(
                 output.write("HTTP/1.1 400 Bad Request\r\n\r\n".toByteArray())
                 return
             }
+
+            // Drain the rest of the CONNECT request (headers + terminating empty line) so
+            // that the bytes remaining on the socket are exactly the client's TLS handshake.
+            // Without this, leftover headers are interpreted as the TLS ClientHello and the
+            // handshake fails with "wrong version number" / "Unable to parse TLS packet header".
+            skipHeaders(input)
 
             val target = parts[1]
             val (host, port) = parseHostPort(target, 443)
@@ -176,8 +189,7 @@ class MitmProxyEngine(
                 is ConnectControl.Disposition.Redirect -> {
                     // Rule redirects this CONNECT to a different upstream — tunnel opaquely to
                     // the redirect target instead of the original (no MITM either way here).
-                    output.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray())
-                    output.flush()
+                    // HttpProxyShared.handleConnectAttempt writes the 200 response itself.
                     HttpProxyShared.handleConnectAttempt(
                         client, disposition.target, ConnectControl.Disposition.AllowOpaque, output,
                     ) { sent, recv ->
@@ -191,8 +203,7 @@ class MitmProxyEngine(
                 is ConnectControl.Disposition.AllowOpaque -> {
                     // No FORCE_MITM rule matched — tunnel opaquely rather than terminate TLS,
                     // even though this engine is capable of MITM.
-                    output.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray())
-                    output.flush()
+                    // HttpProxyShared.handleConnectAttempt writes the 200 response itself.
                     HttpProxyShared.handleConnectAttempt(
                         client, target, ConnectControl.Disposition.AllowOpaque, output,
                     ) { sent, recv ->
@@ -735,13 +746,18 @@ class MitmProxyEngine(
 
     private fun generateHostCert(context: Context, host: String): Pair<X509Certificate, KeyPair> {
         val ca = kotlinx.coroutines.runBlocking { CertificateAuthority.getOrCreate(context) }
-        val keyPair = KeyPairGenerator.getInstance("RSA").apply { initialize(2048, SecureRandom()) }
+        val bcProvider = org.bouncycastle.jce.provider.BouncyCastleProvider()
+        val keyPair = KeyPairGenerator.getInstance("RSA", bcProvider)
+            .apply { initialize(2048, SecureRandom()) }
             .genKeyPair()
         val serial = BigInteger.valueOf(System.currentTimeMillis())
         val now = Date()
         val expiry = Date(now.time + 365L * 24 * 60 * 60 * 1000)
 
-        val issuer = X500Name("CN=requestr Root CA")
+        // Use the real CA certificate's subject DN as the issuer so the generated
+        // per-host cert chains correctly. Hardcoding "CN=requestr Root CA" breaks
+        // verification when the CA subject includes O/OU components.
+        val issuer = X500Name.getInstance(ca.certificate.subjectX500Principal.encoded)
         val subject = X500Name("CN=$host")
 
         val builder = JcaX509v3CertificateBuilder(
@@ -753,12 +769,11 @@ class MitmProxyEngine(
                 GeneralNames(arrayOf(GeneralName(GeneralName.dNSName, host))))
         }
 
-        val signer = JcaContentSignerBuilder("SHA256WithRSA")
-            .setProvider(BouncyCastleProvider.PROVIDER_NAME)
+        val signer = JcaContentSignerBuilder("SHA256withRSA")
+            .setProvider(bcProvider)
             .build(ca.keyPair.private)
 
         val cert = JcaX509CertificateConverter()
-            .setProvider(BouncyCastleProvider.PROVIDER_NAME)
             .getCertificate(builder.build(signer))
 
         return cert to keyPair
@@ -860,12 +875,16 @@ class MitmProxyEngine(
     private fun createSslContext(keyPair: KeyPair, cert: X509Certificate): SSLContext {
         val ks = KeyStore.getInstance("PKCS12").apply {
             load(null, null)
-            setKeyEntry("mitm", keyPair.private, "".toCharArray(),
-                arrayOf(cert, /* chain root not needed for server */ cert))
+            // The client already has the CA in its trust store; sending just the leaf
+            // is enough and avoids an invalid chain (e.g. a duplicate leaf cert) that
+            // stricter TLS implementations (Conscrypt, some browsers) reject.
+            setKeyEntry("mitm", keyPair.private, "".toCharArray(), arrayOf(cert))
         }
         val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
         kmf.init(ks, "".toCharArray())
-        return SSLContext.getInstance("TLS").apply {
+        val ctx = sslContextProvider?.let { SSLContext.getInstance("TLS", it) }
+            ?: SSLContext.getInstance("TLS")
+        return ctx.apply {
             init(kmf.keyManagers, null, SecureRandom())
         }
     }
@@ -887,6 +906,14 @@ class MitmProxyEngine(
         }
     }
 
+    /** Drains the header block of an HTTP request up to and including the terminating empty line. */
+    private fun skipHeaders(input: InputStream) {
+        while (true) {
+            val line = readLine(input) ?: break
+            if (line.isEmpty()) break
+        }
+    }
+
     private fun parseHostPort(target: String, defaultPort: Int): Pair<String, Int> {
         val colon = target.lastIndexOf(':')
         return if (colon > 0)
@@ -899,4 +926,6 @@ class MitmProxyEngine(
         override fun checkServerTrusted(certs: Array<X509Certificate?>?, authType: String?) {}
         override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
     }
+
+
 }
