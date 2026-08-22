@@ -114,6 +114,19 @@ class RequestrVpnService : VpnService() {
                     .addDnsServer("1.1.1.1")
                     .addDnsServer("8.8.8.8")
 
+                // Task 9: IPv6 was previously entirely dark -- no v6 address, no v6 route, so
+                // any IPv6-capable network's traffic never even entered the tun. Guarded with
+                // runCatching so a device/ROM without v6 support (or one that rejects a second
+                // address family on the same interface) degrades to v4-only rather than making
+                // establish() fail outright below -- counted via the log line, not hidden.
+                val ipv6Added = runCatching {
+                    builder.addAddress(TUN_ADDRESS_V6, TUN_PREFIX_V6)
+                    builder.addRoute("::", 0)
+                }.isSuccess
+                if (!ipv6Added) {
+                    Log.w(TAG, "IPv6 route/address could not be added to the tun builder; continuing v4-only")
+                }
+
                 // Real per-app filtering via UID-backed allow-list. VpnService.Builder permits
                 // an allowed set OR a disallowed set, never both -- mixing them throws
                 // UnsupportedOperationException at establish() time, which is exactly why
@@ -423,6 +436,11 @@ class RequestrVpnService : VpnService() {
         private const val MTU = 1500
         private const val TUN_ADDRESS = "10.111.222.1"
         private const val TUN_PREFIX = 32
+
+        // Task 9: a ULA (RFC 4193, fc00::/7) address for the tun interface itself, distinct
+        // from any real network prefix -- same role TUN_ADDRESS/TUN_PREFIX play for v4.
+        private const val TUN_ADDRESS_V6 = "fd00:6112:6222::1"
+        private const val TUN_PREFIX_V6 = 64
 
         const val ACTION_STOP = "com.example.interception.STOP"
 

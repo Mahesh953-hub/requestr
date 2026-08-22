@@ -6,6 +6,8 @@ import com.example.data.interception.InterceptionStateRepository
 import com.example.data.local.QuicConnectionEntity
 import com.example.data.local.RequestrDatabase
 import com.example.data.local.UdpFlowEntity
+import com.example.interception.tun.IpAddressCodec
+import com.example.interception.tun.IpFragmentReassembler
 import com.example.interception.tun.TunRelay
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -87,6 +89,16 @@ class PacketPump(
     init {
         relay.icmpGuestHandler = { datagram, header -> icmpRelay.offer(datagram, header) }
     }
+
+    /**
+     * Task 9: [parseIpv6] needs [IpFragmentReassembler.walkIpv6ExtensionHeaders] to find the
+     * true transport offset instead of assuming a fixed offset 40, exactly like [relay]'s own
+     * v6 header parsing (task 3's work) already does. [walkIpv6ExtensionHeaders] is a pure
+     * function of the packet bytes -- it reads no group/reassembly state -- so a separate
+     * instance here (distinct from [relay]'s own internal one) is safe; this one is never fed
+     * through [IpFragmentReassembler.offer].
+     */
+    private val ipv6HeaderWalker = IpFragmentReassembler()
 
     /** Distinct flows seen recently, keyed by 5-tuple, with last-seen timestamps for expiry. */
     private val activeFlows = LinkedHashMap<String, Long>()
@@ -339,19 +351,70 @@ class PacketPump(
         }.onFailure { e -> Log.w(TAG, "Failed to persist QUIC connection: ${e.message}") }
     }
 
+    /**
+     * Task 9: brought to parity with [parseIpv4] -- DNS-on-53, QUIC-on-443 and [persistUdpFlow]
+     * all run for v6 the same way they do for v4 now. TCP capture needed no change here:
+     * [parseAndTrackFlow] already calls `captureEngine.ingest(packet, length, version)` for
+     * both families and [com.example.interception.tcp.TcpReassembler.feed] already handles v6
+     * TCP via its own `feedIpv6`.
+     *
+     * The previous version read `nextHeader` at byte 6 and assumed the transport header always
+     * started at the fixed offset 40, which breaks the moment any extension header (hop-by-hop
+     * 0, routing 43, fragment 44, destination-options 60) is present. [walkIpv6ExtensionHeaders]
+     * (task 3) walks the real chain to find the true transport offset and protocol, exactly like
+     * [relay]'s own v6 header parsing already does.
+     *
+     * Addresses go through [IpAddressCodec.formatIpv6] rather than the ad-hoc
+     * `joinToString`/`"%02x".format` construction this replaces -- same bare 32-hex-char string
+     * output (so existing flow keys and any already-persisted `connectionId` values stay
+     * byte-for-byte stable), just centralized in one place instead of duplicated per call site.
+     */
     private fun parseIpv6(packet: ByteArray, length: Int) {
         if (length < 40) return
-        val nextHeader = packet[6].toInt() and 0xFF
-        val src = packet.copyOfRange(8, 24).joinToString("") { "%02x".format(it) }
-        val dst = packet.copyOfRange(24, 40).joinToString("") { "%02x".format(it) }
+        val walk = ipv6HeaderWalker.walkIpv6ExtensionHeaders(packet, length) ?: return
+        val (transportOffset, protocol) = walk
+        val src = IpAddressCodec.formatIpv6(packet, 8)
+        val dst = IpAddressCodec.formatIpv6(packet, 24)
 
-        val (sPort, dPort) = if ((nextHeader == 6 || nextHeader == 17) && length >= 44) {
-            val s = ((packet[40].u() shl 8) or packet[41].u())
-            val d = ((packet[42].u() shl 8) or packet[43].u())
+        // Ports only exist for TCP(6)/UDP(17).
+        val (sPort, dPort) = if ((protocol == 6 || protocol == 17) && length >= transportOffset + 4) {
+            val s = ((packet[transportOffset].u() shl 8) or packet[transportOffset + 1].u())
+            val d = ((packet[transportOffset + 2].u() shl 8) or packet[transportOffset + 3].u())
             s to d
         } else 0 to 0
 
-        trackFlow("$nextHeader|$src:$sPort>$dst:$dPort")
+        // Fix #16 parity: intercept DNS queries on UDP port 53.
+        if (protocol == 17 && (sPort == 53 || dPort == 53) && length >= transportOffset + 8) {
+            val udpPayload = packet.copyOfRange(transportOffset + 8, length)
+            val query = com.example.interception.dns.DnsParser.parse(udpPayload, sPort, dPort)
+            query?.let { dns ->
+                Log.d(TAG, "DNS ${dns.qtypeName}: ${dns.hostname} (${if (dns.isResponse) "response" else "query"})")
+                dnsCallback?.invoke(dns, src, sPort, dst, dPort)
+            }
+        }
+
+        // Fix #26 / P2 parity: parse QUIC Initial packets on UDP port 443.
+        if (protocol == 17 && (sPort == 443 || dPort == 443) && length >= transportOffset + 8) {
+            val quicPayload = packet.copyOfRange(transportOffset + 8, length)
+            val initial = com.example.interception.quic.QuicParser.parseInitial(quicPayload)
+            if (initial != null) {
+                Log.i(
+                    TAG,
+                    "QUIC ${if (initial.decrypted) "decrypted" else "heuristic"} SNI: " +
+                        "${initial.sniHostname} alpn=${initial.alpn} " +
+                        "(${if (dPort == 443) "outbound" else "inbound"})",
+                )
+                persistQuicConnection(src, sPort, dst, dPort, initial, quicPayload)
+            }
+        }
+
+        // M1 parity: general UDP flow tracking (byte counters), covering all UDP traffic
+        // including DNS/QUIC above.
+        if (protocol == 17 && length >= transportOffset + 8) {
+            persistUdpFlow(src, sPort, dst, dPort, length - transportOffset - 8)
+        }
+
+        trackFlow("$protocol|$src:$sPort>$dst:$dPort")
     }
 
     private fun trackFlow(key: String) {

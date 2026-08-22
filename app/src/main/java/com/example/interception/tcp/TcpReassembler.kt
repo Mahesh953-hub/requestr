@@ -1,6 +1,8 @@
 package com.example.interception.tcp
 
 import android.util.Log
+import com.example.interception.tun.IpAddressCodec
+import com.example.interception.tun.IpFragmentReassembler
 
 /**
  * Parses TCP headers from raw IP packets and routes payload bytes into
@@ -21,6 +23,13 @@ class TcpReassembler {
 
     /** Idle timeout in ms — streams untouched for this long are pruned. */
     var idleTimeoutMs: Long = 120_000L
+
+    /** Task 9: [feedIpv6] needs [IpFragmentReassembler.walkIpv6ExtensionHeaders] to find the
+     * real transport offset instead of assuming the fixed offset 40, exactly like
+     * [com.example.interception.tun.TunRelay]'s own v6 header parsing (task 3) already does.
+     * Pure function of the packet bytes -- reads no reassembly-group state -- so a dedicated
+     * instance here, never fed through [IpFragmentReassembler.offer], is safe. */
+    private val ipv6HeaderWalker = IpFragmentReassembler()
 
     // ── entry point ─────────────────────────────────────────────────────
 
@@ -58,16 +67,23 @@ class TcpReassembler {
 
     // ── IPv6 ────────────────────────────────────────────────────────────
 
+    /**
+     * Task 9: uses [IpFragmentReassembler.walkIpv6ExtensionHeaders] to find the true transport
+     * offset and protocol instead of assuming `nextHeader` (byte 6) is always TCP and the
+     * transport header always starts at offset 40 -- that assumption broke on any hop-by-hop
+     * (0), routing (43), fragment (44), or destination-options (60) extension header.
+     */
     private fun feedIpv6(packet: ByteArray, length: Int): TcpStream? {
-        if (length < 40 + 20) return null
+        if (length < 40) return null
+        val walk = ipv6HeaderWalker.walkIpv6ExtensionHeaders(packet, length) ?: return null
+        val (transportOffset, protocol) = walk
+        if (protocol != 6) return null  // TCP only
+        if (length < transportOffset + 20) return null  // need at least the minimal TCP header
 
-        val nextHeader = packet[6].toInt() and 0xFF
-        if (nextHeader != 6) return null
+        val srcIp = IpAddressCodec.formatIpv6(packet, 8)
+        val dstIp = IpAddressCodec.formatIpv6(packet, 24)
 
-        val srcIp = packet.copyOfRange(8, 24).joinToString("") { "%02x".format(it) }
-        val dstIp = packet.copyOfRange(24, 40).joinToString("") { "%02x".format(it) }
-
-        return feedTcp(packet, 40, length, srcIp, dstIp, 6)
+        return feedTcp(packet, transportOffset, length, srcIp, dstIp, 6)
     }
 
     // ── TCP header ──────────────────────────────────────────────────────
