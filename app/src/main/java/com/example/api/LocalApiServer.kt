@@ -344,6 +344,11 @@ object LocalApiServer {
                     latencyMs = e.optLong("durationMs", 0),
                     timestamp = e.optLong("timestamp", System.currentTimeMillis()),
                     wasDecrypted = true,
+                    // Task 12: the SDK genuinely has no connection identity to report (it never
+                    // sees a TCP 5-tuple or a CONNECT target) — null is the honest value here,
+                    // not a heuristic. See ConnectionLineage.httpSteps(), which only attaches
+                    // rows carrying a real connectionId.
+                    connectionId = null,
                 )
                 dao.insert(entity)
                 inserted++

@@ -1,6 +1,8 @@
 package com.example.interception.tcp
 
 import android.util.Log
+import com.example.interception.tun.IpAddressCodec
+import com.example.interception.tun.IpFragmentReassembler
 
 /**
  * Parses TCP headers from raw IP packets and routes payload bytes into
@@ -21,6 +23,13 @@ class TcpReassembler {
 
     /** Idle timeout in ms — streams untouched for this long are pruned. */
     var idleTimeoutMs: Long = 120_000L
+
+    /** Task 9: [feedIpv6] needs [IpFragmentReassembler.walkIpv6ExtensionHeaders] to find the
+     * real transport offset instead of assuming the fixed offset 40, exactly like
+     * [com.example.interception.tun.TunRelay]'s own v6 header parsing (task 3) already does.
+     * Pure function of the packet bytes -- reads no reassembly-group state -- so a dedicated
+     * instance here, never fed through [IpFragmentReassembler.offer], is safe. */
+    private val ipv6HeaderWalker = IpFragmentReassembler()
 
     // ── entry point ─────────────────────────────────────────────────────
 
@@ -58,16 +67,23 @@ class TcpReassembler {
 
     // ── IPv6 ────────────────────────────────────────────────────────────
 
+    /**
+     * Task 9: uses [IpFragmentReassembler.walkIpv6ExtensionHeaders] to find the true transport
+     * offset and protocol instead of assuming `nextHeader` (byte 6) is always TCP and the
+     * transport header always starts at offset 40 -- that assumption broke on any hop-by-hop
+     * (0), routing (43), fragment (44), or destination-options (60) extension header.
+     */
     private fun feedIpv6(packet: ByteArray, length: Int): TcpStream? {
-        if (length < 40 + 20) return null
+        if (length < 40) return null
+        val walk = ipv6HeaderWalker.walkIpv6ExtensionHeaders(packet, length) ?: return null
+        val (transportOffset, protocol) = walk
+        if (protocol != 6) return null  // TCP only
+        if (length < transportOffset + 20) return null  // need at least the minimal TCP header
 
-        val nextHeader = packet[6].toInt() and 0xFF
-        if (nextHeader != 6) return null
+        val srcIp = IpAddressCodec.formatIpv6(packet, 8)
+        val dstIp = IpAddressCodec.formatIpv6(packet, 24)
 
-        val srcIp = packet.copyOfRange(8, 24).joinToString("") { "%02x".format(it) }
-        val dstIp = packet.copyOfRange(24, 40).joinToString("") { "%02x".format(it) }
-
-        return feedTcp(packet, 40, length, srcIp, dstIp, 6)
+        return feedTcp(packet, transportOffset, length, srcIp, dstIp, 6)
     }
 
     // ── TCP header ──────────────────────────────────────────────────────
@@ -93,17 +109,50 @@ class TcpReassembler {
         val payloadLen = (length - payloadStart).coerceAtLeast(0)
 
         val stream = getOrCreate(srcIp, srcPort, dstIp, dstPort)
+        val now = System.currentTimeMillis()
+        stream.lastActivityAt = now
 
-        // Update handshake state
-        if ((flags and FLAG_SYN) != 0) {
-            if (!stream.handshakeComplete && (flags and FLAG_ACK) != 0) {
-                // SYN-ACK observed → handshake in progress
+        // Real three-way-handshake tracking, driven by the actual flags seen on the wire —
+        // not inferred from data arriving.
+        val isSyn = (flags and FLAG_SYN) != 0
+        val isAck = (flags and FLAG_ACK) != 0
+        val isFin = (flags and FLAG_FIN) != 0
+        val isRst = (flags and FLAG_RST) != 0
+
+        when {
+            isRst -> {
+                stream.handshakePhase = TcpHandshakePhase.RESET
+                stream.resetByPeer = true
+                stream.closed = true
+            }
+            isSyn && !isAck -> {
+                if (stream.handshakePhase == TcpHandshakePhase.NONE) {
+                    stream.handshakePhase = TcpHandshakePhase.SYN_SENT
+                    stream.synSeenAt = now
+                }
+            }
+            isSyn && isAck -> {
+                if (stream.handshakePhase == TcpHandshakePhase.SYN_SENT ||
+                    stream.handshakePhase == TcpHandshakePhase.NONE
+                ) {
+                    stream.handshakePhase = TcpHandshakePhase.SYN_ACK_SEEN
+                }
+            }
+            isFin -> {
+                if (stream.handshakePhase != TcpHandshakePhase.CLOSED) {
+                    stream.handshakePhase = TcpHandshakePhase.CLOSING
+                }
+            }
+            isAck && stream.handshakePhase == TcpHandshakePhase.SYN_ACK_SEEN -> {
+                stream.handshakePhase = TcpHandshakePhase.ESTABLISHED
+                stream.establishedAtHandshake = now
             }
         }
-        if ((flags and FLAG_ACK) != 0 && !stream.handshakeComplete && stream.clientToServer.size() > 0) {
-            stream.handshakeComplete = true
+
+        if ((isFin || isRst) && stream.handshakePhase != TcpHandshakePhase.RESET) {
+            stream.handshakePhase = TcpHandshakePhase.CLOSED
         }
-        if ((flags and (FLAG_FIN or FLAG_RST)) != 0) {
+        if (isFin || isRst) {
             stream.closed = true
         }
 
@@ -118,7 +167,7 @@ class TcpReassembler {
         if (accepted == -1) {
             stream.retransmissions++
         } else if (accepted > 0) {
-            stream.establishedAt = System.currentTimeMillis()
+            stream.lastActivityAt = now
             if (isClientToServer) stream.totalBytesSent += accepted else stream.totalBytesReceived += accepted
         }
         return stream
@@ -136,19 +185,27 @@ class TcpReassembler {
 
     private fun evictOldest() {
         val now = System.currentTimeMillis()
-        streams.entries.removeAll { (_, s) -> now - s.establishedAt > idleTimeoutMs }
+        streams.entries.removeAll { (_, s) -> now - s.lastActivityAt > idleTimeoutMs }
         // If still over limit, evict the oldest regardless
         while (streams.size >= maxStreams) {
-            val oldest = streams.entries.minByOrNull { it.value.establishedAt }
+            val oldest = streams.entries.minByOrNull { it.value.lastActivityAt }
             oldest?.let { streams.remove(it.key) }
         }
     }
 
-    /** Prune idle streams. Call periodically (e.g. from the flush loop). */
+    /**
+     * Prune idle streams. Call periodically (e.g. from the flush loop).
+     *
+     * Bug fix: the previous second statement compared a *duration*
+     * (`now - establishedAt`, thousands of ms) against an *absolute epoch timestamp*
+     * (`cutoff = now - idleTimeoutMs`, ~1.7e12), so it was never true and never pruned
+     * anything. Both statements below now correctly compare `lastActivityAt` (bumped on every
+     * accepted packet, not just once at flow creation) against the absolute cutoff.
+     */
     fun prune() {
         val cutoff = System.currentTimeMillis() - idleTimeoutMs
-        streams.entries.removeAll { (_, s) -> s.closed && (System.currentTimeMillis() - s.establishedAt > idleTimeoutMs) }
-        streams.entries.removeAll { (_, s) -> System.currentTimeMillis() - s.establishedAt > cutoff }
+        streams.entries.removeAll { (_, s) -> s.closed && s.lastActivityAt < cutoff }
+        streams.entries.removeAll { (_, s) -> s.lastActivityAt < cutoff }
     }
 
     fun streamCount(): Int = streams.size

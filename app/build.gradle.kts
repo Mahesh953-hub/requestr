@@ -69,6 +69,17 @@ android {
     includeInApk = false
     includeInBundle = true
   }
+  sourceSets {
+    // Task 10: MigrationTestHelper (Migration8To9Test) needs the exported schema JSON files as
+    // test assets so it can build a real v8 database on disk to migrate from, instead of relying
+    // on fallbackToDestructiveMigration ever being exercised again. Robolectric unit tests load
+    // assets from the merged "debug" variant assets (see generateDebugUnitTestConfig's
+    // android_merged_assets), not a separate test-only assets dir, so this is wired on "main"
+    // rather than "test".
+    getByName("main") {
+      assets.srcDirs("$projectDir/schemas")
+    }
+  }
 }
 
 // Configure the Secrets Gradle Plugin to use .env and .env.example files
@@ -80,6 +91,12 @@ secrets {
 }
 
 googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
+
+// Room schema v9 (task 10): export the schema JSON so future migrations are verifiable against
+// a real prior-version snapshot instead of relying on fallbackToDestructiveMigration.
+ksp {
+  arg("room.schemaLocation", "$projectDir/schemas")
+}
 
 // Some unused dependencies are commented out below instead of being removed.
 // This makes it easy to add them back in the future if needed.
@@ -130,6 +147,9 @@ dependencies {
   testImplementation(libs.junit)
   testImplementation(libs.kotlinx.coroutines.test)
   testImplementation(libs.robolectric)
+  // Task 10: MigrationTestHelper for Migration8To9Test, now that exportSchema = true gives it a
+  // real prior-version (8.json) schema snapshot to migrate from.
+  testImplementation(libs.androidx.room.testing)
   testImplementation(libs.roborazzi)
   testImplementation(libs.roborazzi.compose)
   testImplementation(libs.roborazzi.junit.rule)

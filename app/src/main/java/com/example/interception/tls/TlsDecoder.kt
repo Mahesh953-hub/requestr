@@ -279,6 +279,103 @@ object TlsDecoder {
         )
     }
 
+    // ── alert records (making TlsHandshakeState.FAILED real) ────────────
+
+    /**
+     * Parses a TLS alert record at [offset]. Requires content type 21 (alert) and a legal
+     * record version (the same `0x0301..0x0304` range [looksLikeTls] already accepts), then
+     * reads the 2-byte alert body (level + description, RFC 8446 §6.2).
+     *
+     * Real constraint, not a gap: TLS 1.3 encrypts alerts once handshake keys are up, so this
+     * only ever sees pre-key (plaintext) alerts. Post-key handshake failure is covered by the
+     * MITM leg's `SSLHandshakeException` catch and by observed RST/close signals — see
+     * `CaptureEngine`/`MitmProxyEngine` task 11 wiring. This function does not claim to see more
+     * than it can.
+     */
+    fun parseAlert(bytes: ByteArray, offset: Int = 0): TlsAlert? {
+        if (bytes.size - offset < 7) return null // 5-byte record header + 2-byte alert body
+        val contentType = bytes[offset].toInt() and 0xFF
+        if (contentType != 21) return null // not an alert record
+        val recordVersion = readU16(bytes, offset + 1)
+        if (recordVersion !in 0x0301..0x0304) return null
+        val recordLen = readU16(bytes, offset + 3)
+        if (recordLen < 2) return null
+
+        val level = bytes[offset + 5].toInt() and 0xFF
+        val description = bytes[offset + 6].toInt() and 0xFF
+        return TlsAlert(
+            level = level,
+            description = description,
+            levelName = when (level) {
+                1 -> "warning"
+                2 -> "fatal"
+                else -> "unknown($level)"
+            },
+            descriptionName = alertDescriptionName(description),
+            isFatal = level == 2,
+        )
+    }
+
+    /**
+     * Walks record boundaries via [readU16] (the same helper [extractSni]/[parseClientHello]
+     * use) looking for an alert record anywhere in [bytes] — so an alert following a handshake
+     * record in the same buffer (e.g. a server ClientHello response bundled with an immediate
+     * alert) is still found, not just one at offset 0.
+     */
+    fun findAlertInRecords(bytes: ByteArray): TlsAlert? {
+        var pos = 0
+        while (pos + 5 <= bytes.size) {
+            val contentType = bytes[pos].toInt() and 0xFF
+            val version = readU16(bytes, pos + 1)
+            if (contentType !in 20..23 || version !in 0x0301..0x0304) break
+            val recordLen = readU16(bytes, pos + 3)
+            if (contentType == 21) {
+                parseAlert(bytes, pos)?.let { return it }
+            }
+            pos += 5 + recordLen
+        }
+        return null
+    }
+
+    /** RFC 8446 §6 alert description codes. Unmapped codes are still reported honestly. */
+    private fun alertDescriptionName(code: Int): String = when (code) {
+        0 -> "close_notify"
+        10 -> "unexpected_message"
+        20 -> "bad_record_mac"
+        21 -> "decryption_failed"
+        22 -> "record_overflow"
+        30 -> "decompression_failure"
+        40 -> "handshake_failure"
+        41 -> "no_certificate"
+        42 -> "bad_certificate"
+        43 -> "unsupported_certificate"
+        44 -> "certificate_revoked"
+        45 -> "certificate_expired"
+        46 -> "certificate_unknown"
+        47 -> "illegal_parameter"
+        48 -> "unknown_ca"
+        49 -> "access_denied"
+        50 -> "decode_error"
+        51 -> "decrypt_error"
+        60 -> "export_restriction"
+        70 -> "protocol_version"
+        71 -> "insufficient_security"
+        80 -> "internal_error"
+        86 -> "inappropriate_fallback"
+        90 -> "user_canceled"
+        100 -> "no_renegotiation"
+        109 -> "missing_extension"
+        110 -> "unsupported_extension"
+        111 -> "certificate_unobtainable"
+        112 -> "unrecognized_name"
+        113 -> "bad_certificate_status_response"
+        114 -> "bad_certificate_hash_value"
+        115 -> "unknown_psk_identity"
+        116 -> "certificate_required"
+        120 -> "no_application_protocol"
+        else -> "unknown($code)"
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────
 
     private fun readU16(buf: ByteArray, off: Int): Int =

@@ -22,6 +22,8 @@ import com.example.data.local.RequestrDatabase
 import com.example.data.prefs.AppFilterMode
 import com.example.data.prefs.SettingsDataStore
 import com.example.data.repository.SettingsRepository
+import com.example.interception.tls.TlsKeyLogRegistry
+import com.example.interception.tun.ProtectHook
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import kotlinx.coroutines.CoroutineScope
@@ -55,6 +57,27 @@ class RequestrVpnService : VpnService() {
     private var filterObserverJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO)
     private var sessionId: Long? = null
+
+    /** Set once the pump is constructed, so [cleanup] can stop [PacketPump.relay] explicitly
+     * (in addition to [pumpJob] cancellation) and observe [com.example.interception.tun.TunRelay.stats] later (task 14). */
+    private var activePump: PacketPump? = null
+
+    /**
+     * Delegates to the real `VpnService.protect(...)` overloads so relay upstream sockets
+     * (task 4) — and, in task 6, the ICMP ping socket via [ParcelFileDescriptor.dup] — route
+     * outside the tun instead of looping back into it. Must run before connect/send on every
+     * relay socket; [com.example.interception.tun.TunRelay] guarantees that ordering.
+     */
+    private val protectHook = object : ProtectHook {
+        override fun protectSocket(socket: java.net.Socket): Boolean =
+            runCatching { protect(socket) }.getOrDefault(false)
+
+        override fun protectDatagramSocket(socket: java.net.DatagramSocket): Boolean =
+            runCatching { protect(socket) }.getOrDefault(false)
+
+        override fun protectFd(fd: Int): Boolean =
+            runCatching { protect(fd) }.getOrDefault(false)
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -91,15 +114,33 @@ class RequestrVpnService : VpnService() {
                     .addDnsServer("1.1.1.1")
                     .addDnsServer("8.8.8.8")
 
-                // Real per-app filtering via UID-backed allow-list. Always exclude ourselves so
-                // requestr's own traffic does not loop back through the tun.
-                builder.addDisallowedApplication(packageName)
-                if (filterMode == AppFilterMode.SELECTED_APPS && selected.isNotEmpty()) {
-                    selected.forEach { pkg ->
-                        if (pkg != packageName) {
+                // Task 9: IPv6 was previously entirely dark -- no v6 address, no v6 route, so
+                // any IPv6-capable network's traffic never even entered the tun. Guarded with
+                // runCatching so a device/ROM without v6 support (or one that rejects a second
+                // address family on the same interface) degrades to v4-only rather than making
+                // establish() fail outright below -- counted via the log line, not hidden.
+                val ipv6Added = runCatching {
+                    builder.addAddress(TUN_ADDRESS_V6, TUN_PREFIX_V6)
+                    builder.addRoute("::", 0)
+                }.isSuccess
+                if (!ipv6Added) {
+                    Log.w(TAG, "IPv6 route/address could not be added to the tun builder; continuing v4-only")
+                }
+
+                // Real per-app filtering via UID-backed allow-list. VpnService.Builder permits
+                // an allowed set OR a disallowed set, never both -- mixing them throws
+                // UnsupportedOperationException at establish() time, which is exactly why
+                // SELECTED_APPS mode never worked before this fix (see resolveFilterPlan doc).
+                when (val plan = resolveFilterPlan(filterMode, selected, packageName)) {
+                    is FilterPlan.Allowlist -> {
+                        plan.packages.forEach { pkg ->
                             runCatching { builder.addAllowedApplication(pkg) }
                                 .onFailure { Log.w(TAG, "Cannot filter missing package $pkg") }
                         }
+                    }
+                    is FilterPlan.Blocklist -> {
+                        runCatching { builder.addDisallowedApplication(packageName) }
+                            .onFailure { Log.w(TAG, "Cannot exclude self package $packageName") }
                     }
                 }
 
@@ -155,7 +196,7 @@ class RequestrVpnService : VpnService() {
                 }
 
                 pumpJob = scope.launch {
-                    PacketPump(
+                    val pump = PacketPump(
                         context = applicationContext,
                         input = FileInputStream(tun.fileDescriptor),
                         output = FileOutputStream(tun.fileDescriptor),
@@ -172,7 +213,10 @@ class RequestrVpnService : VpnService() {
                         dumpToFile = dumpToFile,
                         captureEnabled = captureEnabled,
                         enhancedMode = enhancedMode,
-                    ).run(this)
+                        protectHook = protectHook,
+                    )
+                    activePump = pump
+                    pump.run(this)
                 }
 
                 Log.i(TAG, "Capture started on tun, session=$newId port=$port")
@@ -285,11 +329,19 @@ class RequestrVpnService : VpnService() {
         filterObserverJob = null
         pumpJob?.cancel()
         pumpJob = null
+        // Task 4: stop the relay's selector loop and close every open upstream socket
+        // explicitly, alongside cancelling the pump's coroutine (which also calls
+        // TunRelay.stop() in its own `finally`, but this covers the case where the tun read
+        // loop is already blocked/stuck and never reaches that finally block).
+        runCatching { activePump?.relay?.stop() }
+        activePump = null
         runCatching { tunInterface?.close() }
         tunInterface = null
         // T1: stop PCAP export with the rest of this session's lifecycle -- flushes and closes
         // the .pcap file. No-op (guarded by its own `active` flag) if it was never started.
         runCatching { com.example.interception.packet.PacketCaptureEngine.stop() }
+        // Task 5: secrets are in-memory only and must not outlive a capture session.
+        runCatching { TlsKeyLogRegistry.clear() }
         releaseWakeLock()
         stopForegroundCompat()
     }
@@ -341,7 +393,7 @@ class RequestrVpnService : VpnService() {
 
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("requestr is capturing traffic")
-            .setContentText("VPN active — HTTPS bodies not captured without proxy mode")
+            .setContentText("VPN active — traffic is relayed; HTTPS bodies need proxy mode")
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setOngoing(true)
             .setContentIntent(openApp)
@@ -366,7 +418,6 @@ class RequestrVpnService : VpnService() {
         stopCapture("VPN permission revoked by system")
         super.onRevoke()
     }
-
     override fun onDestroy() {
         cleanup()
         scope.cancel()
@@ -386,6 +437,11 @@ class RequestrVpnService : VpnService() {
         private const val TUN_ADDRESS = "10.111.222.1"
         private const val TUN_PREFIX = 32
 
+        // Task 9: a ULA (RFC 4193, fc00::/7) address for the tun interface itself, distinct
+        // from any real network prefix -- same role TUN_ADDRESS/TUN_PREFIX play for v4.
+        private const val TUN_ADDRESS_V6 = "fd00:6112:6222::1"
+        private const val TUN_PREFIX_V6 = 64
+
         const val ACTION_STOP = "com.example.interception.STOP"
 
         fun start(context: Context) {
@@ -398,4 +454,33 @@ class RequestrVpnService : VpnService() {
             )
         }
     }
+}
+
+/**
+ * The tun app-filter decision, pure and independent of [android.net.VpnService] so it can be
+ * unit-tested (a tun cannot be established in a JVM unit test).
+ */
+sealed class FilterPlan {
+    data class Allowlist(val packages: Set<String>) : FilterPlan()
+    object Blocklist : FilterPlan()
+}
+
+/**
+ * Chooses exactly one of [android.net.VpnService.Builder.addAllowedApplication] /
+ * [android.net.VpnService.Builder.addDisallowedApplication] — never both, since
+ * `VpnService.Builder` throws `UnsupportedOperationException` when mixed, which is why
+ * `SELECTED_APPS` mode never established a tun before this fix.
+ *
+ * - [AppFilterMode.ALL_APPS] → blocklist containing only [self] (excludes requestr's own
+ *   traffic from looping back through the tun).
+ * - [AppFilterMode.SELECTED_APPS] with a non-empty [selected] set (minus [self], which never
+ *   needs to route through its own tun) → allowlist of exactly those packages.
+ * - [AppFilterMode.SELECTED_APPS] where [selected] is empty, or contains only [self] → falls
+ *   back to blocklist rather than establishing a tun that routes nothing.
+ */
+internal fun resolveFilterPlan(mode: AppFilterMode, selected: Set<String>, self: String): FilterPlan {
+    if (mode != AppFilterMode.SELECTED_APPS) return FilterPlan.Blocklist
+    val others = selected.filter { it != self }.toSet()
+    if (others.isEmpty()) return FilterPlan.Blocklist
+    return FilterPlan.Allowlist(others)
 }

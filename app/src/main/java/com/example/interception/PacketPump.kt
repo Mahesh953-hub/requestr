@@ -6,6 +6,9 @@ import com.example.data.interception.InterceptionStateRepository
 import com.example.data.local.QuicConnectionEntity
 import com.example.data.local.RequestrDatabase
 import com.example.data.local.UdpFlowEntity
+import com.example.interception.tun.IpAddressCodec
+import com.example.interception.tun.IpFragmentReassembler
+import com.example.interception.tun.TunRelay
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
@@ -48,10 +51,54 @@ class PacketPump(
     dumpToFile: Boolean = false,
     captureEnabled: Boolean = true,
     enhancedMode: Boolean = false,
+    /**
+     * `VpnService.protect(...)` hook, threaded in from [RequestrVpnService] so relay upstream
+     * sockets don't loop back into our own tun. Defaults to [com.example.interception.tun.NoOpProtectHook]
+     * so existing/test call sites that don't care about the relay keep compiling; production
+     * always passes a real hook.
+     */
+    protectHook: com.example.interception.tun.ProtectHook = com.example.interception.tun.NoOpProtectHook,
 ) {
 
     private var packetCount = 0
     private var byteCount = 0L
+
+    /**
+     * Userspace TCP+UDP relay — this is what finally does something with [output] (task 4).
+     * Every packet the pump reads off the tun fd, after capture/PCAP ingestion, is also handed
+     * here so the app it belongs to actually gets a response instead of the packet vanishing
+     * (the VPN_TUN blackhole recorded in AUDIT_REPORT.md's v5.8-backup addendum). Exposed so the
+     * service can stop it and the UI can observe [TunRelay.stats].
+     */
+    private val tunWriter = com.example.interception.tun.TunWriter(com.example.interception.tun.TunSink { datagram -> output.write(datagram) })
+
+    val relay: TunRelay = TunRelay(protectHook, tunWriter)
+
+    /**
+     * ICMP echo relay (task 6), isolated from [relay]'s TCP/UDP flow tables and selector loop.
+     * Wired in as [TunRelay.icmpGuestHandler] below so a failure inside [IcmpRelay] can never
+     * propagate into TCP/UDP handling -- [TunRelay.offer] only ever calls this handler and
+     * [IcmpRelay.offer] itself never throws (every failure is counted, not propagated). Exposed
+     * (not private), matching [relay]'s own visibility, so a future relay-health UI surface
+     * (task 14) can read [com.example.interception.tun.IcmpRelay.unrelayableCount] /
+     * `outstandingCount()` the same way [RequestrVpnService] already reaches [relay]'s stats via
+     * its `activePump` reference.
+     */
+    val icmpRelay = com.example.interception.tun.IcmpRelay(protectHook, tunWriter)
+
+    init {
+        relay.icmpGuestHandler = { datagram, header -> icmpRelay.offer(datagram, header) }
+    }
+
+    /**
+     * Task 9: [parseIpv6] needs [IpFragmentReassembler.walkIpv6ExtensionHeaders] to find the
+     * true transport offset instead of assuming a fixed offset 40, exactly like [relay]'s own
+     * v6 header parsing (task 3's work) already does. [walkIpv6ExtensionHeaders] is a pure
+     * function of the packet bytes -- it reads no group/reassembly state -- so a separate
+     * instance here (distinct from [relay]'s own internal one) is safe; this one is never fed
+     * through [IpFragmentReassembler.offer].
+     */
+    private val ipv6HeaderWalker = IpFragmentReassembler()
 
     /** Distinct flows seen recently, keyed by 5-tuple, with last-seen timestamps for expiry. */
     private val activeFlows = LinkedHashMap<String, Long>()
@@ -97,6 +144,9 @@ class PacketPump(
 
         // Periodic flush so the UI shows live progress without thrashing the DB per packet.
         val flusher = scope.launch { flushLoop() }
+        // Relay's own selector loop (TCP connects/reads, UDP reads) — separate coroutine so a
+        // slow upstream socket never blocks the tun read loop above.
+        val relayJob = scope.launch { relay.run(scope) }
 
         try {
             withContext(Dispatchers.IO) {
@@ -124,6 +174,9 @@ class PacketPump(
             }
         } finally {
             flusher.cancel()
+            relayJob.cancel()
+            relay.stop()
+            icmpRelay.stop()
             flushNow()
         }
     }
@@ -148,6 +201,11 @@ class PacketPump(
 
         // Route to the capture engine: TCP reassembly → HTTP → Room.
         captureEngine.ingest(packet, length, version)
+
+        // Task 4: hand the same packet to the relay so the flow actually gets a real upstream
+        // connection and a reply, instead of vanishing (the VPN_TUN blackhole). Capture/PCAP
+        // behaviour above stays byte-identical; this is purely additive.
+        relay.offer(packet.copyOf(length), length, version)
     }
 
     private fun parseIpv4(packet: ByteArray, length: Int) {
@@ -293,19 +351,70 @@ class PacketPump(
         }.onFailure { e -> Log.w(TAG, "Failed to persist QUIC connection: ${e.message}") }
     }
 
+    /**
+     * Task 9: brought to parity with [parseIpv4] -- DNS-on-53, QUIC-on-443 and [persistUdpFlow]
+     * all run for v6 the same way they do for v4 now. TCP capture needed no change here:
+     * [parseAndTrackFlow] already calls `captureEngine.ingest(packet, length, version)` for
+     * both families and [com.example.interception.tcp.TcpReassembler.feed] already handles v6
+     * TCP via its own `feedIpv6`.
+     *
+     * The previous version read `nextHeader` at byte 6 and assumed the transport header always
+     * started at the fixed offset 40, which breaks the moment any extension header (hop-by-hop
+     * 0, routing 43, fragment 44, destination-options 60) is present. [walkIpv6ExtensionHeaders]
+     * (task 3) walks the real chain to find the true transport offset and protocol, exactly like
+     * [relay]'s own v6 header parsing already does.
+     *
+     * Addresses go through [IpAddressCodec.formatIpv6] rather than the ad-hoc
+     * `joinToString`/`"%02x".format` construction this replaces -- same bare 32-hex-char string
+     * output (so existing flow keys and any already-persisted `connectionId` values stay
+     * byte-for-byte stable), just centralized in one place instead of duplicated per call site.
+     */
     private fun parseIpv6(packet: ByteArray, length: Int) {
         if (length < 40) return
-        val nextHeader = packet[6].toInt() and 0xFF
-        val src = packet.copyOfRange(8, 24).joinToString("") { "%02x".format(it) }
-        val dst = packet.copyOfRange(24, 40).joinToString("") { "%02x".format(it) }
+        val walk = ipv6HeaderWalker.walkIpv6ExtensionHeaders(packet, length) ?: return
+        val (transportOffset, protocol) = walk
+        val src = IpAddressCodec.formatIpv6(packet, 8)
+        val dst = IpAddressCodec.formatIpv6(packet, 24)
 
-        val (sPort, dPort) = if ((nextHeader == 6 || nextHeader == 17) && length >= 44) {
-            val s = ((packet[40].u() shl 8) or packet[41].u())
-            val d = ((packet[42].u() shl 8) or packet[43].u())
+        // Ports only exist for TCP(6)/UDP(17).
+        val (sPort, dPort) = if ((protocol == 6 || protocol == 17) && length >= transportOffset + 4) {
+            val s = ((packet[transportOffset].u() shl 8) or packet[transportOffset + 1].u())
+            val d = ((packet[transportOffset + 2].u() shl 8) or packet[transportOffset + 3].u())
             s to d
         } else 0 to 0
 
-        trackFlow(com.example.correlation.ConnectionKey.forTcp(src, sPort, dst, dPort, nextHeader))
+        // Fix #16 parity: intercept DNS queries on UDP port 53.
+        if (protocol == 17 && (sPort == 53 || dPort == 53) && length >= transportOffset + 8) {
+            val udpPayload = packet.copyOfRange(transportOffset + 8, length)
+            val query = com.example.interception.dns.DnsParser.parse(udpPayload, sPort, dPort)
+            query?.let { dns ->
+                Log.d(TAG, "DNS ${dns.qtypeName}: ${dns.hostname} (${if (dns.isResponse) "response" else "query"})")
+                dnsCallback?.invoke(dns, src, sPort, dst, dPort)
+            }
+        }
+
+        // Fix #26 / P2 parity: parse QUIC Initial packets on UDP port 443.
+        if (protocol == 17 && (sPort == 443 || dPort == 443) && length >= transportOffset + 8) {
+            val quicPayload = packet.copyOfRange(transportOffset + 8, length)
+            val initial = com.example.interception.quic.QuicParser.parseInitial(quicPayload)
+            if (initial != null) {
+                Log.i(
+                    TAG,
+                    "QUIC ${if (initial.decrypted) "decrypted" else "heuristic"} SNI: " +
+                        "${initial.sniHostname} alpn=${initial.alpn} " +
+                        "(${if (dPort == 443) "outbound" else "inbound"})",
+                )
+                persistQuicConnection(src, sPort, dst, dPort, initial, quicPayload)
+            }
+        }
+
+        // M1 parity: general UDP flow tracking (byte counters), covering all UDP traffic
+        // including DNS/QUIC above.
+        if (protocol == 17 && length >= transportOffset + 8) {
+            persistUdpFlow(src, sPort, dst, dPort, length - transportOffset - 8)
+        }
+
+        trackFlow(com.example.correlation.ConnectionKey.forTcp(src, sPort, dst, dPort, protocol))
     }
 
     private fun trackFlow(key: String) {

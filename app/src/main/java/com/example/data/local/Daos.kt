@@ -28,11 +28,19 @@ interface CapturedTrafficDao {
     @Query("SELECT * FROM captured_traffic WHERE sessionId = :sessionId ORDER BY timestamp DESC")
     suspend fun getBySession(sessionId: Long): List<CapturedTrafficEntity>
 
-    // D2: one-shot read used by ConnectionLineage to find the HTTP transaction(s) that belong to
-    // a given TCP/TLS connection. CapturedTrafficEntity has no connectionId column (HTTP is
-    // parsed out of a TCP stream after the fact, and MITM'd HTTP never sees the raw 5-tuple), so
-    // the join has to be by host + a timestamp window instead -- same heuristic CorrelationEngine
-    // already uses for cross-plane matching, not a new invented convention.
+    // Task 12: the only query ConnectionLineage.httpSteps() is allowed to use to attach an HTTP
+    // transaction to a connection. connectionId is an exact 5-tuple-derived key (see
+    // CapturedTrafficEntity.connectionId doc) shared with TcpConnectionEntity/TlsSessionEntity,
+    // so this is a real join, not a heuristic.
+    @Query("SELECT * FROM captured_traffic WHERE connectionId = :connectionId ORDER BY timestamp ASC")
+    suspend fun getByConnectionId(connectionId: String): List<CapturedTrafficEntity>
+
+    // NOT for lineage attachment -- do not reintroduce this as a fallback inside
+    // ConnectionLineage.httpSteps(). A same-host-in-window match can attach a plausible-but-wrong
+    // HTTP row to a connection, fabricating a causal chain the data does not support; task 12
+    // resolved this in favour of getByConnectionId's exact join instead. Left in place only for
+    // other legitimate callers (e.g. CorrelationEngine's existing cross-plane heuristics) that
+    // already accept a windowed match for their own purposes.
     @Query(
         "SELECT * FROM captured_traffic WHERE sessionId = :sessionId AND host = :host " +
             "AND timestamp BETWEEN :fromTs AND :toTs ORDER BY timestamp ASC"
@@ -354,4 +362,87 @@ interface DnsQueryDao {
 
     @Query("DELETE FROM dns_queries WHERE sessionId = :sessionId")
     suspend fun clearSession(sessionId: Long)
+}
+
+// ── v9 app-scope DAOs (task 10, docs/plans/plan-app.md H1) ────────────
+// Shaped like SavedApiRequestDao: observeAll()/getAll()/upsert()/deleteById() per table.
+
+@Dao
+interface NoteDao {
+
+    @Query("SELECT * FROM notes ORDER BY isPinned DESC, updatedAt DESC")
+    fun observeAll(): Flow<List<NoteEntity>>
+
+    @Query("SELECT * FROM notes ORDER BY isPinned DESC, updatedAt DESC")
+    suspend fun getAll(): List<NoteEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(note: NoteEntity)
+
+    @Query("DELETE FROM notes WHERE id = :id")
+    suspend fun deleteById(id: String)
+}
+
+@Dao
+interface NoteFolderDao {
+
+    @Query("SELECT * FROM note_folders")
+    fun observeAll(): Flow<List<NoteFolderEntity>>
+
+    @Query("SELECT * FROM note_folders")
+    suspend fun getAll(): List<NoteFolderEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(folder: NoteFolderEntity)
+
+    @Query("DELETE FROM note_folders WHERE id = :id")
+    suspend fun deleteById(id: String)
+}
+
+@Dao
+interface CustomToolDao {
+
+    @Query("SELECT * FROM custom_tools ORDER BY createdAt DESC")
+    fun observeAll(): Flow<List<CustomToolEntity>>
+
+    @Query("SELECT * FROM custom_tools ORDER BY createdAt DESC")
+    suspend fun getAll(): List<CustomToolEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(tool: CustomToolEntity)
+
+    @Query("DELETE FROM custom_tools WHERE id = :id")
+    suspend fun deleteById(id: String)
+}
+
+@Dao
+interface ChatMessageDao {
+
+    @Query("SELECT * FROM chat_messages ORDER BY timestamp ASC")
+    fun observeAll(): Flow<List<ChatMessageEntity>>
+
+    @Query("SELECT * FROM chat_messages ORDER BY timestamp ASC")
+    suspend fun getAll(): List<ChatMessageEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(message: ChatMessageEntity)
+
+    @Query("DELETE FROM chat_messages WHERE id = :id")
+    suspend fun deleteById(id: String)
+}
+
+@Dao
+interface ChatProviderDao {
+
+    @Query("SELECT * FROM chat_providers ORDER BY createdAt DESC")
+    fun observeAll(): Flow<List<ChatProviderEntity>>
+
+    @Query("SELECT * FROM chat_providers ORDER BY createdAt DESC")
+    suspend fun getAll(): List<ChatProviderEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(provider: ChatProviderEntity)
+
+    @Query("DELETE FROM chat_providers WHERE id = :id")
+    suspend fun deleteById(id: String)
 }

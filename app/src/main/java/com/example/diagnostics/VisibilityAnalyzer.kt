@@ -11,12 +11,13 @@ import com.example.interception.tls.TlsHandshakeState
  * produces an [ObservationReport] with everything at 0/0, which [VisibilityAnalyzer] reports
  * honestly as "no data" rather than synthesizing a fake baseline.
  *
- * Known, documented limitation carried over from the schema (see [TlsSessionEntity.handshakeState]
- * doc): [TlsHandshakeState.FAILED] exists as an enum value but nothing in the codebase ever sets
- * it -- every persisted TLS row is in [TlsHandshakeState.CLIENT_HELLO] or
- * [TlsHandshakeState.ESTABLISHED]. So "TLS handshakes observed" only ever reports
- * decrypted-vs-SNI-only, never "attempted and failed"; that reason bucket is reported as a fixed
- * 0 with an explanation, not omitted or guessed at.
+ * Known, honest limitation carried over from the schema: TLS 1.3 encrypts alerts once handshake
+ * keys are established (see [com.example.interception.tls.TlsDecoder.parseAlert]'s doc), so a
+ * FAILED-classified [TlsHandshakeState] only ever reflects what [CaptureEngine]/[MitmProxyEngine]
+ * could actually observe -- a pre-key fatal alert, an observed RST/close before ESTABLISHED, or
+ * an [javax.net.ssl.SSLHandshakeException] on a MITM leg. A handshake that fails silently on a
+ * plane requestr never terminates and never sees a plaintext signal for is indistinguishable
+ * from one that simply never started; that gap is real, not fabricated away.
  */
 object VisibilityAnalyzer {
 
@@ -70,7 +71,11 @@ object VisibilityAnalyzer {
             if (httpUndecoded > 0) {
                 add("$httpUndecoded HTTP-layer row(s) are undecoded TLS placeholders (hex dump of the ClientHello only) -- real request/response content was never seen.")
             }
-            add("TlsHandshakeState.FAILED is defined in the schema but nothing in the codebase ever sets it, so a failed/reset TLS handshake is indistinguishable here from one that simply never started -- $tlsFailedReported reported as FAILED is expected to always read 0.")
+            if (tlsFailedReported > 0) {
+                add("$tlsFailedReported of $tlsTotal TLS handshake(s) failed (fatal alert, reset, or a MITM-leg SSLHandshakeException) -- see each session's failureReason.")
+            } else {
+                add("No failed TLS handshakes were observed this session. A handshake that fails silently on a plane requestr never terminates (e.g. an encrypted TLS 1.3 alert with no MITM leg) is still indistinguishable from one that never started -- that gap is real, not fabricated away.")
+            }
             if (dnsResponses > 0 && dnsResolvedWithIps < dnsResponses) {
                 add("${dnsResponses - dnsResolvedWithIps} of $dnsResponses DNS response(s) carried no A/AAAA records requestr could extract (CNAME-only chain, non-address record type, or malformed answer) -- those hostnames can't be linked to a destination IP.")
             }
