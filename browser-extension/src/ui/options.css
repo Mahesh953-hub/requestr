@@ -1,0 +1,75 @@
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  margin: 0;
+  padding: 24px;
+  background: #0b0f19;
+  color: #e5e7eb;
+  max-width: 900px;
+}
+h1 { font-size: 20px; color: #f9fafb; }
+h2 { font-size: 14px; color: #f9fafb; margin-top: 0; }
+.card {
+  background: #111827;
+  border: 1px solid #1f2937;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.label { display: block; color: #9ca3af; font-size: 12px; margin-top: 10px; margin-bottom: 4px; }
+.hint { color: #6b7280; font-size: 11px; margin-top: 6px; line-height: 1.4; }
+.row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 12px; }
+.value { font-weight: 600; }
+input[type="text"], input[type="password"], select {
+  width: 100%;
+  box-sizing: border-box;
+  background: #1f2937;
+  border: 1px solid #374151;
+  color: #e5e7eb;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+input[type="range"] { width: 100%; }
+.buttonRow { display: flex; gap: 8px; margin-top: 8px; }
+button {
+  background: #4f46e5;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+button.secondary { background: #374151; }
+button.danger { background: #7f1d1d; }
+table { width: 100%; margin-top: 10px; border-collapse: collapse; font-size: 11px; }
+th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid #1f2937; }
+th { color: #9ca3af; }
+td.truncate { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover { background: #1f2937; }
+.bodyPreview {
+  margin-top: 10px;
+  background: #0b0f19;
+  border: 1px solid #1f2937;
+  border-radius: 6px;
+  padding: 10px;
+  font-family: monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.switch { position: relative; display: inline-block; width: 34px; height: 18px; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider {
+  position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+  background-color: #374151; border-radius: 18px; transition: 0.15s;
+}
+.slider:before {
+  position: absolute; content: ""; height: 14px; width: 14px; left: 2px; bottom: 2px;
+  background-color: white; border-radius: 50%; transition: 0.15s;
+}
+.switch input:checked + .slider { background-color: #4f46e5; }
+.switch input:checked + .slider:before { transform: translateX(16px); }
