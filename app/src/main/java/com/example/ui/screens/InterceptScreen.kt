@@ -126,6 +126,7 @@ import com.example.data.interception.InterceptionStatus
 import com.example.data.interception.RootState
 import com.example.data.interception.ShizukuState
 import com.example.data.interception.TrafficExporter
+import com.example.data.local.ConnectAttemptEntity
 import com.example.data.local.RuleAction as PersistedRuleAction
 import com.example.data.prefs.AppFilterMode
 import com.example.data.prefs.SettingsDataStore
@@ -162,7 +163,9 @@ import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.scaledTween
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -1548,6 +1551,13 @@ fun ConnectionsBottomSheet(
         else com.example.data.interception.ConnectionsRepository.observeAllTlsSessions(context)
     }.collectAsState(initial = emptyList())
 
+    val connectAttempts by remember(sessionId) {
+        if (sessionId != null) com.example.data.interception.ConnectionsRepository.observeConnectAttempts(context, sessionId)
+        else com.example.data.interception.ConnectionsRepository.observeAllConnectAttempts(context)
+    }.collectAsState(initial = emptyList())
+
+    var selectedConnectAttempt by remember { mutableStateOf<ConnectAttemptEntity?>(null) }
+
     // D1: multi-connection provenance graph, grouped by the host each connection actually
     // dialed (DNS answer / TLS SNI / raw dest IP, see ConnectionLineage.resolveHostFor). This is
     // a one-shot suspend read (not a Flow) since it recomputes the whole grouping+lineage on
@@ -1623,6 +1633,7 @@ fun ConnectionsBottomSheet(
                     "UDP (${udpFlows.size})",
                     "QUIC (${quicConnections.size})",
                     "TLS (${tlsSessions.size})",
+                    "CONNECT (${connectAttempts.size})",
                     "Provenance (${provenanceGraph?.hostGroups?.size ?: 0})",
                 ).forEachIndexed { idx, title ->
                     Tab(
@@ -1753,6 +1764,51 @@ fun ConnectionsBottomSheet(
                         }
                     }
                     4 -> {
+                        if (connectAttempts.isEmpty()) {
+                            EmptyConnectionsState("No CONNECT (HTTPS tunnel) attempts recorded yet. Browse to an HTTPS site while capturing to see rule-driven CONNECT dispositions here.")
+                        } else {
+                            LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                items(connectAttempts, key = { it.id }) { conn ->
+                                    GlassCard(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                                    ) {
+                                        Column(
+                                            modifier = Modifier
+                                                .padding(10.dp)
+                                                .clickable { selectedConnectAttempt = conn }
+                                        ) {
+                                            Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                                                Text("${conn.targetHost}:${conn.targetPort}", fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                                                BadgePill(text = conn.disposition, color = connectDispositionColor(conn.disposition))
+                                            }
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Text(
+                                                clientIdentityFor(context, conn.clientUid) ?: conn.sourceIp ?: "local",
+                                                fontSize = 10.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Text(
+                                                listOfNotNull(
+                                                    "sent ${conn.bytesToUpstream}B · recv ${conn.bytesToClient}B",
+                                                    conn.negotiatedAlpn?.let { "alpn=$it" },
+                                                ).joinToString(" · "),
+                                                fontSize = 10.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                            Text(
+                                                SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(java.util.Date(conn.timestamp)),
+                                                fontSize = 9.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    5 -> {
                         val graph = provenanceGraph
                         if (sessionId == null) {
                             EmptyConnectionsState("Provenance needs an active capture session -- start a capture to see the DNS→TCP→TLS→HTTP chain for each connection.")
@@ -1829,12 +1885,183 @@ fun ConnectionsBottomSheet(
             }
         }
     }
+
+    selectedConnectAttempt?.let { attempt ->
+        ConnectAttemptDetailSheet(
+            item = attempt,
+            onDismiss = { selectedConnectAttempt = null },
+        )
+    }
 }
 
 @Composable
 private fun EmptyConnectionsState(message: String) {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Text(message, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(24.dp))
+    }
+}
+
+/** Disposition -> badge color, mirroring BadgePill's ESTABLISHED/CLOSED green/red convention. */
+private fun connectDispositionColor(disposition: String): Long = when (disposition) {
+    "MITM_DECRYPTED" -> 0xFF10B981
+    "ALLOWED_OPAQUE" -> 0xFFF59E0B
+    "BLOCKED" -> 0xFFEF4444
+    "REDIRECTED" -> 0xFF8B5CF6
+    "FAILED" -> 0xFF64748B
+    else -> 0xFF64748B
+}
+
+/** Best-effort UID -> package/app-label resolution for the CONNECT tab's "client" column. */
+private fun clientIdentityFor(context: android.content.Context, uid: Int?): String? {
+    if (uid == null) return null
+    return try {
+        val pm = context.packageManager
+        val packages = pm.getPackagesForUid(uid)
+        val pkg = packages?.firstOrNull() ?: return "uid $uid"
+        val appInfo = pm.getApplicationInfo(pkg, 0)
+        pm.getApplicationLabel(appInfo).toString()
+    } catch (e: Exception) {
+        "uid $uid"
+    }
+}
+
+/**
+ * Detail sheet for a single CONNECT attempt (Task 5 "Print"): negotiated ALPN, handshake state,
+ * redirect target if redirected, failure reason if failed, timestamps, and a Replay action
+ * (Task 5 "Iter") that re-issues the CONNECT via [com.example.interception.ConnectReplay].
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ConnectAttemptDetailSheet(
+    item: ConnectAttemptEntity,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var targetHost by remember(item.id) { mutableStateOf(item.targetHost) }
+    var targetPort by remember(item.id) { mutableStateOf(item.targetPort.toString()) }
+    var forceMitm by remember(item.id) { mutableStateOf(false) }
+    var replaying by remember(item.id) { mutableStateOf(false) }
+    var replayResult by remember(item.id) { mutableStateOf<com.example.interception.ConnectReplay.ReplayResult?>(null) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("CONNECT ${item.targetHost}:${item.targetPort}", fontSize = 14.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                IconButton(onClick = onDismiss) {
+                    Icon(imageVector = Icons.Default.Close, contentDescription = "Close", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+            BadgePill(text = item.disposition, color = connectDispositionColor(item.disposition))
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                DetailRow("Target", "${item.targetHost}:${item.targetPort}")
+                DetailRow("Client", clientIdentityFor(context, item.clientUid) ?: item.sourceIp ?: "local")
+                DetailRow("ALPN", item.negotiatedAlpn ?: "—")
+                DetailRow("Handshake", item.handshakeState ?: "—")
+                if (item.redirectTarget != null) {
+                    DetailRow("Redirect target", item.redirectTarget)
+                }
+                if (item.failureReason != null) {
+                    DetailRow("Failure reason", item.failureReason)
+                }
+                DetailRow("Sent", "${item.bytesToUpstream}B")
+                DetailRow("Received", "${item.bytesToClient}B")
+                DetailRow("Started", SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(java.util.Date(item.timestamp)))
+                item.finishedAt?.let {
+                    DetailRow("Finished", SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(java.util.Date(it)))
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Text("Replay", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+            Spacer(modifier = Modifier.height(8.dp))
+
+            OutlinedTextField(
+                value = targetHost,
+                onValueChange = { targetHost = it },
+                label = { Text("Target host") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            OutlinedTextField(
+                value = targetPort,
+                onValueChange = { input -> targetPort = input.filter { it.isDigit() } },
+                label = { Text("Target port") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                Text("Force MITM", fontSize = 12.sp, modifier = Modifier.weight(1f))
+                Switch(checked = forceMitm, onCheckedChange = { forceMitm = it })
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+            Button(
+                onClick = {
+                    val port = targetPort.toIntOrNull() ?: item.targetPort
+                    replaying = true
+                    replayResult = null
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            com.example.interception.ConnectReplay.replay(context, targetHost, port, forceMitm)
+                        }
+                        replayResult = result
+                        replaying = false
+                    }
+                },
+                enabled = !replaying,
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Default.Refresh, contentDescription = "Refresh", modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(if (replaying) "Replaying..." else "Replay", fontSize = 13.sp)
+            }
+
+            replayResult?.let { result ->
+                Spacer(modifier = Modifier.height(10.dp))
+                GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                            Text(result.disposition, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            Text("${result.latencyMs}ms", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        result.alpn?.let {
+                            Text("alpn=$it", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        result.error?.let {
+                            Text(it, fontSize = 10.sp, color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+        }
     }
 }
 
