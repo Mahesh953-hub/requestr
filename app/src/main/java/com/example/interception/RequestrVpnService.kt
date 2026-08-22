@@ -34,6 +34,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
@@ -59,8 +60,24 @@ class RequestrVpnService : VpnService() {
     private var sessionId: Long? = null
 
     /** Set once the pump is constructed, so [cleanup] can stop [PacketPump.relay] explicitly
-     * (in addition to [pumpJob] cancellation) and observe [com.example.interception.tun.TunRelay.stats] later (task 14). */
+     * (in addition to [pumpJob] cancellation) and observe [com.example.interception.tun.TunRelay.stats].
+     *
+     * Task 14: [TunRelay.stats] / [com.example.interception.tun.IcmpRelay.unrelayableCount] /
+     * [PacketPump.quicLiveState] all live on *this instance*, not on a static singleton like
+     * [InterceptionStateRepository] -- there is no existing pattern in this codebase for a
+     * running-service-instance-scoped StateFlow reaching Compose UI. Mirroring [activePump]
+     * into the companion object's [activePumpFlow] on every set/clear is the bridge: the UI
+     * binds to [activePumpFlow] (a `StateFlow<PacketPump?>`) via `collectAsStateWithLifecycle`
+     * and then reads `.relay.stats` / `.icmpRelay` / `.quicLiveState` off whatever pump (or
+     * null, when no capture is running) it currently holds. Safe because [RequestrVpnService]
+     * has no `android:process` attribute (confirmed via the manifest), so this always runs in
+     * the same process as the UI -- no cross-process IPC needed for what is otherwise a plain
+     * in-memory object reference. */
     private var activePump: PacketPump? = null
+        set(value) {
+            field = value
+            activePumpFlow.value = value
+        }
 
     /**
      * Delegates to the real `VpnService.protect(...)` overloads so relay upstream sockets
@@ -443,6 +460,11 @@ class RequestrVpnService : VpnService() {
         private const val TUN_PREFIX_V6 = 64
 
         const val ACTION_STOP = "com.example.interception.STOP"
+
+        /** Task 14 bridge -- see [activePump]'s doc for why this exists. Null whenever no
+         * capture is running; the UI must treat null as "relay down", not as "loading". */
+        private val activePumpFlow = kotlinx.coroutines.flow.MutableStateFlow<PacketPump?>(null)
+        val activePumpState: kotlinx.coroutines.flow.StateFlow<PacketPump?> = activePumpFlow.asStateFlow()
 
         fun start(context: Context) {
             context.startService(Intent(context, RequestrVpnService::class.java))

@@ -89,6 +89,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -187,6 +188,22 @@ fun InterceptScreen(
     val interceptionState by InterceptionStateRepository.state.collectAsState()
     // Real capability results. Every field is UNKNOWN until an actual probe runs.
     val capabilities by InterceptionStateRepository.capabilities.collectAsState()
+
+    // Task 14: relay health card -- see RequestrVpnService.activePump's doc for why this is a
+    // cross-instance StateFlow bridge rather than a static singleton. collectAsStateWithLifecycle
+    // (never a plain @Volatile var), per the plan's explicit requirement and the
+    // LocalApiServer.isRunning lesson in /memory/testing/requestr/known-issues.md.
+    val activePumpForHealth by com.example.interception.RequestrVpnService.activePumpState.collectAsStateWithLifecycle()
+    val relayHealthStats by remember(activePumpForHealth) {
+        activePumpForHealth?.relay?.stats
+            ?: kotlinx.coroutines.flow.MutableStateFlow(com.example.interception.tun.TunRelay.RelayStats())
+    }.collectAsStateWithLifecycle()
+    val icmpUnrelayableCount = activePumpForHealth?.icmpRelay?.unrelayableCount ?: 0
+    val icmpLastPathUsed by remember(activePumpForHealth) {
+        activePumpForHealth?.icmpRelay?.lastPathUsed
+            ?: kotlinx.coroutines.flow.MutableStateFlow(com.example.interception.tun.IcmpRelay.LastPathUsed.NONE_YET)
+    }.collectAsStateWithLifecycle()
+    var showRelayHealthSheet by remember { mutableStateOf(false) }
 
     // The traffic log now comes exclusively from Room, written only by the real capture engine.
     // v2.1 read an in-memory list that was seeded with fake rows and topped up by a Random
@@ -384,6 +401,21 @@ fun InterceptScreen(
                     }
                 }
             }
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            // Task 14, surface 1: compact VPN relay health readout, bound to TunRelay.stats via
+            // the activePumpForHealth bridge above. Only meaningful for the VPN_TUN tier (the
+            // relay this describes doesn't exist for PROXY/GATEWAY/MITM), and only relevant if
+            // this build's own honesty disclosure is read alongside it: implemented but NOT
+            // device-verified end-to-end (Redroid has no kernel TUN datapath -- see AUDIT_REPORT.md).
+            RelayHealthCompactCard(
+                pumpRunning = activePumpForHealth != null,
+                stats = relayHealthStats,
+                icmpUnrelayableCount = icmpUnrelayableCount,
+                icmpLastPathUsed = icmpLastPathUsed,
+                onExpand = { showRelayHealthSheet = true },
+            )
 
             Spacer(modifier = Modifier.height(6.dp))
 
@@ -739,6 +771,17 @@ fun InterceptScreen(
             context = screenContext,
             sessionId = interceptionState.sessionId,
             onDismiss = { showConnectionsSheet = false }
+        )
+    }
+
+    // Task 14, surface 1 detail: expanded relay-health bottom sheet.
+    if (showRelayHealthSheet) {
+        RelayHealthDetailSheet(
+            pumpRunning = activePumpForHealth != null,
+            stats = relayHealthStats,
+            icmpUnrelayableCount = icmpUnrelayableCount,
+            icmpLastPathUsed = icmpLastPathUsed,
+            onDismiss = { showRelayHealthSheet = false },
         )
     }
 
@@ -1508,6 +1551,165 @@ fun TrafficItemCard(
 
 
 /**
+ * Task 14, surface 1: compact VPN relay health card shown on the Intercept screen, collapsed by
+ * default, tapping expands to [RelayHealthDetailSheet]. Bound entirely to real counters --
+ * [com.example.interception.tun.TunRelay.RelayStats] fields are all genuinely mutated at their
+ * call sites (see the class doc), never simulated. When [pumpRunning] is false there is no
+ * PacketPump instance at all (no capture active), which is a distinct, honest "not active"
+ * state from "capture active but relay has zero flows so far".
+ *
+ * Following the mockups' status-color set (green healthy, amber degraded, gray inactive) --
+ * "healthy" here is a simplified proxy for the mockup's richer health classification (no
+ * flow-table-pressure/eviction-count fields exist on RelayStats to compute DEGRADED from
+ * precisely, see task 14's own scope note) -- amber is shown only when relayErrors or
+ * unrelayableCount are non-zero, which is real signal, just coarser than the mockup's threshold.
+ */
+@Composable
+private fun RelayHealthCompactCard(
+    pumpRunning: Boolean,
+    stats: com.example.interception.tun.TunRelay.RelayStats,
+    icmpUnrelayableCount: Int,
+    icmpLastPathUsed: com.example.interception.tun.IcmpRelay.LastPathUsed,
+    onExpand: () -> Unit,
+) {
+    val hasIssues = stats.relayErrors > 0 || stats.unrelayableCount > 0 || icmpUnrelayableCount > 0
+    val statusColor = when {
+        !pumpRunning -> TextMuted
+        hasIssues -> InterceptorIdleAmber
+        else -> InterceptorActiveGreen
+    }
+    val statusLabel = when {
+        !pumpRunning -> "NOT ACTIVE"
+        hasIssues -> "DEGRADED"
+        else -> "HEALTHY"
+    }
+    val totalActive = stats.activeTcpV4 + stats.activeTcpV6 + stats.activeUdpV4 + stats.activeUdpV6
+    GlassCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 2.dp),
+        backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+        onClick = onExpand,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(7.dp)
+                        .clip(CircleShape)
+                        .background(statusColor)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "RELAY $statusLabel",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "$totalActive flows",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 9.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(
+                text = "↓${formatByteCount(stats.relayBytesDown)} ↑${formatByteCount(stats.relayBytesUp)}",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 9.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/**
+ * Task 14, surface 1 detail: expanded relay health readout. Faithful to the healthy/degraded/
+ * down states from the mockups but deliberately narrower in scope than the mockup's full
+ * per-reason drop-attribution and NAT-mapping tables -- those need structured counters
+ * ([com.example.interception.tun.TunRelay.RelayStats] has no per-reason breakdown or NAT-mapping
+ * count fields today, see task 14's own investigation note) that do not exist in the codebase,
+ * and adding them here would mean inventing data this pass did not actually instrument.
+ * Every number shown below is one that already existed as a real counter before this task.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RelayHealthDetailSheet(
+    pumpRunning: Boolean,
+    stats: com.example.interception.tun.TunRelay.RelayStats,
+    icmpUnrelayableCount: Int,
+    icmpLastPathUsed: com.example.interception.tun.IcmpRelay.LastPathUsed,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("VPN relay health", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                IconButton(onClick = onDismiss) {
+                    Icon(imageVector = Icons.Default.Close, contentDescription = "Close", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            Text(
+                "Live per-flow relay counters from the running tun pump (task 4/6/9). Implemented but " +
+                    "NOT verified end-to-end on a real device -- see AUDIT_REPORT.md.",
+                fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+
+            if (!pumpRunning) {
+                Text(
+                    "⚠ Nothing is being relayed because nothing is capturing. Start a VPN_TUN capture to bring the relay up.",
+                    fontSize = 11.sp,
+                    color = InterceptorIdleAmber,
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
+            DetailRow("Active TCP flows (v4/v6)", "${stats.activeTcpV4} / ${stats.activeTcpV6}")
+            DetailRow("Active UDP flows (v4/v6)", "${stats.activeUdpV4} / ${stats.activeUdpV6}")
+            DetailRow("Relayed flows (lifetime)", "${stats.relayedFlows}")
+            DetailRow("Bytes up / down", "${formatByteCount(stats.relayBytesUp)} / ${formatByteCount(stats.relayBytesDown)}")
+            DetailRow("Relay errors", "${stats.relayErrors}")
+            DetailRow("Unrelayable packets (TCP/UDP)", "${stats.unrelayableCount}")
+
+            Spacer(modifier = Modifier.height(10.dp))
+            Text("ICMP ECHO RELAY (task 6)", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(modifier = Modifier.height(4.dp))
+            DetailRow(
+                "Path in use (last successful)",
+                when (icmpLastPathUsed) {
+                    com.example.interception.tun.IcmpRelay.LastPathUsed.PING_SOCKET -> "unprivileged ping socket"
+                    com.example.interception.tun.IcmpRelay.LastPathUsed.TCP_FALLBACK -> "TCP reachability fallback"
+                    com.example.interception.tun.IcmpRelay.LastPathUsed.NONE_YET -> "none yet"
+                },
+            )
+            DetailRow("Unrelayable ICMP echoes", "$icmpUnrelayableCount")
+
+            Spacer(modifier = Modifier.height(16.dp))
+        }
+    }
+}
+
+/**
  * M1: Connections sheet.
  *
  * Surfaces the TCP/UDP/QUIC connection rows the capture engine persists into Room
@@ -1527,6 +1729,30 @@ fun ConnectionsBottomSheet(
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var selectedTab by remember { mutableIntStateOf(0) }
+
+    // Task 14: the cross-instance StateFlow bridge -- see RequestrVpnService.activePump's doc.
+    // collectAsStateWithLifecycle (not the plain collectAsState() used elsewhere in this file)
+    // per the plan's explicit requirement, matching the LocalApiServer.isRunning lesson in
+    // /memory/testing/requestr/known-issues.md: a StateFlow, never a bare @Volatile var.
+    val activePump by com.example.interception.RequestrVpnService.activePumpState.collectAsStateWithLifecycle()
+    val keyLogEntryCount by com.example.interception.tls.TlsKeyLogRegistry.entryCount.collectAsStateWithLifecycle()
+
+    // TunRelay.stats only exists on the live PacketPump instance, so the flow bound here must
+    // change whenever activePump itself changes (no capture running -> a fixed empty default).
+    val relayStats by remember(activePump) {
+        activePump?.relay?.stats ?: kotlinx.coroutines.flow.MutableStateFlow(com.example.interception.tun.TunRelay.RelayStats())
+    }.collectAsStateWithLifecycle()
+
+    // PacketPump.quicConnectionState is a plain in-memory map, not a StateFlow (see its own doc
+    // for why) -- polled on a short interval rather than observed, same honesty as the rest of
+    // this sheet: this is live-only state, reset to empty the moment activePump goes null.
+    val quicLiveList by produceState(initialValue = emptyList<com.example.interception.PacketPump.QuicLiveSummary>(), activePump) {
+        while (true) {
+            value = activePump?.quicLiveStateSnapshot() ?: emptyList()
+            kotlinx.coroutines.delay(1000L)
+        }
+    }
+    val quicLiveMap = remember(quicLiveList) { quicLiveList.associateBy { it.connectionId } }
 
     val tcpConnections by remember(sessionId) {
         if (sessionId != null) com.example.data.interception.ConnectionsRepository.observeTcpConnections(context, sessionId)
@@ -1683,20 +1909,62 @@ fun ConnectionsBottomSheet(
                     }
                     2 -> {
                         if (quicConnections.isEmpty()) {
-                            EmptyConnectionsState("No QUIC connections recorded yet. QUIC session identity is extracted from the Initial packet's SNI.")
+                            EmptyConnectionsState(
+                                "No QUIC connections recorded yet. QUIC session identity is extracted from " +
+                                    "the Initial packet's SNI. Task 13 (QUIC 1-RTT decryption) is not implemented " +
+                                    "in this build, so HTTP/3 frames are never decoded -- rows below distinguish " +
+                                    "detected/observed/decoded, and decoded never actually fires yet."
+                            )
                         } else {
                             LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 items(quicConnections) { conn ->
+                                    // Task 14: real com.example.interception.quic.QuicState (live, in-memory
+                                    // only -- see PacketPump.quicLiveStateSnapshot's doc for why this isn't a
+                                    // Room column) plus a genuine decoded-vs-Initial-only badge. decodedFrames
+                                    // is always false today: task 13 (QUIC 1-RTT/QPACK decode) is explicitly
+                                    // descoped from this release, so "decoded" is reachable in code but never
+                                    // actually observed -- this is disclosed, not hidden.
+                                    val live = quicLiveMap[conn.connectionId]
+                                    val decoded = live?.decodedFrames == true
+                                    val observedHttp3 = !decoded && conn.alpn == "h3"
+                                    val badgeText = if (decoded || observedHttp3) "HTTP/3" else "QUIC"
+                                    val badgeColor = when {
+                                        decoded -> 0xFF10B981
+                                        observedHttp3 -> 0xFFF59E0B
+                                        else -> 0xFF64748B
+                                    }
                                     GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)) {
                                         Column(modifier = Modifier.padding(10.dp)) {
                                             Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
                                                 Text(conn.sniHost ?: "${conn.destIp}:${conn.destPort}", fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-                                                BadgePill(text = "v${conn.quicVersion?.toString(16) ?: "?"}", color = 0xFF8B5CF6)
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    BadgePill(text = badgeText, color = badgeColor)
+                                                    Spacer(modifier = Modifier.width(4.dp))
+                                                    BadgePill(text = "v${conn.quicVersion?.toString(16) ?: "?"}", color = 0xFF8B5CF6)
+                                                }
                                             }
                                             Spacer(modifier = Modifier.height(4.dp))
                                             Text(
                                                 "${conn.srcIp}:${conn.srcPort} → ${conn.destIp}:${conn.destPort}",
                                                 fontSize = 10.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                            Text(
+                                                when {
+                                                    decoded -> "state=${live?.state?.name ?: "?"} · HTTP/3 frames decoded"
+                                                    observedHttp3 -> "state=${live?.state?.name ?: "?"} · alpn=h3, no HTTP/3 frames decoded (task 13 not implemented)"
+                                                    live != null -> "state=${live.state.name} · Initial only, alpn=${conn.alpn ?: "unknown"}"
+                                                    else -> "no live state (session ended or capture not running)"
+                                                },
+                                                fontSize = 9.sp,
+                                                fontFamily = FontFamily.Monospace,
+                                                color = if (observedHttp3) Color(0xFFF59E0B) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                            Text(
+                                                "TLS key material in registry: $keyLogEntryCount entries" +
+                                                    if (keyLogEntryCount == 0) " (none -- decoding is impossible without keys)" else "",
+                                                fontSize = 9.sp,
+                                                fontFamily = FontFamily.Monospace,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             )
                                         }
@@ -1711,40 +1979,79 @@ fun ConnectionsBottomSheet(
                         } else {
                             LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 items(tlsSessions) { tls ->
-                                    GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)) {
-                                        Column(modifier = Modifier.padding(10.dp)) {
-                                            Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                                                Text(tls.sniHost ?: tls.connectionId, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-                                                BadgePill(
-                                                    text = if (tls.wasDecrypted) "DECRYPTED" else "SNI/JA3 ONLY",
-                                                    color = if (tls.wasDecrypted) 0xFF10B981 else 0xFF64748B,
+                                    // Task 14: a third badge state, FAILED (red), alongside the existing
+                                    // DECRYPTED (green) / SNI/JA3 ONLY (gray) -- tls.handshakeState is real
+                                    // (task 11 sets it from actual RST/alert signals), previously unread here.
+                                    val failed = tls.handshakeState == "FAILED"
+                                    GlassCard(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                                    ) {
+                                        Row(modifier = Modifier.fillMaxWidth()) {
+                                            if (failed) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .width(3.dp)
+                                                        .fillMaxHeight()
+                                                        .background(Color(0xFFEF4444))
                                                 )
                                             }
-                                            Spacer(modifier = Modifier.height(4.dp))
-                                            Text(
-                                                listOfNotNull(
-                                                    tls.version,
-                                                    tls.cipherSuite,
-                                                    tls.negotiatedProtocol?.let { "alpn=$it" },
-                                                ).joinToString(" · ").ifEmpty { "no handshake metadata" },
-                                                fontSize = 10.sp,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            )
-                                            if (tls.peerCertSubject != null) {
+                                            Column(modifier = Modifier.padding(10.dp)) {
+                                                Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                                                    Text(tls.sniHost ?: tls.connectionId, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                                                    BadgePill(
+                                                        text = when {
+                                                            failed -> "FAILED"
+                                                            tls.wasDecrypted -> "DECRYPTED"
+                                                            else -> "SNI/JA3 ONLY"
+                                                        },
+                                                        color = when {
+                                                            failed -> 0xFFEF4444
+                                                            tls.wasDecrypted -> 0xFF10B981
+                                                            else -> 0xFF64748B
+                                                        },
+                                                    )
+                                                }
+                                                Spacer(modifier = Modifier.height(4.dp))
                                                 Text(
-                                                    "cert: ${tls.peerCertSubject}",
-                                                    fontSize = 9.sp,
-                                                    fontFamily = FontFamily.Monospace,
+                                                    listOfNotNull(
+                                                        tls.version,
+                                                        tls.cipherSuite,
+                                                        tls.negotiatedProtocol?.let { "alpn=$it" },
+                                                    ).joinToString(" · ").ifEmpty { "no handshake metadata" },
+                                                    fontSize = 10.sp,
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                                 )
-                                            }
-                                            if (tls.ja3Hash != null) {
-                                                Text(
-                                                    "JA3: ${tls.ja3Hash}",
-                                                    fontSize = 9.sp,
-                                                    fontFamily = FontFamily.Monospace,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                )
+                                                // Task 14: render the real failureReason (task 11) beneath the
+                                                // version/cipher/alpn line, styled like the existing cert:/JA3:
+                                                // rows below -- this is the row-level treatment the plan asks
+                                                // for; a full handshake-stage-rail detail sheet (per the
+                                                // tls-failed-detail-* mockups) would need per-stage timestamps
+                                                // TlsSessionEntity does not store, so it is out of scope here.
+                                                if (failed && tls.failureReason != null) {
+                                                    Text(
+                                                        "failed: ${tls.failureReason}",
+                                                        fontSize = 9.sp,
+                                                        fontFamily = FontFamily.Monospace,
+                                                        color = Color(0xFFEF4444),
+                                                    )
+                                                }
+                                                if (tls.peerCertSubject != null) {
+                                                    Text(
+                                                        "cert: ${tls.peerCertSubject}",
+                                                        fontSize = 9.sp,
+                                                        fontFamily = FontFamily.Monospace,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    )
+                                                }
+                                                if (tls.ja3Hash != null) {
+                                                    Text(
+                                                        "JA3: ${tls.ja3Hash}",
+                                                        fontSize = 9.sp,
+                                                        fontFamily = FontFamily.Monospace,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    )
+                                                }
                                             }
                                         }
                                     }

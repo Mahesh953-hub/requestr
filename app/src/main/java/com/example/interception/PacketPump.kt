@@ -116,6 +116,54 @@ class PacketPump(
      */
     private val quicConnectionState = LinkedHashMap<String, com.example.interception.quic.QuicConnection>()
 
+    /**
+     * Task 14: read-only snapshot of [quicConnectionState] for the HTTP/3 UI surface, which
+     * needs the live [com.example.interception.quic.QuicState] (`INITIALIZING`,
+     * `HANDSHAKE_IN_PROGRESS`, ...) and per-connection decoded-vs-Initial-only status that
+     * [com.example.data.local.QuicConnectionEntity] has no column for (adding one would mean a
+     * new Room migration, deliberately avoided here — see task 14's honesty writeup on why).
+     * `decodedFrames` is real, not inferred: true only if a stream on this connection actually
+     * has [com.example.interception.quic.QuicStream.decodedHeaders] set, i.e. QPACK decoded a
+     * real HEADERS frame -- which never happens today, since [com.example.interception.quic.QpackDecoder]
+     * has no production call site (task 13 descoped) -- so this will always read false until
+     * that gap is closed, and the UI must say so rather than implying it can happen.
+     *
+     * Caught defensively: [quicConnectionState] is mutated from the tun-read coroutine and
+     * cleared from the flush-loop coroutine with no lock between them (a pre-existing property
+     * of this map, unrelated to this read-only accessor), so a concurrent structural change
+     * during iteration is possible in principle; this snapshot degrades to "nothing to show
+     * yet" rather than crashing the caller.
+     */
+    data class QuicLiveSummary(
+        val connectionId: String,
+        val sniHost: String?,
+        val alpn: String?,
+        val quicVersion: Int?,
+        val destIp: String,
+        val destPort: Int,
+        val state: com.example.interception.quic.QuicState,
+        val decodedFrames: Boolean,
+        val bytesReceived: Long,
+    )
+
+    fun quicLiveStateSnapshot(): List<QuicLiveSummary> = try {
+        quicConnectionState.values.map { conn ->
+            QuicLiveSummary(
+                connectionId = conn.connectionId,
+                sniHost = conn.sniHost,
+                alpn = conn.alpn,
+                quicVersion = conn.quicVersion,
+                destIp = conn.dstIp,
+                destPort = conn.dstPort,
+                state = conn.state,
+                decodedFrames = conn.streams.values.any { it.decodedHeaders != null },
+                bytesReceived = conn.bytesReceived,
+            )
+        }
+    } catch (e: ConcurrentModificationException) {
+        emptyList()
+    }
+
     /** TCP reassembly + HTTP/TLS pipeline. Feeds decoded transactions into Room. */
     private val captureEngine = CaptureEngine(context, db, sessionId, printUndecoded, dumpToFile, captureEnabled, enhancedMode)
 

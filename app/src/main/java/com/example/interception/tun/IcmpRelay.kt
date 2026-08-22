@@ -11,6 +11,9 @@ import java.net.Socket
 import java.nio.channels.SocketChannel
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * ICMP echo relay, isolated from [TunRelay]'s TCP/UDP flow tables and selector loop by design
@@ -66,6 +69,16 @@ class IcmpRelay(
      * several requests concurrently. */
     private val unrelayable = AtomicInteger(0)
     val unrelayableCount: Int get() = unrelayable.get()
+
+    /** Task 14: which of the two relay paths (see class doc) most recently answered an echo
+     * request, so a health UI can show what's actually happening rather than just "ICMP works"
+     * or not. [NONE_YET] until the first successful relay of either kind. Following [TunRelay]'s
+     * own `MutableStateFlow`/`asStateFlow` convention (never a plain `@Volatile var`), per the
+     * `LocalApiServer.isRunning` mistake recorded in `/memory/testing/requestr/known-issues.md`. */
+    enum class LastPathUsed { NONE_YET, PING_SOCKET, TCP_FALLBACK }
+
+    private val _lastPathUsed = MutableStateFlow(LastPathUsed.NONE_YET)
+    val lastPathUsed: StateFlow<LastPathUsed> = _lastPathUsed.asStateFlow()
 
     /**
      * Per-outstanding-request id mapping: kernel-assigned ping-socket identifier (the value
@@ -225,6 +238,7 @@ class IcmpRelay(
 
             val replyPayload = replyBuf.copyOfRange(8, n)
             sendEchoReplyToGuest(matched, replyPayload)
+            _lastPathUsed.value = LastPathUsed.PING_SOCKET
             true
         } catch (e: Exception) {
             Log.w(TAG, "Ping-socket ICMP relay failed: ${e.message}")
@@ -264,11 +278,13 @@ class IcmpRelay(
                 // still proves a live IP stack answered -- same "reachable" semantics
                 // isReachable documents for its own TCP-connect fallback).
                 sendEchoReplyToGuest(request, ByteArray(0))
+                _lastPathUsed.value = LastPathUsed.TCP_FALLBACK
                 return true
             } catch (e: java.net.ConnectException) {
                 // Connection refused: the host answered (RST), which is exactly the "reachable
                 // but nothing there" case isReachable's own fallback treats as success.
                 sendEchoReplyToGuest(request, ByteArray(0))
+                _lastPathUsed.value = LastPathUsed.TCP_FALLBACK
                 return true
             } catch (e: Exception) {
                 // Timed out / unreachable / no route -- try the next port.
