@@ -169,6 +169,17 @@ class CaptureEngine(
                 stream.sniHost = clientHello?.sni ?: TlsDecoder.extractSni(clientBytes)
                 Log.i(TAG, "TLS: ${stream.sniHost ?: "unknown"} (${stream.key}) bytes=${clientBytes.size}")
 
+                // W4: JA3/ALPN only ever exist at this moment (the live ClientHello) -- record
+                // them against the canonical connection id for StackFingerprinter before this
+                // stream's bytes are drained below.
+                if (clientHello != null) {
+                    com.example.runtime.http.StackSignalStore.registerTls(
+                        connectionId = stream.key,
+                        ja3Hash = clientHello.ja3Hash(),
+                        alpn = clientHello.alpn,
+                    )
+                }
+
                 // M2: persist a TlsSessionEntity for this handshake. We never decrypt this path
                 // (no MITM here), so only what's visible on the wire in ClientHello is known:
                 // SNI, offered version/ciphers/ALPN and their JA3 fingerprint. No cipher suite
@@ -259,6 +270,10 @@ class CaptureEngine(
             stream.clientToServer.drain(request.consumedBytes)
             // Store the pending request; wait for the response
             pendingRequests[stream.key] = request
+
+            // W4: original header name order + casing only exists in this parse result --
+            // headers below is lowercased/unordered, and Room does not preserve order.
+            com.example.runtime.http.StackSignalStore.registerRequestHeaderOrder(stream.key, request.rawHeaderNames)
 
             // Fix #14 (TODO): Detect WebSocket upgrade handshake. After the HTTP
             // upgrade request, subsequent bytes on this stream are WS frames.
@@ -378,6 +393,15 @@ class CaptureEngine(
                     grpcStatuses[stream.key]?.remove(frame.streamId)
                     grpcDataBuffers[stream.key]?.remove("${if (isClient) "c" else "s"}|${frame.streamId}")
                 }
+                Http2Parser.FRAME_SETTINGS -> if (isClient) {
+                    // W4: the client's SETTINGS (id, value) multiset is a strong per-stack
+                    // fingerprint (e.g. OkHttp 4.x sends exactly one setting,
+                    // INITIAL_WINDOW_SIZE=16777216) -- only recordable here, at the live frame.
+                    val settingsPairs = Http2Parser.decodeSettings(frame)
+                    if (settingsPairs.isNotEmpty()) {
+                        com.example.runtime.http.StackSignalStore.registerHttp2Settings(stream.key, settingsPairs)
+                    }
+                }
             }
             i++
         }
@@ -389,6 +413,16 @@ class CaptureEngine(
      * capture grpc-status from trailers.
      */
     private fun handleH2Headers(stream: TcpStream, headers: Http2Parser.H2Headers, isClient: Boolean) {
+        // W4: pseudo-header emission order (e.g. :method/:scheme/:authority/:path) is
+        // library-specific and only exists at this decode step -- decodeHeaders builds
+        // pseudoHeaders as a LinkedHashMap, so .keys is already in real wire order.
+        if (isClient && headers.pseudoHeaders.isNotEmpty()) {
+            com.example.runtime.http.StackSignalStore.registerPseudoHeaderOrder(
+                stream.key,
+                headers.pseudoHeaders.keys.toList(),
+            )
+        }
+
         // Trailers: no pseudo-headers, may carry grpc-status.
         val status = GrpcDetector.grpcStatusFromTrailers(headers)
         if (status != null) {
