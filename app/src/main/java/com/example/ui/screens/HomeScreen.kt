@@ -56,6 +56,9 @@ import com.example.data.repository.ApiCollectionsRepository
 import com.example.data.repository.FlowRepository
 import com.example.data.repository.NotesRepository
 import com.example.data.repository.SettingsRepository
+import com.example.data.repository.ToolsRepository
+import com.example.data.search.GlobalSearch
+import com.example.data.search.GlobalSearchHit
 import com.example.data.interception.CaptureLogRepository
 import com.example.data.interception.InterceptionStateRepository
 import com.example.data.interception.InterceptionStatus
@@ -94,8 +97,12 @@ fun HomeScreen(
     val isInterceptionActive = interceptionState.isActive
     val notes by NotesRepository.notes.collectAsState()
     val flows by FlowRepository.nodes.collectAsState()
+    val toolsCatalog = remember { ToolsRepository.getToolsCatalog() }
 
     var searchQuery by remember { mutableStateOf("") }
+    val searchHits = remember(searchQuery, savedApis, notes, toolsCatalog, flows) {
+        GlobalSearch.search(searchQuery, apis = savedApis, notes = notes, tools = toolsCatalog, flows = flows)
+    }
 
     // Time-aware greeting
     val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
@@ -184,10 +191,69 @@ fun HomeScreen(
             SearchInputField(
                 query = searchQuery,
                 onQueryChange = { searchQuery = it },
-                placeholder = "Search APIs, notes, chats, tools...",
+                // "chats" dropped -- Home does not search chat history (that lands with task 12).
+                placeholder = "Search APIs, notes, tools, flow nodes...",
                 onClear = { searchQuery = "" }
             )
         }
+
+        if (searchQuery.isNotBlank()) {
+            if (searchHits.isEmpty()) {
+                item {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 32.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "No matches for \"$searchQuery\"",
+                            color = TextSecondary,
+                            fontSize = 14.sp
+                        )
+                    }
+                }
+            } else {
+                val apiHits = searchHits.filterIsInstance<GlobalSearchHit.Api>()
+                val noteHits = searchHits.filterIsInstance<GlobalSearchHit.Note>()
+                val toolHits = searchHits.filterIsInstance<GlobalSearchHit.Tool>()
+                val flowHits = searchHits.filterIsInstance<GlobalSearchHit.FlowNode>()
+
+                if (apiHits.isNotEmpty()) {
+                    item { SearchSectionLabel("APIs") }
+                    apiHits.forEach { hit ->
+                        item(key = "api-${hit.item.id}") {
+                            SearchResultRow(hit) {
+                                ApiCollectionsRepository.setActiveRequest(hit.item)
+                                onOpenApiRequest(hit.item)
+                            }
+                        }
+                    }
+                }
+                if (noteHits.isNotEmpty()) {
+                    item { SearchSectionLabel("Notes") }
+                    noteHits.forEach { hit ->
+                        item(key = "note-${hit.item.id}") {
+                            SearchResultRow(hit) { onOpenNote(hit.item) }
+                        }
+                    }
+                }
+                if (toolHits.isNotEmpty()) {
+                    item { SearchSectionLabel("Tools") }
+                    toolHits.forEach { hit ->
+                        item(key = "tool-${hit.item.id}") {
+                            SearchResultRow(hit) { onNavigateToSection("tools") }
+                        }
+                    }
+                }
+                if (flowHits.isNotEmpty()) {
+                    item { SearchSectionLabel("Flow") }
+                    flowHits.forEach { hit ->
+                        item(key = "flow-${hit.item.id}") {
+                            SearchResultRow(hit) { onNavigateToSection("flow") }
+                        }
+                    }
+                }
+            }
+        } else {
 
         // Quick Action Chips Row
         item {
@@ -465,7 +531,7 @@ fun HomeScreen(
                     MainSectionCard(
                         title = "Tools",
                         subtitle = "Decoders, ciphers & hashes",
-                        badge = "35+ tools",
+                        badge = "${toolsCatalog.size} tools",
                         icon = "🔧",
                         gradient = listOf(Color(0xFF78350F), Color(0xFF0F172A)),
                         modifier = Modifier.weight(1f),
@@ -499,6 +565,8 @@ fun HomeScreen(
                 }
             }
         }
+
+        } // end normal-mode else branch
 
         item {
             Spacer(modifier = Modifier.height(80.dp))
@@ -588,6 +656,44 @@ fun MainSectionCard(
                     text = subtitle,
                     color = TextSecondary,
                     fontSize = 11.sp,
+                    maxLines = 1
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchSectionLabel(label: String) {
+    Text(
+        text = label.uppercase(),
+        color = TextMuted,
+        fontSize = 11.sp,
+        fontWeight = FontWeight.Bold,
+        modifier = Modifier.padding(top = 4.dp)
+    )
+}
+
+@Composable
+private fun SearchResultRow(hit: com.example.data.search.GlobalSearchHit, onClick: () -> Unit) {
+    GlassCard(
+        modifier = Modifier.fillMaxWidth(),
+        backgroundColor = MaterialTheme.colorScheme.surfaceVariant,
+        onClick = onClick
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+            Text(
+                text = hit.title,
+                fontWeight = FontWeight.SemiBold,
+                color = TextPrimary,
+                fontSize = 14.sp,
+                maxLines = 1
+            )
+            if (hit.subtitle.isNotBlank()) {
+                Text(
+                    text = hit.subtitle,
+                    color = TextSecondary,
+                    fontSize = 12.sp,
                     maxLines = 1
                 )
             }
