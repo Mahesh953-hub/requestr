@@ -403,4 +403,31 @@ note in the maintained tracker.
 
 ---
 
+## Addendum 2 — SDK/CONNECT scope disclosure (2026-08-22, `vorflux/scope-sdk`)
+
+**KNOWN GAP (unfixed this release) — the requestr CA's private key is protected by a hardcoded
+password compiled into the app.** `CertificateAuthority.kt` line 42:
+`private val keystorePassword = "requestr-ca-local".toCharArray()`. This single constant is used
+for two purposes that pull in opposite directions: (1) it protects the CA's PKCS#12 keystore
+persisted to app-private storage (`context.filesDir/requestr_ca.p12`) — this use should genuinely
+be a secret an attacker with filesystem access can't trivially guess; and (2) it is the password
+for the PKCS#12 export a user deliberately produces via `exportP12()` to import the CA into a
+browser or system trust store — this use is *intentionally* known and documented in the
+function's own kdoc ("Password: `requestr-ca-local`"). Because the same constant serves both
+roles, the internal keystore inherits the export path's necessarily-public password, so on-disk
+possession of `requestr_ca.p12` alone is sufficient to extract the CA private key — there is no
+password-based protection against local extraction beyond ordinary app-sandbox isolation.
+
+**Why this is deferred rather than fixed now:** a real fix means splitting the internal-keystore
+password (which should move to a fresh, unpredictable per-install secret, ideally Android
+Keystore-backed rather than a static string at all) from the export-facing password (which stays
+documented and stable, since it is user-facing), plus a read-with-old-password /
+re-encrypt-with-new-password migration path so existing installs that already trust this CA don't
+lose it or fail to load on upgrade. That is materially more risk than a small self-contained fix
+immediately before a release build, so it was explicitly deferred rather than attempted
+unplanned. Tracked here for a future pass; the user has been separately notified to decide
+whether to schedule the real fix.
+
+---
+
 *End of Deep Audit Report*
