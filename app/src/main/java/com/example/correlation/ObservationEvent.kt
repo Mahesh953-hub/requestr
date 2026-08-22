@@ -11,7 +11,7 @@ sealed class ObservationEvent {
     abstract val connectionId: String?
 
     /** Which observation plane produced this event */
-    enum class ObserverSource { VPN, MITM, RUNTIME, BROWSER, PACKET, DNS, QUIC, PROXY }
+    enum class ObserverSource { VPN, MITM, RUNTIME, BROWSER, PACKET, DNS, QUIC, PROXY, SDK }
 }
 
 /** Raw network event: TCP connection, packet-level observation */

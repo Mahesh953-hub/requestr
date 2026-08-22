@@ -112,9 +112,12 @@ object WorkspaceExporter {
                             name = r.optString("name", ""),
                             pattern = r.optString("pattern", ""),
                             domain = r.optString("domain", ""),
-                            action = com.example.data.local.RuleAction.valueOf(
-                                r.optString("action", "LOG_ONLY")
-                            ),
+                            // A workspace exported by an older build won't know FORCE_MITM (or any
+                            // future action) yet -- fall back to LOG_ONLY rather than failing the
+                            // whole rule import on an unrecognized action name.
+                            action = runCatching {
+                                com.example.data.local.RuleAction.valueOf(r.optString("action", "LOG_ONLY"))
+                            }.getOrDefault(com.example.data.local.RuleAction.LOG_ONLY),
                             enabled = r.optBoolean("enabled", true),
                             replacementValue = r.optString("replacementValue").takeIf { it.isNotBlank() },
                         )

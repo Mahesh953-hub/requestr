@@ -3,6 +3,7 @@ package com.example.api
 import android.content.Context
 import android.util.Log
 import com.example.data.local.RequestrDatabase
+import com.example.data.prefs.SettingsDataStore
 import com.example.data.repository.FlowRepository
 import com.example.data.repository.ToolsRepository
 import kotlinx.coroutines.*
@@ -15,6 +16,7 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.net.ServerSocket
+import java.security.SecureRandom
 
 /**
  * Embedded REST API server for programmatic access to requestr internals.
@@ -50,6 +52,45 @@ object LocalApiServer {
         appContext = context.applicationContext
     }
 
+    /**
+     * The pairing token gating `/api/observe` (and every other route via [Authorization: Bearer]
+     * once it's generated). Cached in-memory once loaded so [route] doesn't hit DataStore on
+     * every request; [ensurePairingToken] populates it on first [start] and [regeneratePairingToken]
+     * refreshes it.
+     */
+    @Volatile private var pairingToken: String? = null
+
+    private fun settings(): SettingsDataStore? = appContext?.let { SettingsDataStore.get(it) }
+
+    /** Generates a 256-bit [SecureRandom] token on first call, persists it, and caches it. */
+    private suspend fun ensurePairingToken() {
+        val ds = settings() ?: return
+        val existing = ds.pairingToken.first()
+        if (existing != null) {
+            pairingToken = existing
+            return
+        }
+        val fresh = generateToken()
+        ds.setPairingToken(fresh)
+        pairingToken = fresh
+        Log.i(TAG, "Generated new SDK pairing token (reveal it via Settings > SDK Pairing)")
+    }
+
+    /** Regenerates the pairing token immediately (invalidates the old one). Exposed for Settings' "Regenerate" button. */
+    suspend fun regeneratePairingToken(): String {
+        val ds = settings() ?: throw IllegalStateException("LocalApiServer not initialized")
+        val fresh = generateToken()
+        ds.setPairingToken(fresh)
+        pairingToken = fresh
+        return fresh
+    }
+
+    private fun generateToken(): String {
+        val bytes = ByteArray(32) // 256 bits
+        SecureRandom().nextBytes(bytes)
+        return bytes.joinToString("") { "%02x".format(it) }
+    }
+
     fun start(port: Int = 9876) {
         if (_isRunning.value || appContext == null) return
         this.port = port
@@ -57,6 +98,7 @@ object LocalApiServer {
 
         serverJob = scope.launch {
             try {
+                ensurePairingToken()
                 serverSocket = ServerSocket(port, 10, java.net.InetAddress.getByName("127.0.0.1"))
                 Log.i(TAG, "API server started on 127.0.0.1:$port")
                 while (isActive && _isRunning.value) {
@@ -102,6 +144,7 @@ object LocalApiServer {
                 // optional calibration tag -- see the doc on `calibrationStackHeader` below.
                 val rawHeaderNames = mutableListOf<String>()
                 var calibrationStack: String? = null
+                var authHeader: String? = null
                 while (true) {
                     val hdr = reader.readLine() ?: break
                     if (hdr.isEmpty()) break
@@ -111,6 +154,8 @@ object LocalApiServer {
                         contentLength = hdr.substringAfter(":").trim().toIntOrNull() ?: 0
                     if (hdr.startsWith("$CALIBRATION_STACK_HEADER:", ignoreCase = true))
                         calibrationStack = hdr.substringAfter(":").trim()
+                    if (hdr.startsWith("Authorization:", ignoreCase = true))
+                        authHeader = hdr.substringAfter(":").trim()
                 }
                 val body = if (contentLength > 0) {
                     val buf = CharArray(contentLength)
@@ -129,7 +174,7 @@ object LocalApiServer {
                     )
                 }
 
-                val (status, ct, resp) = route(method, path, body)
+                val (status, ct, resp) = route(method, path, body, authHeader)
                 writer.write("HTTP/1.1 $status ${statusText(status)}\r\n")
                 writer.write("Content-Type: $ct\r\n")
                 writer.write("Content-Length: ${resp.length}\r\n")
@@ -153,11 +198,13 @@ object LocalApiServer {
 
     // ── Router ────────────────────────────────────────────────────
 
-    private suspend fun route(method: String, path: String, body: String): Triple<Int, String, String> {
+    private suspend fun route(method: String, path: String, body: String, authHeader: String? = null): Triple<Int, String, String> {
         return try {
             when {
                 path == "/api/ping" -> ok("""{"status":"ok","version":"4.0"}""")
                 path == "/api/status" -> apiStatus()
+
+                path == "/api/pairing-info" && method == "GET" -> pairingInfo()
 
                 path == "/api/captures" && method == "GET" -> listCaptures()
                 path.startsWith("/api/captures/") && method == "GET" -> getCapture(path.removePrefix("/api/captures/"))
@@ -174,7 +221,16 @@ object LocalApiServer {
 
                 path == "/api/rules" && method == "GET" -> listRules()
 
-                path == "/api/observe" && method == "POST" -> receiveObserverEvents(body)
+                path == "/api/observe" && method == "POST" -> {
+                    // Task 6: the only route that requires pairing auth today -- the local
+                    // 127.0.0.1 bind (start()) remains a secondary defense, this is the primary
+                    // one since ANY local process can otherwise reach a loopback-bound socket.
+                    if (!isAuthorized(authHeader)) {
+                        err(401, "missing or invalid Authorization: Bearer <pairing token>")
+                    } else {
+                        receiveObserverEvents(body)
+                    }
+                }
 
                 path == "/api/plugin/execute" && method == "POST" -> dispatchPlugin(body)
 
@@ -196,6 +252,39 @@ object LocalApiServer {
     }
 
     private fun db() = appContext?.let { RequestrDatabase.get(it) }
+
+    /**
+     * Validates the `Authorization: Bearer <token>` header (case-insensitive scheme, exact-match
+     * token) against the pairing token generated in [ensurePairingToken]. If no token has been
+     * generated yet (e.g. `receiveObserverEvents` reached before any [start] ever ran once --
+     * shouldn't happen in production since [start] always calls [ensurePairingToken] first, but
+     * defends a caller who bypasses `start()`), every request is rejected rather than silently
+     * allowed.
+     */
+    private fun isAuthorized(authHeader: String?): Boolean {
+        val expected = pairingToken ?: return false
+        val header = authHeader ?: return false
+        if (!header.startsWith("Bearer ", ignoreCase = true)) return false
+        val presented = header.substring("Bearer ".length).trim()
+        return presented == expected
+    }
+
+    /**
+     * `GET /api/pairing-info` — reveals the pairing token + port so a third-party app's user (or
+     * the MV3 browser extension) can copy it in. Gated by the "Show Pairing Token" toggle in
+     * Settings ([SettingsDataStore.showPairingToken]); returns 403 otherwise so the token can't be
+     * fetched by an unrelated local process without the user explicitly opting in first.
+     */
+    private suspend fun pairingInfo(): Triple<Int, String, String> {
+        val ds = settings() ?: return err(500, "not initialized")
+        val revealing = ds.showPairingToken.first()
+        val revealUntil = ds.pairingTokenRevealUntil.first()
+        if (!revealing || System.currentTimeMillis() > revealUntil) {
+            return err(403, "pairing token reveal is disabled -- enable 'Show Pairing Token' in Settings")
+        }
+        val token = pairingToken ?: ds.pairingToken.first() ?: return err(500, "no pairing token generated yet")
+        return ok("""{"token":"$token","port":$port}""")
+    }
 
     // ── Endpoints ──────────────────────────────────────────────────
 

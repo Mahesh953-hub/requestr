@@ -54,11 +54,11 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Scope limits (documented rather than silently failing):
  *  - Only a manually-configured HTTP proxy is supported — there is no DHCP/NAT/transparent
  *    gateway. The remote device must explicitly set its HTTP proxy to this device's LAN IP:port.
- *  - HTTPS (`CONNECT`) traffic from remote clients passes through as an opaque, un-inspected
- *    tunnel (same as [com.example.interception.HttpProxyEngine]) — it is captured as a
- *    connection but its content is never decrypted. True MITM for remote clients would require
- *    the remote device to install requestr's CA the same way an on-device MITM flow does; that
- *    is a documented future enhancement, not implemented here.
+ *  - HTTPS (`CONNECT`) traffic from remote clients is rule-driven via [com.example.interception.ConnectControl],
+ *    same as every other CONNECT call site — but a `FORCE_MITM` rule always falls back to a Block
+ *    for gateway clients specifically, because MITM would require the remote device to install
+ *    requestr's CA the same way an on-device MITM flow does, which this engine has no channel to
+ *    do. That is a deliberate, honest scope limit, not a silent gap.
  *  - The enabled/port *preference* is persisted (`SettingsDataStore.gatewayModeEnabled/gatewayPort`)
  *    but the engine does not auto-start on app relaunch — same behavior as other manually
  *    toggled settings (e.g. `LOGGING_ENABLED`) which don't auto-apply either.
@@ -138,12 +138,6 @@ object GatewayEngine {
         val remoteAddr = client.inetAddress
         val isRemote = !remoteAddr.isLoopbackAddress
         val clientIp = remoteAddr?.hostAddress ?: "unknown"
-        // Task 12: gateway connections have no TCP 5-tuple key the way TunRelay/CaptureEngine
-        // streams do (this is a plain accepted Socket, not something PacketPump tracks), so the
-        // connection identity is built from the accepted socket's remote address+port — the same
-        // identity `sourceIp` already reflects — plus the CONNECT/absolute-URI target, finalized
-        // per-request below once `rawUrl` is known.
-        val clientEndpoint = "$clientIp:${client.port}"
 
         if (isRemote) {
             _remoteClients.value = _remoteClients.value + clientIp
@@ -176,22 +170,55 @@ object GatewayEngine {
                 val isConnect = method.equals("CONNECT", ignoreCase = true)
 
                 if (isConnect) {
-                    // Opaque tunnel only — no MITM for remote clients in this pass (see class doc).
-                    HttpProxyShared.handleConnectTunnel(sock, rawUrl, output)
-                    persistTransaction(
-                        method = "CONNECT",
-                        rawUrl = rawUrl,
-                        statusCode = null,
-                        latencyMs = 0,
-                        reqHeaders = headers,
-                        respHeaders = emptyMap(),
-                        reqBody = "",
-                        respBody = "",
-                        sourceIp = if (isRemote) clientIp else null,
-                        wasDecrypted = false,
-                        isUndecoded = true,
-                        connectionId = "$clientEndpoint>$rawUrl",
+                    val ctx = appContext
+                    if (ctx == null) {
+                        output.write("HTTP/1.1 500 Proxy not initialized\r\n\r\n".toByteArray())
+                        return
+                    }
+                    val (host, connectPort) = HttpProxyShared.parseHostPort(rawUrl, 443)
+                    val db = RequestrDatabase.get(ctx)
+                    val rawDisposition = com.example.interception.ConnectControl.evaluate(
+                        db, host, connectPort, sourceIp = if (isRemote) clientIp else null,
                     )
+                    // FORCE_MITM is not supported for gateway clients — no channel to install
+                    // requestr's CA on the remote device — so it always falls back to Block.
+                    val disposition = if (rawDisposition is com.example.interception.ConnectControl.Disposition.ForceMitm) {
+                        com.example.interception.ConnectControl.Disposition.Block("MITM not available for gateway clients")
+                    } else rawDisposition
+                    val dispositionName = when (disposition) {
+                        is com.example.interception.ConnectControl.Disposition.AllowOpaque -> "ALLOWED_OPAQUE"
+                        is com.example.interception.ConnectControl.Disposition.Block -> "BLOCKED"
+                        is com.example.interception.ConnectControl.Disposition.Redirect -> "REDIRECTED"
+                        is com.example.interception.ConnectControl.Disposition.ForceMitm -> "BLOCKED" // unreachable, see above
+                    }
+                    val entity = com.example.data.local.ConnectAttemptEntity(
+                        sessionId = gatewaySessionId(ctx),
+                        targetHost = host,
+                        targetPort = connectPort,
+                        sourceIp = if (isRemote) clientIp else null,
+                        disposition = dispositionName,
+                        redirectTarget = (disposition as? com.example.interception.ConnectControl.Disposition.Redirect)?.target,
+                        failureReason = (disposition as? com.example.interception.ConnectControl.Disposition.Block)?.reason,
+                    )
+                    HttpProxyShared.handleConnectAttempt(sock, rawUrl, disposition, output) { sentBytes, recvBytes ->
+                        runCatching {
+                            kotlinx.coroutines.runBlocking {
+                                RequestrDatabase.get(ctx).connectAttemptDao().insert(
+                                    entity.copy(
+                                        bytesToUpstream = sentBytes,
+                                        bytesToClient = recvBytes,
+                                        finishedAt = System.currentTimeMillis(),
+                                    )
+                                )
+                            }
+                        }.onFailure { Log.w(TAG, "Failed to persist gateway CONNECT attempt: ${it.message}") }
+                    }
+                    if (disposition is com.example.interception.ConnectControl.Disposition.Block) {
+                        // Block never invokes onBytesTransferred (no relay ran) — persist directly.
+                        runCatching {
+                            db.connectAttemptDao().insert(entity.copy(finishedAt = System.currentTimeMillis()))
+                        }.onFailure { Log.w(TAG, "Failed to persist gateway CONNECT attempt: ${it.message}") }
+                    }
                 } else {
                     val bodyLen = headers["Content-Length"]?.toIntOrNull() ?: 0
                     val bodyBytes = if (bodyLen > 0) input.readNBytes(bodyLen) else ByteArray(0)
@@ -222,7 +249,6 @@ object GatewayEngine {
                         sourceIp = if (isRemote) clientIp else null,
                         wasDecrypted = true,
                         isUndecoded = false,
-                        connectionId = "$clientEndpoint>$rawUrl",
                     )
                 }
             }
@@ -243,7 +269,6 @@ object GatewayEngine {
         sourceIp: String?,
         wasDecrypted: Boolean,
         isUndecoded: Boolean,
-        connectionId: String,
     ) {
         val ctx = appContext ?: return
         val (host, path) = runCatching {
@@ -269,7 +294,6 @@ object GatewayEngine {
             wasDecrypted = wasDecrypted,
             isUndecoded = isUndecoded,
             sourceIp = sourceIp,
-            connectionId = connectionId,
         )
         runCatching { RequestrDatabase.get(ctx).capturedTrafficDao().insert(entity) }
             .onFailure { Log.w(TAG, "Failed to persist gateway transaction: ${it.message}") }

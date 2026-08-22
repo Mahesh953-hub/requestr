@@ -32,6 +32,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         CustomToolEntity::class,
         ChatMessageEntity::class,
         ChatProviderEntity::class,
+        ConnectAttemptEntity::class,
     ],
     // v3.5: bumped 4 -> 5 for FlowNodeEntity + FlowConnectionEntity (Flow persistence).
     // v5.6 (M1): bumped 5 -> 6 to register TcpConnectionEntity/UdpFlowEntity/QuicConnectionEntity,
@@ -43,6 +44,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
     // DnsQueryEntity -- PacketPump.dnsCallback previously parsed real DNS queries/responses via
     // DnsParser and discarded them (log-only); this table is what makes DNS a genuine first hop
     // in ConnectionLineage instead of a documented gap.
+    // SDK/CONNECT scope: ConnectAttemptEntity is registered above for the CONNECT control
+    // subsystem (see ConnectControl.kt) -- every CONNECT tunnel establishment is now a
+    // persisted, inspectable record instead of a blind byte relay. Its connect_attempts
+    // CREATE TABLE + indices live in MIGRATION_8_9 Section C below, since the transport
+    // scope owns this database's version number and migrations.
     // v5.8 (task 10): bumped 8 -> 9. Adds CapturedTrafficEntity.connectionId (task 12's exact-key
     // lineage join, replacing the getByHostInWindow 30s heuristic) and TlsSessionEntity.failureReason
     // / failedAt (task 11's real FAILED handshake state). Also registers five app-scope tables
@@ -75,6 +81,7 @@ abstract class RequestrDatabase : RoomDatabase() {
     abstract fun customToolDao(): CustomToolDao
     abstract fun chatMessageDao(): ChatMessageDao
     abstract fun chatProviderDao(): ChatProviderDao
+    abstract fun connectAttemptDao(): ConnectAttemptDao
 
     companion object {
         @Volatile

@@ -1,6 +1,7 @@
 package com.example.data.interception
 
 import android.content.Context
+import com.example.data.local.ConnectAttemptEntity
 import com.example.data.local.QuicConnectionEntity
 import com.example.data.local.RequestrDatabase
 import com.example.data.local.TcpConnectionEntity
@@ -47,4 +48,12 @@ object ConnectionsRepository {
 
     fun observeAllQuicConnections(context: Context): Flow<List<QuicConnectionEntity>> =
         RequestrDatabase.get(context).quicConnectionDao().observeAll()
+
+    /** All CONNECT (HTTPS tunnel) attempts for a given capture session, most-recent first. */
+    fun observeConnectAttempts(context: Context, sessionId: Long): Flow<List<ConnectAttemptEntity>> =
+        RequestrDatabase.get(context).connectAttemptDao().observeBySession(sessionId)
+
+    /** Every CONNECT attempt ever recorded, regardless of session -- used for the "All" view. */
+    fun observeAllConnectAttempts(context: Context): Flow<List<ConnectAttemptEntity>> =
+        RequestrDatabase.get(context).connectAttemptDao().observeAll()
 }

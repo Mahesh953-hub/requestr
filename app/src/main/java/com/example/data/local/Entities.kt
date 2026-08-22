@@ -88,7 +88,7 @@ data class CaptureSessionEntity(
     val errorText: String? = null,
 )
 
-enum class RuleAction { BLOCK, REDIRECT, MODIFY_REQUEST, MODIFY_RESPONSE, LOG_ONLY }
+enum class RuleAction { BLOCK, REDIRECT, MODIFY_REQUEST, MODIFY_RESPONSE, LOG_ONLY, FORCE_MITM }
 
 /**
  * User-defined intercept rules. The "Block this domain" long-press action must be gated on a
@@ -418,4 +418,48 @@ data class ChatProviderEntity(
     val model: String,
     val isActive: Boolean,
     val createdAt: Long = System.currentTimeMillis(),
+)
+
+// ═══════════════════════════════════════════════════════════════
+// CONNECT Control subsystem
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * One record per CONNECT (HTTPS tunnel establishment) attempt observed by
+ * [com.example.interception.MitmProxyEngine], [com.example.interception.HttpProxyEngine], or
+ * [com.example.interception.gateway.GatewayEngine].
+ *
+ * Previously every CONNECT tunnel was opaque: no rule evaluation beyond BLOCK, no persistence,
+ * zero observability into target/disposition/bytes. This table is what makes a CONNECT attempt
+ * a first-class, inspectable record instead of a blind byte relay.
+ *
+ * Modeled as its own entity rather than crammed into [CapturedTrafficEntity] (which the old
+ * GatewayEngine workaround did with `method = "CONNECT"` / `isUndecoded = true`) because a
+ * CONNECT is a tunnel *establishment* — no request/response body, no status code semantics, and
+ * a different lifecycle (opened, then possibly MITM'd/relayed/blocked/redirected, then closed).
+ */
+@Entity(
+    tableName = "connect_attempts",
+    indices = [Index("sessionId"), Index("targetHost"), Index("timestamp")],
+)
+data class ConnectAttemptEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val sessionId: Long,
+    val targetHost: String,
+    val targetPort: Int,
+    /** UID of the local app that opened the tunnel, when resolvable via ConnectivityManager. */
+    val clientUid: Int? = null,
+    /** Remote LAN client IP, set only for gateway-proxied CONNECTs (mirrors CapturedTrafficEntity.sourceIp). */
+    val sourceIp: String? = null,
+    val timestamp: Long = System.currentTimeMillis(),
+    val negotiatedAlpn: String? = null,
+    /** ALLOWED_OPAQUE, MITM_DECRYPTED, BLOCKED, REDIRECTED, FAILED. */
+    val disposition: String,
+    val redirectTarget: String? = null,
+    val bytesToClient: Long = 0,
+    val bytesToUpstream: Long = 0,
+    val failureReason: String? = null,
+    /** NEGOTIATED, FAILED — mirrors TlsSessionEntity.handshakeState's vocabulary. */
+    val handshakeState: String? = null,
+    val finishedAt: Long? = null,
 )

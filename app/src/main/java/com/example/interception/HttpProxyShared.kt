@@ -5,6 +5,7 @@ import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.Socket
 import java.net.URL
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Shared, stateless HTTP/1.1 forward-proxy plumbing used by both [HttpProxyEngine] (on-device
@@ -49,19 +50,87 @@ internal object HttpProxyShared {
     }
 
     /**
-     * Opaque CONNECT tunnel (no MITM/inspection) — same behavior for on-device and remote/gateway
-     * clients: bidirectional byte relay between the client socket and the upstream target.
+     * Handles a CONNECT request per the [ConnectControl.Disposition] the caller already
+     * evaluated -- BLOCK answers the client directly, AllowOpaque/Redirect tunnel bidirectionally
+     * (byte-counted, unlike the previous blind relay), and ForceMitm is answered with an explicit
+     * error since a bare [Socket] relay can never terminate TLS -- only [MitmProxyEngine] can act
+     * on that disposition.
+     *
+     * [onBytesTransferred] is invoked once, after the relay finishes, with
+     * (bytes read from the client / written upstream, bytes read from upstream / written to the
+     * client) so callers can persist a [com.example.data.local.ConnectAttemptEntity] byte count.
      */
-    fun handleConnectTunnel(client: Socket, target: String, output: OutputStream) {
-        val (host, port) = parseHostPort(target, 443)
-        output.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray())
-        output.flush()
+    fun handleConnectAttempt(
+        client: Socket,
+        target: String,
+        disposition: ConnectControl.Disposition,
+        output: OutputStream,
+        onBytesTransferred: (clientToUpstream: Long, upstreamToClient: Long) -> Unit = { _, _ -> },
+    ) {
+        when (disposition) {
+            is ConnectControl.Disposition.Block -> {
+                output.write("HTTP/1.1 403 Blocked by requestr\r\n\r\n".toByteArray())
+                output.flush()
+            }
+            is ConnectControl.Disposition.AllowOpaque -> {
+                val (host, port) = parseHostPort(target, 443)
+                output.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray())
+                output.flush()
+                relay(client, host, port, onBytesTransferred)
+            }
+            is ConnectControl.Disposition.Redirect -> {
+                val (host, port) = parseHostPort(disposition.target, 443)
+                output.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray())
+                output.flush()
+                relay(client, host, port, onBytesTransferred)
+            }
+            is ConnectControl.Disposition.ForceMitm -> {
+                // A plain Socket relay can never terminate TLS -- only MitmProxyEngine can
+                // honor FORCE_MITM. Callers that can't MITM (HttpProxyEngine, GatewayEngine)
+                // must report this honestly rather than silently tunneling opaquely.
+                output.write("HTTP/1.1 403 MITM required but not available\r\n\r\n".toByteArray())
+                output.flush()
+            }
+        }
+    }
 
+    /** Byte-counted bidirectional relay between [client] and a freshly dialed upstream socket. */
+    private fun relay(
+        client: Socket,
+        host: String,
+        port: Int,
+        onBytesTransferred: (clientToUpstream: Long, upstreamToClient: Long) -> Unit,
+    ) {
         Socket(host, port).use { upstream ->
-            val t1 = Thread { client.getInputStream().copyToStream(upstream.getOutputStream(), BUFFER_SIZE) }
-            val t2 = Thread { upstream.getInputStream().copyToStream(client.getOutputStream(), BUFFER_SIZE) }
+            val sent = AtomicLong(0)
+            val received = AtomicLong(0)
+            val t1 = Thread {
+                runCatching {
+                    val input = client.getInputStream()
+                    val out = upstream.getOutputStream()
+                    val buf = ByteArray(BUFFER_SIZE)
+                    var n: Int
+                    while (input.read(buf).also { n = it } != -1) {
+                        out.write(buf, 0, n)
+                        sent.addAndGet(n.toLong())
+                    }
+                }
+            }
+            val t2 = Thread {
+                runCatching {
+                    val input = upstream.getInputStream()
+                    val out = client.getOutputStream()
+                    val buf = ByteArray(BUFFER_SIZE)
+                    var n: Int
+                    while (input.read(buf).also { n = it } != -1) {
+                        out.write(buf, 0, n)
+                        received.addAndGet(n.toLong())
+                    }
+                }
+            }
             t1.start(); t2.start()
             t1.join(30_000); t2.join(30_000)
+            onBytesTransferred(sent.get(), received.get())
         }
     }
 

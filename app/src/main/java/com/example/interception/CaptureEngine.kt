@@ -665,6 +665,12 @@ class CaptureEngine(
                 // LOG_ONLY: Always persist, even if trafficCaptureEnabled is off.
                 // This overrides the capture toggle — tagged requests are always saved.
             }
+            com.example.data.local.RuleAction.FORCE_MITM -> {
+                // FORCE_MITM is evaluated at CONNECT time (see ConnectControl) before this
+                // engine's tun pipeline ever decodes an HTTP transaction inside the tunnel --
+                // by the time a request reaches here the MITM decision has already been made.
+                // Nothing further to do at the per-transaction level; persist normally.
+            }
         }
 
         // LOG_ONLY rules override the capture toggle — always persist tagged traffic

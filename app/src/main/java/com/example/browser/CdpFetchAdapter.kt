@@ -176,7 +176,11 @@ class CdpFetchAdapter(
                     // MODIFY_RESPONSE is applied at the response-stage pause of this same
                     // request (handleResponseStagePaused), not here -- the request stage has
                     // no response body/headers to modify yet.
-                    RuleAction.MODIFY_RESPONSE, RuleAction.LOG_ONLY -> {
+                    // FORCE_MITM is a CONNECT-level disposition (see ConnectControl) with no
+                    // meaning at the Fetch.requestPaused stage -- CDP already observes decrypted
+                    // browser traffic, so there's nothing further to MITM here. Treat it the same
+                    // as LOG_ONLY: allow the request through unmodified.
+                    RuleAction.MODIFY_RESPONSE, RuleAction.LOG_ONLY, RuleAction.FORCE_MITM -> {
                         allowedCount++
                         notifyCountersChanged()
                         client.send(

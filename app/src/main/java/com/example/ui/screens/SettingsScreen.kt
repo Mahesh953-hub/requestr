@@ -716,6 +716,105 @@ fun SettingsScreen(
                 }
             }
 
+            // Section 5.4b: SDK Pairing (SDK & CONNECT scope, Task 6) -- the bearer token
+            // gating `/api/observe`, which the embedded `requestr-sdk` (RequestrObserver) and the
+            // MV3 browser extension both need before their POSTs are accepted. The token itself
+            // is only ever revealed here, and only while "Show Pairing Token" is on.
+            item {
+                SettingsSectionHeader("SDK PAIRING")
+                GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surface) {
+                    val pairingTokenValue by interceptionDataStore.pairingToken.collectAsState(initial = null)
+                    val showPairingToken by interceptionDataStore.showPairingToken.collectAsState(initial = false)
+                    val clipboardManager = LocalClipboardManager.current
+                    var copiedSnackbar by remember { mutableStateOf(false) }
+
+                    // Auto-disable the reveal 5 minutes after it was turned on -- mirrors the
+                    // LocalApiServer-side revealUntil check so the UI and the API agree.
+                    LaunchedEffect(showPairingToken) {
+                        if (showPairingToken) {
+                            kotlinx.coroutines.delay(com.example.data.prefs.SettingsDataStore.PAIRING_REVEAL_DURATION_MS)
+                            interceptionDataStore.setShowPairingToken(false)
+                        }
+                    }
+
+                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(imageVector = Icons.Default.Security, contentDescription = "Pairing", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Third-Party App / Extension Pairing", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                        }
+                        Text(
+                            "A third-party app's embedded requestr-sdk, or the browser extension, must present this bearer token on every /api/observe call. Reveal it here to copy it into that app/extension's setup.",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("Show Pairing Token", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
+                            Switch(
+                                checked = showPairingToken,
+                                onCheckedChange = { checked ->
+                                    settingsScope.launch { interceptionDataStore.setShowPairingToken(checked) }
+                                }
+                            )
+                        }
+
+                        if (showPairingToken) {
+                            if (pairingTokenValue != null) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().clickable {
+                                        clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(pairingTokenValue!!))
+                                        copiedSnackbar = true
+                                    },
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        pairingTokenValue!!,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    Icon(imageVector = Icons.Default.ContentCopy, contentDescription = "Copy", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                                }
+                                if (copiedSnackbar) {
+                                    Text("Copied to clipboard", fontSize = 10.sp, color = MaterialTheme.colorScheme.secondary)
+                                }
+                                Text(
+                                    "Auto-hides in 5 minutes. GET /api/pairing-info returns this token + port ${com.example.api.LocalApiServer.port} while this toggle is on.",
+                                    fontSize = 9.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            } else {
+                                Text(
+                                    "No pairing token yet -- start the Embedded HTTP API Server above to generate one.",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+
+                        Button(
+                            onClick = {
+                                settingsScope.launch {
+                                    runCatching { com.example.api.LocalApiServer.regeneratePairingToken() }
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                            shape = RoundedCornerShape(10.dp),
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Regenerate", modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Regenerate Token", fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+
             // Section 5.5b: Runtime Instrumentation (R1+R3) — honest status for the adapter
             // pattern engine. Started automatically at app launch (see MainActivity); this
             // card just surfaces real state instead of leaving the whole subsystem invisible.

@@ -204,6 +204,8 @@ enum class TrafficSource(val label: String) {
     FRIDA("Frida"),
     /** T2: request was proxied on behalf of another device on the LAN via GatewayEngine. */
     GATEWAY("Gateway"),
+    /** Reported by a third-party app embedding the requestr Observer SDK (CaptureTier.SDK). */
+    SDK("SDK"),
     UNKNOWN("Unknown"),
 }
 

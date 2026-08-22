@@ -186,7 +186,7 @@ object PreflightController {
                 shizukuEngine.start(mitmPort)
             }
             CaptureMethod.HTTP_PROXY -> {
-                httpProxy.start(port)
+                httpProxy.start(context, port)
             }
             CaptureMethod.ROOT_FRIDA -> {
                 // Frida requires external frida-server; start VPN as fallback for traffic

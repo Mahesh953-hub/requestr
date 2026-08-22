@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Sample network security config for apps embedding the requestr Observer SDK (task 9).
+
+  This file is a REFERENCE/TEMPLATE shipped inside the SDK's own res/xml; it is not
+  auto-merged into an embedding app's manifest. Copy it into the host app's own
+  `res/xml/network_security_config.xml` (or point `android:networkSecurityConfig` at this
+  one directly if consuming the SDK as a source module) so requestr's locally-generated
+  MITM CA is trusted for the app's own outbound HTTPS traffic.
+
+  See TrustHelper.kt in this module for the full option A/B/C writeup, including the
+  programmatic (no manifest change) alternative.
+-->
+<network-security-config>
+
+    <!-- Option A: trust user-installed CAs, but ONLY in debug builds (debug-overrides is
+         inert unless android:debuggable="true"). Requires installing requestr's exported
+         CA PEM as a user CA on the test device first (Settings > Security > Install a
+         certificate, or requestr Settings > "Export CA PEM" then adb push + install). -->
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="user" />
+        </trust-anchors>
+    </debug-overrides>
+
+    <!-- Option B: bundle requestr's CA cert directly so it is trusted even in release
+         builds, without installing anything on the device. Uncomment and copy requestr's
+         exported CA PEM into this module's (or the host app's) res/raw/requestr_ca.pem
+         first; see CertificateAuthority.exportPem() on the requestr side.
+
+    <base-config>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="@raw/requestr_ca" />
+        </trust-anchors>
+    </base-config>
+    -->
+
+</network-security-config>

@@ -1,11 +1,13 @@
 package com.example.interception
 
 import android.content.Context
+import android.net.ConnectivityManager
 import android.util.Log
 import com.example.data.interception.ActiveTier
 import com.example.data.interception.CaptureMethod
 import com.example.data.interception.InterceptionStateRepository
 import com.example.data.local.CapturedTrafficEntity
+import com.example.data.local.ConnectAttemptEntity
 import com.example.data.local.RequestrDatabase
 import com.example.data.local.RuleAction
 import com.example.data.models.HttpMethod
@@ -60,7 +62,13 @@ import javax.net.ssl.X509TrustManager
  * client side (so requestr sees plaintext) and re-established upstream
  * (so the real server accepts the connection).
  *
- * Architecture:
+ * Whether a given CONNECT actually gets MITM'd is decided by [ConnectControl] — see
+ * [handleClient]. Only a `FORCE_MITM` disposition reaches the cert-generation / TLS-termination
+ * code below; `AllowOpaque`/`Redirect` tunnel via [HttpProxyShared.handleConnectAttempt] just
+ * like the non-MITM engines, and `Block` is answered directly. This engine being *capable* of
+ * MITM does not mean every CONNECT it sees is decrypted.
+ *
+ * Architecture (for the FORCE_MITM case):
  *   Client → TLS(per-host-cert) → requestr inspects plaintext → TLS(real) → Server
  *
  * After the client-side TLS handshake completes, the decrypted stream is NOT
@@ -154,13 +162,49 @@ class MitmProxyEngine(
             val (host, port) = parseHostPort(target, 443)
 
             val db = RequestrDatabase.get(context)
+            val disposition = ConnectControl.evaluate(db, host, port)
 
-            // Check intercept rules BEFORE establishing the tunnel (host-only coarse gate)
-            val preAction = RuleEnforcer.checkRules(db, "https://$host/", host)
-            if (preAction == RuleAction.BLOCK) {
-                Log.i(TAG, "BLOCKED by rule: $host")
-                output.write("HTTP/1.1 403 Blocked by requestr\r\n\r\n".toByteArray())
-                return
+            when (disposition) {
+                is ConnectControl.Disposition.Block -> {
+                    Log.i(TAG, "BLOCKED by rule: $host")
+                    output.write("HTTP/1.1 403 Blocked by requestr\r\n\r\n".toByteArray())
+                    output.flush()
+                    persistConnectAttempt(context, client, db, host, port, "BLOCKED", failureReason = disposition.reason)
+                    return
+                }
+                is ConnectControl.Disposition.Redirect -> {
+                    // Rule redirects this CONNECT to a different upstream — tunnel opaquely to
+                    // the redirect target instead of the original (no MITM either way here).
+                    output.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray())
+                    output.flush()
+                    HttpProxyShared.handleConnectAttempt(
+                        client, disposition.target, ConnectControl.Disposition.AllowOpaque, output,
+                    ) { sent, recv ->
+                        persistConnectAttempt(
+                            context, client, db, host, port, "REDIRECTED",
+                            redirectTarget = disposition.target, bytesToUpstream = sent, bytesToClient = recv,
+                        )
+                    }
+                    return
+                }
+                is ConnectControl.Disposition.AllowOpaque -> {
+                    // No FORCE_MITM rule matched — tunnel opaquely rather than terminate TLS,
+                    // even though this engine is capable of MITM.
+                    output.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray())
+                    output.flush()
+                    HttpProxyShared.handleConnectAttempt(
+                        client, target, ConnectControl.Disposition.AllowOpaque, output,
+                    ) { sent, recv ->
+                        persistConnectAttempt(
+                            context, client, db, host, port, "ALLOWED_OPAQUE",
+                            bytesToUpstream = sent, bytesToClient = recv,
+                        )
+                    }
+                    return
+                }
+                is ConnectControl.Disposition.ForceMitm -> {
+                    // Fall through to the existing MITM path below.
+                }
             }
 
             // Send 200 to client — we're about to MITM
@@ -236,21 +280,84 @@ class MitmProxyEngine(
             // transaction, and forward the (possibly modified) bytes.
             val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>()
             val clientWriteLock = Any()
+            val sent = AtomicLong(0)
+            val received = AtomicLong(0)
             val t1 = Thread {
                 inspectClientToServer(db, decryptedInput, upstreamOutput, decryptedOutput,
-                    clientWriteLock, host, port, pending)
+                    clientWriteLock, host, port, pending, sent)
             }
             val t2 = Thread {
-                inspectServerToClient(db, upstreamInput, decryptedOutput, clientWriteLock, pending, host, port)
+                inspectServerToClient(db, upstreamInput, decryptedOutput, clientWriteLock, pending, host, port, received)
             }
             t1.start(); t2.start()
             t1.join(60_000); t2.join(60_000)
+
+            persistConnectAttempt(
+                context, client, db, host, port, "MITM_DECRYPTED",
+                negotiatedAlpn = runCatching {
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                        sslSocket.applicationProtocol?.ifBlank { null }
+                    } else null
+                }.getOrNull(),
+                bytesToUpstream = sent.get(), bytesToClient = received.get(),
+            )
 
             packetCount.addAndGet(1)
             InterceptionStateRepository.updateCounters(packetCount = packetCount.get().toInt())
         } catch (e: Exception) {
             if (running.get()) Log.w(TAG, "Client handler: ${e.message}")
         }
+    }
+
+    /**
+     * Persists a [ConnectAttemptEntity] for a CONNECT this engine just handled. Captures
+     * [ConnectAttemptEntity.clientUid] via [ConnectivityManager.getConnectionOwnerUid], keyed off
+     * [client]'s actual kernel-level local/remote socket addresses (the real TCP 4-tuple this
+     * accepted connection represents) -- this only resolves when requestr itself is the active
+     * VPN (true for the VPN_TUN/MITM_PROXY tiers this engine runs under), so the lookup is
+     * wrapped in [runCatching] and left null on any failure or when unsupported (< API 29). Never
+     * throws overall -- a failed persist must not break the CONNECT it's describing, matching
+     * [persistMitmTlsSession]'s existing never-throw contract.
+     */
+    private fun persistConnectAttempt(
+        context: Context,
+        client: Socket,
+        db: RequestrDatabase,
+        host: String,
+        port: Int,
+        disposition: String,
+        redirectTarget: String? = null,
+        failureReason: String? = null,
+        negotiatedAlpn: String? = null,
+        bytesToUpstream: Long = 0,
+        bytesToClient: Long = 0,
+    ) {
+        runCatching {
+            val clientUid = runCatching {
+                if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) return@runCatching null
+                val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                    ?: return@runCatching null
+                val local = client.localSocketAddress as? java.net.InetSocketAddress
+                    ?: return@runCatching null
+                val remote = client.remoteSocketAddress as? java.net.InetSocketAddress
+                    ?: return@runCatching null
+                cm.getConnectionOwnerUid(android.system.OsConstants.IPPROTO_TCP, local, remote).takeIf { it != -1 }
+            }.getOrNull()
+            val entity = ConnectAttemptEntity(
+                sessionId = sessionId.get(),
+                targetHost = host,
+                targetPort = port,
+                clientUid = clientUid,
+                negotiatedAlpn = negotiatedAlpn,
+                disposition = disposition,
+                redirectTarget = redirectTarget,
+                bytesToClient = bytesToClient,
+                bytesToUpstream = bytesToUpstream,
+                failureReason = failureReason,
+                finishedAt = System.currentTimeMillis(),
+            )
+            kotlinx.coroutines.runBlocking { db.connectAttemptDao().insert(entity) }
+        }.onFailure { e -> Log.w(TAG, "Failed to persist CONNECT attempt for $host: ${e.message}") }
     }
 
     // ── Inspecting relay ────────────────────────────────────────────────
@@ -272,6 +379,7 @@ class MitmProxyEngine(
         host: String,
         port: Int,
         pending: ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>,
+        bytesSentToUpstream: AtomicLong,
     ) {
         val buffer = ByteArrayOutputStream()
         val chunk = ByteArray(BUFFER_SIZE)
@@ -280,6 +388,7 @@ class MitmProxyEngine(
             while (true) {
                 val n = input.read(chunk)
                 if (n == -1) break
+                bytesSentToUpstream.addAndGet(n.toLong())
                 if (blind) {
                     upstreamOut.write(chunk, 0, n)
                     upstreamOut.flush()
@@ -325,6 +434,7 @@ class MitmProxyEngine(
         pending: ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>,
         host: String,
         port: Int,
+        bytesReceivedFromUpstream: AtomicLong,
     ) {
         val buffer = ByteArrayOutputStream()
         val chunk = ByteArray(BUFFER_SIZE)
@@ -333,6 +443,7 @@ class MitmProxyEngine(
             while (true) {
                 val n = input.read(chunk)
                 if (n == -1) break
+                bytesReceivedFromUpstream.addAndGet(n.toLong())
                 if (blind) {
                     synchronized(clientWriteLock) {
                         clientOut.write(chunk, 0, n)
