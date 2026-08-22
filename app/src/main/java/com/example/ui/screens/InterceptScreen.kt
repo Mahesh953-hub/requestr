@@ -1477,6 +1477,14 @@ fun TrafficItemCard(
                         BadgePill(text = "GATEWAY", color = 0xFFF59E0B)
                         Spacer(modifier = Modifier.width(6.dp))
                     }
+                    // Task 10: rows reported by a third-party app's embedded requestr-sdk
+                    // (LocalApiServer.receiveObserverEvents, under CaptureTier.SDK) are tagged
+                    // TrafficSource.SDK by CaptureLogRepository.toUiModel() -- same pattern as
+                    // the GATEWAY badge above, distinct cyan color to match the SDK's identity.
+                    if (item.trafficSource == com.example.data.models.TrafficSource.SDK) {
+                        BadgePill(text = "SDK", color = 0xFF06B6D4)
+                        Spacer(modifier = Modifier.width(6.dp))
+                    }
                     ProtocolBadge(protocol = item.protocol)
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(

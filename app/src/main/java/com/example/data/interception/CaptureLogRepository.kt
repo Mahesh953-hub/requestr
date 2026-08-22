@@ -190,7 +190,14 @@ internal fun CapturedTrafficEntity.toUiModel(): CapturedTrafficItem = CapturedTr
     isModified = false,
     // T2: rows written by GatewayEngine set sourceIp to the remote LAN client's address —
     // surface that distinctly in the traffic list/detail sheet rather than as plain "Native".
-    trafficSource = if (sourceIp != null) TrafficSource.GATEWAY else TrafficSource.NATIVE,
+    // SDK-sourced rows (LocalApiServer.receiveObserverEvents, under CaptureTier.SDK) are the
+    // only ones written with protocol == "sdk" — no CaptureTier join available here, so this
+    // is the stable per-row signal to distinguish them.
+    trafficSource = when {
+        protocol == "sdk" -> TrafficSource.SDK
+        sourceIp != null -> TrafficSource.GATEWAY
+        else -> TrafficSource.NATIVE
+    },
     tags = if (sourceIp != null) listOf("gateway:$sourceIp") else emptyList(),
 )
 
