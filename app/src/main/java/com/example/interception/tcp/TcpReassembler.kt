@@ -93,17 +93,50 @@ class TcpReassembler {
         val payloadLen = (length - payloadStart).coerceAtLeast(0)
 
         val stream = getOrCreate(srcIp, srcPort, dstIp, dstPort)
+        val now = System.currentTimeMillis()
+        stream.lastActivityAt = now
 
-        // Update handshake state
-        if ((flags and FLAG_SYN) != 0) {
-            if (!stream.handshakeComplete && (flags and FLAG_ACK) != 0) {
-                // SYN-ACK observed → handshake in progress
+        // Real three-way-handshake tracking, driven by the actual flags seen on the wire —
+        // not inferred from data arriving.
+        val isSyn = (flags and FLAG_SYN) != 0
+        val isAck = (flags and FLAG_ACK) != 0
+        val isFin = (flags and FLAG_FIN) != 0
+        val isRst = (flags and FLAG_RST) != 0
+
+        when {
+            isRst -> {
+                stream.handshakePhase = TcpHandshakePhase.RESET
+                stream.resetByPeer = true
+                stream.closed = true
+            }
+            isSyn && !isAck -> {
+                if (stream.handshakePhase == TcpHandshakePhase.NONE) {
+                    stream.handshakePhase = TcpHandshakePhase.SYN_SENT
+                    stream.synSeenAt = now
+                }
+            }
+            isSyn && isAck -> {
+                if (stream.handshakePhase == TcpHandshakePhase.SYN_SENT ||
+                    stream.handshakePhase == TcpHandshakePhase.NONE
+                ) {
+                    stream.handshakePhase = TcpHandshakePhase.SYN_ACK_SEEN
+                }
+            }
+            isFin -> {
+                if (stream.handshakePhase != TcpHandshakePhase.CLOSED) {
+                    stream.handshakePhase = TcpHandshakePhase.CLOSING
+                }
+            }
+            isAck && stream.handshakePhase == TcpHandshakePhase.SYN_ACK_SEEN -> {
+                stream.handshakePhase = TcpHandshakePhase.ESTABLISHED
+                stream.establishedAtHandshake = now
             }
         }
-        if ((flags and FLAG_ACK) != 0 && !stream.handshakeComplete && stream.clientToServer.size() > 0) {
-            stream.handshakeComplete = true
+
+        if ((isFin || isRst) && stream.handshakePhase != TcpHandshakePhase.RESET) {
+            stream.handshakePhase = TcpHandshakePhase.CLOSED
         }
-        if ((flags and (FLAG_FIN or FLAG_RST)) != 0) {
+        if (isFin || isRst) {
             stream.closed = true
         }
 
@@ -118,7 +151,7 @@ class TcpReassembler {
         if (accepted == -1) {
             stream.retransmissions++
         } else if (accepted > 0) {
-            stream.establishedAt = System.currentTimeMillis()
+            stream.lastActivityAt = now
             if (isClientToServer) stream.totalBytesSent += accepted else stream.totalBytesReceived += accepted
         }
         return stream
@@ -136,19 +169,27 @@ class TcpReassembler {
 
     private fun evictOldest() {
         val now = System.currentTimeMillis()
-        streams.entries.removeAll { (_, s) -> now - s.establishedAt > idleTimeoutMs }
+        streams.entries.removeAll { (_, s) -> now - s.lastActivityAt > idleTimeoutMs }
         // If still over limit, evict the oldest regardless
         while (streams.size >= maxStreams) {
-            val oldest = streams.entries.minByOrNull { it.value.establishedAt }
+            val oldest = streams.entries.minByOrNull { it.value.lastActivityAt }
             oldest?.let { streams.remove(it.key) }
         }
     }
 
-    /** Prune idle streams. Call periodically (e.g. from the flush loop). */
+    /**
+     * Prune idle streams. Call periodically (e.g. from the flush loop).
+     *
+     * Bug fix: the previous second statement compared a *duration*
+     * (`now - establishedAt`, thousands of ms) against an *absolute epoch timestamp*
+     * (`cutoff = now - idleTimeoutMs`, ~1.7e12), so it was never true and never pruned
+     * anything. Both statements below now correctly compare `lastActivityAt` (bumped on every
+     * accepted packet, not just once at flow creation) against the absolute cutoff.
+     */
     fun prune() {
         val cutoff = System.currentTimeMillis() - idleTimeoutMs
-        streams.entries.removeAll { (_, s) -> s.closed && (System.currentTimeMillis() - s.establishedAt > idleTimeoutMs) }
-        streams.entries.removeAll { (_, s) -> System.currentTimeMillis() - s.establishedAt > cutoff }
+        streams.entries.removeAll { (_, s) -> s.closed && s.lastActivityAt < cutoff }
+        streams.entries.removeAll { (_, s) -> s.lastActivityAt < cutoff }
     }
 
     fun streamCount(): Int = streams.size

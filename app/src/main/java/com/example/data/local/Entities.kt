@@ -12,7 +12,7 @@ import androidx.room.PrimaryKey
  */
 @Entity(
     tableName = "captured_traffic",
-    indices = [Index("sessionId"), Index("host"), Index("timestamp")],
+    indices = [Index("sessionId"), Index("host"), Index("timestamp"), Index("connectionId")],
 )
 data class CapturedTrafficEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -44,6 +44,15 @@ data class CapturedTrafficEntity(
      * originated on ANOTHER device (not this one). Null for every other capture path.
      */
     val sourceIp: String? = null,
+    /**
+     * Task 12: the real 5-tuple-derived connection key (same value as
+     * [TcpConnectionEntity.connectionId]/[TlsSessionEntity.connectionId]) this HTTP transaction
+     * was parsed out of, when known. Threaded through every persist path in task 12 so
+     * [com.example.correlation.graph.ConnectionLineage] can join by exact key instead of the
+     * `getByHostInWindow` 30s heuristic. Null for rows persisted before this column existed, or
+     * for producers that genuinely have no connection to attach to (e.g. SDK-observed traffic).
+     */
+    val connectionId: String? = null,
 )
 
 /**
@@ -283,12 +292,22 @@ data class TlsSessionEntity(
     val cipherSuite: String?,           // negotiated cipher suite name; null when undecoded
     val negotiatedProtocol: String?,    // ALPN result: h2, http/1.1, null if unknown
     val ja3Hash: String?,
-    val handshakeState: String,         // CLIENT_HELLO, ESTABLISHED, FAILED (TlsHandshakeState.name)
+    val handshakeState: String,         // CLIENT_HELLO, ESTABLISHED, FAILED (TlsHandshakeState.name) —
+                                         // FAILED is real and reachable: see TcpStream.resetByPeer,
+                                         // TlsDecoder.parseAlert/findAlertInRecords (task 7), and
+                                         // TlsHandshakeStateMachine (task 11).
     val wasDecrypted: Boolean,          // true = MITM'd (real cipher/cert data), false = SNI/JA3-only
     val peerCertSubject: String?,
     val peerCertIssuer: String?,
     val establishedAt: Long = System.currentTimeMillis(),
     val handshakeDurationMs: Long = 0,
+    /** Task 10/11: human-readable reason the handshake reached [handshakeState] == FAILED
+     * (e.g. "RST from peer during handshake", "fatal alert: handshake_failure"). Null unless
+     * FAILED. */
+    val failureReason: String? = null,
+    /** Task 10/11: wall-clock time (ms) the handshake was determined to have failed. Null
+     * unless FAILED. */
+    val failedAt: Long? = null,
 )
 
 // ═══════════════════════════════════════════════════════════════════
@@ -321,4 +340,82 @@ data class DnsQueryEntity(
     val resolvedIps: List<String> = emptyList(),
     val resolver: String = "UDP:53",    // UDP:53 today; DoT/DoH would need a different capture path
     val timestamp: Long = System.currentTimeMillis(),
+)
+
+// ═══════════════════════════════════════════════════════════════════
+// v9 app-scope tables (task 10, DDL per docs/plans/plan-app.md H1 — column shapes owned by the
+// app scope; this file only owns the @Entity registration + DDL so MIGRATION_8_9 has a real
+// CREATE TABLE to run instead of a destructive wipe). Entity fields mirror the app scope's
+// domain models: NoteItem/NoteFolder (data/models/AppModels.kt), ToolsRepository.CustomTool
+// (data/repository/ToolsRepository.kt), ChatMessage (data/models/AppModels.kt). Two fields have
+// no equivalent in today's domain model yet (NoteItem/CustomTool have no createdAt) -- H1's DDL
+// still requires createdAt NOT NULL on notes/custom_tools, so it is included here with a
+// System.currentTimeMillis() default; the app scope's repository mapping fills it in on insert.
+// NoteFolder's Kotlin field is named iconEmoji; H1's column is named emoji -- the DDL/column name
+// wins here since Room maps by @Entity/@ColumnInfo, not by matching a field name to a domain
+// class the app scope owns.
+// ═══════════════════════════════════════════════════════════════════
+
+/** Backs [com.example.data.repository.NotesRepository]'s persisted notes (H1). */
+@Entity(
+    tableName = "notes",
+    indices = [Index("isPinned"), Index("updatedAt")],
+)
+data class NoteEntity(
+    @PrimaryKey val id: String,
+    val title: String,
+    val content: String,
+    val format: String,                 // NoteFormatType.name: PLAIN, MARKDOWN, HTML, CHECKLIST
+    val folderId: String? = null,
+    val folderName: String,
+    val folderColorHex: Long,
+    val isPinned: Boolean,
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis(),
+)
+
+/** Backs [com.example.data.repository.NotesRepository]'s persisted folders (H1). */
+@Entity(tableName = "note_folders")
+data class NoteFolderEntity(
+    @PrimaryKey val id: String,
+    val name: String,
+    val colorHex: Long,
+    val emoji: String,
+)
+
+/** Backs `ToolsRepository.customTools` (H1). */
+@Entity(tableName = "custom_tools")
+data class CustomToolEntity(
+    @PrimaryKey val id: String,
+    val name: String,
+    val operation: String,              // "regex-replace" or "template"
+    val pattern: String,
+    val replacement: String,
+    val createdAt: Long = System.currentTimeMillis(),
+)
+
+/** Backs `ChatRepository`'s persisted chat history (H1). */
+@Entity(
+    tableName = "chat_messages",
+    indices = [Index("timestamp")],
+)
+data class ChatMessageEntity(
+    @PrimaryKey val id: String,
+    val role: String,                   // "user" or "assistant"
+    val content: String,
+    val timestamp: Long = System.currentTimeMillis(),
+)
+
+/**
+ * Backs H2's provider list. Deliberately has NO API-key column -- the key stays in
+ * Keystore-backed storage only, never Room or DataStore. Do not add one here.
+ */
+@Entity(tableName = "chat_providers")
+data class ChatProviderEntity(
+    @PrimaryKey val id: String,
+    val name: String,
+    val baseUrl: String,
+    val model: String,
+    val isActive: Boolean,
+    val createdAt: Long = System.currentTimeMillis(),
 )

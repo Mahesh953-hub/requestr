@@ -6,6 +6,7 @@ import com.example.data.interception.InterceptionStateRepository
 import com.example.data.local.QuicConnectionEntity
 import com.example.data.local.RequestrDatabase
 import com.example.data.local.UdpFlowEntity
+import com.example.interception.tun.TunRelay
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
@@ -48,10 +49,29 @@ class PacketPump(
     dumpToFile: Boolean = false,
     captureEnabled: Boolean = true,
     enhancedMode: Boolean = false,
+    /**
+     * `VpnService.protect(...)` hook, threaded in from [RequestrVpnService] so relay upstream
+     * sockets don't loop back into our own tun. Defaults to [com.example.interception.tun.NoOpProtectHook]
+     * so existing/test call sites that don't care about the relay keep compiling; production
+     * always passes a real hook.
+     */
+    protectHook: com.example.interception.tun.ProtectHook = com.example.interception.tun.NoOpProtectHook,
 ) {
 
     private var packetCount = 0
     private var byteCount = 0L
+
+    /**
+     * Userspace TCP+UDP relay — this is what finally does something with [output] (task 4).
+     * Every packet the pump reads off the tun fd, after capture/PCAP ingestion, is also handed
+     * here so the app it belongs to actually gets a response instead of the packet vanishing
+     * (the VPN_TUN blackhole recorded in AUDIT_REPORT.md's v5.8-backup addendum). Exposed so the
+     * service can stop it and the UI can observe [TunRelay.stats].
+     */
+    val relay: TunRelay = TunRelay(
+        protectHook,
+        com.example.interception.tun.TunWriter(com.example.interception.tun.TunSink { datagram -> output.write(datagram) }),
+    )
 
     /** Distinct flows seen recently, keyed by 5-tuple, with last-seen timestamps for expiry. */
     private val activeFlows = LinkedHashMap<String, Long>()
@@ -97,6 +117,9 @@ class PacketPump(
 
         // Periodic flush so the UI shows live progress without thrashing the DB per packet.
         val flusher = scope.launch { flushLoop() }
+        // Relay's own selector loop (TCP connects/reads, UDP reads) — separate coroutine so a
+        // slow upstream socket never blocks the tun read loop above.
+        val relayJob = scope.launch { relay.run(scope) }
 
         try {
             withContext(Dispatchers.IO) {
@@ -124,6 +147,8 @@ class PacketPump(
             }
         } finally {
             flusher.cancel()
+            relayJob.cancel()
+            relay.stop()
             flushNow()
         }
     }
@@ -148,6 +173,11 @@ class PacketPump(
 
         // Route to the capture engine: TCP reassembly → HTTP → Room.
         captureEngine.ingest(packet, length, version)
+
+        // Task 4: hand the same packet to the relay so the flow actually gets a real upstream
+        // connection and a reply, instead of vanishing (the VPN_TUN blackhole). Capture/PCAP
+        // behaviour above stays byte-identical; this is purely additive.
+        relay.offer(packet.copyOf(length), length, version)
     }
 
     private fun parseIpv4(packet: ByteArray, length: Int) {

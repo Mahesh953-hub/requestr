@@ -55,6 +55,21 @@ data class TlsRecord(
     }
 }
 
+/**
+ * A parsed TLS alert record (RFC 8446 §6 / RFC 5246 §7.2). [isFatal] mirrors [level] == 2
+ * (fatal); a fatal alert always ends the connection. TLS 1.3 encrypts alerts once handshake
+ * keys are established, so this can only ever be parsed from the pre-key, plaintext wire —
+ * post-key failures surface through the MITM leg's [javax.net.ssl.SSLHandshakeException] path
+ * or an observed RST/close instead ([TlsDecoder]'s class doc covers this constraint).
+ */
+data class TlsAlert(
+    val level: Int,
+    val description: Int,
+    val levelName: String,
+    val descriptionName: String,
+    val isFatal: Boolean,
+)
+
 /** ClientHello metadata for fingerprinting */
 data class TlsClientHello(
     val version: String,
