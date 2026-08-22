@@ -58,7 +58,7 @@ data class CapturedTrafficEntity(
  * devices on the same LAN/hotspot (T2), independent of whatever on-device VPN/root/Shizuku
  * tier is (or isn't) simultaneously running.
  */
-enum class CaptureTier { NONE, VPN, SHIZUKU, ROOT, SDK, GATEWAY }
+enum class CaptureTier { NONE, VPN, SHIZUKU, ROOT, SDK, GATEWAY, RUNTIME }
 
 /**
  * One interception run. `packetCount` here is the real counter the Home card and status
