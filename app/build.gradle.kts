@@ -118,6 +118,8 @@ dependencies {
   implementation(libs.shizuku.provider)
   implementation(libs.bouncycastle.bcpkix)
   implementation(libs.bouncycastle.bcprov)
+  implementation(libs.cronet.embedded)
+  implementation(libs.androidx.webkit)
   implementation(libs.androidx.lifecycle.runtime.compose)
   implementation(libs.androidx.lifecycle.runtime.ktx)
   implementation(libs.androidx.lifecycle.viewmodel.compose)

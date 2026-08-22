@@ -152,6 +152,45 @@ object Http2Parser {
     }
 
     /**
+     * Decode a SETTINGS frame payload (RFC 7540 §6.5) into its `(id, value)` pairs, in the
+     * order they appeared on the wire. An ACK'd SETTINGS frame (`FLAG_ACK`) carries no payload
+     * and decodes to an empty list, which callers should treat as "no new settings", not
+     * "settings cleared".
+     *
+     * Used by [com.example.runtime.http.StackFingerprinter] (W4): the exact `(id, value)`
+     * multiset a client sends on stream 0 is a strong per-library fingerprint (verified against
+     * OkHttp 4.x, which sends exactly one setting, `INITIAL_WINDOW_SIZE(7) = 16777216`) — no
+     * production call site needed this before W4 because [CaptureEngine] never inspected
+     * SETTINGS frame bytes, only routed on the frame *type* being present.
+     */
+    fun decodeSettings(frame: H2Frame): List<Pair<Int, Int>> {
+        if (frame.type != FRAME_SETTINGS || (frame.flags and FLAG_ACK) != 0) return emptyList()
+        val out = mutableListOf<Pair<Int, Int>>()
+        var pos = 0
+        val payload = frame.payload
+        while (pos + 6 <= payload.size) {
+            val id = ((payload[pos].toInt() and 0xFF) shl 8) or (payload[pos + 1].toInt() and 0xFF)
+            val value = ((payload[pos + 2].toInt() and 0xFF) shl 24) or
+                ((payload[pos + 3].toInt() and 0xFF) shl 16) or
+                ((payload[pos + 4].toInt() and 0xFF) shl 8) or
+                (payload[pos + 5].toInt() and 0xFF)
+            out.add(id to value)
+            pos += 6
+        }
+        return out
+    }
+
+    // RFC 7540 §11.3 SETTINGS parameter identifiers, as they appear on the wire (this is
+    // what decodeSettings() above decodes). Not to be confused with any library's own
+    // internal array-index numbering for the same parameters.
+    const val SETTINGS_HEADER_TABLE_SIZE = 1
+    const val SETTINGS_ENABLE_PUSH = 2
+    const val SETTINGS_MAX_CONCURRENT_STREAMS = 3
+    const val SETTINGS_INITIAL_WINDOW_SIZE = 4
+    const val SETTINGS_MAX_FRAME_SIZE = 5
+    const val SETTINGS_MAX_HEADER_LIST_SIZE = 6
+
+    /**
      * Check if the data starts with the HTTP/2 connection preface.
      */
     fun isPreface(data: ByteArray): Boolean {

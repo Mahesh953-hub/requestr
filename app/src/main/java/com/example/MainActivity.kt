@@ -183,15 +183,19 @@ class MainActivity : ComponentActivity() {
         // T2: Initialize Gateway mode engine (doesn't start it -- see SettingsScreen's
         // "GATEWAY MODE" card for the manual start/stop toggle).
         com.example.interception.gateway.GatewayEngine.init(applicationContext)
-        // v5.5 (R1+R3): register the HTTP-stack instrumentation adapters and start the
-        // engine so RuntimeInstrumentationEngine is no longer fully dead code — it now
-        // actually polls adapter events and feeds them into CorrelationEngine as
-        // RUNTIME-plane ObservationEvents. Cronet/WebView adapters just report presence
-        // (pollEvents() stays empty for them — no native hook exists yet); OkHttp reports
-        // real request/response pairs recorded by OkHttpProxyInterceptor.
+        // v5.5 (R1+R3), extended in W1-W3 (runtime-instrumentation scope): register the
+        // HTTP-stack instrumentation adapters and start the engine so
+        // RuntimeInstrumentationEngine is no longer fully dead code — it polls adapter
+        // events, feeds them into CorrelationEngine as RUNTIME-plane ObservationEvents,
+        // and (via RuntimeTrafficSink) persists them as real CapturedTrafficEntity rows.
+        // All three adapters now report genuine captured traffic: OkHttp via
+        // OkHttpProxyInterceptor, Cronet via a real RequestFinishedInfo.Listener
+        // (CronetInstrumentation), and WebView via shouldInterceptRequest + a MAIN-world
+        // fetch/XHR JS bridge (WebViewInstrumentation).
         com.example.runtime.RuntimeInstrumentationEngine.registerAdapter(com.example.runtime.http.OkHttpAdapter())
         com.example.runtime.RuntimeInstrumentationEngine.registerAdapter(com.example.runtime.http.CronetAdapter())
         com.example.runtime.RuntimeInstrumentationEngine.registerAdapter(com.example.runtime.http.WebViewAdapter())
+        com.example.runtime.RuntimeInstrumentationEngine.registerSink(com.example.runtime.RuntimeTrafficSink(applicationContext))
         com.example.runtime.RuntimeInstrumentationEngine.start(applicationContext)
         // B1-B6: initialize the Browser Bridge manager with an app context so its
         // CdpFetchAdapter (B3) can read the shared intercept_rules Room table. This does NOT

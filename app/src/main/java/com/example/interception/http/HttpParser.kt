@@ -50,12 +50,20 @@ object HttpParser {
         val version = parts.getOrElse(2) { "HTTP/1.1" }
 
         val headers = mutableMapOf<String, String>()
+        // W4 (stack fingerprinting): header name order + original casing is a real
+        // stack-discriminating signal (see StackFingerprinter), but `headers` above
+        // lowercases every name and Room's Map<String,String> converter does not preserve
+        // insertion order once written -- so the only place this survives is right here,
+        // at parse time, in a field kept alongside (not instead of) the lowercased map.
+        val rawHeaderNames = mutableListOf<String>()
         for (i in 1 until lines.size) {
             val colon = lines[i].indexOf(':')
             if (colon > 0) {
-                val name = lines[i].substring(0, colon).trim().lowercase()
+                val rawName = lines[i].substring(0, colon).trim()
+                val name = rawName.lowercase()
                 val value = lines[i].substring(colon + 1).trim()
                 headers[name] = value
+                rawHeaderNames.add(rawName)
             }
         }
 
@@ -82,6 +90,7 @@ object HttpParser {
             headers = headers,
             body = body,
             consumedBytes = totalNeeded,
+            rawHeaderNames = rawHeaderNames,
         )
     }
 
@@ -284,4 +293,11 @@ data class ParsedHttpMessage(
     val contentType: String = "",
     /** Total bytes consumed from the buffer (headers + body). */
     val consumedBytes: Int = 0,
+    /**
+     * Header names in original wire order and casing, request path only (W4). [headers]
+     * above is lowercased and unordered for lookup convenience; this field exists solely so
+     * [com.example.runtime.http.StackFingerprinter] can sample the real order/casing before
+     * it is lost -- never populated for responses, and empty when the request had no headers.
+     */
+    val rawHeaderNames: List<String> = emptyList(),
 )

@@ -308,12 +308,12 @@ class PacketPump(
             persistUdpFlow(src, sPort, dst, dPort, length - ihl - 8)
         }
 
-        trackFlow("$protocol|$src:$sPort>$dst:$dPort")
+        trackFlow(com.example.correlation.ConnectionKey.forTcp(src, sPort, dst, dPort, protocol))
     }
 
     /** M1: upsert a udp_flows row, throttled per 5-tuple so we don't hit Room every packet. */
     private fun persistUdpFlow(src: String, sPort: Int, dst: String, dPort: Int, payloadLen: Int) {
-        val flowId = "17|$src:$sPort>$dst:$dPort"
+        val flowId = com.example.correlation.ConnectionKey.forTcp(src, sPort, dst, dPort, 17)
         val now = System.currentTimeMillis()
         val last = lastUdpPersist[flowId]
         if (last != null && now - last < UDP_PERSIST_INTERVAL_MS) return
@@ -349,7 +349,7 @@ class PacketPump(
         initial: com.example.interception.quic.QuicParser.QuicInitial,
         quicPayload: ByteArray,
     ) {
-        val connectionId = "quic|$src:$sPort>$dst:$dPort"
+        val connectionId = com.example.correlation.ConnectionKey.forQuic(src, sPort, dst, dPort)
 
         // Advance (or create) the in-memory state machine for every Initial packet we see on
         // this 5-tuple, regardless of whether we've already persisted the Room row below --
@@ -462,7 +462,7 @@ class PacketPump(
             persistUdpFlow(src, sPort, dst, dPort, length - transportOffset - 8)
         }
 
-        trackFlow("$protocol|$src:$sPort>$dst:$dPort")
+        trackFlow(com.example.correlation.ConnectionKey.forTcp(src, sPort, dst, dPort, protocol))
     }
 
     private fun trackFlow(key: String) {

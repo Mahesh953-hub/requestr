@@ -59,6 +59,16 @@ data class HttpEvent(
     val wasDecrypted: Boolean,
     val protocol: String = "HTTP/1.1",
     val requestId: String?,     // CDP request ID for browser events
+    /**
+     * W7: human-readable initiator description (e.g. a URL/script location), first-class
+     * instead of being smuggled in as a synthetic `X-Requestr-Initiator` request header (see
+     * [com.example.browser.CdpNetworkAdapter], which used to do exactly that).
+     */
+    val initiator: String? = null,
+    /** W7: structured call-stack backing [initiator], when the source can resolve one. */
+    val initiatorStackFrames: List<StackFrame> = emptyList(),
+    val requestBody: String? = null,
+    val responseBody: String? = null,
 ) : ObservationEvent()
 
 /** Runtime instrumentation event (Frida, Xposed, SDK) */

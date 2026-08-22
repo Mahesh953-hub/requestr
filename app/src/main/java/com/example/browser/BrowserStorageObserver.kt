@@ -7,7 +7,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONObject
 
 /**
- * B6: Browser storage correlation (cookies / localStorage / IndexedDB) via CDP.
+ * B6/W9: Browser storage correlation (cookies / localStorage / IndexedDB) via CDP.
  *
  * Three independent, real CDP round-trips, each genuinely parsed into an app-visible model:
  *
@@ -16,31 +16,33 @@ import org.json.JSONObject
  *     "sameSite"}`.
  *  2. **localStorage** -- `DOMStorage.enable` + `DOMStorage.getDOMStorageItems` with
  *     `{"storageId":{"securityOrigin":<origin>,"isLocalStorage":true}}` -> `[[key,value],...]`
- *     pairs. Requires knowing the page's origin, which this observer reads off the CDP
- *     target info already captured by [CdpClient] when it attached (falls back to asking the
- *     caller to supply it explicitly via [refreshStorage] if unknown).
+ *     pairs for the initial snapshot, kept live afterwards (W9) by subscribing to
+ *     `DOMStorage.domStorageItemAdded`/`domStorageItemRemoved`/`domStorageItemUpdated`/
+ *     `domStorageItemsCleared` and applying each delta directly to [localStorage] -- so the
+ *     Settings UI reflects real-time page writes, not just a stale poll.
  *  3. **IndexedDB** -- `IndexedDB.enable` + `IndexedDB.requestDatabaseNames` with
- *     `{"securityOrigin":<origin>}` -> database names only (`IndexedDB.requestData` for full
- *     record dumps is NOT implemented -- see scope caveat below).
+ *     `{"securityOrigin":<origin>}` for database names, then (W9) for each database,
+ *     `IndexedDB.requestDatabase` to enumerate its object stores, then `IndexedDB.requestData`
+ *     per object store to read real records into [indexedDbRecords] -- not just names.
  *
- * Snapshot-based, not event-streamed: Chrome does not push storage-change events for
- * cookies/localStorage the way it does for `Network.*`, so this observer polls on demand via
- * [refreshStorage] (call it from the UI, e.g. a manual "Refresh" action next to the browser
- * bridge card) rather than pretending to have a live event stream. The result lands in
- * [stateFlow] either way, so it's genuinely visible state, not console-log-only debug output.
+ * Snapshot-plus-events, not pure polling: cookies still require an explicit [refreshStorage]
+ * call (Chrome has no cookie-change event over CDP), but localStorage now updates live once
+ * `DOMStorage.enable` is on, matching how a real DevTools panel behaves.
  *
- * Scope caveat: IndexedDB record contents (`IndexedDB.requestData`) and localStorage
- * per-key change notifications (`DOMStorage.domStorageItemAdded/Removed/Updated`) are not
- * implemented -- only database *names* and current localStorage *snapshots* are captured.
- * Documented here rather than silently omitted, matching this project's convention for
- * partially-scoped features (compare the P2/T1 "Remaining gap" notes in TODO_v5.md).
+ * W8: takes an optional [sessionId] so one observer instance is scoped to exactly one
+ * attached CDP target under `Target.setAutoAttach`'s flattened-session model; `null` keeps
+ * this usable against a single-target/legacy connection.
  */
 class BrowserStorageObserver(
     private val client: CdpClient,
+    private val sessionId: String? = null,
     private val originProvider: () -> String?,
 ) {
     companion object {
         private const val TAG = "BrowserStorageObserver"
+
+        /** Max IndexedDB records fetched per object store per refresh -- avoids unbounded pulls. */
+        private const val INDEXEDDB_PAGE_SIZE = 100
     }
 
     data class CookieInfo(
@@ -57,6 +59,10 @@ class BrowserStorageObserver(
         val cookies: List<CookieInfo> = emptyList(),
         val localStorage: Map<String, String> = emptyMap(),
         val indexedDbDatabases: List<String> = emptyList(),
+        /** database name -> rendered "key: value"-shaped records (W9). */
+        val indexedDbRecords: Map<String, List<String>> = emptyMap(),
+        /** database name -> true when more records exist past [INDEXEDDB_PAGE_SIZE] (W9). */
+        val indexedDbHasMore: Map<String, Boolean> = emptyMap(),
         val lastRefreshed: Long = 0L,
         val lastError: String? = null,
     )
@@ -65,29 +71,65 @@ class BrowserStorageObserver(
     val stateFlow: StateFlow<StorageSnapshot> = _snapshot.asStateFlow()
 
     fun start() {
-        client.send("DOMStorage.enable")
-        client.send("IndexedDB.enable")
+        client.send("DOMStorage.enable", sessionId = sessionId)
+        client.send("IndexedDB.enable", sessionId = sessionId)
+        client.on("DOMStorage.domStorageItemAdded", sessionId) { params -> applyItemAdded(params) }
+        client.on("DOMStorage.domStorageItemRemoved", sessionId) { params -> applyItemRemoved(params) }
+        client.on("DOMStorage.domStorageItemUpdated", sessionId) { params -> applyItemUpdated(params) }
+        client.on("DOMStorage.domStorageItemsCleared", sessionId) { params -> applyItemsCleared(params) }
     }
 
     fun stop() {
-        client.send("DOMStorage.disable")
-        client.send("IndexedDB.disable")
+        client.send("DOMStorage.disable", sessionId = sessionId)
+        client.send("IndexedDB.disable", sessionId = sessionId)
     }
 
-    /** Pull a fresh snapshot of cookies + localStorage + IndexedDB database names. */
+    /** Pull a fresh snapshot of cookies + localStorage + IndexedDB database names and records. */
     fun refreshStorage() {
         fetchCookies()
         val origin = originProvider()
         if (origin != null) {
             fetchLocalStorage(origin)
-            fetchIndexedDbNames(origin)
+            fetchIndexedDbNamesAndRecords(origin)
         } else {
             Log.i(TAG, "No known page origin -- skipping localStorage/IndexedDB fetch (cookies still fetched)")
         }
     }
 
+    // ── DOMStorage live-event deltas (W9) ──────────────────────────────
+
+    /** `DOMStorage.domStorageItemAdded`: `{"storageId":{...},"key":"...","newValue":"..."}`. */
+    private fun applyItemAdded(params: JSONObject) {
+        val key = params.optString("key", "")
+        if (key.isEmpty()) return
+        val value = params.optString("newValue", "")
+        _snapshot.value = _snapshot.value.copy(localStorage = _snapshot.value.localStorage + (key to value))
+    }
+
+    /** `DOMStorage.domStorageItemRemoved`: `{"storageId":{...},"key":"..."}`. */
+    private fun applyItemRemoved(params: JSONObject) {
+        val key = params.optString("key", "")
+        if (key.isEmpty()) return
+        _snapshot.value = _snapshot.value.copy(localStorage = _snapshot.value.localStorage - key)
+    }
+
+    /** `DOMStorage.domStorageItemUpdated`: `{"storageId":{...},"key":"...","oldValue":"...","newValue":"..."}`. */
+    private fun applyItemUpdated(params: JSONObject) {
+        val key = params.optString("key", "")
+        if (key.isEmpty()) return
+        val value = params.optString("newValue", "")
+        _snapshot.value = _snapshot.value.copy(localStorage = _snapshot.value.localStorage + (key to value))
+    }
+
+    /** `DOMStorage.domStorageItemsCleared`: `{"storageId":{...}}` -- the whole store was cleared. */
+    private fun applyItemsCleared(params: JSONObject) {
+        _snapshot.value = _snapshot.value.copy(localStorage = emptyMap())
+    }
+
+    // ── Snapshot fetches ────────────────────────────────────────────────
+
     private fun fetchCookies() {
-        client.send("Network.getCookies") { result, error ->
+        client.send("Network.getCookies", sessionId = sessionId) { result, error ->
             if (error != null || result == null) {
                 _snapshot.value = _snapshot.value.copy(lastError = error ?: "getCookies failed")
                 return@send
@@ -122,7 +164,7 @@ class BrowserStorageObserver(
             put("securityOrigin", origin)
             put("isLocalStorage", true)
         }
-        client.send("DOMStorage.getDOMStorageItems", JSONObject().apply { put("storageId", storageId) }) { result, error ->
+        client.send("DOMStorage.getDOMStorageItems", JSONObject().apply { put("storageId", storageId) }, sessionId = sessionId) { result, error ->
             if (error != null || result == null) {
                 Log.w(TAG, "getDOMStorageItems failed: $error")
                 return@send
@@ -141,8 +183,8 @@ class BrowserStorageObserver(
         }
     }
 
-    private fun fetchIndexedDbNames(origin: String) {
-        client.send("IndexedDB.requestDatabaseNames", JSONObject().apply { put("securityOrigin", origin) }) { result, error ->
+    private fun fetchIndexedDbNamesAndRecords(origin: String) {
+        client.send("IndexedDB.requestDatabaseNames", JSONObject().apply { put("securityOrigin", origin) }, sessionId = sessionId) { result, error ->
             if (error != null || result == null) {
                 Log.w(TAG, "requestDatabaseNames failed: $error")
                 return@send
@@ -151,8 +193,68 @@ class BrowserStorageObserver(
                 val names = result.optJSONArray("databaseNames") ?: org.json.JSONArray()
                 val list = (0 until names.length()).map { names.optString(it, "") }
                 _snapshot.value = _snapshot.value.copy(indexedDbDatabases = list, lastRefreshed = System.currentTimeMillis())
+                list.forEach { dbName -> fetchIndexedDbRecords(origin, dbName) }
             } catch (e: Exception) {
                 Log.w(TAG, "IndexedDB parse failed: ${e.message}")
+            }
+        }
+    }
+
+    /** `IndexedDB.requestDatabase` -> enumerate object stores, then `IndexedDB.requestData` each. */
+    private fun fetchIndexedDbRecords(origin: String, dbName: String) {
+        val params = JSONObject().apply {
+            put("securityOrigin", origin)
+            put("databaseName", dbName)
+        }
+        client.send("IndexedDB.requestDatabase", params, sessionId = sessionId) { result, error ->
+            if (error != null || result == null) {
+                Log.w(TAG, "requestDatabase($dbName) failed: $error")
+                return@send
+            }
+            try {
+                val dbJson = result.optJSONObject("databaseWithObjectStores") ?: return@send
+                val stores = dbJson.optJSONArray("objectStores") ?: org.json.JSONArray()
+                for (i in 0 until stores.length()) {
+                    val storeName = stores.optJSONObject(i)?.optString("name", "") ?: continue
+                    if (storeName.isNotEmpty()) fetchIndexedDbObjectStoreData(origin, dbName, storeName)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "requestDatabase($dbName) parse failed: ${e.message}")
+            }
+        }
+    }
+
+    private fun fetchIndexedDbObjectStoreData(origin: String, dbName: String, storeName: String) {
+        val params = JSONObject().apply {
+            put("securityOrigin", origin)
+            put("databaseName", dbName)
+            put("objectStoreName", storeName)
+            put("indexName", "")
+            put("skipCount", 0)
+            put("pageSize", INDEXEDDB_PAGE_SIZE)
+        }
+        client.send("IndexedDB.requestData", params, sessionId = sessionId) { result, error ->
+            if (error != null || result == null) {
+                Log.w(TAG, "requestData($dbName/$storeName) failed: $error")
+                return@send
+            }
+            try {
+                val entries = result.optJSONArray("objectStoreDataEntries") ?: org.json.JSONArray()
+                val hasMore = result.optBoolean("hasMore", false)
+                val records = (0 until entries.length()).map { i ->
+                    val e = entries.optJSONObject(i)
+                    val key = e?.optJSONObject("key")?.optString("description", "?") ?: "?"
+                    val value = e?.optJSONObject("value")?.optString("description", "?") ?: "?"
+                    "$key: $value"
+                }
+                val key = "$dbName/$storeName"
+                _snapshot.value = _snapshot.value.copy(
+                    indexedDbRecords = _snapshot.value.indexedDbRecords + (key to records),
+                    indexedDbHasMore = _snapshot.value.indexedDbHasMore + (key to hasMore),
+                    lastRefreshed = System.currentTimeMillis(),
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "requestData($dbName/$storeName) parse failed: ${e.message}")
             }
         }
     }
