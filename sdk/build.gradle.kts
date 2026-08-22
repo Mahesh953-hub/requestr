@@ -19,6 +19,20 @@ android {
     sourceCompatibility = JavaVersion.VERSION_11
     targetCompatibility = JavaVersion.VERSION_11
   }
+
+  testOptions {
+    unitTests.all {
+      // HttpUrlConnectionWrapperTest reflects into java.net.URL's package-private
+      // getURLStreamHandler(String) + private static `handlers` field (see
+      // HttpUrlConnectionWrapper.systemHandlerFor/evictHandlerCache kdoc) to capture and
+      // uncache the platform's real http(s) handler before installing our own factory. On
+      // JDK 9+ that requires the test JVM to actually open java.net to unnamed modules --
+      // without this, `setAccessible(true)` throws InaccessibleObjectException in the test
+      // JVM (module boundaries don't exist on real Android/ART, only on the desktop JVM
+      // Robolectric/JUnit run under).
+      it.jvmArgs("--add-opens=java.base/java.net=ALL-UNNAMED")
+    }
+  }
 }
 
 dependencies {
@@ -39,7 +53,13 @@ dependencies {
   testImplementation(libs.junit)
   testImplementation(libs.kotlinx.coroutines.test)
   testImplementation(libs.okhttp)
+  testImplementation(libs.robolectric)
+  testImplementation(libs.androidx.core)
   testImplementation("com.squareup.okhttp3:mockwebserver:4.10.0")
   testImplementation("io.ktor:ktor-client-core:2.3.0")
   testImplementation("io.ktor:ktor-client-cio:2.3.0")
+  // CronetInterceptorTest needs the real ExperimentalCronetEngine.Builder/ICronetEngineBuilder
+  // classes to construct a builder against a fake delegate (no native engine runs in a JVM
+  // unit test -- see the test's kdoc). compileOnly above is not visible to the test source set.
+  testImplementation("com.google.android.gms:play-services-cronet:18.1.0")
 }
