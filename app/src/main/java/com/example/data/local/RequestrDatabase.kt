@@ -105,6 +105,13 @@ abstract class RequestrDatabase : RoomDatabase() {
          * Section B: app-scope tables (columns owned by docs/plans/plan-app.md H1) -- notes,
          * note_folders, custom_tools, chat_messages, chat_providers. chat_providers deliberately
          * has no API-key column; the key stays in Keystore-backed storage only (H2).
+         *
+         * Section C: connect_attempts table, owned by the SDK scope (plan-sdk.md).
+         * ConnectAttemptEntity itself (and its DAO) live only on the SDK scope's branch --
+         * this scope does not register the @Entity/@Dao here, only the backing table/indices,
+         * so that when the two branches are merged the entity list (added on the SDK side)
+         * and this migration agree on schema instead of Room throwing
+         * "Migration didn't properly handle ... connect_attempts" at database-open time.
          */
         val MIGRATION_8_9: Migration = object : Migration(8, 9) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -154,6 +161,42 @@ abstract class RequestrDatabase : RoomDatabase() {
                     "CREATE TABLE IF NOT EXISTS chat_providers (" +
                         "id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, baseUrl TEXT NOT NULL, " +
                         "model TEXT NOT NULL, isActive INTEGER NOT NULL, createdAt INTEGER NOT NULL)"
+                )
+
+                // ── Section C: connect_attempts table (SDK scope's ConnectAttemptEntity) ──
+                // Kotlin default values on the @Entity (e.g. `sourceIp: String? = null`,
+                // `timestamp: Long = System.currentTimeMillis()`) are NOT database defaults --
+                // Room only uses them when the field is omitted from an object at insert time,
+                // so no SQL DEFAULT clause is added here for any column.
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS connect_attempts (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                        "sessionId INTEGER NOT NULL, " +
+                        "targetHost TEXT NOT NULL, " +
+                        "targetPort INTEGER NOT NULL, " +
+                        "clientUid INTEGER, " +
+                        "sourceIp TEXT, " +
+                        "timestamp INTEGER NOT NULL, " +
+                        "negotiatedAlpn TEXT, " +
+                        "disposition TEXT NOT NULL, " +
+                        "redirectTarget TEXT, " +
+                        "bytesToClient INTEGER NOT NULL, " +
+                        "bytesToUpstream INTEGER NOT NULL, " +
+                        "failureReason TEXT, " +
+                        "handshakeState TEXT, " +
+                        "finishedAt INTEGER)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_connect_attempts_sessionId " +
+                        "ON connect_attempts(sessionId)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_connect_attempts_targetHost " +
+                        "ON connect_attempts(targetHost)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_connect_attempts_timestamp " +
+                        "ON connect_attempts(timestamp)"
                 )
             }
         }
