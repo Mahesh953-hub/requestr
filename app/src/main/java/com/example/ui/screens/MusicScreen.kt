@@ -26,7 +26,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.MusicNote
@@ -34,18 +33,22 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -61,11 +64,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.models.MusicTrackItem
 import com.example.data.repository.MusicRepository
+import com.example.ui.components.ConfirmActionDialog
 import com.example.ui.components.GlassCard
 import com.example.ui.components.SectionHeader
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import kotlinx.coroutines.launch
 
 @Composable
 fun MusicScreen(
@@ -78,6 +83,24 @@ fun MusicScreen(
     val isPlaying by MusicRepository.isPlaying.collectAsState()
     val positionSec by MusicRepository.currentPositionSec.collectAsState()
 
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+    var isScanning by remember { mutableStateOf(false) }
+
+    fun rescanLibrary() {
+        if (isScanning) return
+        isScanning = true
+        scope.launch {
+            MusicRepository.loadLocalLibrary(context)
+            isScanning = false
+            val count = MusicRepository.tracks.value.size
+            snackbarHostState.showSnackbar(
+                if (count == 0) "No audio files found on this device"
+                else "Found $count track${if (count == 1) "" else "s"}"
+            )
+        }
+    }
+
     // BUG FIX: Actually trigger the MediaStore scan when the screen is first composed.
     // Previously, nobody ever called loadLocalLibrary — the track list stayed empty forever
     // even after READ_MEDIA_AUDIO was granted. Now we scan once on first composition.
@@ -86,6 +109,8 @@ fun MusicScreen(
             MusicRepository.loadLocalLibrary(context)
         }
     }
+
+    var pendingDeleteTrack by remember { mutableStateOf<MusicTrackItem?>(null) }
 
     // v3.1 B8: infinite pulse can't be duration-scaled to 0 without flickering forever,
     // so skip it entirely and hold a static value when animations are disabled.
@@ -102,6 +127,7 @@ fun MusicScreen(
     )
     val waveAnim = if (animationsEnabled) animatedWave else 0.6f
 
+    Box(modifier = Modifier.fillMaxSize()) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -112,7 +138,7 @@ fun MusicScreen(
             onBack = onBack,
             onMiniSettings = onMiniSettings,
             actions = {
-                IconButton(onClick = { /* Refresh local tracks */ }) {
+                IconButton(onClick = { rescanLibrary() }) {
                     Icon(
                         imageVector = Icons.Default.MusicNote,
                         contentDescription = "Scan Audio Files",
@@ -266,33 +292,19 @@ fun MusicScreen(
 
             // Playlist Queue
             item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Soundtrack Playlist", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-                    Button(
-                        onClick = { /* Scan Audio */ },
-                        shape = RoundedCornerShape(8.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-                    ) {
-                        Icon(imageVector = Icons.Default.Add, contentDescription = "Add", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Import MP3", fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
-                    }
-                }
+                Text("Soundtrack Playlist", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
             }
 
             items(tracks, key = { it.id }) { track ->
                 val isSelected = track.id == currentTrack.id
-                // Fix #35 (TODO): swipe-to-remove with confirmation
+                // Swipe-to-remove now asks for confirmation before deleting instead of
+                // destroying the row on a stray swipe (Fix #35).
                 val dismissState = androidx.compose.material3.rememberSwipeToDismissBoxState(
                     confirmValueChange = { value ->
                         if (value == androidx.compose.material3.SwipeToDismissBoxValue.EndToStart) {
-                            MusicRepository.removeTrack(track.id)
-                            true
-                        } else false
+                            pendingDeleteTrack = track
+                        }
+                        false
                     }
                 )
                 androidx.compose.material3.SwipeToDismissBox(
@@ -348,5 +360,25 @@ fun MusicScreen(
 
             item { Spacer(modifier = Modifier.height(80.dp)) }
         }
+    }
+
+    SnackbarHost(
+        hostState = snackbarHostState,
+        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp)
+    )
+    }
+
+    val trackToDelete = pendingDeleteTrack
+    if (trackToDelete != null) {
+        ConfirmActionDialog(
+            title = "Remove track?",
+            message = "\"${trackToDelete.title}\" will be removed from the playlist.",
+            confirmLabel = "Remove",
+            onConfirm = {
+                MusicRepository.removeTrack(trackToDelete.id)
+                pendingDeleteTrack = null
+            },
+            onDismiss = { pendingDeleteTrack = null }
+        )
     }
 }

@@ -361,19 +361,30 @@ data class FlowConnectionItem(
     val toPort: String = "in"
 )
 
+/**
+ * Single source of truth for a flow connection's deterministic id. Previously
+ * `AppRepositories.kt`'s `toEntity()` computed `"${fromNodeId}_${fromPort}_${toNodeId}_${toPort}"`
+ * while `FlowScreen.kt`'s port-drag built a third format (`"${fromId}_out_${toId}_in"`) and
+ * `toFlowConnectionItem()` dropped `id` entirely, taking the random-UUID default instead. All
+ * three call sites now use this function so `removeConnection(id)` can never silently miss a
+ * Room-loaded connection.
+ */
+fun flowConnectionId(fromNodeId: String, fromPort: String, toNodeId: String, toPort: String): String =
+    "${fromNodeId}_${fromPort}_${toNodeId}_${toPort}"
+
+// F3: SYNTH_LOFI/AMBIENT_CYBER/CHILL_CODING were fabricated sources with no producer anywhere
+// in the codebase (only data/music/LocalMusicScanner.kt ever produces a MusicTrackItem, and it
+// always sets LOCAL) — deleted so the enum can't misrepresent where a track came from.
 enum class MusicSourceType(val label: String) {
-    SYNTH_LOFI("requestr Synth Beats"),
-    AMBIENT_CYBER("Cyber Cyberpunk Ambience"),
-    CHILL_CODING("Chill Coding Terminal"),
     LOCAL("Local Storage")
 }
 
 data class MusicTrackItem(
     val id: String = UUID.randomUUID().toString(),
-    val title: String = "Neon Trace (Cyber Synth)",
-    val artist: String = "requestr Audio Engine",
-    val durationSec: Int = 184,
-    val source: MusicSourceType = MusicSourceType.SYNTH_LOFI,
+    val title: String = "No Track Selected",
+    val artist: String = "",
+    val durationSec: Int = 0,
+    val source: MusicSourceType = MusicSourceType.LOCAL,
     val albumCoverHex: Long = 0xFF1E3A8A,
     val contentUri: String? = null,
     val albumArtUri: String? = null,
@@ -391,7 +402,7 @@ data class UserSettingsState(
     val themeMode: String = "MONOCHROME_DARK",
     val cornerRadiusDp: Int = 16,
     val proxyPort: Int = 8080,
-    // Fix #30 (TODO): Removed isVpnActive, isRootDetected, isShizukuAvailable,
+    // Fix #30: removed isVpnActive, isRootDetected, isShizukuAvailable,
     // isFridaReady, isLsposedInstalled — these were initialized as false and never
     // updated by CapabilityProbe (which writes to InterceptionStateRepository).
     // The Settings Diagnostics section reads capabilities directly, not these.
@@ -443,3 +454,22 @@ data class ChatMessage(
     val content: String,
     val timestamp: Long = System.currentTimeMillis(),
 )
+
+/**
+ * Task 12 — the chat provider configuration `ChatRepository` exposes to the UI.
+ *
+ * `name`/`baseUrl`/`model`/`isActive` are backed by the `chat_providers` Room table (task 11).
+ * `apiKey` is NOT a Room column — it is read from / written to Keystore-backed storage
+ * ([com.example.data.prefs.SecureKeyStore]) keyed by [id], and only ever lives in memory here.
+ */
+data class ChatProviderConfig(
+    val id: String = "default",
+    val name: String = "Default",
+    val baseUrl: String = "",
+    val model: String = "",
+    val apiKey: String = "",
+    val isActive: Boolean = true,
+) {
+    /** A provider needs both an endpoint and a key before [ChatRepository] will call it. */
+    val isConfigured: Boolean get() = baseUrl.isNotBlank() && apiKey.isNotBlank()
+}

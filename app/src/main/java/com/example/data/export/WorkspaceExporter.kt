@@ -8,26 +8,25 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Workspace system — exports/imports the full app state as a single JSON file.
+ * Workspace system — exports/imports the app's intercept rules, saved API requests, and
+ * flow graphs (nodes + connections) as a single JSON file.
  *
- * A workspace includes: intercept rules, saved API requests, flow graphs,
- * environments, notes, and settings. This enables backup/restore and
- * sharing configurations between devices.
- *
- * TODO #50 (Workspace system).
+ * Environments, notes, and settings are not part of this export. Notes become exportable
+ * after flow/notes-repository work lands; extending the export to cover them is a clean
+ * follow-up at that point.
  */
 object WorkspaceExporter {
 
     /**
-     * Exports the full workspace as a JSON string.
-     * Includes: rules, saved requests, flows, notes.
+     * Exports the workspace as a JSON string.
+     * Includes: intercept rules, saved requests, flow nodes and connections.
      */
     suspend fun exportWorkspace(context: Context): String = withContext(Dispatchers.IO) {
         val db = RequestrDatabase.get(context)
         val root = JSONObject()
         root.put("version", "1.0")
         root.put("exportedAt", System.currentTimeMillis())
-        root.put("appVersion", "3.8")
+        root.put("appVersion", com.example.BuildConfig.VERSION_NAME)
 
         // Intercept rules
         val rules = db.interceptRuleDao().getEnabledRules()
@@ -124,6 +123,26 @@ object WorkspaceExporter {
                     )
                     rulesImported++
                 } catch (e: Exception) { errors.add("Rule $i: ${e.message}") }
+            }
+        }
+
+        // Import saved API requests
+        root.optJSONArray("savedRequests")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                try {
+                    val r = arr.getJSONObject(i)
+                    db.savedApiRequestDao().upsert(
+                        com.example.data.local.SavedApiRequestEntity(
+                            id = r.getString("id"),
+                            name = r.optString("name", "Untitled Request"),
+                            method = r.optString("method", "GET"),
+                            url = r.optString("url", ""),
+                            isFavorite = r.optBoolean("isFavorite", false),
+                            updatedAt = r.optLong("updatedAt", System.currentTimeMillis()),
+                        )
+                    )
+                    requestsImported++
+                } catch (e: Exception) { errors.add("Request $i: ${e.message}") }
             }
         }
 

@@ -113,36 +113,42 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
 
     companion object {
-        /** Deep-link navigation requests received while the activity was alive. */
-        val pendingDeeplinks = java.util.concurrent.ConcurrentLinkedQueue<android.net.Uri>()
+        /**
+         * Deep-link URIs received while the activity is alive. Replaces the previous
+         * `ConcurrentLinkedQueue` + one-shot `LaunchedEffect(Unit)` drain, which missed every
+         * link that arrived after the initial poll loop hit its first empty poll and `break`d —
+         * i.e. every link received via onNewIntent while the app was already open, exactly the
+         * case the old "Fix #22" comment claimed to handle. A SharedFlow collected in a
+         * LaunchedEffect keyed on navController stays subscribed for the composable's lifetime.
+         */
+        val deeplinkEvents = kotlinx.coroutines.flow.MutableSharedFlow<android.net.Uri>(extraBufferCapacity = 8)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        // Fix #22 (TODO): handle requestr:// deep links arriving while the app is open.
         val data = intent.data
         if (data?.scheme == "requestr") {
-            pendingDeeplinks.add(data)
+            deeplinkEvents.tryEmit(data)
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Fix #43 (TODO): Global keyboard shortcuts for power users.
-        // Ctrl+Enter = send request (API Testr), Ctrl+Shift+N = new request,
-        // Escape = back navigation.
+        // Global keyboard shortcuts for power users: Ctrl+Enter = send request (API Testr),
+        // Ctrl+Shift+N = new request, Escape = back navigation. Send/New now go through
+        // com.example.AppShortcuts (an in-process SharedFlow ApiTestrScreen collects) instead
+        // of sendBroadcast() to a receiver that never existed.
         window.decorView.setOnKeyListener { _, keyCode, event ->
             if (event.action == android.view.KeyEvent.ACTION_DOWN) {
                 val ctrl = event.isCtrlPressed
                 val shift = event.isShiftPressed
                 when {
                     ctrl && keyCode == android.view.KeyEvent.KEYCODE_ENTER -> {
-                        // Broadcast send-request intent — ApiTestrScreen picks it up
-                        sendBroadcast(Intent("com.example.requestr.SEND_REQUEST"))
+                        com.example.AppShortcuts.emit(com.example.ShortcutEvent.SendRequest)
                         true
                     }
                     ctrl && shift && keyCode == android.view.KeyEvent.KEYCODE_N -> {
-                        sendBroadcast(Intent("com.example.requestr.NEW_REQUEST"))
+                        com.example.AppShortcuts.emit(com.example.ShortcutEvent.NewRequest)
                         true
                     }
                     keyCode == android.view.KeyEvent.KEYCODE_ESCAPE -> {
@@ -164,6 +170,13 @@ class MainActivity : ComponentActivity() {
         ApiCollectionsRepository.init(applicationContext)
         // v3.5: backs FlowRepository's nodes/connections from Room so positions survive restart.
         FlowRepository.init(applicationContext)
+        // Task 11: backs NotesRepository (notes/note_folders), ToolsRepository's custom-tool
+        // map, and ChatRepository's message history from the five app-scope Room tables
+        // transport shipped in schema v9 -- previously all three lived only in a plain
+        // MutableStateFlow/ConcurrentHashMap and were wiped on process death.
+        NotesRepository.init(applicationContext)
+        com.example.data.repository.ToolsRepository.init(applicationContext)
+        com.example.data.repository.ChatRepository.init(applicationContext)
         // R3 fix: gives ApiTestrRepository a Context so its OkHttpClient can attach
         // OkHttpProxyInterceptor, wiring requestr's own API Testr traffic into the OkHttp
         // runtime-instrumentation plane (see OkHttpAdapter in HttpStackAdapters.kt).
@@ -215,50 +228,62 @@ class MainActivity : ComponentActivity() {
 }
 
 /**
- * Fix #22 (TODO): routes a requestr:// deep link to the matching screen.
- * Supported routes: requestr://flow/execute, requestr://intercept,
- * requestr://apis, requestr://tools, requestr://notes, requestr://music,
- * requestr://settings, requestr://saved
+ * Executes a parsed [com.example.DeeplinkRouter.DeeplinkAction] — navigating **and** acting,
+ * unlike the previous `handleRequestrDeeplink` which only ever mapped a host to a route (so
+ * the rows advertised in Settings — `api/run`, `flow/execute`, `note/create` — never did
+ * anything beyond whatever plain navigation their host happened to also match).
+ *
+ * `intercept/toggle` is deliberately not one of these actions: driving start/stop needs the
+ * Activity-scoped VPN consent launcher that only `rememberCaptureController` can provide, and
+ * that row was removed from the Settings deep-link list to match (see DeeplinkRouter.kt).
  */
-private fun handleRequestrDeeplink(
+private suspend fun executeDeeplinkAction(
+    action: com.example.DeeplinkRouter.DeeplinkAction,
     navController: androidx.navigation.NavHostController,
-    uri: android.net.Uri,
 ) {
-    val route = when (uri.host) {
-        "flow" -> Screen.Flow.route
-        "intercept" -> Screen.Intercept.route
-        "apis" -> Screen.Apis.route
-        "tools" -> Screen.Tools.route
-        "notes" -> Screen.Notes.route
-        "music" -> Screen.Music.route
-        "settings" -> Screen.Settings.route
-        "chat" -> "chat"
-        "saved" -> Screen.SavedApis.route
-        "home" -> Screen.Home.route
-        "flow/execute" -> Screen.Flow.route
-        else -> uri.path?.trim('/')?.takeIf { it.isNotBlank() }?.let { path ->
-            when (path.split("/").first()) {
-                "flow" -> Screen.Flow.route
-                "intercept" -> Screen.Intercept.route
-                "apis", "api" -> Screen.Apis.route
-                "tools" -> Screen.Tools.route
-                "notes" -> Screen.Notes.route
-                "music" -> Screen.Music.route
-                "settings" -> Screen.Settings.route
-                "saved" -> Screen.SavedApis.route
-                else -> null
+    fun navigate(route: String) {
+        try {
+            navController.navigate(route) {
+                popUpTo(Screen.Home.route) { saveState = true }
+                launchSingleTop = true
+                restoreState = true
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("Deeplink", "Navigation to '$route' failed: ${e.message}")
+        }
+    }
+
+    when (action) {
+        is com.example.DeeplinkRouter.DeeplinkAction.Navigate -> navigate(action.route)
+
+        is com.example.DeeplinkRouter.DeeplinkAction.RunApi -> {
+            navigate(Screen.Apis.route)
+            val saved = ApiCollectionsRepository.requests.value.find { it.id == action.requestId }
+            if (saved == null) {
+                android.util.Log.w("Deeplink", "api/run: no saved request with id '${action.requestId}'")
+            } else {
+                ApiCollectionsRepository.setActiveRequest(saved)
+                try {
+                    com.example.data.repository.ApiTestrRepository.executeRequest(saved)
+                } catch (e: Exception) {
+                    android.util.Log.w("Deeplink", "api/run: request '${action.requestId}' failed: ${e.message}")
+                }
             }
         }
-    } ?: return
 
-    try {
-        navController.navigate(route) {
-            popUpTo(Screen.Home.route) { saveState = true }
-            launchSingleTop = true
-            restoreState = true
+        is com.example.DeeplinkRouter.DeeplinkAction.ExecuteFlow -> {
+            navigate(Screen.Flow.route)
+            try {
+                FlowRepository.executeFlow()
+            } catch (e: Exception) {
+                android.util.Log.w("Deeplink", "flow/execute failed: ${e.message}")
+            }
         }
-    } catch (_: Exception) {
-        // Navigation not ready yet — ignore, deep link is best-effort
+
+        is com.example.DeeplinkRouter.DeeplinkAction.CreateNote -> {
+            NotesRepository.saveNote(NoteItem(title = action.title))
+            navigate(Screen.Notes.route)
+        }
     }
 }
 
@@ -346,16 +371,18 @@ fun RequestrApp() {
         val navBackStackEntry by navController.currentBackStackEntryAsState()
         val currentRoute = navBackStackEntry?.destination?.route ?: Screen.Home.route
 
-        // Fix #22 (TODO): drain pending requestr:// deep links and navigate.
+        // Drain requestr:// deep links: the initial launch intent (if any) plus every uri
+        // MainActivity.onNewIntent() emits afterwards. Keyed on navController (not Unit) so
+        // the collector stays subscribed for the composable's lifetime instead of draining
+        // once and then going deaf to subsequent deep-link taps while the app is foregrounded.
         val activity = androidx.compose.ui.platform.LocalContext.current as? MainActivity
-        LaunchedEffect(Unit) {
+        LaunchedEffect(navController) {
             val initialUri = activity?.intent?.data
             if (initialUri?.scheme == "requestr") {
-                handleRequestrDeeplink(navController, initialUri)
+                com.example.DeeplinkRouter.parse(initialUri)?.let { executeDeeplinkAction(it, navController) }
             }
-            while (true) {
-                val uri = MainActivity.pendingDeeplinks.poll() ?: break
-                handleRequestrDeeplink(navController, uri)
+            MainActivity.deeplinkEvents.collect { uri ->
+                com.example.DeeplinkRouter.parse(uri)?.let { executeDeeplinkAction(it, navController) }
             }
         }
 

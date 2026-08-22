@@ -91,6 +91,17 @@ class SettingsDataStore(private val context: Context) {
     /** Epoch millis after which the reveal auto-disables itself (5 minutes from when enabled). */
     val pairingTokenRevealUntil: Flow<Long> = prefs.map { it[AppSettingsKeys.PAIRING_TOKEN_REVEAL_UNTIL] ?: 0L }
 
+    /**
+     * App scope, Task 9: capture toggles the VPN service must read directly.
+     * Readable from any process/component (e.g. [com.example.interception.RequestrVpnService]
+     * restarted by the system without [com.example.MainActivity]), unlike
+     * `SettingsRepository.settings.value`, which only reflects reality once
+     * `SettingsRepository.init()` has run from the Activity.
+     */
+    val trafficCapture: Flow<Boolean> = prefs.map { it[AppSettingsKeys.TRAFFIC_CAPTURE] ?: true }
+    val requestLogging: Flow<Boolean> = prefs.map { it[AppSettingsKeys.REQUEST_LOGGING] ?: true }
+    val responseLogging: Flow<Boolean> = prefs.map { it[AppSettingsKeys.RESPONSE_LOGGING] ?: true }
+
     suspend fun setProxyPort(port: Int) {
         // Keep within the unprivileged, valid TCP range.
         val safe = port.coerceIn(1024, 65535)

@@ -33,6 +33,7 @@ import javax.crypto.Mac
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -59,8 +60,7 @@ object ToolsRepository {
     // Icon shortcuts (Fix 07)
     private val Ic = Icons.Default
 
-    fun getToolsCatalog(): List<ToolItem> {
-        val builtIn = listOf(
+    private val builtInTools = listOf(
         ToolItem("jwt-decoder",     "JWT Token Decoder",        "Decode Header, Payload claims and inspect signatures", ToolCategory.DECODERS,   Ic.Key),
         ToolItem("base64",          "Base64 Encoder / Decoder", "RFC 4648 Base64 text & binary converter",              ToolCategory.DECODERS,   Ic.DataObject),
         ToolItem("url-encoder",     "URL / URI Percent Encoder","Encode & decode query strings & path parameters",       ToolCategory.DECODERS,   Ic.Link),
@@ -80,23 +80,81 @@ object ToolsRepository {
         ToolItem("uuid-gen",        "UUID v4 Generator",        "Generate cryptographically secure RFC 4122 UUIDs",     ToolCategory.GENERATORS, Ic.Token),
         ToolItem("random-string",   "Secure Random String",     "Alphanumeric passwords, tokens, entropy keys",          ToolCategory.GENERATORS, Ic.Password),
         ToolItem("lorem-ipsum",     "Lorem Ipsum Generator",    "Generate mock payload strings and paragraphs",          ToolCategory.GENERATORS, Ic.Notes)
-        )
-        // Append user-created custom tools so they appear in the catalog
-        val userTools = customTools.values.map { ct ->
-            ToolItem(
-                id = ct.id,
-                title = ct.name,
-                description = when (ct.operation) {
-                    "regex-replace" -> "Custom regex: ${ct.pattern} → ${ct.replacement}"
-                    "template" -> "Template: ${ct.pattern}"
-                    else -> ct.operation
-                },
-                category = ToolCategory.CUSTOM,
-                icon = Ic.Build
-            )
+    )
+
+    data class CustomTool(
+        val id: String,
+        val name: String,
+        val operation: String, // "regex-replace" or "template"
+        val pattern: String,
+        val replacement: String,
+    )
+
+    /**
+     * User-defined custom tools. Backed by the `custom_tools` Room table (task 11) via [init];
+     * before a Context is available (e.g. in the plain-JUnit `ToolsRepositoryCustomToolTest`,
+     * which never calls [init]) this stays a purely in-memory cache — mirrors the
+     * `appContext ?: return` guard pattern already used by [FlowRepository]/
+     * [ApiCollectionsRepository], so tool creation still works without a Context, it just isn't
+     * persisted.
+     */
+    private val customTools = java.util.concurrent.ConcurrentHashMap<String, CustomTool>()
+
+    private var appContext: android.content.Context? = null
+    private val repoScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
+    )
+
+    /**
+     * Loads persisted custom tools from Room into [customTools] and republishes [catalog].
+     * Call once from MainActivity.onCreate(), mirroring [FlowRepository.init]. No seed data —
+     * an empty `custom_tools` table just means the user hasn't created one yet.
+     */
+    fun init(context: android.content.Context) {
+        if (appContext != null) return
+        val ctx = context.applicationContext
+        appContext = ctx
+        val db = com.example.data.local.RequestrDatabase.get(ctx)
+        repoScope.launch {
+            db.customToolDao().observeAll().collect { entities ->
+                // Additive merge, never a clear()+rebuild: ToolsRepository is a process-wide
+                // singleton object, so a custom tool added before init() was ever called (there
+                // is no delete affordance in the UI, so this only ever grows) must not be wiped
+                // out just because a later Room emission doesn't happen to contain it yet.
+                entities.forEach { e ->
+                    customTools[e.id] = CustomTool(
+                        id = e.id, name = e.name, operation = e.operation,
+                        pattern = e.pattern, replacement = e.replacement
+                    )
+                }
+                _catalog.value = computeCatalog()
+            }
         }
-        return builtIn + userTools
     }
+
+    private fun customToolToItem(ct: CustomTool): ToolItem = ToolItem(
+        id = ct.id,
+        title = ct.name,
+        description = when (ct.operation) {
+            "regex-replace" -> "Custom regex: ${ct.pattern} → ${ct.replacement}"
+            "template" -> "Template: ${ct.pattern}"
+            else -> ct.operation
+        },
+        category = ToolCategory.CUSTOM,
+        icon = Ic.Build
+    )
+
+    private fun computeCatalog(): List<ToolItem> = builtInTools + customTools.values.map(::customToolToItem)
+
+    // E2: the tool list used to be `ToolsRepository.getToolsCatalog()` called once and never
+    // re-keyed, so a newly created custom tool never appeared until an unrelated recomposition.
+    // `catalog` is the live source of truth; `getToolsCatalog()` below just reads its value for
+    // call sites (Flow TOOL nodes, LocalApiServer) that only need a one-shot snapshot.
+    private val _catalog = kotlinx.coroutines.flow.MutableStateFlow(computeCatalog())
+    val catalog: kotlinx.coroutines.flow.StateFlow<List<ToolItem>> = _catalog
+
+    fun getToolsCatalog(): List<ToolItem> = _catalog.value
+
 
     // ==========================================
     // 1. DECODERS
@@ -376,29 +434,33 @@ Broadcast: $ip (Derived)
         }
     }
 
-    // ── Custom Tools (#37) ──────────────────────────────────────────
+    // ── Custom Tools ─────────────────────────────────────────────────
 
-    /** User-defined custom tools, stored in-memory. */
-    private val customTools = java.util.concurrent.ConcurrentHashMap<String, CustomTool>()
+    /**
+     * Adds a custom tool from structured fields, and republishes [catalog] so the Tools list
+     * reflects it immediately.
+     *
+     * E3: previously took a display-formatted [ToolItem] and reverse-parsed its description
+     * (e.g. `"Regex: $pattern → $replacement"`) to recover `pattern`/`replacement` — any wording
+     * change in that description format would silently corrupt the tool. Structured fields
+     * remove that round-trip entirely; the description is now derived for display only, in
+     * [customToolToItem].
+     */
+    fun addCustomTool(name: String, operation: String, pattern: String, replacement: String) {
+        val id = "custom-${name.lowercase().replace(Regex("[^a-z0-9]"), "-")}"
+        val tool = CustomTool(id = id, name = name, operation = operation, pattern = pattern, replacement = replacement)
+        customTools[id] = tool
+        _catalog.value = computeCatalog()
 
-    data class CustomTool(
-        val id: String,
-        val name: String,
-        val operation: String, // "regex-replace" or "template"
-        val pattern: String,
-        val replacement: String,
-    )
-
-    /** Adds a custom tool to the catalog. */
-    fun addCustomTool(item: ToolItem) {
-        val customTool = CustomTool(
-            id = item.id,
-            name = item.title,
-            operation = if (item.description.startsWith("Regex:")) "regex-replace" else "template",
-            pattern = item.description.substringAfter(": ").substringBefore(" → "),
-            replacement = if (item.description.contains("→")) item.description.substringAfter("→ ") else "",
-        )
-        customTools[customTool.id] = customTool
+        val ctx = appContext ?: return
+        repoScope.launch {
+            com.example.data.local.RequestrDatabase.get(ctx).customToolDao().upsert(
+                com.example.data.local.CustomToolEntity(
+                    id = tool.id, name = tool.name, operation = tool.operation,
+                    pattern = tool.pattern, replacement = tool.replacement,
+                )
+            )
+        }
     }
 
     /** Executes a custom tool on the input. */

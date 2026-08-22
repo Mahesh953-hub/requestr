@@ -8,7 +8,6 @@ import com.example.data.local.InterceptRuleEntity
 import com.example.data.local.RequestrDatabase
 import com.example.data.local.TcpConnectionEntity
 import com.example.data.local.TlsSessionEntity
-import com.example.data.repository.SettingsRepository
 import com.example.interception.grpc.GrpcDetector
 import com.example.interception.grpc.ProtobufDecoder
 import com.example.interception.http.Http2Parser
@@ -57,6 +56,17 @@ class CaptureEngine(
     // sheet, no new UI needed. This is additive: it never changes what gets captured or
     // blocks anything, only annotates rows with an extra analysis pass.
     var enhancedMode: Boolean = false,
+    /**
+     * Task 9: threaded in from [RequestrVpnService] via [PacketPump], which reads
+     * [com.example.data.prefs.SettingsDataStore.requestLogging] / `.responseLogging` directly.
+     * Previously this class read the process-wide settings singleton's `.value` here, which
+     * silently fell back to hardcoded `true` defaults whenever the service ran without
+     * `MainActivity` (e.g. system-initiated VPN restart), because that singleton's `init()` is
+     * only ever called from `onCreate`. `SettingsDataStore` is safe to read from any
+     * process/component.
+     */
+    var requestLogging: Boolean = true,
+    var responseLogging: Boolean = true,
 ) {
     // Complaint #5 audit fix: this used to build a path via
     // `Environment.getExternalStoragePublicDirectory(DIRECTORY_DOWNLOADS)` and open a raw
@@ -332,8 +342,8 @@ class CaptureEngine(
             // headers below is lowercased/unordered, and Room does not preserve order.
             com.example.runtime.http.StackSignalStore.registerRequestHeaderOrder(stream.key, request.rawHeaderNames)
 
-            // Fix #14 (TODO): Detect WebSocket upgrade handshake. After the HTTP
-            // upgrade request, subsequent bytes on this stream are WS frames.
+            // WebSocket upgrade handshake detection. After the HTTP upgrade request,
+            // subsequent bytes on this stream are WS frames.
             if (com.example.interception.http.WebSocketParser.looksLikeUpgrade(request.headers, isRequest = true)) {
                 Log.i(TAG, "WebSocket upgrade on ${stream.key}")
                 synchronized(wsStreams) { wsStreams.add(stream.key) }
@@ -346,8 +356,10 @@ class CaptureEngine(
         val response = HttpParser.tryParseResponse(scBytes, sentRequestUrl = pendingReq.url)
 
         if (response != null) {
-            // Fix #15 (TODO): If the response is SSE (text/event-stream), parse events
-            // and persist the event stream as a tagged transaction.
+            // Server-Sent Events (text/event-stream) are detected and logged only — events
+            // are not persisted as their own transactions the way WS frames are
+            // (see persistWsFrame). The underlying HTTP request/response pair that carries
+            // this SSE stream is still persisted below via persistTransaction.
             if (com.example.interception.http.SseParser.looksLikeSse(response.headers)) {
                 val (events, _) = com.example.interception.http.SseParser.parseEvents(response.body)
                 if (events.isNotEmpty()) {
@@ -587,11 +599,11 @@ class CaptureEngine(
             statusCode = null,
             protocol = "gRPC",
             requestHeaders = if (isClient) {
-                if (SettingsRepository.settings.value.requestLoggingEnabled) call.headers + metaHeaders else metaHeaders
+                if (requestLogging) call.headers + metaHeaders else metaHeaders
             } else metaHeaders,
             responseHeaders = metaHeaders,
-            requestBody = if (isClient && SettingsRepository.settings.value.requestLoggingEnabled) hexDump else null,
-            responseBody = if (!isClient && SettingsRepository.settings.value.responseLoggingEnabled) hexDump else null,
+            requestBody = if (isClient && requestLogging) hexDump else null,
+            responseBody = if (!isClient && responseLogging) hexDump else null,
             requestSizeBytes = if (isClient) (msg.length + GrpcDetector.MESSAGE_HEADER_SIZE).toLong() else 0L,
             responseSizeBytes = if (!isClient) (msg.length + GrpcDetector.MESSAGE_HEADER_SIZE).toLong() else 0L,
             latencyMs = 0L,
@@ -624,7 +636,8 @@ class CaptureEngine(
         if (!captureEnabled) return
 
         // Fix 15 (AUDIT_REPORT): Consult intercept rules before persisting.
-        // Fix #7 (TODO): Implement all rule actions, not just BLOCK.
+        // All rule actions are implemented below: BLOCK, REDIRECT, MODIFY_REQUEST,
+        // MODIFY_RESPONSE, LOG_ONLY.
         val ruleAction = checkRules(request.url, request.host)
         when (ruleAction) {
             com.example.data.local.RuleAction.BLOCK -> {
@@ -632,8 +645,9 @@ class CaptureEngine(
                 return  // Drop entirely — never persisted, never forwarded
             }
             com.example.data.local.RuleAction.REDIRECT -> {
-                // REDIRECT: Find the matching rule's replacementValue and rewrite the URL.
-                // For now, log + persist with a tag so user knows it was a redirect candidate.
+                // REDIRECT: find the matching rule's replacementValue, rewrite the request's
+                // URL/host to it, then log and persist the rewritten request below like any
+                // other transaction.
                 Log.d(TAG, "REDIRECT rule matched: ${request.url.take(80)}")
                 // Persist with modified URL if replacementValue is set
                 val matchedRule = getMatchingRule(request.url, request.host)
@@ -697,10 +711,10 @@ class CaptureEngine(
             path = request.path,
             statusCode = if (response.statusCode == 0) null else response.statusCode,
             protocol = response.version.ifEmpty { request.version },
-            requestHeaders = (if (SettingsRepository.settings.value.requestLoggingEnabled) request.headers else emptyMap()) + enhancedHeaders,
-            responseHeaders = if (SettingsRepository.settings.value.responseLoggingEnabled) response.headers else emptyMap(),
-            requestBody = if (SettingsRepository.settings.value.requestLoggingEnabled) request.body.ifEmpty { null } else null,
-            responseBody = if (SettingsRepository.settings.value.responseLoggingEnabled) response.body.ifEmpty { null } else null,
+            requestHeaders = (if (requestLogging) request.headers else emptyMap()) + enhancedHeaders,
+            responseHeaders = if (responseLogging) response.headers else emptyMap(),
+            requestBody = if (requestLogging) request.body.ifEmpty { null } else null,
+            responseBody = if (responseLogging) response.body.ifEmpty { null } else null,
             requestSizeBytes = request.body.toByteArray(Charsets.UTF_8).size.toLong(),
             responseSizeBytes = response.body.toByteArray(Charsets.UTF_8).size.toLong(),
             latencyMs = 0L, // without proxy we don't have timing between request/response

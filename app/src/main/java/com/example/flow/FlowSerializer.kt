@@ -111,11 +111,4 @@ object FlowSerializer {
             null
         }
     }
-
-    /** Serializes to a compact single-line JSON for sharing. */
-    fun exportToCompactJson(
-        flowName: String,
-        nodes: List<FlowNodeItem>,
-        connections: List<FlowConnectionItem>,
-    ): String = exportToJson(flowName, nodes, connections)
 }

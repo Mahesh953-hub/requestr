@@ -51,6 +51,9 @@ class PacketPump(
     dumpToFile: Boolean = false,
     captureEnabled: Boolean = true,
     enhancedMode: Boolean = false,
+    /** Task 9: threaded from `SettingsDataStore.requestLogging`/`.responseLogging`. */
+    requestLogging: Boolean = true,
+    responseLogging: Boolean = true,
     /**
      * `VpnService.protect(...)` hook, threaded in from [RequestrVpnService] so relay upstream
      * sockets don't loop back into our own tun. Defaults to [com.example.interception.tun.NoOpProtectHook]
@@ -165,7 +168,7 @@ class PacketPump(
     }
 
     /** TCP reassembly + HTTP/TLS pipeline. Feeds decoded transactions into Room. */
-    private val captureEngine = CaptureEngine(context, db, sessionId, printUndecoded, dumpToFile, captureEnabled, enhancedMode)
+    private val captureEngine = CaptureEngine(context, db, sessionId, printUndecoded, dumpToFile, captureEnabled, enhancedMode, requestLogging, responseLogging)
 
     /**
      * T1: PCAP export. [com.example.interception.packet.PacketCaptureEngine] is started/stopped
@@ -271,7 +274,8 @@ class PacketPump(
             s to d
         } else 0 to 0
 
-        // Fix #16 (TODO): intercept DNS queries on UDP port 53.
+        // DNS interception on UDP port 53: parses queries/responses and forwards them via
+        // dnsCallback (see RequestrVpnService.onDnsObserved) for real persistence.
         if (protocol == 17 && (sPort == 53 || dPort == 53)) {
             val udpPayload = packet.copyOfRange(ihl + 8, length)
             val query = com.example.interception.dns.DnsParser.parse(udpPayload, sPort, dPort)

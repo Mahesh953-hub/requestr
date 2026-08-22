@@ -61,8 +61,30 @@ class FlowExecutor(
                 errors.add("Node '${node.title}' (${node.type.label}) returned no output")
             }
 
-            // Enqueue downstream nodes
-            adjacency[nodeId]?.forEach { nextId ->
+            if (node.type == FlowNodeType.CONDITION) {
+                val conditionError = ConditionEvaluator.diagnose(node.configData, upstreamInputs.values.firstOrNull() ?: "")
+                if (conditionError != null) {
+                    errors.add("Condition node '${node.title}': $conditionError")
+                }
+            }
+
+            // Enqueue downstream nodes. CONDITION nodes only follow the outgoing edge whose
+            // fromPort matches the boolean result ("true"/"false") — real branching, instead of
+            // the previous behavior of walking every downstream edge regardless of outcome.
+            // Graphs whose connections were made before ports were labelled (all "out") fall
+            // back to following every "out" edge, so existing flows don't silently stop working.
+            val edges = adjacency[nodeId].orEmpty()
+            val nextIds = if (node.type == FlowNodeType.CONDITION) {
+                val hasLabelledPorts = edges.any { it.first == "true" || it.first == "false" }
+                if (hasLabelledPorts) {
+                    edges.filter { it.first == result }.map { it.second }
+                } else {
+                    edges.map { it.second }
+                }
+            } else {
+                edges.map { it.second }
+            }
+            nextIds.forEach { nextId ->
                 if (nextId !in visited) queue.addLast(nextId)
             }
         }
@@ -106,12 +128,14 @@ class FlowExecutor(
         return try {
             val config = node.configData
             // configData is JSON-like: {"url":"...","method":"GET","headers":{...},"body":"..."}
-            val url = extractJsonField(config, "url") ?: "https://httpbin.org/get"
+            // A missing URL is a real configuration error now, not a silent substitution of
+            // https://httpbin.org/get — that hid the fact the node was never configured.
+            val url = extractJsonField(config, "url")
+                ?: return "{\"error\": \"API node '${node.title}' has no URL configured\"}"
             val method = extractJsonField(config, "method") ?: "GET"
             val body = extractJsonField(config, "body") ?: ""
 
             val headers = mutableMapOf<String, String>(
-                "User-Agent" to "requestr-flow/3.0",
                 "Accept" to "application/json",
             )
 
@@ -138,33 +162,13 @@ class FlowExecutor(
     }
 
     private fun executeConditionNode(node: FlowNodeItem, inputs: Map<String, String>): String {
-        val input = inputs.values.firstOrNull() ?: "false"
-        // configData: "status == 200" or "body contains token" or "isEmpty" or custom expression
-        val config = node.configData.lowercase().trim()
-        return when {
-            config.contains("status") && config.contains("200") -> {
-                if (input.contains("200") || input.contains("\"status\":200")) "true" else "false"
-            }
-            config.contains("contains") -> {
-                val keyword = config.substringAfter("contains").trim()
-                if (input.contains(keyword, ignoreCase = true)) "true" else "false"
-            }
-            config.contains("empty") || config.contains("isempty") -> {
-                if (input.isBlank() || input == "{}") "true" else "false"
-            }
-            config.contains("not empty") || config.contains("notempty") -> {
-                if (input.isNotBlank() && input != "{}") "true" else "false"
-            }
-            config.contains("equals") -> {
-                val expected = config.substringAfter("equals").trim()
-                if (input.trim().equals(expected, ignoreCase = true)) "true" else "false"
-            }
-            config.contains("matches") -> {
-                val pattern = config.substringAfter("matches").trim()
-                if (runCatching { Regex(pattern).containsMatchIn(input) }.getOrDefault(false)) "true" else "false"
-            }
-            else -> "true"
+        val input = inputs.values.firstOrNull() ?: ""
+        val result = ConditionEvaluator.evaluate(node.configData, input)
+        val error = ConditionEvaluator.diagnose(node.configData, input)
+        if (error != null) {
+            Log.w(TAG, "Condition node '${node.title}' config error: $error")
         }
+        return if (result) "true" else "false"
     }
 
     /**
@@ -197,10 +201,10 @@ class FlowExecutor(
         return "delayed:${clamped}ms"
     }
 
-    private fun buildAdjacency(connections: List<FlowConnectionItem>): Map<String, List<String>> {
-        val adj = mutableMapOf<String, MutableList<String>>()
+    private fun buildAdjacency(connections: List<FlowConnectionItem>): Map<String, List<Pair<String, String>>> {
+        val adj = mutableMapOf<String, MutableList<Pair<String, String>>>()
         connections.forEach { conn ->
-            adj.getOrPut(conn.fromNodeId) { mutableListOf() }.add(conn.toNodeId)
+            adj.getOrPut(conn.fromNodeId) { mutableListOf() }.add(conn.fromPort to conn.toNodeId)
         }
         return adj
     }

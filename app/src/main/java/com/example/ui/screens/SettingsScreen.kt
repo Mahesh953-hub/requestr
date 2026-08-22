@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
@@ -106,6 +108,39 @@ fun SettingsScreen(
     // and six diagnostics rows that always claimed success (APP_v2.md Bug 3.1 / 10).
     val settingsContext = LocalContext.current
     val settingsScope = rememberCoroutineScope()
+
+    // Task 13: workspace export/import — WorkspaceExporter was complete and real but had zero
+    // call sites anywhere in the app. This launcher reads the picked file and runs it through
+    // WorkspaceExporter.importWorkspace, surfacing a real summary (including errors) rather
+    // than swallowing them.
+    val workspaceImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        settingsScope.launch {
+            val json = runCatching {
+                settingsContext.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+            }.getOrNull()
+            if (json == null) {
+                android.widget.Toast.makeText(settingsContext, "Could not read the selected file.", android.widget.Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            val result = runCatching {
+                com.example.data.export.WorkspaceExporter.importWorkspace(settingsContext, json)
+            }.getOrNull()
+            if (result == null) {
+                android.widget.Toast.makeText(settingsContext, "Import failed: file is not a valid workspace export.", android.widget.Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            val message = if (result.errors.isNotEmpty()) {
+                "${result.summary}: ${result.errors.joinToString("; ")}"
+            } else {
+                result.summary
+            }
+            android.widget.Toast.makeText(settingsContext, message, android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
+
     val capabilities by InterceptionStateRepository.capabilities.collectAsState()
     // B9: the port editable here MUST be the same value PreflightController/InterceptScreen
     // actually read (SettingsDataStore), not the separate, unconsumed SettingsRepository copy
@@ -645,7 +680,6 @@ fun SettingsScreen(
                         Spacer(modifier = Modifier.height(10.dp))
 
                         val deepLinks = listOf(
-                            "requestr://intercept/toggle" to "Toggle capture state",
                             "requestr://api/run?id=req-1" to "Trigger API payload",
                             "requestr://flow/execute?id=flow-1" to "Run n8n Automation Chain",
                             "requestr://note/create?title=Log" to "New quick note"
@@ -814,6 +848,97 @@ fun SettingsScreen(
                     }
                 }
             }
+
+            // Task 12: AI Provider — configures the OpenAI-compatible endpoint ChatRepository
+            // calls from the Chats section. Before this card existed there was no writer
+            // anywhere for the provider fields, so callProvider() was permanently unreachable
+            // and the app was always in local-mock mode. name/baseUrl/model/isActive persist to
+            // the chat_providers Room table (task 11); the API key never does -- it goes through
+            // SecureKeyStore (raw AndroidKeyStore AES/GCM), keyed by provider id.
+            item {
+                SettingsSectionHeader("AI PROVIDER")
+                GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surface) {
+                    val providerConfig by com.example.data.repository.ChatRepository.providerConfig.collectAsState()
+                    var urlInput by remember(providerConfig.baseUrl) { mutableStateOf(providerConfig.baseUrl) }
+                    var modelInput by remember(providerConfig.model) { mutableStateOf(providerConfig.model) }
+                    var keyInput by remember(providerConfig.apiKey) { mutableStateOf(providerConfig.apiKey) }
+                    var keyVisible by remember { mutableStateOf(false) }
+
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(imageVector = Icons.Default.VpnKey, contentDescription = "AI Provider", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Chat Completion Endpoint", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            if (providerConfig.isConfigured) "Configured — the Chats section will call this provider." else "Not configured — the Chats section runs in local mode (no network calls).",
+                            fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Text("Base URL", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        OutlinedTextField(
+                            value = urlInput,
+                            onValueChange = { urlInput = it },
+                            singleLine = true,
+                            placeholder = { Text("https://api.openai.com/v1/chat/completions", fontSize = 11.sp) },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(10.dp),
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Text("Model", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        OutlinedTextField(
+                            value = modelInput,
+                            onValueChange = { modelInput = it },
+                            singleLine = true,
+                            placeholder = { Text("gpt-3.5-turbo", fontSize = 11.sp) },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(10.dp),
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Text("API Key (stored in AndroidKeyStore, never in Room/DataStore in plaintext)", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        OutlinedTextField(
+                            value = keyInput,
+                            onValueChange = { keyInput = it },
+                            singleLine = true,
+                            visualTransformation = if (keyVisible) androidx.compose.ui.text.input.VisualTransformation.None
+                                else androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                            trailingIcon = {
+                                IconButton(onClick = { keyVisible = !keyVisible }) {
+                                    Icon(
+                                        imageVector = if (keyVisible) Icons.Default.Visibility else Icons.Default.Language,
+                                        contentDescription = if (keyVisible) "Hide key" else "Show key",
+                                    )
+                                }
+                            },
+                            placeholder = { Text("sk-…", fontSize = 11.sp) },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(10.dp),
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Button(
+                            onClick = {
+                                com.example.data.repository.ChatRepository.saveProviderConfig(
+                                    providerConfig.copy(
+                                        baseUrl = urlInput.trim(),
+                                        model = modelInput.trim(),
+                                        apiKey = keyInput,
+                                    )
+                                )
+                                android.widget.Toast.makeText(settingsContext, "AI provider saved.", android.widget.Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("Save Provider")
+                        }
+                    }
+                }
+            }
+
 
             // Section 5.5b: Runtime Instrumentation (R1+R3) — honest status for the adapter
             // pattern engine. Started automatically at app launch (see MainActivity); this
@@ -1438,10 +1563,10 @@ fun SettingsScreen(
                             Text("Regenerate CA", color = MaterialTheme.colorScheme.onErrorContainer, fontSize = 12.sp)
                         }
 
-                        // Fix #21 (TODO): auto-promote to system store when root/Shizuku
-                        // transitions to GRANTED and CA is in user store. Previously the user
-                        // had to manually tap the button. Now we observe the capability state
-                        // and trigger automatically (with a result toast).
+                        // Auto-promote to system store when root/Shizuku transitions to
+                        // GRANTED and the CA is in the user store. Previously the user had to
+                        // manually tap the button. Now we observe the capability state and
+                        // trigger automatically (with a result toast either way).
                         var autoPromoteTriggered by remember { mutableStateOf(false) }
                         LaunchedEffect(capabilities.root, capabilities.shizuku, capabilities.ca) {
                             if (autoPromoteTriggered) return@LaunchedEffect
@@ -1460,6 +1585,12 @@ fun SettingsScreen(
                                             android.widget.Toast.LENGTH_SHORT
                                         ).show()
                                     }
+                                }.onFailure { e ->
+                                    android.widget.Toast.makeText(
+                                        settingsContext,
+                                        "CA auto-promotion failed: ${e.message ?: e::class.java.simpleName}",
+                                        android.widget.Toast.LENGTH_SHORT
+                                    ).show()
                                 }
                                 CapabilityProbe.probeAll(settingsContext)
                             }
@@ -1644,6 +1775,52 @@ fun SettingsScreen(
                         Icon(imageVector = Icons.Default.Share, contentDescription = "Share", tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("Export JSON", color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Workspace export/import — WorkspaceExporter.exportWorkspace/importWorkspace
+                // were complete and real but had zero call sites anywhere in the app.
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            settingsScope.launch {
+                                runCatching {
+                                    val json = com.example.data.export.WorkspaceExporter.exportWorkspace(settingsContext)
+                                    val target = com.example.data.export.FileExporter.writeJson(settingsContext, json)
+                                        ?: error("Failed to write workspace JSON to Downloads/requestr/")
+                                    com.example.data.export.FileExporter.shareFile(
+                                        settingsContext, target,
+                                        "application/json",
+                                        "requestr Workspace"
+                                    )
+                                }.onFailure { e ->
+                                    android.widget.Toast.makeText(settingsContext, "Export failed: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                    ) {
+                        Icon(imageVector = Icons.Default.Upload, contentDescription = "Export Workspace", tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Export Workspace", color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp)
+                    }
+
+                    Button(
+                        onClick = { workspaceImportLauncher.launch(arrayOf("application/json")) },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                    ) {
+                        Icon(imageVector = Icons.Default.Download, contentDescription = "Import Workspace", tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Import Workspace", color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp)
                     }
                 }
             }

@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 9,
-    "identityHash": "38c4e5bd839bca0db89cea7c10b0a1f6",
+    "identityHash": "1f8abd5e6e1c54785aebcc9f7d702500",
     "entities": [
       {
         "tableName": "captured_traffic",
@@ -1412,11 +1412,135 @@
             "id"
           ]
         }
+      },
+      {
+        "tableName": "connect_attempts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `sessionId` INTEGER NOT NULL, `targetHost` TEXT NOT NULL, `targetPort` INTEGER NOT NULL, `clientUid` INTEGER, `sourceIp` TEXT, `timestamp` INTEGER NOT NULL, `negotiatedAlpn` TEXT, `disposition` TEXT NOT NULL, `redirectTarget` TEXT, `bytesToClient` INTEGER NOT NULL, `bytesToUpstream` INTEGER NOT NULL, `failureReason` TEXT, `handshakeState` TEXT, `finishedAt` INTEGER)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sessionId",
+            "columnName": "sessionId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetHost",
+            "columnName": "targetHost",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetPort",
+            "columnName": "targetPort",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "clientUid",
+            "columnName": "clientUid",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "sourceIp",
+            "columnName": "sourceIp",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "timestamp",
+            "columnName": "timestamp",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "negotiatedAlpn",
+            "columnName": "negotiatedAlpn",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "disposition",
+            "columnName": "disposition",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "redirectTarget",
+            "columnName": "redirectTarget",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "bytesToClient",
+            "columnName": "bytesToClient",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "bytesToUpstream",
+            "columnName": "bytesToUpstream",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "failureReason",
+            "columnName": "failureReason",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "handshakeState",
+            "columnName": "handshakeState",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "finishedAt",
+            "columnName": "finishedAt",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_connect_attempts_sessionId",
+            "unique": false,
+            "columnNames": [
+              "sessionId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_connect_attempts_sessionId` ON `${TABLE_NAME}` (`sessionId`)"
+          },
+          {
+            "name": "index_connect_attempts_targetHost",
+            "unique": false,
+            "columnNames": [
+              "targetHost"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_connect_attempts_targetHost` ON `${TABLE_NAME}` (`targetHost`)"
+          },
+          {
+            "name": "index_connect_attempts_timestamp",
+            "unique": false,
+            "columnNames": [
+              "timestamp"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_connect_attempts_timestamp` ON `${TABLE_NAME}` (`timestamp`)"
+          }
+        ]
       }
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '38c4e5bd839bca0db89cea7c10b0a1f6')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '1f8abd5e6e1c54785aebcc9f7d702500')"
     ]
   }
 }

@@ -35,6 +35,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -71,9 +72,9 @@ fun ToolsScreen(
     var showCustomToolSheet by remember { mutableStateOf(false) }
     val gridState = rememberLazyGridState()
 
-    val allTools = ToolsRepository.getToolsCatalog()
+    val allTools by ToolsRepository.catalog.collectAsState()
 
-    val filteredTools = remember(searchQuery, selectedCategory) {
+    val filteredTools = remember(allTools, searchQuery, selectedCategory) {
         allTools.filter { tool ->
             (selectedCategory == null || tool.category == selectedCategory) &&
                     (searchQuery.isBlank() || tool.title.contains(searchQuery, ignoreCase = true))
@@ -121,7 +122,7 @@ fun ToolsScreen(
                 ToolCard(tool = tool, onClick = { onNavigateToTool(tool.id) })
             }
 
-            // Fix #37 (TODO): "Create Custom Tool" card when Custom category is selected
+            // "Create Custom Tool" card when Custom category (or "All") is selected.
             if (selectedCategory == null || selectedCategory == ToolCategory.CUSTOM) {
                 item(key = "create-custom-tool") {
                     GlassCard(
@@ -235,15 +236,11 @@ fun ToolsScreen(
                 Button(
                     onClick = {
                         if (toolName.isNotBlank()) {
-                            val toolId = "custom-${toolName.lowercase().replace(Regex("[^a-z0-9]"), "-")}"
                             ToolsRepository.addCustomTool(
-                                com.example.data.repository.ToolItem(
-                                    id = toolId,
-                                    title = toolName,
-                                    description = if (toolOperation == "regex-replace") "Regex: $toolPattern → $toolReplacement" else "Template: $toolPattern",
-                                    category = ToolCategory.CUSTOM,
-                                    icon = Icons.Default.Add,
-                                )
+                                name = toolName,
+                                operation = toolOperation,
+                                pattern = toolPattern,
+                                replacement = toolReplacement,
                             )
                             showCustomToolSheet = false
                         }

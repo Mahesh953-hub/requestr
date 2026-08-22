@@ -155,7 +155,7 @@ fun ToolWorkspaceScreen(
                     "random-string" -> GeneratorWorkspace("Random String", "Generate", ::randomStringGen)
                     "lorem-ipsum"   -> GeneratorWorkspace("Lorem Ipsum", "Generate", ::loremGen)
 
-                    else -> PlaceholderWorkspace(tool.title)
+                    else -> CustomToolWorkspace(tool.id)
                 }
             }
         }
@@ -702,17 +702,35 @@ private fun randomStringGen() = ToolsRepository.generateRandomString(32)
 private fun loremGen() = ToolsRepository.generateLoremIpsum(2)
 
 // ═══════════════════════════════════════════════════════════════════
-// Placeholder
+// Custom tools (E1) — every custom tool used to dead-end in a placeholder
+// workspace stub even though ToolsRepository.executeToolFunction already
+// routed custom-tool ids to a real regex-replace/template implementation.
+// This wires that up.
 // ═══════════════════════════════════════════════════════════════════
 
 @Composable
-private fun PlaceholderWorkspace(title: String) {
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("🚧", fontSize = 40.sp)
-            Spacer(modifier = Modifier.height(12.dp))
-            Text("$title — Coming Soon", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
+private fun CustomToolWorkspace(toolId: String) {
+    var input by remember { mutableStateOf("") }
+    val ctx = LocalContext.current
+    val output = remember(toolId, input) { ToolsRepository.executeToolFunction(toolId, input) }
+
+    Column {
+        modeRow("Custom Tool")
+        Text("Input", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(modifier = Modifier.height(4.dp))
+        OutlinedTextField(
+            value = input,
+            onValueChange = { input = it },
+            modifier = Modifier.fillMaxWidth(),
+            minLines = 4,
+            maxLines = 8,
+            placeholder = { Text("Paste or type…", color = MaterialTheme.colorScheme.onSurfaceVariant) },
+            textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace, fontSize = 13.sp),
+            colors = fieldColors(),
+            shape = RoundedCornerShape(12.dp)
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+        outputBlock("Output", output, ctx)
     }
 }
 
