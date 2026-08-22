@@ -99,6 +99,15 @@ fun NotesScreen(
         val wordCount = remember(editContent) { editContent.split("\\s+".toRegex()).filter { it.isNotBlank() }.size }
         val charCount = remember(editContent) { editContent.length }
 
+        // Export failures used to be swallowed by `?: return@launch` with no user feedback.
+        // This SnackbarHost surfaces that failure (and could carry other editor feedback later).
+        val editorSnackbarHostState = remember { androidx.compose.material3.SnackbarHostState() }
+        val editorSnackbarScope = rememberCoroutineScope()
+        fun showEditorSnackbar(message: String) {
+            editorSnackbarScope.launch { editorSnackbarHostState.showSnackbar(message) }
+        }
+
+        Box(modifier = Modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -118,17 +127,11 @@ fun NotesScreen(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // Fix #18 (TODO): Export note as MD or HTML file
                     val notesContext = androidx.compose.ui.platform.LocalContext.current
                     val notesScope = rememberCoroutineScope()
                     IconButton(onClick = {
                         notesScope.launch(Dispatchers.IO) {
-                            val text = when (editFormat) {
-                                com.example.data.models.NoteFormatType.HTML -> editContent
-                                com.example.data.models.NoteFormatType.MARKDOWN -> editContent
-                                com.example.data.models.NoteFormatType.CHECKLIST -> editContent
-                                else -> editContent
-                            }
+                            val text = editContent
                             val ext = when (editFormat) {
                                 com.example.data.models.NoteFormatType.HTML -> ".html"
                                 com.example.data.models.NoteFormatType.MARKDOWN -> ".md"
@@ -146,7 +149,11 @@ fun NotesScreen(
                             // Route through MediaStoreExporter like every other export writer.
                             val target = com.example.data.export.MediaStoreExporter.writeText(
                                 notesContext, fileName, mimeType, text
-                            ) ?: return@launch
+                            )
+                            if (target == null) {
+                                showEditorSnackbar("Export failed — could not write \"$fileName\"")
+                                return@launch
+                            }
                             com.example.data.export.FileExporter.shareFile(
                                 notesContext, target, mimeType, "Exported: $editTitle"
                             )
@@ -239,21 +246,78 @@ fun NotesScreen(
                         .weight(1f),
                     backgroundColor = MaterialTheme.colorScheme.surface
                 ) {
-                    LazyColumn(modifier = Modifier.padding(14.dp)) {
-                        item {
-                            // Fix 16 (AUDIT_REPORT §11.2): HTML preview now renders via
-                            // HtmlCompat instead of showing raw tags as monospace text.
-                            // Markdown shows as-is (monospace) since no MD render lib exists.
-                            if (editFormat == NoteFormatType.HTML) {
-                                val annotated = remember(editContent) {
-                                    val spanned = androidx.core.text.HtmlCompat.fromHtml(
-                                        editContent, androidx.core.text.HtmlCompat.FROM_HTML_MODE_COMPACT
-                                    )
-                                    androidx.compose.ui.text.AnnotatedString(spanned.toString())
+                    when (editFormat) {
+                        NoteFormatType.HTML -> {
+                            // Fix 16 (AUDIT_REPORT §11.2): walk the Spanned's real spans into
+                            // an AnnotatedString instead of `AnnotatedString(spanned.toString())`,
+                            // which discarded every span and rendered "HTML preview" as
+                            // tag-stripped plain text.
+                            val annotated = remember(editContent) {
+                                val spanned = androidx.core.text.HtmlCompat.fromHtml(
+                                    editContent, androidx.core.text.HtmlCompat.FROM_HTML_MODE_COMPACT
+                                )
+                                com.example.ui.text.MarkdownRenderer.fromSpanned(spanned)
+                            }
+                            LazyColumn(modifier = Modifier.padding(14.dp)) {
+                                item { Text(annotated, color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp) }
+                            }
+                        }
+
+                        NoteFormatType.MARKDOWN -> {
+                            // Fix 16: a real Markdown renderer (headings/bold/italic/code/
+                            // fenced blocks/lists/links) instead of showing the raw source
+                            // as-is in monospace.
+                            val rendered = remember(editContent) { com.example.ui.text.MarkdownRenderer.render(editContent) }
+                            LazyColumn(modifier = Modifier.padding(14.dp)) {
+                                item { Text(rendered, color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp) }
+                            }
+                        }
+
+                        NoteFormatType.CHECKLIST -> {
+                            val items = remember(editContent) { com.example.ui.text.MarkdownRenderer.parseChecklist(editContent) }
+                            LazyColumn(modifier = Modifier.padding(14.dp)) {
+                                if (items.isEmpty()) {
+                                    item {
+                                        Text(
+                                            "No checklist items yet. Add lines like \"- [ ] task\".",
+                                            color = TextMuted,
+                                            fontSize = 12.sp
+                                        )
+                                    }
+                                } else {
+                                    items(items, key = { it.lineIndex }) { checkItem ->
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable {
+                                                    editContent = com.example.ui.text.MarkdownRenderer.toggleChecklistItem(editContent, checkItem.lineIndex)
+                                                }
+                                                .padding(vertical = 4.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            androidx.compose.material3.Checkbox(
+                                                checked = checkItem.checked,
+                                                onCheckedChange = {
+                                                    editContent = com.example.ui.text.MarkdownRenderer.toggleChecklistItem(editContent, checkItem.lineIndex)
+                                                }
+                                            )
+                                            Text(
+                                                checkItem.text,
+                                                color = if (checkItem.checked) TextMuted else MaterialTheme.colorScheme.onSurface,
+                                                fontSize = 14.sp,
+                                                textDecoration = if (checkItem.checked) androidx.compose.ui.text.style.TextDecoration.LineThrough else null
+                                            )
+                                        }
+                                    }
                                 }
-                                Text(annotated, color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp)
-                            } else {
-                                Text(editContent, color = MaterialTheme.colorScheme.secondary, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+                            }
+                        }
+
+                        else -> {
+                            LazyColumn(modifier = Modifier.padding(14.dp)) {
+                                item {
+                                    Text(editContent, color = MaterialTheme.colorScheme.secondary, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+                                }
                             }
                         }
                     }
@@ -276,6 +340,11 @@ fun NotesScreen(
                     shape = RoundedCornerShape(14.dp)
                 )
             }
+        }
+        androidx.compose.material3.SnackbarHost(
+            hostState = editorSnackbarHostState,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp)
+        )
         }
     } else {
         // Main Notes List View
