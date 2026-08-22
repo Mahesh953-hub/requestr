@@ -95,6 +95,12 @@ import com.example.ui.theme.TextSecondary
 import java.util.UUID
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -110,11 +116,44 @@ fun FlowScreen(
     val performHaptic = rememberAppHapticFeedback()
 
     var isRunning by remember { mutableStateOf(false) }
-    var executionResult by remember { mutableStateOf<String?>(null) }
+    var executionSuccess by remember { mutableStateOf<Boolean?>(null) }
+    var executionMessage by remember { mutableStateOf<String?>(null) }
     var viewMode by remember { mutableIntStateOf(0) } // 0 = Canvas, 1 = Node Sequence List
     var showAddNodeSheet by remember { mutableStateOf(false) }
     var nodeForEdit by remember { mutableStateOf<FlowNodeItem?>(null) }
+    val snackbarHostState = remember { SnackbarHostState() }
+    fun notify(message: String) {
+        coroutineScope.launch { snackbarHostState.showSnackbar(message) }
+    }
 
+    val flowContext = androidx.compose.ui.platform.LocalContext.current
+
+    // Fix #25: real import via a document picker with actual result handling, replacing the
+    // previous ACTION_GET_CONTENT fire-and-forget that never read anything back.
+    val importLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val json = runCatching {
+                flowContext.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+            }.getOrNull()
+            if (json == null) {
+                notify("Could not read the selected file.")
+                return@launch
+            }
+            val parsed = com.example.flow.FlowSerializer.importFromJson(json)
+            if (parsed == null) {
+                notify("Import failed: file is not a valid Flow export.")
+            } else {
+                val (importedNodes, importedConnections) = parsed
+                FlowRepository.replaceGraph(importedNodes, importedConnections)
+                notify("Imported ${importedNodes.size} node(s) and ${importedConnections.size} connection(s).")
+            }
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -124,8 +163,6 @@ fun FlowScreen(
             title = "Flow & Automation (n8n Engine)",
             onMiniSettings = onMiniSettings,
             actions = {
-                // Fix #25 (TODO): Flow export/import via FlowSerializer
-                val flowContext = androidx.compose.ui.platform.LocalContext.current
                 IconButton(onClick = {
                     coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                         runCatching {
@@ -141,7 +178,7 @@ fun FlowScreen(
                                 "application/json",
                                 "Flow export"
                             )
-                        }
+                        }.onFailure { notify("Export failed: ${it.message}") }
                     }
                 }) {
                     Icon(
@@ -167,18 +204,7 @@ fun FlowScreen(
                     )
                 }
 
-                // Fix #25: Import flow from JSON (share sheet)
-                IconButton(onClick = {
-                    coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                        runCatching {
-                            val importIntent = android.content.Intent(android.content.Intent.ACTION_GET_CONTENT).apply {
-                                type = "application/json"
-                                addCategory(android.content.Intent.CATEGORY_OPENABLE)
-                            }
-                            flowContext.startActivity(importIntent)
-                        }
-                    }
-                }) {
+                IconButton(onClick = { importLauncher.launch(arrayOf("application/json")) }) {
                     Icon(
                         imageVector = Icons.Default.FileDownload,
                         contentDescription = "Import Flow",
@@ -191,7 +217,8 @@ fun FlowScreen(
                         isRunning = true
                         coroutineScope.launch {
                             val res = FlowRepository.executeFlow()
-                            executionResult = res
+                            executionSuccess = res.success
+                            executionMessage = res.message
                             isRunning = false
                         }
                     },
@@ -210,22 +237,29 @@ fun FlowScreen(
             }
         )
 
-        // Execution status banner
-        if (executionResult != null) {
+        // Execution status banner -- colour and icon now reflect the real outcome (task 2c),
+        // instead of always rendering green + CheckCircle regardless of success/failure.
+        if (executionMessage != null) {
+            val bannerColor = if (executionSuccess == true) Color(0xFF10B981) else Color(0xFFEF4444)
             GlassCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 4.dp),
-                backgroundColor = Color(0xFF10B981).copy(alpha = 0.15f),
-                borderColor = Color(0xFF10B981).copy(alpha = 0.5f)
+                backgroundColor = bannerColor.copy(alpha = 0.15f),
+                borderColor = bannerColor.copy(alpha = 0.5f)
             ) {
                 Row(
                     modifier = Modifier.padding(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(imageVector = Icons.Default.CheckCircle, contentDescription = "Success", tint = Color(0xFF10B981), modifier = Modifier.size(18.dp))
+                    Icon(
+                        imageVector = if (executionSuccess == true) Icons.Default.CheckCircle else Icons.Default.Close,
+                        contentDescription = if (executionSuccess == true) "Success" else "Failure",
+                        tint = bannerColor,
+                        modifier = Modifier.size(18.dp)
+                    )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text(executionResult!!, color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    Text(executionMessage!!, color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
@@ -248,7 +282,7 @@ fun FlowScreen(
                     if (fromNode != null && toNode != null) {
                         FlowRepository.addConnection(
                             com.example.data.models.FlowConnectionItem(
-                                id = "${fromId}_out_${toId}_in",
+                                id = com.example.data.models.flowConnectionId(fromId, "out", toId, "in"),
                                 fromNodeId = fromId,
                                 toNodeId = toId,
                                 fromPort = "out",
@@ -340,11 +374,33 @@ fun FlowScreen(
             }
         )
     }
+
+    // Edit Step Bottom Sheet — closes the previously dead-end nodeForEdit
+    // state (context-menu Edit + Sequence-List Edit button both set it, but
+    // nothing consumed it before this).
+    nodeForEdit?.let { editing ->
+        EditFlowNodeBottomSheet(
+            node = editing,
+            onDismiss = { nodeForEdit = null },
+            onSave = { title, type, config ->
+                FlowRepository.updateNode(editing.copy(title = title, type = type, configData = config))
+                nodeForEdit = null
+            }
+        )
+    }
+
+    SnackbarHost(
+        hostState = snackbarHostState,
+        modifier = Modifier
+            .align(Alignment.BottomCenter)
+            .padding(bottom = 16.dp)
+    )
+    }
 }
 
 /**
  * Flow canvas with pan/zoom, port-drag connection creation, and long-press
- * context menu. Implements TODO items #23, #24, #32, #33, #34.
+ * context menu. Implements items #23, #24, #32, #33, #34.
  */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
@@ -377,6 +433,10 @@ fun FlowCanvas(
     // Long-press context menu state
     var contextMenuNode by remember { mutableStateOf<FlowNodeItem?>(null) }
 
+    // Real measured canvas size, captured via onSizeChanged below. Fit-to-view
+    // derives scale/offsets from this instead of a hardcoded 0.8f + 300f guess.
+    var canvasSize by remember { mutableStateOf(IntSize.Zero) }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -385,12 +445,15 @@ fun FlowCanvas(
             .background(MaterialTheme.colorScheme.surface)
             .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(16.dp))
             .transformable(state = transformState)
+            .onSizeChanged { canvasSize = it }
     ) {
         // Fit-to-view button
         IconButton(
             onClick = {
                 // Calculate bounding box of all nodes and center+scale to fit
-                if (nodes.isNotEmpty()) {
+                // the real measured canvas dimensions, instead of a fixed
+                // scale/offset guess that ignored actual screen size.
+                if (nodes.isNotEmpty() && canvasSize.width > 0 && canvasSize.height > 0) {
                     val minX = nodes.minOf { it.x }
                     val maxX = nodes.maxOf { it.x } + 180f
                     val minY = nodes.minOf { it.y }
@@ -398,9 +461,13 @@ fun FlowCanvas(
                     val contentW = maxX - minX
                     val contentH = maxY - minY
                     if (contentW > 0 && contentH > 0) {
-                        scale = 0.8f
-                        offsetX = -(minX + contentW / 2) * scale + 300f
-                        offsetY = -(minY + contentH / 2) * scale + 300f
+                        val fitScale = minOf(
+                            canvasSize.width / contentW,
+                            canvasSize.height / contentH
+                        ).coerceIn(0.3f, 3f)
+                        scale = fitScale
+                        offsetX = -(minX + contentW / 2) * fitScale + canvasSize.width / 2f
+                        offsetY = -(minY + contentH / 2) * fitScale + canvasSize.height / 2f
                     }
                 }
             },
@@ -789,6 +856,89 @@ fun AddFlowNodeBottomSheet(
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
             ) {
                 Text("Add Node to Automation Canvas")
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun EditFlowNodeBottomSheet(
+    node: FlowNodeItem,
+    onDismiss: () -> Unit,
+    onSave: (String, FlowNodeType, String) -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var stepTitle by remember(node.id) { mutableStateOf(node.title) }
+    var selectedType by remember(node.id) { mutableStateOf(node.type) }
+    var configText by remember(node.id) { mutableStateOf(node.configData) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text("Edit Automation Step", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+
+            OutlinedTextField(
+                value = stepTitle,
+                onValueChange = { stepTitle = it },
+                label = { Text("Step Title") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(10.dp)
+            )
+
+            Text("Select Trigger / Action Type:", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                FlowNodeType.values().forEach { t ->
+                    val isSel = selectedType == t
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (isSel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                            .clickable { selectedType = t }
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Text("${t.iconEmoji} ${t.label}", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = if (isSel) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+
+            OutlinedTextField(
+                value = configText,
+                onValueChange = { configText = it },
+                label = { Text("Config / Endpoint / Pattern") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(10.dp)
+            )
+
+            Button(
+                onClick = {
+                    if (stepTitle.isNotBlank()) {
+                        onSave(stepTitle, selectedType, configText)
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+            ) {
+                Text("Save Changes")
             }
 
             Spacer(modifier = Modifier.height(20.dp))
