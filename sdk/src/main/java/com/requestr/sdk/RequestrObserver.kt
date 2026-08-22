@@ -29,6 +29,7 @@ object RequestrObserver {
     private const val TAG = "RequestrObserver"
     private var context: Context? = null
     private var apiBase = "http://127.0.0.1:9876"
+    private var pairingToken: String? = null
     private val pendingEvents = mutableListOf<ObserverEvent>()
 
     // Own SupervisorJob-scoped CoroutineScope rather than GlobalScope: flush() calls from a
@@ -37,9 +38,16 @@ object RequestrObserver {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val client = OkHttpClient()
 
-    fun init(ctx: Context, apiBaseUrl: String = "http://127.0.0.1:9876") {
+    /**
+     * @param pairingToken the token copied from requestr's Settings > SDK Pairing screen
+     *   (revealed via `GET /api/pairing-info` while "Show Pairing Token" is on). Sent as
+     *   `Authorization: Bearer <pairingToken>` on every [flush] POST -- `/api/observe` rejects
+     *   requests without it (401).
+     */
+    fun init(ctx: Context, pairingToken: String, apiBaseUrl: String = "http://127.0.0.1:9876") {
         context = ctx.applicationContext
         apiBase = apiBaseUrl
+        this.pairingToken = pairingToken
         Log.i(TAG, "Observer initialized, API base: $apiBase")
     }
 
@@ -92,11 +100,11 @@ object RequestrObserver {
                     })
                 }
                 val body = """{"events":$json}"""
-                val request = Request.Builder()
+                val requestBuilder = Request.Builder()
                     .url("$apiBase/api/observe")
                     .post(body.toRequestBody("application/json".toMediaType()))
-                    .build()
-                client.newCall(request).execute().close()
+                pairingToken?.let { requestBuilder.addHeader("Authorization", "Bearer $it") }
+                client.newCall(requestBuilder.build()).execute().close()
             } catch (e: Exception) {
                 Log.w(TAG, "Flush failed, re-queuing ${events.size} events: ${e.message}")
                 synchronized(pendingEvents) { pendingEvents.addAll(events) }

@@ -79,6 +79,18 @@ class SettingsDataStore(private val context: Context) {
     /** T2: port GatewayEngine listens on, bound to 0.0.0.0 so LAN clients can reach it. */
     val gatewayPort: Flow<Int> = prefs.map { it[AppSettingsKeys.GATEWAY_PORT] ?: DEFAULT_GATEWAY_PORT }
 
+    /**
+     * SDK & CONNECT scope, Task 6: the bearer token `/api/observe` requires. Null until
+     * [LocalApiServer][com.example.api.LocalApiServer] generates one on first start.
+     */
+    val pairingToken: Flow<String?> = prefs.map { it[AppSettingsKeys.PAIRING_TOKEN] }
+
+    /** Whether `GET /api/pairing-info` is currently allowed to reveal [pairingToken]. */
+    val showPairingToken: Flow<Boolean> = prefs.map { it[AppSettingsKeys.SHOW_PAIRING_TOKEN] ?: false }
+
+    /** Epoch millis after which the reveal auto-disables itself (5 minutes from when enabled). */
+    val pairingTokenRevealUntil: Flow<Long> = prefs.map { it[AppSettingsKeys.PAIRING_TOKEN_REVEAL_UNTIL] ?: 0L }
+
     suspend fun setProxyPort(port: Int) {
         // Keep within the unprivileged, valid TCP range.
         val safe = port.coerceIn(1024, 65535)
@@ -134,9 +146,23 @@ class SettingsDataStore(private val context: Context) {
         store.edit { it[AppSettingsKeys.GATEWAY_PORT] = safe }
     }
 
+    suspend fun setPairingToken(value: String) {
+        store.edit { it[AppSettingsKeys.PAIRING_TOKEN] = value }
+    }
+
+    /** Enables the reveal window (used by [showPairingToken]/[pairingTokenRevealUntil]). */
+    suspend fun setShowPairingToken(value: Boolean, revealDurationMs: Long = PAIRING_REVEAL_DURATION_MS) {
+        store.edit {
+            it[AppSettingsKeys.SHOW_PAIRING_TOKEN] = value
+            it[AppSettingsKeys.PAIRING_TOKEN_REVEAL_UNTIL] =
+                if (value) System.currentTimeMillis() + revealDurationMs else 0L
+        }
+    }
+
     companion object {
         const val DEFAULT_PROXY_PORT = 9000
         const val DEFAULT_GATEWAY_PORT = 8888
+        const val PAIRING_REVEAL_DURATION_MS = 5 * 60 * 1000L
 
         @Volatile
         private var INSTANCE: SettingsDataStore? = null

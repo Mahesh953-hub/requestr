@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.first
@@ -109,6 +110,15 @@ object AppSettingsKeys {
     // originating on THIS device) — it runs independently of whatever local tier is active.
     val GATEWAY_MODE_ENABLED = booleanPreferencesKey("gateway_mode_enabled")
     val GATEWAY_PORT = intPreferencesKey("gateway_port")
+
+    // SDK & CONNECT scope, Task 6: pairing token gating `/api/observe` on LocalApiServer.
+    // Generated once (SecureRandom, 256-bit) on first LocalApiServer.start() and never rotated
+    // automatically -- only the "Regenerate Token" button in Settings changes it.
+    val PAIRING_TOKEN = stringPreferencesKey("pairing_token")
+    // "Show Pairing Token" toggle: while true, GET /api/pairing-info returns the token; while
+    // false it 403s. Auto-disabled by SettingsScreen after 5 minutes (PAIRING_TOKEN_REVEAL_UNTIL).
+    val SHOW_PAIRING_TOKEN = booleanPreferencesKey("show_pairing_token")
+    val PAIRING_TOKEN_REVEAL_UNTIL = longPreferencesKey("pairing_token_reveal_until")
 }
 
 /**
