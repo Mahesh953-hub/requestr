@@ -355,3 +355,34 @@ interface DnsQueryDao {
     @Query("DELETE FROM dns_queries WHERE sessionId = :sessionId")
     suspend fun clearSession(sessionId: Long)
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// CONNECT Control subsystem
+// ═══════════════════════════════════════════════════════════════════
+
+@Dao
+interface ConnectAttemptDao {
+    @Query("SELECT * FROM connect_attempts WHERE sessionId = :sessionId ORDER BY timestamp DESC")
+    fun observeBySession(sessionId: Long): Flow<List<ConnectAttemptEntity>>
+
+    @Query("SELECT * FROM connect_attempts ORDER BY timestamp DESC")
+    fun observeAll(): Flow<List<ConnectAttemptEntity>>
+
+    @Query("SELECT * FROM connect_attempts WHERE id = :id")
+    suspend fun getById(id: Long): ConnectAttemptEntity?
+
+    @Query("SELECT * FROM connect_attempts WHERE sessionId = :sessionId ORDER BY timestamp DESC")
+    suspend fun getBySession(sessionId: Long): List<ConnectAttemptEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(item: ConnectAttemptEntity): Long
+
+    @Update
+    suspend fun update(item: ConnectAttemptEntity)
+
+    @Query("SELECT COUNT(*) FROM connect_attempts WHERE sessionId = :sessionId")
+    fun observeCount(sessionId: Long): Flow<Int>
+
+    @Query("DELETE FROM connect_attempts WHERE sessionId = :sessionId")
+    suspend fun clearSession(sessionId: Long)
+}

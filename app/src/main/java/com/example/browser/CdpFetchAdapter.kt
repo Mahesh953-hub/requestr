@@ -110,7 +110,11 @@ class CdpFetchAdapter(
                         client.send("Fetch.continueRequest", continueParams)
                         Log.i(TAG, "MODIFY_REQUEST $url")
                     }
-                    RuleAction.MODIFY_RESPONSE, RuleAction.LOG_ONLY -> {
+                    // FORCE_MITM is a CONNECT-level disposition (see ConnectControl) with no
+                    // meaning at the Fetch.requestPaused stage -- CDP already observes decrypted
+                    // browser traffic, so there's nothing further to MITM here. Treat it the same
+                    // as LOG_ONLY: allow the request through unmodified.
+                    RuleAction.MODIFY_RESPONSE, RuleAction.LOG_ONLY, RuleAction.FORCE_MITM -> {
                         allowedCount++
                         client.send(
                             "Fetch.continueRequest",

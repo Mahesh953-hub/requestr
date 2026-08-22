@@ -25,6 +25,7 @@ import androidx.room.TypeConverters
         QuicConnectionEntity::class,
         TlsSessionEntity::class,
         DnsQueryEntity::class,
+        ConnectAttemptEntity::class,
     ],
     // v3.5: bumped 4 -> 5 for FlowNodeEntity + FlowConnectionEntity (Flow persistence).
     // v5.6 (M1): bumped 5 -> 6 to register TcpConnectionEntity/UdpFlowEntity/QuicConnectionEntity,
@@ -36,6 +37,10 @@ import androidx.room.TypeConverters
     // DnsQueryEntity -- PacketPump.dnsCallback previously parsed real DNS queries/responses via
     // DnsParser and discarded them (log-only); this table is what makes DNS a genuine first hop
     // in ConnectionLineage instead of a documented gap.
+    // v5.X (SDK/CONNECT scope): registered ConnectAttemptEntity for the CONNECT control
+    // subsystem (see ConnectControl.kt) -- every CONNECT tunnel establishment is now a
+    // persisted, inspectable record instead of a blind byte relay. Final version number and
+    // migration are owned by the transport scope, which also bumps this database's version.
     version = 8,
     exportSchema = false,
 )
@@ -53,6 +58,7 @@ abstract class RequestrDatabase : RoomDatabase() {
     abstract fun quicConnectionDao(): QuicConnectionDao
     abstract fun tlsSessionDao(): TlsSessionDao
     abstract fun dnsQueryDao(): DnsQueryDao
+    abstract fun connectAttemptDao(): ConnectAttemptDao
 
     companion object {
         @Volatile
