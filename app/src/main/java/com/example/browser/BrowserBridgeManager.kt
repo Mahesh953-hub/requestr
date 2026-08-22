@@ -69,6 +69,33 @@ object BrowserBridgeManager {
     private val _eventsIngestedByTarget = MutableStateFlow<Map<String, Int>>(emptyMap())
     val eventsIngestedByTarget: StateFlow<Map<String, Int>> = _eventsIngestedByTarget.asStateFlow()
 
+    /**
+     * W9: aggregate Fetch rule-enforcement counters across every attached target's
+     * [CdpFetchAdapter], recomputed via [CdpFetchAdapter.onCountersChanged] so the Settings card
+     * shows one real total instead of only the first target's numbers.
+     */
+    data class FetchCounters(
+        val allowed: Int = 0,
+        val blocked: Int = 0,
+        val modified: Int = 0,
+        val responseModified: Int = 0,
+        val bodiesCaptured: Int = 0,
+    )
+
+    private val _fetchCounters = MutableStateFlow(FetchCounters())
+    val fetchCounters: StateFlow<FetchCounters> = _fetchCounters.asStateFlow()
+
+    private fun recomputeFetchCounters() {
+        val adapters = perTargetAdapters.values.mapNotNull { it.fetchAdapter }
+        _fetchCounters.value = FetchCounters(
+            allowed = adapters.sumOf { it.allowedCount },
+            blocked = adapters.sumOf { it.blockedCount },
+            modified = adapters.sumOf { it.modifiedCount },
+            responseModified = adapters.sumOf { it.responseModifiedCount },
+            bodiesCaptured = adapters.sumOf { it.bodiesCapturedCount },
+        )
+    }
+
     private val emptyServiceWorkerState: StateFlow<Map<String, ServiceWorkerObserver.WorkerRegistration>> =
         MutableStateFlow<Map<String, ServiceWorkerObserver.WorkerRegistration>>(emptyMap()).asStateFlow()
 
@@ -152,6 +179,7 @@ object BrowserBridgeManager {
                 adapter.onResponseBodyCaptured = { networkId, body, sizeBytes ->
                     netAdapter.applyResponseBody(networkId, body, sizeBytes)
                 }
+                adapter.onCountersChanged = { recomputeFetchCounters() }
                 adapter.start()
             }
         } else {
@@ -175,6 +203,7 @@ object BrowserBridgeManager {
         adapters.serviceWorkerObserver.stop()
         adapters.storageObserver.stop()
         _eventsIngestedByTarget.value = _eventsIngestedByTarget.value - sessionId
+        recomputeFetchCounters()
         Log.i(TAG, "Adapters detached for target $sessionId")
     }
 
@@ -183,6 +212,7 @@ object BrowserBridgeManager {
         client?.disconnect()
         client = null
         _eventsIngestedByTarget.value = emptyMap()
+        _fetchCounters.value = FetchCounters()
         _connectionState.value = CdpClient.State.DISCONNECTED
         _statusMessage.value = "Disconnected"
     }

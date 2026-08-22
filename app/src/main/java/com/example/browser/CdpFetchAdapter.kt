@@ -82,6 +82,17 @@ class CdpFetchAdapter(
         private set
 
     /**
+     * W9: fired after every counter increment above so [BrowserBridgeManager] can aggregate
+     * counts across every attached target's adapter into one Settings-visible total, without
+     * this class depending on Compose or exposing its own `StateFlow`.
+     */
+    var onCountersChanged: (() -> Unit)? = null
+
+    private fun notifyCountersChanged() {
+        onCountersChanged?.invoke()
+    }
+
+    /**
      * W9: fired whenever [Fetch.getResponseBody] genuinely returns a body, keyed by the CDP
      * `networkId` field on the same `Fetch.requestPaused` event -- which the protocol defines
      * as equal to the `Network.requestWillBeSent.requestId` for the same underlying network
@@ -130,6 +141,7 @@ class CdpFetchAdapter(
                 when (rule?.action ?: RuleAction.LOG_ONLY) {
                     RuleAction.BLOCK -> {
                         blockedCount++
+                        notifyCountersChanged()
                         client.send(
                             "Fetch.failRequest",
                             JSONObject().apply {
@@ -142,6 +154,7 @@ class CdpFetchAdapter(
                     }
                     RuleAction.REDIRECT -> {
                         modifiedCount++
+                        notifyCountersChanged()
                         val target = rule?.replacementValue?.takeIf { it.isNotBlank() } ?: url
                         client.send(
                             "Fetch.continueRequest",
@@ -155,6 +168,7 @@ class CdpFetchAdapter(
                     }
                     RuleAction.MODIFY_REQUEST -> {
                         modifiedCount++
+                        notifyCountersChanged()
                         val continueParams = buildModifiedContinueParams(fetchRequestId, request, rule?.replacementValue)
                         client.send("Fetch.continueRequest", continueParams, sessionId = sessionId)
                         Log.i(TAG, "MODIFY_REQUEST $url")
@@ -164,6 +178,7 @@ class CdpFetchAdapter(
                     // no response body/headers to modify yet.
                     RuleAction.MODIFY_RESPONSE, RuleAction.LOG_ONLY -> {
                         allowedCount++
+                        notifyCountersChanged()
                         client.send(
                             "Fetch.continueRequest",
                             JSONObject().apply { put("requestId", fetchRequestId) },
@@ -222,6 +237,7 @@ class CdpFetchAdapter(
                         body = bodyResult.first
                         base64Encoded = bodyResult.second
                         bodiesCapturedCount++
+                        notifyCountersChanged()
                     }
                 }
 
@@ -246,6 +262,7 @@ class CdpFetchAdapter(
                 )
                 RuleEnforcer.applyResponseModification(parsed, rule.replacementValue ?: "")
                 responseModifiedCount++
+                notifyCountersChanged()
 
                 client.send("Fetch.fulfillRequest", buildFulfillParams(fetchRequestId, parsed), sessionId = sessionId)
                 Log.i(TAG, "MODIFY_RESPONSE $url (rule=${rule.name})")
