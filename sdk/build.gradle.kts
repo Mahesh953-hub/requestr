@@ -27,6 +27,19 @@ dependencies {
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.okhttp)
+
+  // Task 7: automatic HTTP stack instrumentation. All three third-party stacks are
+  // `compileOnly` so the SDK never forces them onto an embedding app that doesn't already
+  // use them -- only the stack(s) the host app itself depends on will actually be present
+  // on its runtime classpath, so the corresponding interceptor activates and the others
+  // simply reference classes that never get loaded.
+  compileOnly("io.ktor:ktor-client-core:2.3.0")
+  compileOnly("com.google.android.gms:play-services-cronet:18.1.0")
+
   testImplementation(libs.junit)
   testImplementation(libs.kotlinx.coroutines.test)
+  testImplementation(libs.okhttp)
+  testImplementation("com.squareup.okhttp3:mockwebserver:4.10.0")
+  testImplementation("io.ktor:ktor-client-core:2.3.0")
+  testImplementation("io.ktor:ktor-client-cio:2.3.0")
 }
