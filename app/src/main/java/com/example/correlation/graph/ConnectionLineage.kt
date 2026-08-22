@@ -17,27 +17,33 @@ import com.example.data.local.TlsSessionEntity
  * (v5.7, see [com.example.data.local.DnsQueryEntity]), TCP/QUIC (M1) and TLS (M2) rows are
  * already written by [com.example.interception.PacketPump] / [com.example.interception.CaptureEngine]
  * / [com.example.interception.MitmProxyEngine]. [com.example.data.local.CapturedTrafficEntity] (HTTP)
- * has no `connectionId` column, so the HTTP step is matched by host + a timestamp window instead
- * of an exact key join -- the same heuristic [com.example.correlation.CorrelationEngine] already
- * uses for cross-plane correlation, not a new invented convention.
+ * now carries a `connectionId` column (task 12) that every real producer populates with the same
+ * key its TCP/TLS row uses (`TcpStream.key` for the undecoded/VPN path, `"$host:$port"` for
+ * MITM'd rows -- see [com.example.interception.MitmProxyEngine.persistMitmTlsSession]), so the
+ * HTTP step below is an exact-key join, never a time-window heuristic. A prior draft of this
+ * matched by host + a timestamp window; that was deliberately removed because it can attach a
+ * plausible-but-wrong HTTP row to a connection, fabricating a causal chain the data does not
+ * support. [com.example.correlation.CorrelationEngine] still uses its own host+window heuristic
+ * for a different purpose (cross-plane correlation, not lineage attachment) via
+ * [com.example.data.local.CapturedTrafficDao.getByHostInWindow] -- that DAO method intentionally
+ * stays; it must never be called from this file again.
  *
  * Honest limitations, surfaced as failed/missing [LineageStep]s rather than fabricated:
  *  - The DNS step is only found if the destination IP was actually resolved via a UDP:53 query
  *    this capture session observed. Hardcoded IPs, OS-level DNS cache hits from before capture
  *    started, and DoH/DoT (this parser only listens on port 53) will show as "no DNS resolution
  *    found" -- a real gap, not a bug to hide.
- *  - [com.example.interception.tls.TlsHandshakeState.FAILED] is defined but never actually set
- *    anywhere in the codebase today, so a TLS step's `success` flag can only ever be false when
- *    the step itself is entirely missing (no TLS row found) -- there is no genuine "handshake
- *    attempted and failed" signal to surface yet.
- *  - The HTTP step is a best-effort host+time-window match; on a connection that is TLS'd but
- *    where HTTP parsing didn't run (e.g. non-HTTP protocol over TLS, or MITM inspection skipped
- *    it), it will legitimately come back empty.
+ *  - [com.example.interception.tls.TlsHandshakeState.FAILED] is a real, reachable outcome (task
+ *    11): [com.example.interception.CaptureEngine] and [com.example.interception.MitmProxyEngine]
+ *    both set it from genuine signals (fatal TLS alert, RST during handshake, close before
+ *    established, or an SSLHandshakeException on a MITM leg).
+ *  - The HTTP step is an exact `connectionId` join; on a connection that is TLS'd but where HTTP
+ *    parsing didn't run (e.g. non-HTTP protocol over TLS, or MITM inspection skipped it), or
+ *    where the producer never had a connection identity to report (SDK `/api/observe`), it will
+ *    legitimately come back empty -- that emptiness is the honest signal, not a bug to paper
+ *    over with a fuzzier match.
  */
 object ConnectionLineage {
-
-    /** How long after a TLS/TCP handshake we still consider an HTTP transaction "part of it". */
-    private const val HTTP_WINDOW_MS = 30_000L
 
     /**
      * D1: exposes the same DNS/TLS host-resolution logic [build] uses internally, so
@@ -104,10 +110,12 @@ object ConnectionLineage {
         val tls = findTlsFor(db, sessionId, connectionId, dnsRow?.hostname)
         if (tls != null) {
             steps += tlsStep(tls)
-            val host = tls.sniHost ?: dnsRow?.hostname
-            if (host != null) {
-                steps += httpSteps(db, sessionId, host, tls.establishedAt)
-            }
+            // Task 12: HTTP rows join on the TLS row's own connectionId (tls.connectionId --
+            // which is "$host:$port" for MITM'd rows, the TCP 5-tuple key otherwise), matching
+            // whichever connectionId convention MitmProxyEngine.emitTransaction /
+            // CaptureEngine's persist* sites actually wrote for this connection. Falling back
+            // to the TCP 5-tuple `connectionId` here would miss MITM'd HTTP rows entirely.
+            steps += httpSteps(db, tls.connectionId)
         } else {
             steps += LineageStep(
                 plane = ObservationEvent.ObserverSource.PACKET,
@@ -116,8 +124,10 @@ object ConnectionLineage {
                 timestamp = tcp.establishedAt,
                 success = false,
             )
-            // Plaintext HTTP fallback: match by destIp/sniHost-less host within the TCP window.
-            steps += httpSteps(db, sessionId, dnsRow?.hostname ?: tcp.destIp, tcp.establishedAt)
+            // Plaintext HTTP: joins on the TCP 5-tuple connectionId directly (CaptureEngine's
+            // persistTransaction/persistWsFrame/persistGrpcMessage all write connectionId =
+            // stream.key, which is exactly this connectionId).
+            steps += httpSteps(db, connectionId)
         }
 
         return LineageChain(connectionId = connectionId, steps = steps)
@@ -142,10 +152,12 @@ object ConnectionLineage {
             success = quic.sniHost != null,
         )
 
-        val host = quic.sniHost ?: dnsRow?.hostname
-        if (host != null) {
-            steps += httpSteps(db, sessionId, host, quic.establishedAt)
-        }
+        // Task 12/13: no HTTP/3 producer sets connectionId onto captured_traffic yet (that's
+        // task 13's job -- PacketPump.persistQuicConnection is spec'd to write
+        // connectionId = <this quic.connectionId>), so this exact join legitimately returns
+        // nothing until task 13 lands. Left as the correct query rather than a host-based
+        // heuristic, since fabricating a match here is exactly what this task exists to stop.
+        steps += httpSteps(db, connectionId)
 
         return LineageChain(connectionId = connectionId, steps = steps)
     }
@@ -230,18 +242,18 @@ object ConnectionLineage {
 
     private suspend fun httpSteps(
         db: RequestrDatabase,
-        sessionId: Long,
-        host: String,
-        anchorTs: Long,
+        connectionId: String,
     ): List<LineageStep> {
-        val rows = db.capturedTrafficDao().getByHostInWindow(sessionId, host, anchorTs, anchorTs + HTTP_WINDOW_MS)
+        // Task 12: exact connectionId join only -- no windowed fallback. See the class doc and
+        // Daos.kt's getByHostInWindow comment for why a time-window heuristic was rejected here.
+        val rows = db.capturedTrafficDao().getByConnectionId(connectionId)
         if (rows.isEmpty()) {
             return listOf(
                 LineageStep(
                     plane = ObservationEvent.ObserverSource.PROXY,
-                    label = "No HTTP transaction observed for $host",
-                    detail = "No captured_traffic row for host=$host within ${HTTP_WINDOW_MS}ms of the handshake -- either no HTTP traffic followed, or it wasn't decoded (non-HTTP protocol, or MITM inspection skipped it).",
-                    timestamp = anchorTs,
+                    label = "No HTTP transaction observed",
+                    detail = "No captured_traffic row carries connectionId=$connectionId -- either no HTTP traffic followed on this connection, it wasn't decoded (non-HTTP protocol, or MITM inspection skipped it), or the producer for this row genuinely has no connection identity to report (e.g. SDK /api/observe).",
+                    timestamp = System.currentTimeMillis(),
                     success = false,
                 )
             )

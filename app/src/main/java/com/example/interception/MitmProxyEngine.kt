@@ -219,7 +219,7 @@ class MitmProxyEngine(
                     clientWriteLock, host, port, pending)
             }
             val t2 = Thread {
-                inspectServerToClient(db, upstreamInput, decryptedOutput, clientWriteLock, pending)
+                inspectServerToClient(db, upstreamInput, decryptedOutput, clientWriteLock, pending, host, port)
             }
             t1.start(); t2.start()
             t1.join(60_000); t2.join(60_000)
@@ -301,6 +301,8 @@ class MitmProxyEngine(
         clientOut: OutputStream,
         clientWriteLock: Any,
         pending: ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>,
+        host: String,
+        port: Int,
     ) {
         val buffer = ByteArrayOutputStream()
         val chunk = ByteArray(BUFFER_SIZE)
@@ -338,7 +340,7 @@ class MitmProxyEngine(
                     } else {
                         val raw = bytes.copyOfRange(0, response.consumedBytes)
                         bytes = bytes.copyOfRange(response.consumedBytes, bytes.size)
-                        handleParsedResponse(db, response, raw, clientOut, clientWriteLock, pending)
+                        handleParsedResponse(db, response, raw, clientOut, clientWriteLock, pending, host, port)
                         buffer.reset()
                         buffer.write(bytes)
                     }
@@ -404,6 +406,8 @@ class MitmProxyEngine(
         clientOut: OutputStream,
         clientWriteLock: Any,
         pending: ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>,
+        host: String,
+        port: Int,
     ) {
         // Interim 1xx responses (e.g. 100 Continue) precede the final response:
         // forward them without consuming the request pairing. 101 is terminal
@@ -431,7 +435,7 @@ class MitmProxyEngine(
         }
         if (request != null) {
             val latencyMs = System.currentTimeMillis() - pair!!.second
-            emitTransaction(request, response, latencyMs)
+            emitTransaction(request, response, latencyMs, "$host:$port")
         }
     }
 
@@ -442,6 +446,7 @@ class MitmProxyEngine(
         request: ParsedHttpMessage,
         response: ParsedHttpMessage,
         latencyMs: Long,
+        connectionId: String,
     ) {
         val callback = onDecryptedTransaction ?: return
         val logRequests = SettingsRepository.settings.value.requestLoggingEnabled
@@ -464,6 +469,11 @@ class MitmProxyEngine(
             timestamp = System.currentTimeMillis(),
             wasDecrypted = true,
             isUndecoded = false,
+            // Task 12: MITM rows use "$host:$port" (the CONNECT target), matching
+            // persistMitmTlsSession's convention -- the engine never sees the raw 5-tuple, only
+            // the CONNECT target, so this is the exact identity ConnectionLineage.findTlsFor's
+            // two-step lookup already handles.
+            connectionId = connectionId,
         )
         runCatching { callback(entity) }
             .onSuccess {

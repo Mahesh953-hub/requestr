@@ -259,6 +259,7 @@ class CaptureEngine(
                         sessionId = sessionId,
                         wasDecrypted = false,
                         isUndecoded = true,
+                        connectionId = stream.key,
                     )
                     kotlinx.coroutines.runBlocking {
                         try { db.capturedTrafficDao().insert(entity); transactionCount++; Log.i(TAG, "Undecoded TLS persisted: ${stream.sniHost ?: stream.dstIp}") } catch (_: Exception) {}
@@ -562,6 +563,7 @@ class CaptureEngine(
             latencyMs = 0L,
             timestamp = System.currentTimeMillis(),
             wasDecrypted = stream.decryptedByMitm,
+            connectionId = stream.key,
         )
 
         runCatching {
@@ -664,6 +666,7 @@ class CaptureEngine(
             latencyMs = 0L, // without proxy we don't have timing between request/response
             timestamp = System.currentTimeMillis(),
             wasDecrypted = false,
+            connectionId = stream.key,
         )
 
         runCatching {
@@ -737,6 +740,7 @@ class CaptureEngine(
             latencyMs = 0L,
             timestamp = System.currentTimeMillis(),
             wasDecrypted = false,
+            connectionId = stream.key,
         )
         runCatching {
             kotlinx.coroutines.runBlocking { db.capturedTrafficDao().insert(entity) }
