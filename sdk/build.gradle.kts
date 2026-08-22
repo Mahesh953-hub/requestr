@@ -30,7 +30,14 @@ android {
       // without this, `setAccessible(true)` throws InaccessibleObjectException in the test
       // JVM (module boundaries don't exist on real Android/ART, only on the desktop JVM
       // Robolectric/JUnit run under).
-      it.jvmArgs("--add-opens=java.base/java.net=ALL-UNNAMED")
+      it.jvmArgs(
+        "--add-opens=java.base/java.net=ALL-UNNAMED",
+        // SslSecretExtractorTest reflects into a real Conscrypt handshake's SSLSession object
+        // graph (see the test's kdoc) -- JDK 9+ blocks setAccessible(true) on javax.net.ssl /
+        // java.lang internals from an unnamed module without this.
+        "--add-opens=java.base/javax.net.ssl=ALL-UNNAMED",
+        "--add-opens=java.base/java.lang=ALL-UNNAMED",
+      )
     }
   }
 }
@@ -62,4 +69,9 @@ dependencies {
   // classes to construct a builder against a fake delegate (no native engine runs in a JVM
   // unit test -- see the test's kdoc). compileOnly above is not visible to the test source set.
   testImplementation("com.google.android.gms:play-services-cronet:18.1.0")
+  // SslSecretExtractorTest runs a real TLS 1.2/1.3 handshake through Conscrypt's actual JVM
+  // artifact (not Android's bundled copy, which can't run outside ART) to honestly document
+  // SslSecretExtractor's real-world behavior against this build's real internal class shapes,
+  // confirmed via decompilation -- see the test's kdoc.
+  testImplementation("org.conscrypt:conscrypt-openjdk-uber:2.5.2")
 }
