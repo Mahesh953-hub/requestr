@@ -117,7 +117,10 @@ object ToolsRepository {
         val db = com.example.data.local.RequestrDatabase.get(ctx)
         repoScope.launch {
             db.customToolDao().observeAll().collect { entities ->
-                customTools.clear()
+                // Additive merge, never a clear()+rebuild: ToolsRepository is a process-wide
+                // singleton object, so a custom tool added before init() was ever called (there
+                // is no delete affordance in the UI, so this only ever grows) must not be wiped
+                // out just because a later Room emission doesn't happen to contain it yet.
                 entities.forEach { e ->
                     customTools[e.id] = CustomTool(
                         id = e.id, name = e.name, operation = e.operation,
