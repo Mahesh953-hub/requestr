@@ -723,6 +723,8 @@ fun SettingsScreen(
                 SettingsSectionHeader("RUNTIME INSTRUMENTATION")
                 GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surface) {
                     val instrumentationState by com.example.runtime.RuntimeInstrumentationEngine.stateFlow.collectAsState()
+                    val adapterStatuses by com.example.runtime.RuntimeInstrumentationEngine.adapterStatuses.collectAsState()
+                    val eventCounts by com.example.runtime.RuntimeInstrumentationEngine.eventCounts.collectAsState()
                     Column(modifier = Modifier.padding(14.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(imageVector = Icons.Default.Terminal, contentDescription = "Runtime", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
@@ -732,8 +734,8 @@ fun SettingsScreen(
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             when (instrumentationState) {
-                                com.example.runtime.InstrumentationState.ACTIVE -> "Active — polling registered adapters for real request/response events."
-                                com.example.runtime.InstrumentationState.FAILED -> "No adapter reported active (Cronet/WebView only detect class presence)."
+                                com.example.runtime.InstrumentationState.ACTIVE -> "Active — ${com.example.runtime.RuntimeInstrumentationEngine.adapterNames().size} adapters registered, polling for real request/response events."
+                                com.example.runtime.InstrumentationState.FAILED -> "Every registered adapter failed to start — see per-adapter reasons below."
                                 com.example.runtime.InstrumentationState.INITIALIZING -> "Starting..."
                                 com.example.runtime.InstrumentationState.STOPPED -> "Stopped."
                                 com.example.runtime.InstrumentationState.NOT_STARTED -> "Not started."
@@ -741,13 +743,69 @@ fun SettingsScreen(
                             fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Spacer(modifier = Modifier.height(6.dp))
+                        Text("ADAPTERS", fontWeight = FontWeight.Bold, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        if (adapterStatuses.isEmpty()) {
+                            Text("none registered", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        } else {
+                            adapterStatuses.forEach { (adapterName, statusText) ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.Top
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(adapterName, fontSize = 11.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
+                                        Text(statusText, fontSize = 9.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                    Text(
+                                        "${eventCounts[adapterName] ?: 0}",
+                                        fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+                        }
                         Text(
-                            "Adapters: " + com.example.runtime.RuntimeInstrumentationEngine.adapterNames().joinToString(", ").ifEmpty { "none registered" },
-                            fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            "OkHttp adapter reports requestr's own outbound calls made via OkHttpProxyInterceptor. Third-party apps need the Requestr Observer SDK (see sdk/) to report their own traffic.",
+                            "OkHttp reports requestr's own outbound calls made via OkHttpProxyInterceptor. Third-party apps need the Requestr Observer SDK (see sdk/) to report their own traffic.",
                             fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        // W3: offscreen WebView capture -- URL field + Start, driven straight
+                        // from this card (DEC-2: no full in-app inspector screen).
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                        Text("OFFSCREEN WEBVIEW CAPTURE", fontWeight = FontWeight.Bold, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        var webViewCaptureUrl by remember { mutableStateOf("") }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            OutlinedTextField(
+                                value = webViewCaptureUrl,
+                                onValueChange = { webViewCaptureUrl = it },
+                                label = { Text("https://example.com", fontSize = 11.sp) },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(10.dp),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                    unfocusedBorderColor = MaterialTheme.colorScheme.outline,
+                                    focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                                    unfocusedTextColor = MaterialTheme.colorScheme.onSurface
+                                )
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Button(onClick = {
+                                if (webViewCaptureUrl.isNotBlank()) {
+                                    com.example.runtime.webview.WebViewInstrumentation.loadUrl(webViewCaptureUrl)
+                                }
+                            }) {
+                                Text("Start", fontSize = 12.sp)
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        val webViewCaptured = eventCounts["WebView"] ?: 0
+                        val webViewActive = com.example.runtime.webview.WebViewInstrumentation.isActive()
+                        Text(
+                            "${if (webViewActive) "Idle" else "Not started"} · $webViewCaptured captured · load a URL and start to capture page fetch/XHR through the proxy",
+                            fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
 
                         // S2: HTTP client stack auto-detection. Two independent, honestly-labelled
