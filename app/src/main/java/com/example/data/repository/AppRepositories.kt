@@ -40,75 +40,126 @@ data class NoteFolder(
 )
 
 object NotesRepository {
-    private val _folders = MutableStateFlow<List<NoteFolder>>(
-        listOf(
-            NoteFolder("f-1", "Security Audits", 0xFF3B82F6, "🛡️"),
-            NoteFolder("f-2", "API Endpoints", 0xFF06B6D4, "🌐"),
-            NoteFolder("f-3", "Frida Snippets", 0xFFF59E0B, "⚡"),
-            NoteFolder("f-4", "Reverse Engineering", 0xFF8B5CF6, "🔍")
-        )
+
+    // Default folder taxonomy — structural categories, not user content, so (unlike the notes
+    // below) these are still worth seeding once so a fresh install has somewhere to file a note.
+    // Seeded through the same "only when Room is genuinely empty" gate as FlowRepository's
+    // defaultNodes/defaultConnections, so a user who deletes every folder does not get them
+    // resurrected on the next launch.
+    private val defaultFolders = listOf(
+        NoteFolder("f-1", "Security Audits", 0xFF3B82F6, "🛡️"),
+        NoteFolder("f-2", "API Endpoints", 0xFF06B6D4, "🌐"),
+        NoteFolder("f-3", "Frida Snippets", 0xFFF59E0B, "⚡"),
+        NoteFolder("f-4", "Reverse Engineering", 0xFF8B5CF6, "🔍")
     )
+
+    private val _folders = MutableStateFlow<List<NoteFolder>>(defaultFolders)
     val folders: StateFlow<List<NoteFolder>> = _folders.asStateFlow()
 
-    private val _notes = MutableStateFlow<List<NoteItem>>(
-        listOf(
-            NoteItem(
-                id = "n-1",
-                title = "Android 14+ APEX Certificate Store",
-                content = "# Android 14+ APEX CA Certificates\n\nStarting with Android 14, system CA certificates moved from `/system/etc/security/cacerts/` to the Conscrypt APEX module at `/apex/com.android.conscrypt/cacerts/`.\n\n### Mounting steps with Magisk:\n```bash\n# Bind mount writable tmpfs over APEX directory\nmount -t tmpfs tmpfs /apex/com.android.conscrypt/cacerts\ncp /system/etc/security/cacerts/* /apex/com.android.conscrypt/cacerts/\ncp /data/local/tmp/requestr_ca.0 /apex/com.android.conscrypt/cacerts/\n```\n- Fully trusted by all system & user apps\n- Works seamlessly with requestr root installer",
-                format = NoteFormatType.MARKDOWN,
-                folderId = "f-1",
-                folderName = "Security Audits",
-                folderColorHex = 0xFF3B82F6,
-                isPinned = true
-            ),
-            NoteItem(
-                id = "n-2",
-                title = "OAuth 2.0 PKCE Checklist",
-                content = "- [x] Code Verifier (43-128 chars random Base64URL)\n- [x] Code Challenge = BASE64URL-ENCODE(SHA256(code_verifier))\n- [ ] Authorization request with `code_challenge_method=S256`\n- [ ] Token exchange with raw `code_verifier`\n- [ ] Validate state token prevents CSRF",
-                format = NoteFormatType.CHECKLIST,
-                folderId = "f-2",
-                folderName = "API Endpoints",
-                folderColorHex = 0xFF06B6D4,
-                isPinned = true
-            ),
-            NoteItem(
-                id = "n-3",
-                title = "Custom HTML Report Template",
-                content = "<div style=\"font-family: monospace; background: #0A0E1A; color: #60A5FA; padding: 16px; border-radius: 8px;\">\n  <h2>requestr API Audit Report</h2>\n  <p>Endpoint: <code>https://api.internal/v2/user</code></p>\n  <p>Status: <span style=\"color: #22C55E;\">PASSED</span></p>\n</div>",
-                format = NoteFormatType.HTML,
-                folderId = "f-4",
-                folderName = "Reverse Engineering",
-                folderColorHex = 0xFF8B5CF6,
-                isPinned = false
-            )
-        )
-    )
+    // Task 11 (plan-app.md H1): no seed data for notes, by design — the three notes that used
+    // to live here (an APEX cert-store writeup, a PKCE checklist, an HTML report template) were
+    // fabricated sample content, exactly the "fabricated sample rows" pattern RequestrDatabase's
+    // own KDoc calls out and rejects. A fresh install now genuinely has zero notes.
+    private val _notes = MutableStateFlow<List<NoteItem>>(emptyList())
     val notes: StateFlow<List<NoteItem>> = _notes.asStateFlow()
 
+    private var appContext: Context? = null
+    private val repoScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    /**
+     * Backs [folders]/[notes] with the real `note_folders`/`notes` Room tables (task 11).
+     * Call once from MainActivity.onCreate(), mirroring [FlowRepository.init]/
+     * [ApiCollectionsRepository.init]. Folders seed their small default taxonomy on a genuinely
+     * empty table; notes never seed anything.
+     */
+    fun init(context: Context) {
+        if (appContext != null) return
+        val ctx = context.applicationContext
+        appContext = ctx
+        val db = RequestrDatabase.get(ctx)
+
+        repoScope.launch {
+            db.noteFolderDao().observeAll().collect { entities ->
+                if (entities.isEmpty() && _folders.value == defaultFolders) {
+                    defaultFolders.forEach { db.noteFolderDao().upsert(it.toEntity()) }
+                } else if (entities.isNotEmpty()) {
+                    _folders.value = entities.map { it.toNoteFolder() }
+                }
+            }
+        }
+        repoScope.launch {
+            db.noteDao().observeAll().collect { entities ->
+                _notes.value = entities.map { it.toNoteItem() }
+            }
+        }
+    }
+
     fun saveNote(note: NoteItem) {
+        val updated = note.copy(updatedAt = System.currentTimeMillis())
         val current = _notes.value
-        val exists = current.any { it.id == note.id }
-        if (exists) {
-            _notes.value = current.map { if (it.id == note.id) note.copy(updatedAt = System.currentTimeMillis()) else it }
+        val exists = current.any { it.id == updated.id }
+        _notes.value = if (exists) {
+            current.map { if (it.id == updated.id) updated else it }
         } else {
-            _notes.value = listOf(note.copy(updatedAt = System.currentTimeMillis())) + current
+            listOf(updated) + current
+        }
+        val ctx = appContext ?: return
+        repoScope.launch {
+            RequestrDatabase.get(ctx).noteDao().upsert(updated.toEntity())
         }
     }
 
     fun deleteNote(id: String) {
         _notes.value = _notes.value.filter { it.id != id }
+        val ctx = appContext ?: return
+        repoScope.launch {
+            RequestrDatabase.get(ctx).noteDao().deleteById(id)
+        }
     }
 
     fun togglePin(id: String) {
-        _notes.value = _notes.value.map {
+        val updated = _notes.value.map {
             if (it.id == id) it.copy(isPinned = !it.isPinned) else it
+        }
+        _notes.value = updated
+        val ctx = appContext ?: return
+        val toggled = updated.firstOrNull { it.id == id } ?: return
+        repoScope.launch {
+            RequestrDatabase.get(ctx).noteDao().upsert(toggled.toEntity())
         }
     }
 
     fun addFolder(name: String, colorHex: Long) {
-        _folders.value = _folders.value + NoteFolder(UUID.randomUUID().toString(), name, colorHex)
+        val folder = NoteFolder(UUID.randomUUID().toString(), name, colorHex)
+        _folders.value = _folders.value + folder
+        val ctx = appContext ?: return
+        repoScope.launch {
+            RequestrDatabase.get(ctx).noteFolderDao().upsert(folder.toEntity())
+        }
     }
+
+    // ── Entity mappers ──────────────────────────────────────────────
+
+    private fun NoteFolder.toEntity() = com.example.data.local.NoteFolderEntity(
+        id = id, name = name, colorHex = colorHex, emoji = iconEmoji
+    )
+
+    private fun com.example.data.local.NoteFolderEntity.toNoteFolder() = NoteFolder(
+        id = id, name = name, colorHex = colorHex, iconEmoji = emoji
+    )
+
+    private fun NoteItem.toEntity() = com.example.data.local.NoteEntity(
+        id = id, title = title, content = content, format = format.name,
+        folderId = folderId, folderName = folderName, folderColorHex = folderColorHex,
+        isPinned = isPinned, updatedAt = updatedAt
+    )
+
+    private fun com.example.data.local.NoteEntity.toNoteItem() = NoteItem(
+        id = id, title = title, content = content,
+        format = runCatching { NoteFormatType.valueOf(format) }.getOrDefault(NoteFormatType.MARKDOWN),
+        folderId = folderId, folderName = folderName, folderColorHex = folderColorHex,
+        isPinned = isPinned, updatedAt = updatedAt
+    )
 }
 
 // ==========================================

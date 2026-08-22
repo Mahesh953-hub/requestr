@@ -33,6 +33,7 @@ import javax.crypto.Mac
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -89,8 +90,44 @@ object ToolsRepository {
         val replacement: String,
     )
 
-    /** User-defined custom tools, stored in-memory. */
+    /**
+     * User-defined custom tools. Backed by the `custom_tools` Room table (task 11) via [init];
+     * before a Context is available (e.g. in the plain-JUnit `ToolsRepositoryCustomToolTest`,
+     * which never calls [init]) this stays a purely in-memory cache — mirrors the
+     * `appContext ?: return` guard pattern already used by [FlowRepository]/
+     * [ApiCollectionsRepository], so tool creation still works without a Context, it just isn't
+     * persisted.
+     */
     private val customTools = java.util.concurrent.ConcurrentHashMap<String, CustomTool>()
+
+    private var appContext: android.content.Context? = null
+    private val repoScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
+    )
+
+    /**
+     * Loads persisted custom tools from Room into [customTools] and republishes [catalog].
+     * Call once from MainActivity.onCreate(), mirroring [FlowRepository.init]. No seed data —
+     * an empty `custom_tools` table just means the user hasn't created one yet.
+     */
+    fun init(context: android.content.Context) {
+        if (appContext != null) return
+        val ctx = context.applicationContext
+        appContext = ctx
+        val db = com.example.data.local.RequestrDatabase.get(ctx)
+        repoScope.launch {
+            db.customToolDao().observeAll().collect { entities ->
+                customTools.clear()
+                entities.forEach { e ->
+                    customTools[e.id] = CustomTool(
+                        id = e.id, name = e.name, operation = e.operation,
+                        pattern = e.pattern, replacement = e.replacement
+                    )
+                }
+                _catalog.value = computeCatalog()
+            }
+        }
+    }
 
     private fun customToolToItem(ct: CustomTool): ToolItem = ToolItem(
         id = ct.id,
@@ -408,8 +445,19 @@ Broadcast: $ip (Derived)
      */
     fun addCustomTool(name: String, operation: String, pattern: String, replacement: String) {
         val id = "custom-${name.lowercase().replace(Regex("[^a-z0-9]"), "-")}"
-        customTools[id] = CustomTool(id = id, name = name, operation = operation, pattern = pattern, replacement = replacement)
+        val tool = CustomTool(id = id, name = name, operation = operation, pattern = pattern, replacement = replacement)
+        customTools[id] = tool
         _catalog.value = computeCatalog()
+
+        val ctx = appContext ?: return
+        repoScope.launch {
+            com.example.data.local.RequestrDatabase.get(ctx).customToolDao().upsert(
+                com.example.data.local.CustomToolEntity(
+                    id = tool.id, name = tool.name, operation = tool.operation,
+                    pattern = tool.pattern, replacement = tool.replacement,
+                )
+            )
+        }
     }
 
     /** Executes a custom tool on the input. */
