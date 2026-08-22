@@ -177,7 +177,12 @@ class MitmProxyEngine(
             val sslSocket = sslContext.socketFactory
                 .createSocket(client, host, port, true) as SSLSocket
             sslSocket.useClientMode = false
-            sslSocket.startHandshake()
+            try {
+                sslSocket.startHandshake()
+            } catch (e: javax.net.ssl.SSLException) {
+                persistFailedMitmTlsSession(db, host, port, "client-facing handshake", e)
+                return
+            }
 
             val decryptedInput = sslSocket.getInputStream()
             val decryptedOutput = sslSocket.getOutputStream()
@@ -187,7 +192,12 @@ class MitmProxyEngine(
             val upstreamSsl = SSLContext.getInstance("TLS").apply {
                 init(null, arrayOf(TrustAllCerts), SecureRandom())
             }.socketFactory.createSocket(upstream, host, port, true) as SSLSocket
-            upstreamSsl.startHandshake()
+            try {
+                upstreamSsl.startHandshake()
+            } catch (e: javax.net.ssl.SSLException) {
+                persistFailedMitmTlsSession(db, host, port, "upstream handshake", e)
+                return
+            }
 
             val upstreamInput = upstreamSsl.getInputStream()
             val upstreamOutput = upstreamSsl.getOutputStream()
@@ -630,6 +640,47 @@ class MitmProxyEngine(
             kotlinx.coroutines.runBlocking { db.tlsSessionDao().upsert(entity) }
             Log.i(TAG, "TLS session persisted: $host cipher=${entity.cipherSuite} alpn=${entity.negotiatedProtocol}")
         }.onFailure { e -> Log.w(TAG, "Failed to persist MITM TLS session for $host: ${e.message}") }
+    }
+
+    /**
+     * Task 11: persist a FAILED [com.example.data.local.TlsSessionEntity] when either leg of
+     * the MITM handshake throws. This covers the TLS 1.3 encrypted-alert case
+     * [com.example.interception.tls.TlsDecoder.parseAlert] cannot see on the wire — the MITM
+     * proxy is a real TLS endpoint, so [javax.net.ssl.SSLHandshakeException]/[SSLException] is
+     * an unambiguous, first-class failure signal, not a heuristic.
+     *
+     * Uses the same `"$host:$port"` [connectionId] convention as [persistMitmTlsSession] so a
+     * later successful re-handshake on the same host overwrites this row rather than
+     * duplicating it. Never throws — a failure here must not break the caller's early return.
+     */
+    private fun persistFailedMitmTlsSession(
+        db: RequestrDatabase,
+        host: String,
+        port: Int,
+        stage: String,
+        cause: Exception,
+    ) {
+        runCatching {
+            val connectionId = "$host:$port"
+            val entity = com.example.data.local.TlsSessionEntity(
+                tlsSessionId = connectionId,
+                sessionId = sessionId.get(),
+                connectionId = connectionId,
+                sniHost = host,
+                version = null,
+                cipherSuite = null,
+                negotiatedProtocol = null,
+                ja3Hash = null,
+                handshakeState = com.example.interception.tls.TlsHandshakeState.FAILED.name,
+                wasDecrypted = false,
+                peerCertSubject = null,
+                peerCertIssuer = null,
+                failureReason = "$stage: ${cause.javaClass.simpleName}: ${cause.message}",
+                failedAt = System.currentTimeMillis(),
+            )
+            kotlinx.coroutines.runBlocking { db.tlsSessionDao().upsert(entity) }
+            Log.w(TAG, "MITM TLS handshake FAILED: $host stage=$stage cause=${cause.message}")
+        }.onFailure { e -> Log.w(TAG, "Failed to persist FAILED MITM TLS session for $host: ${e.message}") }
     }
 
     // ── SSL context ─────────────────────────────────────────────────────

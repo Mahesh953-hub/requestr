@@ -80,6 +80,14 @@ data class TcpStream(
     /** True when this stream's bytes arrived already decrypted by the MITM proxy. */
     var decryptedByMitm: Boolean = false
 
+    /**
+     * Task 11: set once [com.example.interception.CaptureEngine] has written a terminal
+     * (FAILED, or determined-not-applicable) outcome for this stream's TLS handshake, so a
+     * closed/reset connection is classified exactly once instead of re-upserting on every
+     * subsequent packet still trickling in after close.
+     */
+    var tlsOutcomeRecorded: Boolean = false
+
     /** SNI hostname extracted from TLS ClientHello, if any. */
     var sniHost: String? = null
 

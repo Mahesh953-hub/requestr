@@ -217,10 +217,13 @@ object ConnectionLineage {
             label = "TLS handshake (${tls.sniHost ?: tls.connectionId})",
             detail = "version=${tls.version ?: "?"} cipher=${tls.cipherSuite ?: "unknown (${if (tls.wasDecrypted) "should be known" else "SNI/JA3-only, not negotiated from our view"})"} " +
                 "alpn=${tls.negotiatedProtocol ?: "?"} decrypted=${tls.wasDecrypted} state=${tls.handshakeState}" +
-                (tls.peerCertSubject?.let { " cert=$it" } ?: ""),
+                (tls.peerCertSubject?.let { " cert=$it" } ?: "") +
+                (tls.failureReason?.let { " failureReason=$it" } ?: ""),
             timestamp = tls.establishedAt,
-            // TlsHandshakeState.FAILED is defined but never set anywhere in the codebase today
-            // (see class doc) -- so this can only ever be true given that a row exists at all.
+            // Task 11: CaptureEngine and MitmProxyEngine now both write handshakeState = FAILED
+            // with a real failureReason (fatal alert, RST during handshake, close before
+            // established, or an SSLHandshakeException on either MITM leg), so this is a
+            // genuine outcome, not an unreachable state.
             success = tls.handshakeState != "FAILED",
         )
     }
