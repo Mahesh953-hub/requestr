@@ -30,6 +30,8 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class CdpNetworkAdapter(
     private val client: CdpClient,
+    /** W8: the target's flattened-session id, or null for a single-target/legacy connection. */
+    private val sessionId: String? = null,
     private val onEvent: (HttpEvent) -> Unit,
 ) {
     companion object {
@@ -50,11 +52,11 @@ class CdpNetworkAdapter(
 
     /** Enable the Network domain and start listening. Idempotent per-instance. */
     fun start() {
-        client.send("Network.enable")
-        client.on("Network.requestWillBeSent") { params -> handleRequestWillBeSent(params) }
-        client.on("Network.responseReceived") { params -> handleResponseReceived(params) }
-        client.on("Network.loadingFinished") { params -> handleLoadingFinished(params) }
-        client.on("Network.loadingFailed") { params -> handleLoadingFailed(params) }
+        client.send("Network.enable", sessionId = sessionId)
+        client.on("Network.requestWillBeSent", sessionId) { params -> handleRequestWillBeSent(params) }
+        client.on("Network.responseReceived", sessionId) { params -> handleResponseReceived(params) }
+        client.on("Network.loadingFinished", sessionId) { params -> handleLoadingFinished(params) }
+        client.on("Network.loadingFailed", sessionId) { params -> handleLoadingFailed(params) }
     }
 
     internal fun handleRequestWillBeSent(params: JSONObject) {

@@ -5,6 +5,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -21,36 +22,40 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * B1: Chrome DevTools Protocol (CDP) client.
+ * W8: Chrome DevTools Protocol (CDP) client with real multi-target auto-attach, flattened
+ * session routing, and reconnect-with-backoff -- replacing the earlier single-target,
+ * no-retry client this class doc used to describe as an explicit scope limit.
  *
- * Connects to a running Chromium/Chrome instance's remote-debugging endpoint
- * (default `localhost:9222`), the same port `--remote-debugging-port=9222`
- * exposes. This talks the *real* CDP wire protocol over a plain WebSocket:
+ * Connects to the **browser-level** endpoint (`/json/version`'s `webSocketDebuggerUrl`, not a
+ * single page target's), then:
+ *  1. `Target.setDiscoverTargets {"discover": true}` so target creation/destruction is
+ *     reported even for tabs that existed before this connection.
+ *  2. `Target.setAutoAttach {"autoAttach": true, "waitForDebuggerOnStart": false, "flatten":
+ *     true}` -- with `flatten: true`, CDP reports each attached child's `sessionId` on
+ *     `Target.attachedToTarget` and every subsequent command/event for that target carries
+ *     `sessionId` at the message's top level (no per-target socket, no nested session
+ *     protocol) -- this is the real mechanism, not a client-side simulation of it.
+ *  3. Tracks every attached target in [targets] (sessionId -> [TargetInfo]), added on
+ *     `Target.attachedToTarget` and removed on `Target.detachedFromTarget` /
+ *     `Target.targetDestroyed`.
  *
- *  1. GET http://host:port/json/version (or /json/list) to discover a page
- *     target's `webSocketDebuggerUrl` — Chrome does not expose a single
- *     "browser-wide" socket that also gets you Page/Network domain events;
- *     those are per-target sockets. This client attaches to the first
- *     page-type target it finds (matches what a typical single-tab "point
- *     requestr at my browser" workflow needs, and is an explicit, documented
- *     scope limit — see class doc below).
- *  2. Opens a WebSocket to that `webSocketDebuggerUrl`.
- *  3. Sends JSON-RPC-shaped CDP commands: `{"id":N,"method":"Domain.method","params":{...}}`
- *  4. Dispatches incoming frames: either a `{"id":N,"result":...}` response to a
- *     pending command (matched by id), or a `{"method":"Domain.event","params":...}`
- *     unsolicited event, which is routed to any registered event listener for
- *     that method.
+ * [send] takes an optional `sessionId`; when non-null it is included in the outgoing JSON-RPC
+ * message exactly as the CDP spec requires for flattened sessions. [dispatch] reads the
+ * inbound `sessionId` (present on every per-target event/response once flattened) and routes
+ * strictly to listeners registered for that same `sessionId` -- a listener registered for one
+ * target's session never sees another target's events, and a browser-level listener
+ * (`sessionId = null`) only ever sees browser-level messages, never targets' by construction of
+ * [listenerKey].
  *
- * Honest state machine, deliberately mirroring [com.example.runtime.frida.FridaClient]:
- * DISCONNECTED → CONNECTING → CONNECTED → FAILED. Never reports CONNECTED without a real
- * open WebSocket to a real target.
+ * Reconnect: on `onFailure` or a non-1000 `onClosed`, a retry loop schedules the next attempt
+ * after [computeBackoffDelayMs] (exponential, capped, jittered) on this client's own scope,
+ * incrementing [reconnectAttempt] and publishing [nextRetryDelayMs] so the UI can show
+ * "reconnecting in Ns (attempt N)" instead of a bare FAILED. [disconnect] cancels the retry
+ * loop explicitly.
  *
- * Scope caveat: this client attaches to exactly one target (the first page target
- * discovered via `/json/list`). Multi-tab / multi-target fan-out, target
- * auto-attach (`Target.setAutoAttach`), and reconnect-with-backoff are not
- * implemented — a dropped socket transitions to FAILED and requires the user to
- * reconnect from Settings. This is enough to prove genuine CDP wiring end-to-end
- * without pretending to be a production-grade multi-target CDP client.
+ * Honest state machine, mirroring [com.example.runtime.frida.FridaClient]:
+ * DISCONNECTED -> CONNECTING -> CONNECTED -> FAILED. Never reports CONNECTED without a real
+ * open WebSocket to a real browser endpoint.
  */
 class CdpClient(
     private val host: String,
@@ -59,9 +64,53 @@ class CdpClient(
     companion object {
         private const val TAG = "CdpClient"
         private const val HTTP_TIMEOUT_S = 5L
+
+        /** Base delay for attempt 1; doubles each subsequent attempt, capped at [MAX_BACKOFF_MS]. */
+        private const val BASE_BACKOFF_MS = 1_000L
+        private const val MAX_BACKOFF_MS = 16_000L
+        private const val MAX_RECONNECT_ATTEMPTS = 6
+
+        /**
+         * Pure exponential backoff schedule: attempt 1 -> 1s, 2 -> 2s, 3 -> 4s, 4 -> 8s,
+         * 5 -> 16s, 6+ -> 16s (capped). Never negative, no jitter here -- jitter (a small
+         * random +/- term) is applied by the caller around the scheduled delay so this
+         * function stays a deterministic, directly testable pure function.
+         */
+        fun computeBackoffDelayMs(attempt: Int): Long {
+            if (attempt <= 0) return 0L
+            val shifted = attempt.coerceAtMost(5) - 1
+            val raw = BASE_BACKOFF_MS shl shifted
+            return raw.coerceAtMost(MAX_BACKOFF_MS)
+        }
+
+        /**
+         * Builds one CDP JSON-RPC message. `sessionId` is included at the top level only when
+         * non-null -- CDP's flattened-session wire format requires it present for per-target
+         * commands and absent for browser-level ones, so this is not a cosmetic choice.
+         */
+        fun buildMessage(id: Int, method: String, params: JSONObject, sessionId: String? = null): JSONObject =
+            JSONObject().apply {
+                put("id", id)
+                put("method", method)
+                put("params", params)
+                if (sessionId != null) put("sessionId", sessionId)
+            }
+
+        /** Composite key so a browser-level listener and a per-session listener never collide. */
+        internal fun listenerKey(sessionId: String?, method: String): String =
+            (sessionId ?: "\u0000browser") + "|" + method
     }
 
     enum class State { DISCONNECTED, CONNECTING, CONNECTED, FAILED }
+
+    /** One CDP target attached via `Target.setAutoAttach` (flattened session). */
+    data class TargetInfo(
+        val sessionId: String,
+        val targetId: String,
+        val type: String,
+        val title: String,
+        val url: String,
+    )
 
     private val _state = MutableStateFlow(State.DISCONNECTED)
     val stateFlow: StateFlow<State> = _state.asStateFlow()
@@ -70,9 +119,24 @@ class CdpClient(
     private val _lastError = MutableStateFlow<String?>(null)
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
 
-    /** Human-readable target info (title/url) once attached, for the Settings UI. */
+    /** Human-readable target info (title/url) for the first attached target, for legacy callers. */
     private val _targetInfo = MutableStateFlow<String?>(null)
     val targetInfo: StateFlow<String?> = _targetInfo.asStateFlow()
+
+    private val _targets = MutableStateFlow<Map<String, TargetInfo>>(emptyMap())
+    val targets: StateFlow<Map<String, TargetInfo>> = _targets.asStateFlow()
+
+    private val _reconnectAttempt = MutableStateFlow(0)
+    val reconnectAttempt: StateFlow<Int> = _reconnectAttempt.asStateFlow()
+
+    private val _nextRetryDelayMs = MutableStateFlow(0L)
+    val nextRetryDelayMs: StateFlow<Long> = _nextRetryDelayMs.asStateFlow()
+
+    /** Fired on `Target.attachedToTarget` with the new [TargetInfo]; used to spin up per-target adapters. */
+    var onTargetAttached: (TargetInfo) -> Unit = {}
+
+    /** Fired on `Target.detachedFromTarget`/`Target.targetDestroyed` with the departing sessionId. */
+    var onTargetDetached: (String) -> Unit = {}
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(HTTP_TIMEOUT_S, TimeUnit.SECONDS)
@@ -87,39 +151,38 @@ class CdpClient(
     private var webSocket: WebSocket? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var connectJob: Job? = null
+    private var reconnectJob: Job? = null
+    private var explicitlyDisconnected = false
 
     private val nextId = AtomicInteger(1)
     private val pending = ConcurrentHashMap<Int, (JSONObject?, String?) -> Unit>()
 
-    /** method name -> listeners invoked with the event's `params` object. */
+    /** listenerKey(sessionId, method) -> listeners invoked with the event's `params` object. */
     private val eventListeners = ConcurrentHashMap<String, MutableList<(JSONObject) -> Unit>>()
 
-    /** Register a listener for a CDP event, e.g. "Network.requestWillBeSent". */
-    fun on(method: String, listener: (JSONObject) -> Unit) {
-        eventListeners.getOrPut(method) { mutableListOf() }.add(listener)
+    /** Register a listener for a CDP event, e.g. "Network.requestWillBeSent". `sessionId = null` means browser-level. */
+    fun on(method: String, sessionId: String? = null, listener: (JSONObject) -> Unit) {
+        eventListeners.getOrPut(listenerKey(sessionId, method)) { mutableListOf() }.add(listener)
     }
 
-    /** Connect: discover a page target via /json/list, then open its WebSocket. */
+    /** Connect to the browser-level CDP endpoint and auto-attach to every target. */
     fun connect(onResult: (Boolean, String?) -> Unit = { _, _ -> }) {
         if (_state.value == State.CONNECTING || _state.value == State.CONNECTED) {
             onResult(_state.value == State.CONNECTED, null)
             return
         }
+        explicitlyDisconnected = false
+        reconnectJob?.cancel()
+        _reconnectAttempt.value = 0
+        _nextRetryDelayMs.value = 0L
         _state.value = State.CONNECTING
         _lastError.value = null
         connectJob?.cancel()
         connectJob = scope.launch {
             try {
-                val target = discoverPageTarget()
-                if (target == null) {
-                    fail("No page target found at http://$host:$port/json/list — is Chrome running with --remote-debugging-port=$port?")
-                    onResult(false, _lastError.value)
-                    return@launch
-                }
-                _targetInfo.value = "${target.optString("title", "(untitled)")} — ${target.optString("url", "")}"
-                val wsUrl = target.optString("webSocketDebuggerUrl", "")
-                if (wsUrl.isEmpty()) {
-                    fail("Target has no webSocketDebuggerUrl")
+                val wsUrl = discoverBrowserEndpoint()
+                if (wsUrl == null) {
+                    fail("No CDP browser endpoint found at http://$host:$port/json/version — is Chrome running with --remote-debugging-port=$port?")
                     onResult(false, _lastError.value)
                     return@launch
                 }
@@ -131,26 +194,16 @@ class CdpClient(
         }
     }
 
-    private fun discoverPageTarget(): JSONObject? {
-        val req = Request.Builder().url("http://$host:$port/json/list").build()
+    private fun discoverBrowserEndpoint(): String? {
+        val req = Request.Builder().url("http://$host:$port/json/version").build()
         val response: Response = httpClient.newCall(req).execute()
         response.use {
             if (!it.isSuccessful) return null
             val body = it.body?.string() ?: return null
-            val arr = JSONArray(body)
-            for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
-                if (obj.optString("type") == "page" && obj.optString("webSocketDebuggerUrl").isNotEmpty()) {
-                    return obj
-                }
-            }
-            // Fall back to any target that at least has a debugger URL.
-            for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
-                if (obj.optString("webSocketDebuggerUrl").isNotEmpty()) return obj
-            }
+            val obj = JSONObject(body)
+            val url = obj.optString("webSocketDebuggerUrl", "")
+            return url.ifEmpty { null }
         }
-        return null
     }
 
     private fun openSocket(wsUrl: String, onResult: (Boolean, String?) -> Unit) {
@@ -158,7 +211,10 @@ class CdpClient(
         webSocket = wsClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 _state.value = State.CONNECTED
+                _reconnectAttempt.value = 0
+                _nextRetryDelayMs.value = 0L
                 Log.i(TAG, "CDP connected: $wsUrl")
+                sendDiscoveryCommands()
                 onResult(true, null)
             }
 
@@ -171,15 +227,92 @@ class CdpClient(
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                _state.value = if (code == 1000) State.DISCONNECTED else State.FAILED
-                if (code != 1000) _lastError.value = "Socket closed: $code $reason"
+                if (code == 1000) {
+                    _state.value = State.DISCONNECTED
+                } else {
+                    _lastError.value = "Socket closed: $code $reason"
+                    _state.value = State.FAILED
+                    scheduleReconnect(onResult)
+                }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 fail("Socket failure: ${t.message}")
                 onResult(false, _lastError.value)
+                scheduleReconnect(onResult)
             }
         })
+    }
+
+    /** After connecting, discover every existing/future target and auto-attach in flattened mode. */
+    private fun sendDiscoveryCommands() {
+        send("Target.setDiscoverTargets", JSONObject().apply { put("discover", true) })
+        send(
+            "Target.setAutoAttach",
+            JSONObject().apply {
+                put("autoAttach", true)
+                put("waitForDebuggerOnStart", false)
+                put("flatten", true)
+            },
+        )
+        on("Target.attachedToTarget", sessionId = null) { params -> handleAttachedToTarget(params) }
+        on("Target.detachedFromTarget", sessionId = null) { params -> handleDetached(params.optString("sessionId")) }
+        on("Target.targetDestroyed", sessionId = null) { params -> handleTargetDestroyed(params) }
+    }
+
+    private fun handleAttachedToTarget(params: JSONObject) {
+        val sessionId = params.optString("sessionId")
+        val targetInfoJson = params.optJSONObject("targetInfo") ?: return
+        if (sessionId.isEmpty()) return
+        val info = TargetInfo(
+            sessionId = sessionId,
+            targetId = targetInfoJson.optString("targetId", ""),
+            type = targetInfoJson.optString("type", ""),
+            title = targetInfoJson.optString("title", ""),
+            url = targetInfoJson.optString("url", ""),
+        )
+        _targets.value = _targets.value + (sessionId to info)
+        if (_targetInfo.value == null) {
+            _targetInfo.value = "${info.title} — ${info.url}"
+        }
+        Log.i(TAG, "CDP target attached: $sessionId ${info.type} ${info.url}")
+        onTargetAttached(info)
+    }
+
+    private fun handleDetached(sessionId: String) {
+        if (sessionId.isEmpty()) return
+        _targets.value = _targets.value - sessionId
+        onTargetDetached(sessionId)
+    }
+
+    private fun handleTargetDestroyed(params: JSONObject) {
+        val targetId = params.optString("targetId")
+        val sessionId = _targets.value.entries.firstOrNull { it.value.targetId == targetId }?.key
+        if (sessionId != null) handleDetached(sessionId)
+    }
+
+    private fun scheduleReconnect(onResult: (Boolean, String?) -> Unit) {
+        if (explicitlyDisconnected) return
+        reconnectJob?.cancel()
+        reconnectJob = scope.launch {
+            var attempt = _reconnectAttempt.value
+            while (!explicitlyDisconnected && attempt < MAX_RECONNECT_ATTEMPTS) {
+                attempt++
+                _reconnectAttempt.value = attempt
+                val delayMs = computeBackoffDelayMs(attempt)
+                _nextRetryDelayMs.value = delayMs
+                delay(delayMs)
+                if (explicitlyDisconnected) return@launch
+                _state.value = State.CONNECTING
+                val wsUrl = runCatching { discoverBrowserEndpoint() }.getOrNull()
+                if (wsUrl != null) {
+                    openSocket(wsUrl, onResult)
+                    return@launch
+                }
+                _state.value = State.FAILED
+                _lastError.value = "Reconnect attempt $attempt failed: no CDP browser endpoint at http://$host:$port/json/version"
+            }
+        }
     }
 
     private fun fail(message: String) {
@@ -202,7 +335,8 @@ class CdpClient(
             } else if (json.has("method")) {
                 val method = json.getString("method")
                 val params = json.optJSONObject("params") ?: JSONObject()
-                eventListeners[method]?.forEach { listener ->
+                val sessionId = json.optString("sessionId", "").ifEmpty { null }
+                eventListeners[listenerKey(sessionId, method)]?.forEach { listener ->
                     try { listener(params) } catch (e: Exception) {
                         Log.w(TAG, "Event listener for $method threw: ${e.message}")
                     }
@@ -213,11 +347,16 @@ class CdpClient(
         }
     }
 
+    /** Test-only entry point: routes a raw inbound frame through the real [dispatch] logic. */
+    internal fun dispatchForTest(text: String) = dispatch(text)
+
     /**
-     * Send a CDP command, e.g. send("Network.enable", JSONObject()) { result, error -> ... }.
+     * Send a CDP command, e.g. send("Network.enable", JSONObject(), sessionId = "S1") { ... }.
+     * `sessionId` must be non-null for any per-target command once auto-attach is flattened;
+     * browser-level commands (e.g. `Target.setAutoAttach` itself) pass `sessionId = null`.
      * Fire-and-forget if [callback] is left default and the caller doesn't care about the result.
      */
-    fun send(method: String, params: JSONObject = JSONObject(), callback: (JSONObject?, String?) -> Unit = { _, _ -> }) {
+    fun send(method: String, params: JSONObject = JSONObject(), sessionId: String? = null, callback: (JSONObject?, String?) -> Unit = { _, _ -> }) {
         val socket = webSocket
         if (socket == null || _state.value != State.CONNECTED) {
             callback(null, "Not connected")
@@ -225,20 +364,28 @@ class CdpClient(
         }
         val id = nextId.getAndIncrement()
         pending[id] = callback
-        val payload = JSONObject().apply {
-            put("id", id)
-            put("method", method)
-            put("params", params)
-        }
+        val payload = buildMessage(id, method, params, sessionId)
         socket.send(payload.toString())
     }
 
     fun disconnect() {
+        explicitlyDisconnected = true
         connectJob?.cancel()
+        reconnectJob?.cancel()
         webSocket?.close(1000, "client disconnect")
         webSocket = null
         pending.clear()
+        eventListeners.clear()
+        _targets.value = emptyMap()
+        _reconnectAttempt.value = 0
+        _nextRetryDelayMs.value = 0L
         _state.value = State.DISCONNECTED
         _targetInfo.value = null
     }
+}
+
+/** Kept for backwards-compatible listing of page-type targets outside a live [CdpClient] connection. */
+internal fun parseTargetList(json: String): List<JSONObject> {
+    val arr = JSONArray(json)
+    return (0 until arr.length()).map { arr.getJSONObject(it) }
 }

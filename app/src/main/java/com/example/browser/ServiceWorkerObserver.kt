@@ -22,8 +22,15 @@ import org.json.JSONObject
  * `registrationId`, so the Settings UI can show "N service workers observed" and their
  * current status without the caller having to hand-roll event bookkeeping. This is a genuine
  * CDP event -> app-visible-state pipeline, not a stub that discards what it receives.
+ *
+ * W8: takes an optional [sessionId] so one observer instance is scoped to exactly one
+ * attached CDP target under `Target.setAutoAttach`'s flattened-session model; `null` keeps
+ * this usable against a single-target/legacy connection.
  */
-class ServiceWorkerObserver(private val client: CdpClient) {
+class ServiceWorkerObserver(
+    private val client: CdpClient,
+    private val sessionId: String? = null,
+) {
     companion object {
         private const val TAG = "ServiceWorkerObserver"
     }
@@ -42,14 +49,14 @@ class ServiceWorkerObserver(private val client: CdpClient) {
     val stateFlow: StateFlow<Map<String, WorkerRegistration>> = _registrations.asStateFlow()
 
     fun start() {
-        client.send("ServiceWorker.enable")
-        client.on("ServiceWorker.workerRegistrationUpdated") { params -> handleRegistrationUpdated(params) }
-        client.on("ServiceWorker.workerVersionUpdated") { params -> handleVersionUpdated(params) }
-        client.on("ServiceWorker.workerErrorReported") { params -> handleErrorReported(params) }
+        client.send("ServiceWorker.enable", sessionId = sessionId)
+        client.on("ServiceWorker.workerRegistrationUpdated", sessionId) { params -> handleRegistrationUpdated(params) }
+        client.on("ServiceWorker.workerVersionUpdated", sessionId) { params -> handleVersionUpdated(params) }
+        client.on("ServiceWorker.workerErrorReported", sessionId) { params -> handleErrorReported(params) }
     }
 
     fun stop() {
-        client.send("ServiceWorker.disable")
+        client.send("ServiceWorker.disable", sessionId = sessionId)
     }
 
     private fun handleRegistrationUpdated(params: JSONObject) {
