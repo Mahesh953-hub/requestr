@@ -142,4 +142,22 @@ class RequestrEventListener(private val observer: RequestrObserver) : EventListe
         val start = secureConnectStart.remove(call) ?: return
         observer.recordTiming(call, "tls", System.currentTimeMillis() - start)
     }
+
+    /**
+     * **Task 8 wiring.** [EventListener.secureConnectEnd] only exposes the [okhttp3.Handshake]
+     * (cipher suite, negotiated protocol, peer certificates) -- not the underlying [SSLSocket]
+     * [KeyLogProducer.recordFromSslSocket] needs to reflect into for the client random and
+     * traffic secrets. [Connection.socket] is the earliest point in OkHttp's own listener
+     * callbacks that hands back the real socket object, so keylog production happens here
+     * instead. This fires once per physical connection (OkHttp may reuse a connection across
+     * many calls), which is exactly the granularity [KeyLogProducer]/`TlsKeyLogRegistry` want --
+     * recording is idempotent per (label, clientRandom), so a connection observed via multiple
+     * calls just re-records the same value harmlessly.
+     */
+    override fun connectionAcquired(call: Call, connection: okhttp3.Connection) {
+        val socket = runCatching { connection.socket() }.getOrNull()
+        if (socket is javax.net.ssl.SSLSocket) {
+            runCatching { KeyLogProducer.recordFromSslSocket(socket) }
+        }
+    }
 }
