@@ -181,7 +181,6 @@ private fun PillItem(dest: NavDestination, active: Boolean, alpha: Float, onClic
 private fun CollapsedChip(dest: NavDestination) {
     Row(
         Modifier.clip(RoundedCornerShape(20.dp)).background(MaterialTheme.colorScheme.primaryContainer)
-            .clickable { /* handled by parent */ }
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {

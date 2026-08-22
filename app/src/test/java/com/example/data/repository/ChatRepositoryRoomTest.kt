@@ -76,11 +76,13 @@ class ChatRepositoryRoomTest {
         ChatRepository.sendMessage("test message")
         awaitUntil { RequestrDatabase.get(context).chatMessageDao().getAll().isNotEmpty() }
 
+        // clearHistory() sets _messages empty synchronously AND launches a fire-and-forget
+        // delete. The test awaits both the database deletion and the Room observer to catch
+        // up — observeAll() emits per-transaction intermediate states, so the observer may
+        // briefly see a non-empty snapshot if deleteById rows are interleaved.
         ChatRepository.clearHistory()
-        // clearHistory() itself only fires-and-forgets the delete for production callers (a UI
-        // "clear chat" action has nothing meaningful to await) -- await the same suspend function
-        // it launches directly so this assertion is deterministic, not racing a background job.
-        ChatRepository.deleteAllPersistedMessages(context)
+        awaitUntil { RequestrDatabase.get(context).chatMessageDao().getAll().isEmpty() }
+        awaitUntil { ChatRepository.messages.value.isEmpty() }
 
         assertTrue(RequestrDatabase.get(context).chatMessageDao().getAll().isEmpty())
         assertTrue(ChatRepository.messages.value.isEmpty())
