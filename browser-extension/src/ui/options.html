@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>requestr Browser Bridge — Options</title>
+  <link rel="stylesheet" href="options.css" />
+</head>
+<body>
+  <h1>requestr Browser Bridge — Options</h1>
+
+  <section class="card">
+    <h2>Connection</h2>
+    <label class="label" for="apiBase">Local API server address</label>
+    <input id="apiBase" type="text" placeholder="http://localhost:9876" />
+    <label class="label" for="tokenInput">Pairing token (from requestr Settings &rarr; SDK Pairing &rarr; Show Pairing Token)</label>
+    <input id="tokenInput" type="password" placeholder="paste token here" autocomplete="off" />
+    <div class="buttonRow">
+      <button id="saveConnBtn">Save</button>
+      <button id="autoPairBtn" class="secondary">Pair automatically</button>
+      <button id="unpairBtn" class="danger">Unpair</button>
+    </div>
+    <div id="pairStatus" class="hint"></div>
+    <div class="row">
+      <span class="label">Server health</span>
+      <span class="value" id="healthValue">checking...</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Rules (from requestr — read only)</h2>
+    <p class="hint">Edit rules in the requestr app's Intercept Rules screen. This table mirrors what the extension last pulled.</p>
+    <div class="row">
+      <span class="label" id="ruleCounts">0 total</span>
+    </div>
+    <table id="rulesTable">
+      <thead>
+        <tr><th>ID</th><th>Name</th><th>Action</th><th>Pattern</th><th>Domain</th><th>Enabled</th><th>Replacement</th></tr>
+      </thead>
+      <tbody id="rulesTableBody"></tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Traffic Log (last 200 events observed)</h2>
+    <div class="buttonRow">
+      <input id="logFilter" type="text" placeholder="filter by URL..." />
+      <button id="clearLogBtn" class="secondary">Clear log</button>
+    </div>
+    <table id="logTable">
+      <thead>
+        <tr><th>Source</th><th>Method</th><th>URL</th><th>Status</th><th>Req body</th><th>Resp body</th><th>Rule</th></tr>
+      </thead>
+      <tbody id="logTableBody"></tbody>
+    </table>
+    <div id="bodyPreview" class="bodyPreview" style="display:none"></div>
+  </section>
+
+  <section class="card">
+    <h2>Settings</h2>
+    <label class="label" for="maxBodySlider">Max body capture size: <span id="maxBodyValue"></span> KB</label>
+    <input id="maxBodySlider" type="range" min="64" max="2048" step="64" />
+
+    <label class="label" for="flushIntervalSelect">Flush interval</label>
+    <select id="flushIntervalSelect">
+      <option value="2000">2s</option>
+      <option value="5000">5s</option>
+      <option value="10000">10s</option>
+      <option value="30000">30s</option>
+    </select>
+
+    <div class="row toggleRow">
+      <span class="label">Enforcement enabled by default</span>
+      <label class="switch">
+        <input type="checkbox" id="enforcementDefaultToggle" />
+        <span class="slider"></span>
+      </label>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>About</h2>
+    <div class="row"><span class="label">SDK version</span><span class="value" id="sdkVersion"></span></div>
+    <div class="row"><span class="label">Build</span><span class="value" id="sdkBuild"></span></div>
+  </section>
+
+  <script type="module" src="options.mjs"></script>
+</body>
+</html>

@@ -1,38 +1,48 @@
 {
   "manifest_version": 3,
   "name": "requestr Browser Bridge",
-  "version": "1.0.0",
-  "description": "Relays page-context fetch/XHR activity (and raw HTTP requests seen by chrome.webRequest) to the requestr Android app's Local API server, complementing what the CDP Browser Bridge (Settings -> Browser Bridge) can see.",
+  "version": "2.0.0",
+  "description": "requestr MV3 SDK: captures request/response bodies, enforces intercept rules where the server supplies enough data to do so, and syncs with the requestr Android app's Local API server.",
   "permissions": [
     "webRequest",
     "storage",
     "scripting",
-    "activeTab"
+    "activeTab",
+    "declarativeNetRequest",
+    "declarativeNetRequestFeedback",
+    "alarms"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "<all_urls>",
+    "http://localhost:*/*",
+    "http://127.0.0.1:*/*"
   ],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "src/background/service-worker.mjs",
+    "type": "module"
   },
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["page-interceptor.js"],
+      "js": ["src/content/interceptor-main.mjs"],
       "run_at": "document_start",
       "all_frames": true,
       "world": "MAIN"
     },
     {
       "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "js": ["src/content/bridge.mjs"],
       "run_at": "document_start",
       "all_frames": true
     }
   ],
   "action": {
-    "default_popup": "popup.html",
+    "default_popup": "src/ui/popup.html",
     "default_title": "requestr Browser Bridge"
+  },
+  "options_ui": {
+    "page": "src/ui/options.html",
+    "open_in_tab": true
   },
   "icons": {
     "16": "icons/icon16.png",

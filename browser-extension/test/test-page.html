@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>requestr Browser Bridge -- Integration Test Page</title>
+<style>
+  body { font-family: monospace; background: #0b0f19; color: #e5e7eb; padding: 20px; }
+  .test { padding: 8px; margin-bottom: 6px; border-radius: 4px; border: 1px solid #374151; }
+  .test.pass { border-color: #10b981; }
+  .test.fail { border-color: #ef4444; }
+  .test.pending { border-color: #6b7280; }
+  .test.skip { border-color: #f59e0b; }
+  .status { font-weight: bold; }
+  pre { background: #111827; padding: 8px; overflow-x: auto; max-height: 160px; }
+</style>
+</head>
+<body>
+<h1>requestr Browser Bridge -- Integration Test Page</h1>
+<p>
+  Load this page with the extension installed and open the extension's service worker
+  console (chrome://extensions -&gt; Inspect views) to watch <code>__requestr_fetch_observed__</code>
+  events flow. This page also drives the interceptor directly and reports pass/fail for
+  each case below without depending on any external network endpoint (all requests target
+  this same page's own inline resources or fail deterministically, so the suite works
+  offline / without a running requestr app).
+</p>
+<div id="results"></div>
+
+<script>
+  const resultsEl = document.getElementById("results");
+  const cases = [];
+
+  function addCase(name, fn) {
+    const el = document.createElement("div");
+    el.className = "test pending";
+    el.innerHTML = `<span class="status">PENDING</span> — ${name}<pre style="display:none"></pre>`;
+    resultsEl.appendChild(el);
+    cases.push({ name, fn, el });
+  }
+
+  async function runCase(c) {
+    const pre = c.el.querySelector("pre");
+    try {
+      const detail = await c.fn();
+      if (detail && detail.__skip) {
+        c.el.className = "test skip";
+        c.el.querySelector(".status").textContent = "SKIP";
+        pre.style.display = "block";
+        pre.textContent = detail.__skip;
+        return;
+      }
+      c.el.className = "test pass";
+      c.el.querySelector(".status").textContent = "PASS";
+      pre.style.display = "block";
+      pre.textContent = JSON.stringify(detail, null, 2);
+    } catch (e) {
+      c.el.className = "test fail";
+      c.el.querySelector(".status").textContent = "FAIL";
+      pre.style.display = "block";
+      pre.textContent = String((e && e.message) || e);
+    }
+  }
+
+  function escapeRegex(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  /** Waits for the interceptor's __requestr_fetch_observed__ CustomEvent whose
+   *  detail.url contains urlSubstring. This page's own <script> runs in the same MAIN
+   *  JS world as interceptor-main.mjs (content script world "MAIN" shares window with
+   *  the page), so it can listen for the dispatched event directly -- no extension
+   *  message-passing needed for verification. */
+  function waitForEvent(urlSubstring, timeoutMs = 3000) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        window.removeEventListener("__requestr_fetch_observed__", onEvent);
+        reject(
+          new Error(
+            "timed out waiting for __requestr_fetch_observed__ matching \"" +
+              urlSubstring +
+              "\" -- is the extension loaded and enabled on this page (world: MAIN content script)?"
+          )
+        );
+      }, timeoutMs);
+      function onEvent(e) {
+        if (e.detail && typeof e.detail.url === "string" && e.detail.url.indexOf(urlSubstring) !== -1) {
+          clearTimeout(timer);
+          window.removeEventListener("__requestr_fetch_observed__", onEvent);
+          resolve(e.detail);
+        }
+      }
+      window.addEventListener("__requestr_fetch_observed__", onEvent);
+    });
+  }
+
+  // Test 1: fetch GET with JSON response -- verifies the page receives an unmodified
+  // response even though the interceptor cloned and read it.
+  addCase("fetch GET JSON response, page still receives correct data", async () => {
+    const res = await fetch("data:application/json," + encodeURIComponent(JSON.stringify({ ok: true, n: 42 })));
+    const json = await res.json();
+    if (json.n !== 42) throw new Error("page received corrupted response: " + JSON.stringify(json));
+    return { receivedByPage: json };
+  });
+
+  // Test 2: fetch POST with a JSON string body -- verifies captureRequestBody path runs
+  // without throwing and the real request still completes (checked by response text
+  // matching what a same-origin echo would produce -- here we just verify no error).
+  addCase("fetch POST with JSON body does not throw", async () => {
+    const body = JSON.stringify({ hello: "world" });
+    const res = await fetch("data:text/plain,posted", { method: "POST", body });
+    const text = await res.text();
+    return { requestBodySent: body, responseText: text };
+  });
+
+  // Test 3: Blob response -- verifies page receives the blob and interceptor doesn't corrupt it.
+  addCase("fetch with blob response, page receives blob correctly", async () => {
+    const res = await fetch("data:text/plain,blobtest");
+    const blob = await res.blob();
+    const text = await blob.text();
+    if (text !== "blobtest") throw new Error("blob content corrupted: " + text);
+    return { blobText: text };
+  });
+
+  // Test 4: XHR GET -- verifies XHR patch doesn't break normal usage.
+  addCase("XMLHttpRequest GET completes normally", () => {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("GET", "data:text/plain,xhrtest");
+      xhr.onload = () => {
+        if (xhr.responseText !== "xhrtest") reject(new Error("XHR response corrupted: " + xhr.responseText));
+        else resolve({ responseText: xhr.responseText, status: xhr.status });
+      };
+      xhr.onerror = () => reject(new Error("XHR errored"));
+      xhr.send();
+    });
+  });
+
+  // Test 5: XHR POST with body -- verifies send() body capture path doesn't alter what's sent.
+  addCase("XMLHttpRequest POST with body completes normally", () => {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "data:text/plain,xhrposttest");
+      xhr.onload = () => resolve({ status: xhr.status, responseText: xhr.responseText });
+      xhr.onerror = () => reject(new Error("XHR errored"));
+      xhr.send(JSON.stringify({ a: 1 }));
+    });
+  });
+
+  // Test 6: rejected fetch (network error path) still resolves the interceptor's error
+  // branch without throwing an unrelated error.
+  addCase("fetch to unreachable host rejects with the real network error (not swallowed)", async () => {
+    try {
+      await fetch("http://127.0.0.1:1/__requestr_test_unreachable__");
+      throw new Error("expected fetch to reject, but it resolved");
+    } catch (e) {
+      if (e.message === "expected fetch to reject, but it resolved") throw e;
+      return { rejectedWith: String(e && e.message ? e.message : e) };
+    }
+  });
+
+  // Test 7: rule injection via postMessage -- verifies the MAIN-world interceptor's
+  // message listener updates cachedRules without throwing (does not require the
+  // extension's bridge to be present; this simulates what bridge.mjs sends).
+  addCase("window.postMessage rules-update is accepted without throwing", async () => {
+    window.postMessage(
+      {
+        type: "__requestr_rules_update__",
+        rules: [{ id: 999, name: "test-block-rule", domain: "example-blocked-test.invalid", action: "BLOCK", enabled: true }],
+        enforcementEnabled: true,
+      },
+      window.location.origin
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    return { posted: true };
+  });
+
+  // Test 8: concurrency -- 5 simultaneous fetches, verifying no cross-request interleaving
+  // corrupts any individual response.
+  addCase("5 concurrent fetches all resolve with their own distinct content", async () => {
+    const urls = [0, 1, 2, 3, 4].map((i) => `data:text/plain,concurrent-${i}`);
+    const results = await Promise.all(urls.map((u) => fetch(u).then((r) => r.text())));
+    results.forEach((text, i) => {
+      if (text !== `concurrent-${i}`) throw new Error(`response ${i} corrupted: got "${text}"`);
+    });
+    return { results };
+  });
+
+  // Test 9: MODIFY_REQUEST rule (addHeaders) -- verifies the interceptor actually adds the
+  // configured header to the outgoing request (not just that it doesn't throw) and that
+  // the dispatched observed-event reports the *modified* headers, not the page's originals.
+  // This requires the real extension to be loaded (data: URLs can't echo headers back, so
+  // this asserts against the interceptor's own dispatched event rather than a server echo).
+  addCase("fetch -> MODIFY_REQUEST rule (addHeaders) actually rewrites outgoing headers", async () => {
+    const marker = "modreq-" + Date.now();
+    const targetUrl = "data:text/plain," + marker;
+    window.postMessage(
+      {
+        type: "__requestr_rules_update__",
+        rules: [
+          {
+            id: 9001,
+            name: "test-modify-request",
+            pattern: escapeRegex(marker),
+            action: "MODIFY_REQUEST",
+            enabled: true,
+            replacementValue: JSON.stringify({ addHeaders: { "X-Requestr-Test": "injected" } }),
+          },
+        ],
+        enforcementEnabled: true,
+      },
+      window.location.origin
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    const eventPromise = waitForEvent(marker);
+    const res = await fetch(targetUrl);
+    await res.text();
+    const detail = await eventPromise;
+    if (!detail.requestHeaders || detail.requestHeaders["X-Requestr-Test"] !== "injected") {
+      throw new Error(
+        "observed event did not report the injected header -- got requestHeaders=" +
+          JSON.stringify(detail.requestHeaders)
+      );
+    }
+    if (detail.ruleAction !== "MODIFY_REQUEST") {
+      throw new Error("expected ruleAction MODIFY_REQUEST, got " + detail.ruleAction);
+    }
+    return { observedRequestHeaders: detail.requestHeaders, ruleAction: detail.ruleAction };
+  });
+
+  // Test 10: MODIFY_RESPONSE rule (bodyReplace) -- verifies the page actually receives the
+  // *replaced* body, not the original data: URL content, and that the original body is
+  // discarded rather than merged/appended.
+  addCase("fetch -> MODIFY_RESPONSE rule (bodyReplace) swaps the body the page receives", async () => {
+    const marker = "modresp-" + Date.now();
+    const targetUrl = "data:text/plain," + marker + "-original";
+    const replacement = "REPLACED-" + marker;
+    window.postMessage(
+      {
+        type: "__requestr_rules_update__",
+        rules: [
+          {
+            id: 9002,
+            name: "test-modify-response",
+            pattern: escapeRegex(marker),
+            action: "MODIFY_RESPONSE",
+            enabled: true,
+            replacementValue: JSON.stringify({ statusCode: 200, bodyReplace: replacement }),
+          },
+        ],
+        enforcementEnabled: true,
+      },
+      window.location.origin
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    const eventPromise = waitForEvent(marker);
+    const res = await fetch(targetUrl);
+    const text = await res.text();
+    if (text !== replacement) {
+      throw new Error(
+        `page received "${text}" -- expected the rule's replacement body "${replacement}", ` +
+          "original body must be fully discarded, not merged"
+      );
+    }
+    const detail = await eventPromise;
+    if (detail.ruleAction !== "MODIFY_RESPONSE") {
+      throw new Error("expected ruleAction MODIFY_RESPONSE, got " + detail.ruleAction);
+    }
+    return { pageReceivedBody: text, ruleAction: detail.ruleAction };
+  });
+
+  // Test 11: slow/chunked response -- verifies readWithTimeout()'s reader loop doesn't hang
+  // and duration is measured correctly across a response body delivered over several
+  // separate stream chunks with a real delay between each. Uses a test-only Service Worker
+  // (slow-response-sw.js, same directory as this page) to answer a same-origin fetch with a
+  // genuinely time-delayed ReadableStream -- this is real network-layer streaming latency,
+  // not a data: URL, so it exercises the same response.body.getReader() loop in
+  // captureResponseBody() that a slow real server would hit. Service workers require a
+  // secure/http(s) origin; if this page is opened via file:// (no origin to register a SW
+  // against) or the browser blocks SW registration, this case is honestly reported as
+  // SKIP rather than faked as a pass -- see README's "Integration testing" section for how
+  // to serve this page over http:// to run this case for real.
+  addCase("slow chunked response (via test Service Worker): duration captured, reader does not hang", async () => {
+    if (!("serviceWorker" in navigator)) {
+      return { __skip: "navigator.serviceWorker unavailable in this context (try serving over http://, not file://)" };
+    }
+    let registration;
+    try {
+      registration = await navigator.serviceWorker.register("./slow-response-sw.js");
+      await navigator.serviceWorker.ready;
+    } catch (e) {
+      return { __skip: "Service Worker registration failed (" + (e && e.message) + ") -- serve this page over http:// to run this case" };
+    }
+
+    const marker = "slow-" + Date.now();
+    const targetUrl = "__requestr_slow__/" + marker;
+    const start = performance.now();
+    const eventPromise = waitForEvent(targetUrl, 6000);
+    const res = await fetch(targetUrl);
+    const text = await res.text();
+    const elapsedMs = performance.now() - start;
+
+    if (text !== "chunk1-chunk2-" + marker) {
+      throw new Error("page received corrupted streamed body: " + text);
+    }
+    if (elapsedMs < 300) {
+      throw new Error("response resolved too fast (" + Math.round(elapsedMs) + "ms) -- SW chunk delays did not apply");
+    }
+
+    const detail = await eventPromise;
+    if (typeof detail.durationMs !== "number" || detail.durationMs < 300) {
+      throw new Error("observed durationMs (" + detail.durationMs + ") does not reflect the ~450ms of chunk delays");
+    }
+    if (detail.responseBodyTruncated) {
+      throw new Error("body was truncated even though it is well under maxBodyBytes -- reader loop misbehaved");
+    }
+
+    try {
+      await registration.unregister();
+    } catch (_e) {
+      /* best effort cleanup */
+    }
+
+    return { pageReceivedBody: text, elapsedMs: Math.round(elapsedMs), observedDurationMs: detail.durationMs };
+  });
+
+  (async () => {
+    for (const c of cases) await runCase(c);
+  })();
+</script>
+</body>
+</html>
