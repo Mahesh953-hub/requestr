@@ -28,7 +28,7 @@ data class TcpStream(
     /** Bytes received from the server (server → app direction). */
     val serverToClient = DirectionBuffer("$dstIp:$dstPort → $srcIp:$srcPort")
 
-    val key: String get() = "$protocol|$srcIp:$srcPort>$dstIp:$dstPort"
+    val key: String get() = com.example.correlation.ConnectionKey.forTcp(srcIp, srcPort, dstIp, dstPort, protocol)
 
     /** When we first saw this flow (SYN or first data). */
     var establishedAt: Long = System.currentTimeMillis()
@@ -57,7 +57,7 @@ data class TcpStream(
 
     companion object {
         fun keyFrom(srcIp: String, srcPort: Int, dstIp: String, dstPort: Int, protocol: Int = 6): String =
-            "$protocol|$srcIp:$srcPort>$dstIp:$dstPort"
+            com.example.correlation.ConnectionKey.forTcp(srcIp, srcPort, dstIp, dstPort, protocol)
     }
 }
 

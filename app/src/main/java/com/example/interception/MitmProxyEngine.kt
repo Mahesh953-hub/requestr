@@ -608,7 +608,7 @@ class MitmProxyEngine(
             val clientSession: SSLSession = clientFacingSocket.session
             val upstreamSession: SSLSession = upstreamSocket.session
             val peerCert = upstreamSession.peerCertificates?.firstOrNull() as? X509Certificate
-            val connectionId = "$host:$port"
+            val connectionId = com.example.correlation.ConnectionKey.forHostPort(host, port)
             val entity = com.example.data.local.TlsSessionEntity(
                 tlsSessionId = connectionId,
                 sessionId = sessionId.get(),
