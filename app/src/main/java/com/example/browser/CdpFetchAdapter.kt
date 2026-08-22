@@ -81,6 +81,16 @@ class CdpFetchAdapter(
     @Volatile var bodiesCapturedCount: Int = 0
         private set
 
+    /**
+     * W9: fired whenever [Fetch.getResponseBody] genuinely returns a body, keyed by the CDP
+     * `networkId` field on the same `Fetch.requestPaused` event -- which the protocol defines
+     * as equal to the `Network.requestWillBeSent.requestId` for the same underlying network
+     * transaction when one exists. [BrowserBridgeManager] wires this to
+     * [CdpNetworkAdapter.onResponseBodyCaptured] so the real body/size reach the [HttpEvent]
+     * that adapter already emits, instead of leaving `responseBody`/`responseSize` hardcoded.
+     */
+    var onResponseBodyCaptured: ((networkId: String, body: String, sizeBytes: Long) -> Unit)? = null
+
     fun start() {
         val params = JSONObject().apply {
             put(
@@ -177,6 +187,11 @@ class CdpFetchAdapter(
         val host = runCatching { java.net.URI(url).host }.getOrNull() ?: url
         val statusCode = event.optInt("responseStatusCode", 200)
         val responseHeadersJson = event.optJSONArray("responseHeaders")
+        // Per the CDP spec, `networkId` on a Fetch.requestPaused event equals the
+        // Network.requestWillBeSent.requestId for the same transaction when the Network
+        // domain also observed it -- this is the join key CdpNetworkAdapter.applyResponseBody
+        // expects. Absent when no matching Network.requestWillBeSent fired.
+        val networkId = event.optString("networkId", "").ifEmpty { null }
 
         scope.launch {
             try {
@@ -214,6 +229,10 @@ class CdpFetchAdapter(
                     runCatching { String(Base64.getDecoder().decode(body), Charsets.UTF_8) }.getOrDefault(body)
                 } else {
                     body
+                }
+
+                if (networkId != null && decodedBody.isNotEmpty()) {
+                    onResponseBodyCaptured?.invoke(networkId, decodedBody, decodedBody.toByteArray(Charsets.UTF_8).size.toLong())
                 }
 
                 val parsed = ParsedHttpMessage(

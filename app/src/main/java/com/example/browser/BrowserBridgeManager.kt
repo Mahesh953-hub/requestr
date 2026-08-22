@@ -145,7 +145,18 @@ object BrowserBridgeManager {
         netAdapter.start()
 
         val context = appContext
-        val fa = if (context != null) CdpFetchAdapter(cdpClient, context, sessionId).also { it.start() } else null
+        val fa = if (context != null) {
+            CdpFetchAdapter(cdpClient, context, sessionId).also { adapter ->
+                // W9: feed every response body Fetch genuinely captures back into the same
+                // target's CdpNetworkAdapter, joined on Network.requestId == Fetch's networkId.
+                adapter.onResponseBodyCaptured = { networkId, body, sizeBytes ->
+                    netAdapter.applyResponseBody(networkId, body, sizeBytes)
+                }
+                adapter.start()
+            }
+        } else {
+            null
+        }
 
         val swObserver = ServiceWorkerObserver(cdpClient, sessionId)
         swObserver.start()

@@ -27,6 +27,15 @@ import java.util.concurrent.ConcurrentHashMap
  * [InitiatorResolver.resolveStack] and attached to [HttpEvent]'s first-class `initiator` /
  * `initiatorStackFrames` fields, rather than smuggled in as a pseudo request header (the
  * previous `X-Requestr-Initiator` shortcut this replaces).
+ *
+ * W9 wiring: `Network.requestId` and `Fetch.requestPaused.networkId` are the same identifier
+ * per the CDP spec when both domains observe the same transaction, so
+ * [BrowserBridgeManager] feeds every body [CdpFetchAdapter] genuinely captures via
+ * `Fetch.getResponseBody` into [applyResponseBody] here, keyed by that shared id. This is
+ * best-effort: the two domains give no ordering guarantee between `Fetch.requestPaused`
+ * (response stage) and `Network.responseReceived`, so a body that arrives after [emit] has
+ * already fired for that request is simply not attached -- `responseBody`/`responseSize` fall
+ * back to their previous `null`/`0` values rather than blocking or re-emitting.
  */
 class CdpNetworkAdapter(
     private val client: CdpClient,
@@ -49,6 +58,21 @@ class CdpNetworkAdapter(
     )
 
     private val pendingRequests = ConcurrentHashMap<String, PendingRequest>()
+
+    /** requestId -> (body, sizeBytes), populated by [applyResponseBody] ahead of [emit]. */
+    private val capturedResponseBodies = ConcurrentHashMap<String, Pair<String, Long>>()
+
+    /**
+     * W9: record a response body [CdpFetchAdapter] captured via `Fetch.getResponseBody` for the
+     * network transaction identified by [networkId] (== `Network.requestId`), so [emit] can
+     * attach the real body/size instead of the previous hardcoded `null`/`0`. Safe to call
+     * before or after [handleRequestWillBeSent]; a call for a request that already emitted (or
+     * never existed on the Network domain) is a harmless no-op.
+     */
+    fun applyResponseBody(networkId: String, body: String, sizeBytes: Long) {
+        if (networkId.isEmpty()) return
+        capturedResponseBodies[networkId] = body to sizeBytes
+    }
 
     /** Enable the Network domain and start listening. Idempotent per-instance. */
     fun start() {
@@ -104,6 +128,7 @@ class CdpNetworkAdapter(
     internal fun handleLoadingFinished(params: JSONObject) {
         val requestId = params.optString("requestId")
         pendingRequests.remove(requestId)
+        capturedResponseBodies.remove(requestId)
     }
 
     internal fun handleLoadingFailed(params: JSONObject) {
@@ -114,6 +139,7 @@ class CdpNetworkAdapter(
             // No response ever arrived -- still emit so the failure is visible, matching
             // this adapter's "never silently drop browser activity" contract from the class doc.
             emit(req, null, mapOf("X-Requestr-Error" to errorText))
+            capturedResponseBodies.remove(requestId)
         } catch (e: Exception) {
             Log.w(TAG, "loadingFailed parse failed: ${e.message}")
         }
@@ -121,6 +147,7 @@ class CdpNetworkAdapter(
 
     private fun emit(req: PendingRequest, statusCode: Int?, responseHeaders: Map<String, String>) {
         val host = runCatching { java.net.URI(req.url).host }.getOrNull() ?: req.url
+        val capturedBody = capturedResponseBodies[req.requestId]
         onEvent(
             HttpEvent(
                 eventId = "cdp-net-${req.requestId}-${req.timestamp}",
@@ -134,12 +161,13 @@ class CdpNetworkAdapter(
                 requestHeaders = req.headers,
                 responseHeaders = responseHeaders,
                 requestSize = 0,
-                responseSize = 0,
+                responseSize = capturedBody?.second ?: 0,
                 wasDecrypted = true, // CDP sees plaintext application-layer data by construction
                 protocol = "CDP",
                 requestId = req.requestId,
                 initiator = req.initiatorDescription,
                 initiatorStackFrames = req.initiatorStackFrames,
+                responseBody = capturedBody?.first,
             )
         )
     }

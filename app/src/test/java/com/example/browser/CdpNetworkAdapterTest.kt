@@ -106,4 +106,77 @@ class CdpNetworkAdapterTest {
         val event = events.first()
         assertEquals("unknown", event.initiator)
     }
+
+    // ---- W9: applyResponseBody joins a CdpFetchAdapter-captured body by shared requestId ----
+
+    @Test
+    fun `a body applied before the response arrives is attached to the emitted event`() {
+        val events = mutableListOf<com.example.correlation.HttpEvent>()
+        val adapter = CdpNetworkAdapter(CdpClient("localhost", 9222)) { events.add(it) }
+
+        adapter.handleRequestWillBeSent(
+            jsonOf(
+                """
+                {"requestId": "req-4", "timestamp": 400.0, "request": {"method": "GET", "url": "https://example.com/api", "headers": {}}}
+                """.trimIndent()
+            )
+        )
+        adapter.applyResponseBody("req-4", "{\"ok\":true}", 11L)
+        adapter.handleResponseReceived(
+            jsonOf(
+                """{"requestId": "req-4", "response": {"status": 200, "url": "https://example.com/api", "headers": {}}}"""
+            )
+        )
+
+        val event = events.first()
+        assertEquals("{\"ok\":true}", event.responseBody)
+        assertEquals(11L, event.responseSize)
+    }
+
+    @Test
+    fun `no applyResponseBody call leaves responseBody null and responseSize zero`() {
+        val events = mutableListOf<com.example.correlation.HttpEvent>()
+        val adapter = CdpNetworkAdapter(CdpClient("localhost", 9222)) { events.add(it) }
+
+        adapter.handleRequestWillBeSent(
+            jsonOf(
+                """
+                {"requestId": "req-5", "timestamp": 500.0, "request": {"method": "GET", "url": "https://example.com/api", "headers": {}}}
+                """.trimIndent()
+            )
+        )
+        adapter.handleResponseReceived(
+            jsonOf(
+                """{"requestId": "req-5", "response": {"status": 200, "url": "https://example.com/api", "headers": {}}}"""
+            )
+        )
+
+        val event = events.first()
+        assertEquals(null, event.responseBody)
+        assertEquals(0L, event.responseSize)
+    }
+
+    @Test
+    fun `applyResponseBody with an empty networkId is a no-op`() {
+        val events = mutableListOf<com.example.correlation.HttpEvent>()
+        val adapter = CdpNetworkAdapter(CdpClient("localhost", 9222)) { events.add(it) }
+
+        adapter.handleRequestWillBeSent(
+            jsonOf(
+                """
+                {"requestId": "req-6", "timestamp": 600.0, "request": {"method": "GET", "url": "https://example.com/api", "headers": {}}}
+                """.trimIndent()
+            )
+        )
+        adapter.applyResponseBody("", "ignored", 5L)
+        adapter.handleResponseReceived(
+            jsonOf(
+                """{"requestId": "req-6", "response": {"status": 200, "url": "https://example.com/api", "headers": {}}}"""
+            )
+        )
+
+        val event = events.first()
+        assertEquals(null, event.responseBody)
+        assertEquals(0L, event.responseSize)
+    }
 }
