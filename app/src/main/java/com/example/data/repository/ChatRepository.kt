@@ -2,8 +2,11 @@ package com.example.data.repository
 
 import android.content.Context
 import com.example.data.local.ChatMessageEntity
+import com.example.data.local.ChatProviderEntity
 import com.example.data.local.RequestrDatabase
 import com.example.data.models.ChatMessage
+import com.example.data.models.ChatProviderConfig
+import com.example.data.prefs.SecureKeyStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -20,8 +23,14 @@ import okhttp3.RequestBody.Companion.toRequestBody
  * Supports configurable API providers (OpenAI-compatible format) for
  * chat completion. Falls back to a local echo/mock response when no
  * provider is configured.
+ *
+ * Task 12: the provider's `name`/`baseUrl`/`model`/`isActive` live in the `chat_providers` Room
+ * table (task 11); the API key is never stored there -- it lives only in Keystore-backed
+ * storage ([SecureKeyStore]), looked up by provider id. See [providerConfig].
  */
 object ChatRepository {
+
+    private const val DEFAULT_PROVIDER_ID = "default"
 
     // Task 11: no seed data -- an empty `chat_messages` table just means no conversation has
     // happened yet, matching NotesRepository's "no seed data" decision for the same reason.
@@ -31,16 +40,20 @@ object ChatRepository {
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
-    var providerUrl: String = ""
-    var providerKey: String = ""
-    var providerModel: String = ""
+    // Task 12: replaces the old plain `var providerUrl`/`providerKey`/`providerModel` fields --
+    // those had no writer anywhere and ChatScreen read them as plain vars inside composition, so
+    // the provider banner could never recompose even once a writer existed. This StateFlow is
+    // updated by loadProviderConfig()/saveProviderConfig() and collected in ChatScreen.
+    private val _providerConfig = MutableStateFlow(ChatProviderConfig(id = DEFAULT_PROVIDER_ID))
+    val providerConfig: StateFlow<ChatProviderConfig> = _providerConfig.asStateFlow()
 
     private var appContext: Context? = null
     private val repoScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     /**
-     * Backs [messages] with the real `chat_messages` Room table (task 11). Call once from
-     * MainActivity.onCreate(), mirroring [NotesRepository.init]/[FlowRepository.init].
+     * Backs [messages] with the real `chat_messages` Room table (task 11), and loads the
+     * persisted provider config (Room metadata + Keystore key) into [providerConfig]. Call once
+     * from MainActivity.onCreate(), mirroring [NotesRepository.init]/[FlowRepository.init].
      */
     fun init(context: Context) {
         if (appContext != null) return
@@ -49,6 +62,75 @@ object ChatRepository {
         repoScope.launch {
             RequestrDatabase.get(ctx).chatMessageDao().observeAll().collect { entities ->
                 _messages.value = entities.map { it.toChatMessage() }
+            }
+        }
+        repoScope.launch { loadProviderConfig() }
+    }
+
+    /**
+     * Reloads [providerConfig] from Room (metadata) + [SecureKeyStore] (key) for
+     * [DEFAULT_PROVIDER_ID]. Safe to call multiple times, e.g. after [saveProviderConfig].
+     */
+    private suspend fun loadProviderConfig() {
+        val ctx = appContext ?: return
+        val entity = RequestrDatabase.get(ctx).chatProviderDao().getAll()
+            .firstOrNull { it.id == DEFAULT_PROVIDER_ID }
+            ?: return // nothing saved yet -- keep the all-blank default
+
+        val key = when (val result = SecureKeyStore.getSecret(ctx, entity.id)) {
+            is SecureKeyStore.SecretReadResult.Found -> result.value
+            SecureKeyStore.SecretReadResult.Absent -> ""
+            // Task 12 non-negotiable: an unreadable key must never look like "no key entered".
+            // ChatScreen/SettingsScreen key this off apiKey.isBlank() vs a dedicated flag; since
+            // isConfigured only gates whether callProvider is reachable (never silently swallowed
+            // as success), surfacing "" here plus the provider still failing loudly at call time
+            // is acceptable, but we log so the underlying cause is diagnosable.
+            SecureKeyStore.SecretReadResult.Unreadable -> {
+                android.util.Log.w(
+                    "ChatRepository",
+                    "Stored API key for provider ${entity.id} is unreadable (auth tag failed) " +
+                        "-- treating as not configured; user must re-enter it in Settings.",
+                )
+                ""
+            }
+        }
+
+        _providerConfig.value = ChatProviderConfig(
+            id = entity.id,
+            name = entity.name,
+            baseUrl = entity.baseUrl,
+            model = entity.model,
+            apiKey = key,
+            isActive = entity.isActive,
+        )
+    }
+
+    /**
+     * Persists [config]'s metadata to Room and its key to [SecureKeyStore], then updates
+     * [providerConfig] so the UI reflects the change immediately (not just on the next
+     * observeAll() emission, which the `chat_providers` table alone can't drive since the key
+     * isn't in it).
+     */
+    fun saveProviderConfig(config: ChatProviderConfig) {
+        val ctx = appContext ?: run {
+            _providerConfig.value = config
+            return
+        }
+        _providerConfig.value = config
+        repoScope.launch {
+            RequestrDatabase.get(ctx).chatProviderDao().upsert(
+                ChatProviderEntity(
+                    id = config.id,
+                    name = config.name,
+                    baseUrl = config.baseUrl,
+                    model = config.model,
+                    isActive = config.isActive,
+                ),
+            )
+            if (config.apiKey.isNotBlank()) {
+                SecureKeyStore.putSecret(ctx, config.id, config.apiKey)
+            } else {
+                SecureKeyStore.removeSecret(ctx, config.id)
             }
         }
     }
@@ -70,8 +152,9 @@ object ChatRepository {
         _isLoading.value = true
 
         // Generate response
-        val response = if (providerUrl.isNotBlank() && providerKey.isNotBlank()) {
-            callProvider(text)
+        val config = _providerConfig.value
+        val response = if (config.isConfigured) {
+            callProvider(text, config)
         } else {
             // Local fallback: echo with context awareness
             generateLocalResponse(text)
@@ -118,30 +201,40 @@ object ChatRepository {
      * Calls an OpenAI-compatible chat completion API.
      * Works with OpenAI, Anthropic (via proxy), or any compatible endpoint.
      */
-    private suspend fun callProvider(userMessage: String): String {
+    /**
+     * Builds the OpenAI-compatible chat-completion request body: `model`, a `messages` array
+     * windowed to the last 10 messages of [history] (oldest-to-newest, matching [ChatMessage]
+     * ordering), and `max_tokens`. Extracted as a pure function (task 12) so the shape can be
+     * asserted on directly in [com.example.data.repository.ChatProviderConfigTest] without a
+     * real network call.
+     */
+    internal fun buildRequestBodyJson(config: ChatProviderConfig, history: List<ChatMessage>): org.json.JSONObject {
+        return org.json.JSONObject().apply {
+            put("model", config.model.ifBlank { "gpt-3.5-turbo" })
+            put("messages", org.json.JSONArray().apply {
+                history.takeLast(10).forEach { msg ->
+                    put(org.json.JSONObject().apply {
+                        put("role", msg.role)
+                        put("content", msg.content)
+                    })
+                }
+            })
+            put("max_tokens", 1000)
+        }
+    }
+
+    private suspend fun callProvider(userMessage: String, config: ChatProviderConfig): String {
         return try {
             val client = okhttp3.OkHttpClient.Builder()
                 .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
                 .build()
 
-            val requestBody = org.json.JSONObject().apply {
-                put("model", providerModel.ifBlank { "gpt-3.5-turbo" })
-                put("messages", org.json.JSONArray().apply {
-                    // Include conversation history for context
-                    _messages.value.takeLast(10).forEach { msg ->
-                        put(org.json.JSONObject().apply {
-                            put("role", msg.role)
-                            put("content", msg.content)
-                        })
-                    }
-                })
-                put("max_tokens", 1000)
-            }
+            val requestBody = buildRequestBodyJson(config, _messages.value)
 
             val request = okhttp3.Request.Builder()
-                .url(providerUrl)
-                .addHeader("Authorization", "Bearer $providerKey")
+                .url(config.baseUrl)
+                .addHeader("Authorization", "Bearer ${config.apiKey}")
                 .addHeader("Content-Type", "application/json")
                 .post(requestBody.toString().toRequestBody("application/json".toMediaTypeOrNull()))
                 .build()
@@ -162,6 +255,8 @@ object ChatRepository {
                 "Error ${response.code}: ${response.message}"
             }
         } catch (e: Exception) {
+            // Never logs config.apiKey -- only the exception message, which is provider/network
+            // detail, not the secret itself.
             "Connection failed: ${e.message}. Check provider URL and API key in Settings."
         }
     }
@@ -190,7 +285,7 @@ object ChatRepository {
             lower.contains("help") ->
                 "I can help with: interception, API testing, flows/automation, tools, rules, certificates, and app navigation. What specific feature do you need help with?"
             else ->
-                "I don't have an AI provider configured, so I'm running in local mode. I can answer questions about requestr's features. Try asking about interception, flows, API testing, tools, rules, or certificates."
+                "I don't have an AI provider configured, so I'm running in local mode (this is an honest fallback, not a bug -- add a provider in Settings to reach a real model). I can answer questions about requestr's features. Try asking about interception, flows, API testing, tools, rules, or certificates."
         }
     }
 }

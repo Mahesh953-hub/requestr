@@ -42,10 +42,9 @@ class ChatRepositoryRoomTest {
 
     @Test
     fun `chat history round-trips through Room with role and ordering preserved`() = runBlocking {
-        // No provider configured, so sendMessage exercises the local-mock path -- exactly what
-        // task 12 keeps as the honest fallback -- while still writing both messages to Room.
-        ChatRepository.providerUrl = ""
-        ChatRepository.providerKey = ""
+        // No provider configured (ChatProviderConfig() defaults to blank baseUrl/apiKey), so
+        // sendMessage exercises the local-mock path -- exactly what task 12 keeps as the honest
+        // fallback -- while still writing both messages to Room.
         ChatRepository.sendMessage("hello")
 
         awaitUntil { RequestrDatabase.get(context).chatMessageDao().getAll().size >= 2 }
@@ -65,8 +64,6 @@ class ChatRepositoryRoomTest {
 
     @Test
     fun `clearHistory deletes the persisted rows, not just the in-memory list`() = runBlocking {
-        ChatRepository.providerUrl = ""
-        ChatRepository.providerKey = ""
         ChatRepository.sendMessage("test message")
         awaitUntil { RequestrDatabase.get(context).chatMessageDao().getAll().isNotEmpty() }
 

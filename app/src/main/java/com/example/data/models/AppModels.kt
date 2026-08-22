@@ -452,3 +452,22 @@ data class ChatMessage(
     val content: String,
     val timestamp: Long = System.currentTimeMillis(),
 )
+
+/**
+ * Task 12 — the chat provider configuration `ChatRepository` exposes to the UI.
+ *
+ * `name`/`baseUrl`/`model`/`isActive` are backed by the `chat_providers` Room table (task 11).
+ * `apiKey` is NOT a Room column — it is read from / written to Keystore-backed storage
+ * ([com.example.data.prefs.SecureKeyStore]) keyed by [id], and only ever lives in memory here.
+ */
+data class ChatProviderConfig(
+    val id: String = "default",
+    val name: String = "Default",
+    val baseUrl: String = "",
+    val model: String = "",
+    val apiKey: String = "",
+    val isActive: Boolean = true,
+) {
+    /** A provider needs both an endpoint and a key before [ChatRepository] will call it. */
+    val isConfigured: Boolean get() = baseUrl.isNotBlank() && apiKey.isNotBlank()
+}

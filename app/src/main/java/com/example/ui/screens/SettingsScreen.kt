@@ -750,6 +750,97 @@ fun SettingsScreen(
                 }
             }
 
+            // Task 12: AI Provider — configures the OpenAI-compatible endpoint ChatRepository
+            // calls from the Chats section. Before this card existed there was no writer
+            // anywhere for the provider fields, so callProvider() was permanently unreachable
+            // and the app was always in local-mock mode. name/baseUrl/model/isActive persist to
+            // the chat_providers Room table (task 11); the API key never does -- it goes through
+            // SecureKeyStore (raw AndroidKeyStore AES/GCM), keyed by provider id.
+            item {
+                SettingsSectionHeader("AI PROVIDER")
+                GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surface) {
+                    val providerConfig by com.example.data.repository.ChatRepository.providerConfig.collectAsState()
+                    var urlInput by remember(providerConfig.baseUrl) { mutableStateOf(providerConfig.baseUrl) }
+                    var modelInput by remember(providerConfig.model) { mutableStateOf(providerConfig.model) }
+                    var keyInput by remember(providerConfig.apiKey) { mutableStateOf(providerConfig.apiKey) }
+                    var keyVisible by remember { mutableStateOf(false) }
+
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(imageVector = Icons.Default.VpnKey, contentDescription = "AI Provider", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Chat Completion Endpoint", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            if (providerConfig.isConfigured) "Configured — the Chats section will call this provider." else "Not configured — the Chats section runs in local mode (no network calls).",
+                            fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Text("Base URL", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        OutlinedTextField(
+                            value = urlInput,
+                            onValueChange = { urlInput = it },
+                            singleLine = true,
+                            placeholder = { Text("https://api.openai.com/v1/chat/completions", fontSize = 11.sp) },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(10.dp),
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Text("Model", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        OutlinedTextField(
+                            value = modelInput,
+                            onValueChange = { modelInput = it },
+                            singleLine = true,
+                            placeholder = { Text("gpt-3.5-turbo", fontSize = 11.sp) },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(10.dp),
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Text("API Key (stored in AndroidKeyStore, never in Room/DataStore in plaintext)", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        OutlinedTextField(
+                            value = keyInput,
+                            onValueChange = { keyInput = it },
+                            singleLine = true,
+                            visualTransformation = if (keyVisible) androidx.compose.ui.text.input.VisualTransformation.None
+                                else androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                            trailingIcon = {
+                                IconButton(onClick = { keyVisible = !keyVisible }) {
+                                    Icon(
+                                        imageVector = if (keyVisible) Icons.Default.Visibility else Icons.Default.Language,
+                                        contentDescription = if (keyVisible) "Hide key" else "Show key",
+                                    )
+                                }
+                            },
+                            placeholder = { Text("sk-…", fontSize = 11.sp) },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(10.dp),
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Button(
+                            onClick = {
+                                com.example.data.repository.ChatRepository.saveProviderConfig(
+                                    providerConfig.copy(
+                                        baseUrl = urlInput.trim(),
+                                        model = modelInput.trim(),
+                                        apiKey = keyInput,
+                                    )
+                                )
+                                android.widget.Toast.makeText(settingsContext, "AI provider saved.", android.widget.Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("Save Provider")
+                        }
+                    }
+                }
+            }
+
+
             // Section 5.5b: Runtime Instrumentation (R1+R3) — honest status for the adapter
             // pattern engine. Started automatically at app launch (see MainActivity); this
             // card just surfaces real state instead of leaving the whole subsystem invisible.

@@ -51,8 +51,6 @@ import kotlinx.coroutines.launch
  * When a provider URL + API key is configured in Settings, messages are
  * sent to an OpenAI-compatible chat completion endpoint. Without a provider,
  * falls back to local responses about the app's features.
- *
- * TODO #44 (Chats section).
  */
 @Composable
 fun ChatScreen(
@@ -60,6 +58,11 @@ fun ChatScreen(
 ) {
     val messages by ChatRepository.messages.collectAsState()
     val isLoading by ChatRepository.isLoading.collectAsState()
+    // Task 12: this used to read ChatRepository.providerUrl as a plain var inside composition,
+    // so the banner below could never recompose even after Settings wrote a provider -- there
+    // was no writer for that var anywhere in the app either. collectAsState() on the real
+    // StateFlow means the banner now updates the moment Settings saves a config.
+    val providerConfig by ChatRepository.providerConfig.collectAsState()
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     var inputText by remember { mutableStateOf("") }
@@ -92,7 +95,7 @@ fun ChatScreen(
         )
 
         // Provider status banner
-        if (ChatRepository.providerUrl.isBlank()) {
+        if (!providerConfig.isConfigured) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
