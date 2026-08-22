@@ -94,10 +94,21 @@ abstract class RequestrDatabase : RoomDatabase() {
                     RequestrDatabase::class.java,
                     "requestr.db",
                 )
-                    // Real migration path as of v9 -- no more fallbackToDestructiveMigration.
-                    // Upgrading from v8 now preserves all user data; before this change every
-                    // version bump wiped every table.
+                    // Real migration path as of v9 -- v8 now preserves all user data via
+                    // MIGRATION_8_9. But `main` has shipped released builds at versions 1-7
+                    // (confirmed via `git log -p` on this file's `version =` field) with
+                    // exportSchema = false the whole time, so there is no exported schema JSON
+                    // for any of those versions to author a faithful migration against -- only
+                    // 8.json and 9.json exist under app/schemas/. Rather than crash every
+                    // pre-8 install with Room's "A migration from N to 9 was required but not
+                    // found" IllegalStateException on every launch, fall back to destructive
+                    // recreation *only* for those specific unsupported legacy versions (1-7).
+                    // This wipes captured traffic/saved requests/flow graphs for pre-8 users --
+                    // real, disclosed data loss (see AUDIT_REPORT.md/TODO_v5.md) -- but it is
+                    // strictly better than a crash loop, and it does not touch the v8->v9 path,
+                    // which stays a real, non-destructive migration.
                     .addMigrations(MIGRATION_8_9)
+                    .fallbackToDestructiveMigrationFrom(/* dropAllTables = */ true, 1, 2, 3, 4, 5, 6, 7)
                     .build()
                     .also { INSTANCE = it }
             }

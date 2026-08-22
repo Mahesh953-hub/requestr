@@ -6,6 +6,9 @@ import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
@@ -39,6 +42,19 @@ object RequestrObserver {
     private var apiBase = "http://127.0.0.1:9876"
     private var pairingToken: String? = null
     private val pendingEvents = mutableListOf<ObserverEvent>()
+
+    /** Hard cap on [pendingEvents] so a host app that keeps calling [observe]/[observeDetailed]
+     * while `/api/observe` is unreachable (or rejecting every batch with 401) can't grow this
+     * list without bound. Oldest events are dropped first -- see [enqueue]. */
+    private const val MAX_PENDING_EVENTS = 2000
+
+    private val _lastFlushStatus = MutableStateFlow<FlushStatus>(FlushStatus.Idle)
+
+    /** Outcome of the most recent [flush] attempt, consistent with how [RequestrSdk] exposes
+     * [RequestrSdk.isInitialized] as host-observable state. Lets an embedding app surface "not
+     * paired" / "server unreachable" in its own UI instead of the failure being silently logged
+     * and swallowed. */
+    val lastFlushStatus: StateFlow<FlushStatus> = _lastFlushStatus.asStateFlow()
 
     /** DNS/connect/TLS timing recorded by [RequestrEventListener], keyed by the OkHttp [Call]
      * instance it was observed on (identity-keyed map -- OkHttp's RealCall doesn't override
@@ -162,11 +178,37 @@ object RequestrObserver {
     fun consumeTiming(call: Call): TimingBreakdown? = pendingTiming.remove(call)
 
     private fun enqueue(event: ObserverEvent) {
-        synchronized(pendingEvents) { pendingEvents.add(event) }
+        synchronized(pendingEvents) {
+            pendingEvents.add(event)
+            // Drop the oldest events first -- they're the ones least useful to a live debugging
+            // session, and this keeps the list itself (not just a single flush batch) bounded
+            // even if flush() is failing continuously (e.g. permanently unpaired, see FIX 6).
+            val overflow = pendingEvents.size - MAX_PENDING_EVENTS
+            if (overflow > 0) {
+                Log.w(TAG, "pendingEvents exceeded $MAX_PENDING_EVENTS, dropping $overflow oldest event(s)")
+                repeat(overflow) { pendingEvents.removeAt(0) }
+            }
+        }
         flush()
     }
 
-    /** Flush pending events to the local API. */
+    /** Flush pending events to the local API.
+     *
+     * FIX 6: the previous implementation called `execute().close()` and treated *any* completed
+     * HTTP exchange as success -- `execute()` only throws on I/O failure (unreachable host,
+     * timeout, etc.), so a 401 (bad/rotated pairing token) or 5xx from `/api/observe` was silently
+     * discarded: [pendingEvents] had already been cleared before this coroutine ran, so a
+     * non-exceptional-but-unsuccessful response meant the batch was gone for good with no trace
+     * beyond a log line that nobody but the host app's logcat consumer would ever see.
+     *
+     * Now: the response is inspected via [okhttp3.Response.isSuccessful] inside `use { }`.
+     * Non-2xx responses re-queue the batch (respecting [MAX_PENDING_EVENTS], same as [enqueue])
+     * exactly like an I/O exception does, and [lastFlushStatus] is updated so a host app can
+     * observe persistent failure instead of it being invisible. 401/403 (bad or revoked pairing
+     * token -- a permanent credential problem, more retries won't help until the user re-pairs)
+     * are surfaced distinctly from transient 5xx/I-O failures so a host app can tell "you need to
+     * re-pair" apart from "server's temporarily down".
+     */
     fun flush() {
         if (context == null) return
         val events: List<ObserverEvent>
@@ -207,10 +249,37 @@ object RequestrObserver {
                     .url("$apiBase/api/observe")
                     .post(body.toRequestBody("application/json".toMediaType()))
                 pairingToken?.let { requestBuilder.addHeader("Authorization", "Bearer $it") }
-                client.newCall(requestBuilder.build()).execute().close()
+                client.newCall(requestBuilder.build()).execute().use { response ->
+                    if (response.isSuccessful) {
+                        _lastFlushStatus.value = FlushStatus.Success
+                    } else if (response.code == 401 || response.code == 403) {
+                        Log.w(TAG, "Flush rejected (${response.code}, bad/revoked pairing token), re-queuing ${events.size} events")
+                        requeue(events)
+                        _lastFlushStatus.value = FlushStatus.Unauthorized(response.code)
+                    } else {
+                        Log.w(TAG, "Flush failed (HTTP ${response.code}), re-queuing ${events.size} events")
+                        requeue(events)
+                        _lastFlushStatus.value = FlushStatus.ServerError(response.code)
+                    }
+                }
             } catch (e: Exception) {
                 Log.w(TAG, "Flush failed, re-queuing ${events.size} events: ${e.message}")
-                synchronized(pendingEvents) { pendingEvents.addAll(events) }
+                requeue(events)
+                _lastFlushStatus.value = FlushStatus.NetworkError(e.message)
+            }
+        }
+    }
+
+    /** Re-queues a failed batch at the FRONT of [pendingEvents] (oldest-first order preserved)
+     * then re-applies [MAX_PENDING_EVENTS], dropping the oldest overflow -- same policy [enqueue]
+     * uses, so a permanently-failing flush loop can't grow the list without bound either. */
+    private fun requeue(events: List<ObserverEvent>) {
+        synchronized(pendingEvents) {
+            pendingEvents.addAll(0, events)
+            val overflow = pendingEvents.size - MAX_PENDING_EVENTS
+            if (overflow > 0) {
+                Log.w(TAG, "pendingEvents exceeded $MAX_PENDING_EVENTS after re-queue, dropping $overflow oldest event(s)")
+                repeat(overflow) { pendingEvents.removeAt(0) }
             }
         }
     }
@@ -224,6 +293,29 @@ object RequestrObserver {
             response.use { it.isSuccessful }
         } catch (_: Exception) { false }
     }
+}
+
+/** Outcome of the most recent [RequestrObserver.flush] attempt -- see [RequestrObserver.lastFlushStatus]. */
+sealed class FlushStatus {
+    /** No flush has completed yet (or none was ever attempted) since [RequestrObserver.init]. */
+    object Idle : FlushStatus()
+
+    /** The most recent flush's batch was accepted (2xx). */
+    object Success : FlushStatus()
+
+    /** The most recent flush was rejected with 401/403 -- the pairing token is missing, wrong,
+     * or was rotated on requestr's side. This is a permanent credential problem: the batch was
+     * re-queued, but retrying it as-is will keep failing until the host app calls
+     * [RequestrObserver.init] again with a valid token. */
+    data class Unauthorized(val httpCode: Int) : FlushStatus()
+
+    /** The most recent flush reached `/api/observe` but got back a non-2xx, non-401/403 response
+     * (e.g. a transient 5xx). The batch was re-queued; a later flush may well succeed. */
+    data class ServerError(val httpCode: Int) : FlushStatus()
+
+    /** The most recent flush couldn't complete an HTTP exchange at all (host unreachable,
+     * timeout, etc). The batch was re-queued; a later flush may well succeed. */
+    data class NetworkError(val message: String?) : FlushStatus()
 }
 
 /** DNS/connect/TLS-handshake timing for a single request, in milliseconds. Any leg may be null

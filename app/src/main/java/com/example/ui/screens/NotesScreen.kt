@@ -90,7 +90,17 @@ fun NotesScreen(
 
     if (activeNoteToEdit != null || isCreatingNew) {
         // Full Editor Mode
-        val currentNote = activeNoteToEdit ?: NoteItem(id = UUID.randomUUID().toString(), title = "New Security Note", content = "")
+        // Bug fix: this used to construct a fresh NoteItem (with a brand-new random UUID) on
+        // every recomposition when creating a new note (activeNoteToEdit == null). Since
+        // editTitle/editContent/editFormat are keyed on `currentNote` via remember(currentNote),
+        // and NoteItem's equals()/hashCode() include `id`, every keystroke's onValueChange
+        // triggered a recompose that manufactured a *new* currentNote identity, which reset
+        // editContent back to "" on the very next frame -- so typed text never visibly landed.
+        // Wrapping the "new note" placeholder in remember(activeNoteToEdit) keeps its id (and the
+        // rest of the object) stable for the lifetime of this editing session.
+        val currentNote = activeNoteToEdit ?: remember(activeNoteToEdit) {
+            NoteItem(id = UUID.randomUUID().toString(), title = "New Security Note", content = "")
+        }
         var editTitle by remember(currentNote) { mutableStateOf(currentNote.title) }
         var editContent by remember(currentNote) { mutableStateOf(currentNote.content) }
         var editFormat by remember(currentNote) { mutableStateOf(currentNote.format) }

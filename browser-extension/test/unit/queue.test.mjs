@@ -2,7 +2,7 @@
 // for these three functions -- they're the parts genuinely testable with plain node).
 // Run with: node test/unit/queue.test.mjs
 import assert from "node:assert/strict";
-import { overflowDropCount, partitionByRetries, nextRetryDelayMs } from "../../src/sdk/queue.mjs";
+import { overflowDropCount, partitionByRetries, nextRetryDelayMs, isDue } from "../../src/sdk/queue.mjs";
 
 let failures = 0;
 function test(name, fn) {
@@ -49,6 +49,24 @@ test("nextRetryDelayMs: matches backoffDelay semantics per event's retry count",
   assert.equal(nextRetryDelayMs({ retries: 1 }), 2000);
   assert.equal(nextRetryDelayMs({ retries: 10 }), 30000);
   assert.equal(nextRetryDelayMs({}), 1000); // missing retries defaults to attempt 0
+});
+
+// FIX 7: flush() used to retry every queued event on every ~30s alarm tick regardless of
+// its own backoff schedule, contradicting the "exponential backoff" claim in README.md.
+// isDue() is the pure predicate flush() now uses to skip events still inside their window.
+test("isDue: true for an event with no nextAttemptAt at all (never failed yet)", () => {
+  assert.equal(isDue({ url: "a" }, Date.now()), true);
+});
+
+test("isDue: false while now is before nextAttemptAt", () => {
+  const now = 1_000_000;
+  assert.equal(isDue({ url: "a", nextAttemptAt: now + 5000 }, now), false);
+});
+
+test("isDue: true once now reaches or passes nextAttemptAt", () => {
+  const now = 1_000_000;
+  assert.equal(isDue({ url: "a", nextAttemptAt: now }, now), true);
+  assert.equal(isDue({ url: "a", nextAttemptAt: now - 1 }, now), true);
 });
 
 if (failures > 0) {

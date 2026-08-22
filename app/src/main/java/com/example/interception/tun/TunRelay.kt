@@ -163,6 +163,7 @@ class TunRelay(
                 if ((flags and TcpReassembler.FLAG_SYN) == 0) return // no flow, not a SYN: nothing to open
                 if (tcpFlows.size >= MAX_FLOWS) evictOldestTcp()
                 flow = TcpRelayFlow(header.family, header.srcIp, srcPort, header.dstIp, dstPort)
+                flow.mapKey = key
                 flow.guestNextSeq = seq + 1 // SYN consumes one sequence number
                 tcpFlows[key] = flow
                 openTcpUpstream(flow)
@@ -204,7 +205,7 @@ class TunRelay(
             if (!protected) {
                 Log.w(TAG, "Failed to protect TCP upstream socket; refusing to relay to avoid a tun loop")
                 updateStats { it.copy(relayErrors = it.relayErrors + 1) }
-                tcpFlows.remove(flow.key)
+                tcpFlows.remove(flow.mapKey)
                 return
             }
             flow.channel = channel
@@ -218,7 +219,7 @@ class TunRelay(
         } catch (e: Exception) {
             Log.w(TAG, "TCP upstream open failed: ${e.message}")
             updateStats { it.copy(relayErrors = it.relayErrors + 1) }
-            tcpFlows.remove(flow.key)
+            tcpFlows.remove(flow.mapKey)
         }
     }
 
@@ -250,7 +251,7 @@ class TunRelay(
             }
         } catch (e: Exception) {
             Log.w(TAG, "TCP upstream write failed: ${e.message}")
-            synchronized(flowLock) { closeTcpFlow(flow.key, flow, sendFinToGuest = false) }
+            synchronized(flowLock) { closeTcpFlow(flow.mapKey, flow, sendFinToGuest = false) }
         }
     }
 
@@ -285,7 +286,7 @@ class TunRelay(
             channel.read(buf)
         } catch (e: Exception) {
             Log.w(TAG, "TCP upstream read failed: ${e.message}")
-            synchronized(flowLock) { closeTcpFlow(flow.key, flow, sendFinToGuest = true) }
+            synchronized(flowLock) { closeTcpFlow(flow.mapKey, flow, sendFinToGuest = true) }
             return
         }
         if (n < 0) {
@@ -294,7 +295,7 @@ class TunRelay(
             flow.ourSeq += 1
             synchronized(flowLock) {
                 if (flow.state == TcpRelayState.CLOSING) {
-                    closeTcpFlow(flow.key, flow, sendFinToGuest = false)
+                    closeTcpFlow(flow.mapKey, flow, sendFinToGuest = false)
                 } else {
                     flow.state = TcpRelayState.CLOSING
                 }
@@ -347,6 +348,7 @@ class TunRelay(
                 if (udpFlows.size >= MAX_FLOWS) evictOldestUdp()
                 flow = UdpRelayFlow(header.family, header.srcIp, srcPort, header.dstIp, dstPort)
                 udpFlows[key] = flow
+                flow.mapKey = key
                 if (!openUdpUpstream(flow)) {
                     udpFlows.remove(key)
                     return
@@ -468,7 +470,7 @@ class TunRelay(
                             key.interestOps(SelectionKey.OP_READ)
                             onTcpConnected(attachment)
                         } else {
-                            synchronized(flowLock) { closeTcpFlow(attachment.key, attachment, sendFinToGuest = false) }
+                            synchronized(flowLock) { closeTcpFlow(attachment.mapKey, attachment, sendFinToGuest = false) }
                             updateStats { it.copy(relayErrors = it.relayErrors + 1) }
                         }
                         return
@@ -538,13 +540,12 @@ class TunRelay(
     }
 
     private fun flowKey(protocol: Int, family: Int, srcIp: ByteArray, srcPort: Int, dstIp: ByteArray, dstPort: Int): String {
-        val srcStr = if (family == 4) IpAddressCodec.formatIpv4(srcIp, 0) else IpAddressCodec.formatIpv6(srcIp, 0)
-        val dstStr = if (family == 4) IpAddressCodec.formatIpv4(dstIp, 0) else IpAddressCodec.formatIpv6(dstIp, 0)
+        val srcStr = IpAddressCodec.format(family, srcIp)
+        val dstStr = IpAddressCodec.format(family, dstIp)
         return "$protocol|$family|$srcStr:$srcPort>$dstStr:$dstPort"
     }
 
-    private fun addrString(family: Int, ip: ByteArray): String =
-        if (family == 4) IpAddressCodec.formatIpv4(ip, 0) else IpAddressCodec.formatIpv6(ip, 0)
+    private fun addrString(family: Int, ip: ByteArray): String = IpAddressCodec.format(family, ip)
 
     private fun u16(buf: ByteArray, off: Int): Int = ((buf[off].toInt() and 0xFF) shl 8) or (buf[off + 1].toInt() and 0xFF)
     private fun u32(buf: ByteArray, off: Int): Long =

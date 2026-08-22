@@ -81,10 +81,27 @@ export async function purgeDead() {
  * exceed MAX_RETRIES move to the dead-letter queue instead of being retried
  * forever. Never silently drops a batch without accounting for it in either
  * the persisted queue, the dead-letter queue, or droppedCount.
+ *
+ * FIX 7: only events whose backoff window has actually elapsed (`nextAttemptAt`,
+ * unset or in the past) are sent -- everything else stays queued untouched. This
+ * is what makes the exponential backoff documented in README.md real: previously
+ * `nextRetryDelayMs`/`backoffDelay` were computed but never consulted here, so
+ * every item was retried on every alarm tick (a fixed ~30s cadence) regardless of
+ * its retry count. The 30s `chrome.alarms` tick is now a polling cadence (how
+ * often we *check* whether anything is due), not the retry cadence itself.
  */
 export async function flush() {
   const queue = await readSession(QUEUE_KEY);
   if (queue.length === 0) return { sent: 0, failed: 0 };
+
+  const now = Date.now();
+  const due = queue.filter((e) => isDue(e, now));
+  const notDue = queue.filter((e) => !isDue(e, now));
+  if (due.length === 0) {
+    // Nothing has crossed its backoff window yet -- leave the queue exactly as-is
+    // and report that this tick was a no-op rather than pretending nothing is queued.
+    return { sent: 0, failed: 0, skipped: notDue.length };
+  }
 
   const config = await getConfig();
   const authHeaders = await getAuthHeaders();
@@ -95,7 +112,7 @@ export async function flush() {
     const res = await fetch(`${config.apiBase}/api/observe`, {
       method: "POST",
       headers: Object.assign({ "Content-Type": "application/json" }, authHeaders),
-      body: JSON.stringify({ events: queue.map(stripRetryMeta) }),
+      body: JSON.stringify({ events: due.map(stripRetryMeta) }),
     });
     ok = res.ok;
     statusForRetryDecision = res.status;
@@ -107,18 +124,31 @@ export async function flush() {
   lastFlushAt = Date.now();
 
   if (ok) {
-    relayedCount += queue.length;
+    relayedCount += due.length;
     lastError = null;
-    await writeSession(QUEUE_KEY, []);
-    return { sent: queue.length, failed: 0 };
+    // Only the events that were actually sent are removed -- events still waiting
+    // out their backoff window (notDue) are untouched.
+    await writeSession(QUEUE_KEY, notDue);
+    return { sent: due.length, failed: 0 };
   }
 
   // A 401 means the token is wrong/missing -- retrying immediately won't help,
   // but we still keep the events (server may get paired later) rather than
   // dropping them, since that's a config problem, not a data problem.
-  const bumped = queue.map((e) => Object.assign({}, e, { retries: (e.retries || 0) + 1 }));
+  //
+  // nextAttemptAt is computed from each event's PRE-bump retries count via
+  // nextRetryDelayMs, so it matches that function's own documented semantics
+  // exactly (retries=0 -> first retry waits 1s, retries=1 -> second retry waits
+  // 2s, etc.) -- the retry counter is bumped only after the delay is computed.
+  const bumped = due.map((e) => {
+    const delayMs = nextRetryDelayMs(e);
+    return Object.assign({}, e, {
+      retries: (e.retries || 0) + 1,
+      nextAttemptAt: Date.now() + delayMs,
+    });
+  });
   const { keep, dead } = partitionByRetries(bumped, MAX_RETRIES);
-  await writeSession(QUEUE_KEY, keep);
+  await writeSession(QUEUE_KEY, keep.concat(notDue));
   if (dead.length > 0) {
     const existingDead = await readSession(DEAD_KEY);
     const now = Date.now();
@@ -127,11 +157,24 @@ export async function flush() {
     if (drop > 0) newDead.splice(0, drop);
     await writeSession(DEAD_KEY, newDead);
   }
-  return { sent: 0, failed: keep.length, deadLettered: dead.length, statusCode: statusForRetryDecision };
+  return {
+    sent: 0,
+    failed: keep.length,
+    deadLettered: dead.length,
+    statusCode: statusForRetryDecision,
+    skipped: notDue.length,
+  };
+}
+
+/** Pure function (unit-tested directly): true if `event` has no pending backoff window,
+ *  or its window has already elapsed as of `now`. Exposed (like [overflowDropCount] and
+ *  [partitionByRetries]) so [flush]'s due/not-due split is testable without chrome.*. */
+export function isDue(event, now) {
+  return !event.nextAttemptAt || event.nextAttemptAt <= now;
 }
 
 function stripRetryMeta(event) {
-  const { retries, deadAt, ...rest } = event;
+  const { retries, deadAt, nextAttemptAt, ...rest } = event;
   return rest;
 }
 
@@ -156,9 +199,10 @@ export async function getQueueStatus() {
 }
 
 /** Returns the backoff delay (ms) that would apply to the given event's next retry.
- *  Not currently used to schedule anything (chrome.alarms fires on a fixed 30s cadence
- *  regardless), but exposed so the options page can show "next retry in ~Ns" and so the
- *  math is unit-testable. */
+ *  FIX 7: this is now actually consulted by [flush] (via `nextAttemptAt`) to skip
+ *  events still inside their backoff window, not just exposed for the options page's
+ *  "next retry in ~Ns" display -- the `chrome.alarms` 30s tick is a polling cadence,
+ *  the real retry cadence is this function's output. */
 export function nextRetryDelayMs(event) {
   return backoffDelay(event.retries || 0);
 }

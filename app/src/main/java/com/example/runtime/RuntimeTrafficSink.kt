@@ -3,17 +3,15 @@ package com.example.runtime
 import android.content.Context
 import android.util.Log
 import com.example.data.local.CapturedTrafficEntity
-import com.example.data.local.CaptureSessionEntity
+import com.example.data.local.CaptureSessionRegistry
 import com.example.data.local.CaptureTier
 import com.example.data.local.RequestrDatabase
-import com.example.data.repository.SettingsRepository
+import com.example.data.prefs.SettingsDataStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 
 /**
  * W1: a [RuntimeCaptureSink] that maps every [InstrumentationEvent] carrying a non-null [url]
@@ -24,18 +22,21 @@ import kotlinx.coroutines.sync.withLock
  * Mirrors the field mapping [com.example.api.LocalApiServer.receiveObserverEvents] already uses
  * for SDK-sourced rows (host/path derived via [java.net.URI], `wasDecrypted = true` -- runtime
  * adapters observe the plaintext request/response inside this process, so there is nothing to
- * decrypt) and gates request/response bodies on [SettingsRepository]'s logging toggles exactly
+ * decrypt) and gates request/response bodies on [SettingsDataStore]'s logging toggles exactly
  * as [com.example.interception.MitmProxyEngine.emitTransaction] does.
  *
  * Session id: a single long-lived [CaptureTier.RUNTIME] session row, reused across the process
- * lifetime -- same lazy-create-once pattern as [com.example.api.LocalApiServer.sdkSessionId].
+ * lifetime via [CaptureSessionRegistry] (FIX D: this used to be its own hand-rolled
+ * `@Volatile` + [kotlinx.coroutines.sync.Mutex] cache, the only one of three near-duplicate
+ * copies of this pattern that was actually correct -- consolidated so the other two,
+ * [com.example.api.LocalApiServer.sdkSessionId] and
+ * [com.example.interception.gateway.GatewayEngine.gatewaySessionId], get the same correctness
+ * instead of each maintaining (or failing to maintain) their own cache).
  */
 class RuntimeTrafficSink(private val context: Context) : RuntimeCaptureSink {
 
     private val tag = "RuntimeTrafficSink"
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val sessionMutex = Mutex()
-    @Volatile private var cachedSessionId: Long? = null
 
     override fun onEvents(events: List<InstrumentationEvent>) {
         val withUrl = events.filter { !it.url.isNullOrBlank() }
@@ -49,9 +50,15 @@ class RuntimeTrafficSink(private val context: Context) : RuntimeCaptureSink {
     private suspend fun persist(events: List<InstrumentationEvent>) {
         val db = RequestrDatabase.get(context)
         val dao = db.capturedTrafficDao()
-        val sessionId = runtimeSessionId(db)
-        val logRequests = SettingsRepository.settings.value.requestLoggingEnabled
-        val logResponses = SettingsRepository.settings.value.responseLoggingEnabled
+        val sessionId = CaptureSessionRegistry.openSessionIdFor(db, CaptureTier.RUNTIME)
+        // Fix C: SettingsDataStore, not SettingsRepository.settings.value -- this sink can run
+        // before anything in-process has called SettingsRepository.init() (same failure mode
+        // documented at RequestrVpnService's prefs.requestLogging.first() read), in which case
+        // SettingsRepository silently returns hardcoded `true` defaults regardless of what the
+        // user actually configured.
+        val prefs = SettingsDataStore.get(context)
+        val logRequests = prefs.requestLogging.first()
+        val logResponses = prefs.responseLogging.first()
         for (e in events) {
             val url = e.url ?: continue
             val host = e.host ?: runCatching { java.net.URI(url).host }.getOrNull() ?: url
@@ -73,25 +80,9 @@ class RuntimeTrafficSink(private val context: Context) : RuntimeCaptureSink {
                 latencyMs = e.latencyMs,
                 timestamp = e.timestamp,
                 wasDecrypted = true,
-                // NOTE (merge reconciliation): CapturedTrafficEntity.connectionId is owned by the
-                // transport scope (Room schema v9). Once that column lands, add
-                // `connectionId = e.connectionId` here so runtime-captured rows join lineage the
-                // same way every other producer does.
+                connectionId = e.connectionId,
             )
             dao.insert(entity)
-        }
-    }
-
-    private suspend fun runtimeSessionId(db: RequestrDatabase): Long {
-        cachedSessionId?.let { return it }
-        return sessionMutex.withLock {
-            cachedSessionId?.let { return it }
-            val sessionDao = db.captureSessionDao()
-            val existing = sessionDao.observeAll().first()
-                .firstOrNull { it.tier == CaptureTier.RUNTIME && it.endedAt == null }
-            val id = existing?.id ?: sessionDao.insert(CaptureSessionEntity(tier = CaptureTier.RUNTIME))
-            cachedSessionId = id
-            id
         }
     }
 }

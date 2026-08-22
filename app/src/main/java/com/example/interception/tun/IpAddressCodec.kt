@@ -27,6 +27,15 @@ object IpAddressCodec {
         return sb.toString()
     }
 
+    /**
+     * Family-dispatching convenience over [formatIpv4]/[formatIpv6] -- folds the
+     * `if (family == 4) formatIpv4(...) else formatIpv6(...)` expression that used to be
+     * hand-duplicated at six call sites (TunRelay.kt's `flowKey`, [RelayFlow.key], IcmpRelay.kt)
+     * into one place.
+     */
+    fun format(family: Int, bytes: ByteArray, offset: Int = 0): String =
+        if (family == 4) formatIpv4(bytes, offset) else formatIpv6(bytes, offset)
+
     fun parseIpv4(address: String): ByteArray {
         val parts = address.split(".")
         require(parts.size == 4) { "Not a dotted-quad IPv4 address: $address" }

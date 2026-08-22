@@ -330,8 +330,7 @@ class IcmpRelay(
 
     // ── shared parsing/formatting helpers ──────────────────────────────────
 
-    private fun addrString(family: Int, ip: ByteArray): String =
-        if (family == 4) IpAddressCodec.formatIpv4(ip, 0) else IpAddressCodec.formatIpv6(ip, 0)
+    private fun addrString(family: Int, ip: ByteArray): String = IpAddressCodec.format(family, ip)
 
     private fun u16(buf: ByteArray, off: Int): Int = ((buf[off].toInt() and 0xFF) shl 8) or (buf[off + 1].toInt() and 0xFF)
 

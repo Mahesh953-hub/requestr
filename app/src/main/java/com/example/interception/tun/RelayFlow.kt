@@ -38,12 +38,20 @@ sealed class RelayFlow {
     abstract val dstPort: Int
     abstract var lastActivityAt: Long
 
-    val key: String
-        get() {
-            val srcStr = if (family == 4) IpAddressCodec.formatIpv4(srcIp, 0) else IpAddressCodec.formatIpv6(srcIp, 0)
-            val dstStr = if (family == 4) IpAddressCodec.formatIpv4(dstIp, 0) else IpAddressCodec.formatIpv6(dstIp, 0)
-            return "$family|$srcStr:$srcPort>$dstStr:$dstPort"
-        }
+    /**
+     * The exact string this flow is keyed under in [TunRelay.tcpFlows]/[TunRelay.udpFlows], set
+     * once by [TunRelay] right after insertion (via its own `flowKey(...)`, which additionally
+     * includes the protocol number this class has no field for).
+     *
+     * FIX A: this used to be a computed property that reproduced `flowKey(...)`'s family/address/
+     * port formatting *without* the protocol segment, so its output could never equal the real
+     * map key -- every `tcpFlows.remove(flow.key)` / `closeTcpFlow(flow.key, ...)` call site was
+     * a silent no-op: the socket/selection key got closed but the map entry survived until
+     * `pruneIdle` or `MAX_FLOWS` eviction caught it, inflating `activeTcpV4`/`activeTcpV6` and
+     * burning flow budget. Storing the real key once, at insert time, makes `flowKey(...)` the
+     * single producer of this string instead of two near-duplicate formatters that could drift.
+     */
+    var mapKey: String = ""
 }
 
 enum class TcpRelayState { CONNECTING, ESTABLISHED, CLOSING, CLOSED }

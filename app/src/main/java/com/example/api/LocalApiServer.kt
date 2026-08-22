@@ -219,7 +219,18 @@ object LocalApiServer {
                 path == "/api/tools" && method == "GET" -> listTools()
                 path == "/api/tools/execute" && method == "POST" -> executeTool(body)
 
-                path == "/api/rules" && method == "GET" -> listRules()
+                path == "/api/rules" && method == "GET" -> {
+                    // FIX 2: the extension's own docs claim this endpoint is bearer-token
+                    // authenticated (same as /api/observe), but until now nothing enforced
+                    // that here -- extended with the exact same isAuthorized() helper
+                    // /api/observe uses so the semantics (case-insensitive scheme, exact-match
+                    // token) stay identical between the two routes.
+                    if (!isAuthorized(authHeader)) {
+                        err(401, "missing or invalid Authorization: Bearer <pairing token>")
+                    } else {
+                        listRules()
+                    }
+                }
 
                 path == "/api/observe" && method == "POST" -> {
                     // Task 6: the only route that requires pairing auth today -- the local
@@ -381,21 +392,123 @@ object LocalApiServer {
         } catch (e: Exception) { err(400, e.message ?: "bad request") }
     }
 
+    /**
+     * `GET /api/rules` — serializes every [com.example.data.local.InterceptRuleEntity] into the
+     * exact shape the MV3 extension's `enforcer.mjs` requires: `{ id, name, pattern, domain,
+     * action, enabled, replacementValue }` (see enforcer.mjs:9-11's own doc comment). FIX 2:
+     * previously this omitted `domain` (so `checkRules()`'s domain-only match branch could never
+     * fire) and `replacementValue` (so REDIRECT/MODIFY_REQUEST/MODIFY_RESPONSE rules had no
+     * configuration for `parseRequestModification()`/`parseResponseModification()` to parse).
+     * Also rebuilt on [JSONObject]/[JSONArray] rather than hand-rolled string interpolation with
+     * `.replace("\"","\\\"")`, which is not correct JSON escaping (breaks on backslashes,
+     * newlines, and control characters — all things a regex `pattern` or a JSON-valued
+     * `replacementValue` can legitimately contain). `replacementValue` is nullable on the entity,
+     * so it serializes as JSON `null` (via [JSONObject.put] with a null value), never the string
+     * `"null"`.
+     */
     private suspend fun listRules(): Triple<Int, String, String> {
         return try {
             val dao = db()?.interceptRuleDao() ?: return ok("[]")
             val rules = dao.observeAll().first()
-            ok("[" + rules.joinToString(",") { rule ->
-                """{"id":${rule.id},"name":"${rule.name.replace("\"","\\\"")}","action":"${rule.action.name}","pattern":"${rule.pattern.replace("\"","\\\"")}","enabled":${rule.enabled}}"""
-            } + "]")
+            val arr = org.json.JSONArray()
+            for (rule in rules) {
+                arr.put(
+                    JSONObject()
+                        .put("id", rule.id)
+                        .put("name", rule.name)
+                        .put("pattern", rule.pattern)
+                        .put("domain", rule.domain)
+                        .put("action", rule.action.name)
+                        .put("enabled", rule.enabled)
+                        // org.json's JSONObject.put(key, null) REMOVES the key entirely rather
+                        // than serializing a JSON null -- JSONObject.NULL is the sentinel that
+                        // actually produces `"replacementValue":null` on the wire.
+                        .put("replacementValue", rule.replacementValue ?: JSONObject.NULL)
+                )
+            }
+            ok(arr.toString())
         } catch (_: Exception) { ok("[]") }
     }
 
+    /** Returns [key]'s string value, or null if the key is absent/JSON-null -- unlike
+     *  [JSONObject.optString] (whose 1-arg overload returns `""` for both, indistinguishable
+     *  from a real empty string, and whose 2-arg overload can't take a null default from
+     *  Kotlin's non-null `String` parameter type). */
+    private fun JSONObject.optNullableString(key: String): String? =
+        if (has(key) && !isNull(key)) getString(key) else null
+
+    /** Flattens a `{"k":"v",...}` [JSONObject] into a `Map<String, String>`, or an empty map if
+     *  [obj] is null (key absent from the payload). */
+    private fun jsonObjectToMap(obj: JSONObject?): Map<String, String> {
+        if (obj == null) return emptyMap()
+        val map = mutableMapOf<String, String>()
+        obj.keys().forEachRemaining { key -> map[key] = obj.optString(key, "") }
+        return map
+    }
+
+    /** A body decoded from the wire, plus the exact byte count it actually occupies -- computed
+     *  from the decoded bytes, never from the (possibly larger, Base64-inflated) wire string. */
+    private class DecodedBody(val text: String, val byteCount: Long)
+
     /**
-     * Ingest a batch of events POSTed by a third-party app's embedded `requestr-sdk`
-     * (`RequestrObserver.flush()`), matching the shape:
-     * `{"events":[{"url":..,"method":..,"headers":{..},"statusCode":..,"bodySize":..,
-     *   "durationMs":..,"source":"sdk","timestamp":..}, ...]}`
+     * Decodes [raw] per [encoding]. The two producers disagree on whether this field exists at
+     * all, which is exactly why it must be an explicit branch rather than a shared default:
+     *  - MV3 extension: always sends an explicit `requestBodyEncoding`/`responseBodyEncoding`
+     *    ("none"/"utf8"/"base64" — see `interceptor-main.mjs`'s `encodingForContentType`).
+     *    "none" is MV3's explicit "no body available" marker (e.g. webRequest-sourced events,
+     *    which cannot see bodies in MV3 at all) and must decode to nothing, not to a literal
+     *    "none" string.
+     *  - SDK: never sends an encoding field at all -- `requestBody`/`responseBody` are *always*
+     *    Base64 when present (see `RequestrObserver.observeDetailed`'s unconditional
+     *    `Base64.encodeToString`), so a null/absent [encoding] means "decode as base64", not
+     *    "treat as plain text" (which would corrupt every SDK body silently).
+     * Unrecognized non-null encodings (e.g. MV3's "blob-async"/"error" markers for a body it
+     * could not capture) are treated as opaque text rather than dropped, so a real placeholder
+     * the extension chose to send is never silently discarded.
+     */
+    private fun decodeBody(raw: String?, encoding: String?): DecodedBody? {
+        if (raw.isNullOrEmpty()) return null
+        if (encoding == "none") return null
+        return if (encoding == "base64" || encoding == null) {
+            val bytes = runCatching { android.util.Base64.decode(raw, android.util.Base64.DEFAULT) }.getOrNull()
+                ?: return DecodedBody(raw, raw.toByteArray(Charsets.UTF_8).size.toLong())
+            DecodedBody(String(bytes, Charsets.UTF_8), bytes.size.toLong())
+        } else {
+            DecodedBody(raw, raw.toByteArray(Charsets.UTF_8).size.toLong())
+        }
+    }
+
+    /**
+     * Ingest a batch of events POSTed by either of `/api/observe`'s two producers, which use two
+     * genuinely different event shapes:
+     *
+     * 1. The Android `requestr-sdk` (`RequestrObserver.flush()`, see
+     *    `sdk/src/main/java/com/requestr/sdk/RequestrObserver.kt`): a flat `headers` map (request
+     *    headers only — the SDK never sees response headers), `requestBody`/`responseBody` as
+     *    Base64 (always, when present — see `observeDetailed`'s `Base64.encodeToString`), a
+     *    single `bodySize` covering request+response combined, and an `isDecrypted` flag (true
+     *    for every in-process HTTP stack it instruments — there is nothing to decrypt, it already
+     *    sees plaintext).
+     * 2. The MV3 browser extension (`browser-extension/src/sdk/observer.mjs`'s `normalizeEvent`):
+     *    separate `requestHeaders`/`responseHeaders` maps, separate `requestBody`/`responseBody`
+     *    strings each with their own `requestBodyEncoding`/`responseBodyEncoding` (`"none"`,
+     *    `"utf8"`, or `"base64"` — see `interceptor-main.mjs`'s `encodingForContentType`), and no
+     *    `isDecrypted` field at all (browser traffic is never MITM'd by this app, so it is always
+     *    honestly `wasDecrypted = true` — the extension observes the page's own plaintext
+     *    fetch()/XHR calls, same rationale as the SDK).
+     *
+     * FIX 1: previously this only read the SDK shape's `headers` field (discarding
+     * `requestHeaders`/`responseHeaders`/`requestBody`/`responseBody` entirely for BOTH
+     * producers), never read `isDecrypted`, and mis-assigned the SDK's *combined* `bodySize`
+     * entirely to `responseSizeBytes` while leaving `requestSizeBytes` always zero. Now each
+     * producer's real fields are read, bodies are decoded per their declared/implied encoding,
+     * and request/response sizes are computed independently from the actual bytes.
+     *
+     * Backward compatible with the original minimal shape (`headers` + `bodySize`, no bodies at
+     * all): when `requestHeaders`/`responseHeaders` are absent, `headers` is used as the request
+     * headers (matching the original behavior exactly), and when no body fields are present at
+     * all, `bodySize` alone still populates `responseSizeBytes` as it always did, so an older
+     * caller sending only the original fields is unaffected.
      *
      * Persists each event as a [com.example.data.local.CapturedTrafficEntity] row under a
      * dedicated, always-present [com.example.data.local.CaptureTier.SDK] session so SDK-sourced
@@ -415,10 +528,26 @@ object LocalApiServer {
                 if (url.isEmpty()) continue
                 val host = runCatching { java.net.URI(url).host }.getOrNull() ?: url
                 val path = runCatching { java.net.URI(url).path }.getOrNull() ?: ""
-                val headersJson = e.optJSONObject("headers")
-                val headers = mutableMapOf<String, String>()
-                headersJson?.keys()?.forEachRemaining { key -> headers[key] = headersJson.optString(key, "") }
                 val statusCodeRaw = e.optInt("statusCode", -1)
+
+                // MV3 shape: separate requestHeaders/responseHeaders. SDK (and the older
+                // minimal) shape: a single flat `headers` map, which the SDK only ever
+                // populates with *request* headers -- it has no response-header visibility.
+                val requestHeaders = jsonObjectToMap(e.optJSONObject("requestHeaders") ?: e.optJSONObject("headers"))
+                val responseHeaders = jsonObjectToMap(e.optJSONObject("responseHeaders"))
+
+                val decodedRequestBody = decodeBody(e.optNullableString("requestBody"), e.optNullableString("requestBodyEncoding"))
+                val decodedResponseBody = decodeBody(e.optNullableString("responseBody"), e.optNullableString("responseBodyEncoding"))
+
+                // Sizes: prefer each side's own decoded body length (works for both producers,
+                // since both now carry real per-side bodies) and fall back to the legacy
+                // combined `bodySize` -- attributed to responseSizeBytes only, exactly as the
+                // original (pre-fix) behavior did -- when no body fields are present at all
+                // (the original minimal contract this endpoint has always accepted).
+                val requestSizeBytes = decodedRequestBody?.byteCount ?: 0L
+                val responseSizeBytes = decodedResponseBody?.byteCount
+                    ?: if (decodedRequestBody == null) e.optLong("bodySize", 0) else 0L
+
                 val entity = com.example.data.local.CapturedTrafficEntity(
                     sessionId = sessionId,
                     method = e.optString("method", "GET"),
@@ -427,14 +556,22 @@ object LocalApiServer {
                     path = path,
                     statusCode = if (statusCodeRaw >= 0) statusCodeRaw else null,
                     protocol = "sdk",
-                    requestHeaders = headers,
-                    requestSizeBytes = 0,
-                    responseSizeBytes = e.optLong("bodySize", 0),
+                    requestHeaders = requestHeaders,
+                    responseHeaders = responseHeaders,
+                    requestBody = decodedRequestBody?.text,
+                    responseBody = decodedResponseBody?.text,
+                    requestSizeBytes = requestSizeBytes,
+                    responseSizeBytes = responseSizeBytes,
                     latencyMs = e.optLong("durationMs", 0),
                     timestamp = e.optLong("timestamp", System.currentTimeMillis()),
-                    wasDecrypted = true,
-                    // Task 12: the SDK genuinely has no connection identity to report (it never
-                    // sees a TCP 5-tuple or a CONNECT target) — null is the honest value here,
+                    // The SDK sends a real isDecrypted flag (always true today -- every stack it
+                    // instruments observes in-process plaintext); the MV3 extension has no such
+                    // field at all, since browser traffic here is likewise never MITM'd -- true
+                    // is the honest default for both, matching pre-fix behavior when absent.
+                    wasDecrypted = if (e.has("isDecrypted")) e.optBoolean("isDecrypted", true) else true,
+                    // Task 12: neither producer has a real connection identity to report (the
+                    // SDK never sees a TCP 5-tuple or a CONNECT target; the extension observes
+                    // browser fetch()/XHR calls, not a socket) — null is the honest value here,
                     // not a heuristic. See ConnectionLineage.httpSteps(), which only attaches
                     // rows carrying a real connectionId.
                     connectionId = null,
@@ -455,16 +592,15 @@ object LocalApiServer {
      * lazily creates (once) and then reuses a single always-open
      * [com.example.data.local.CaptureTier.SDK] [com.example.data.local.CaptureSessionEntity] row,
      * so third-party apps can observe traffic even when the user has never started a capture.
+     *
+     * FIX D: delegates to [com.example.data.local.CaptureSessionRegistry], the one shared,
+     * correctly-cached implementation of this pattern (see its kdoc for why the three previous
+     * copies -- this one included -- needed consolidating).
      */
     private suspend fun sdkSessionId(): Long {
-        val sessionDao = db()?.captureSessionDao() ?: return 0L
-        val existing = sessionDao.observeAll().first().firstOrNull { it.tier == com.example.data.local.CaptureTier.SDK && it.endedAt == null }
-        if (existing != null) return existing.id
-        return sessionDao.insert(
-            com.example.data.local.CaptureSessionEntity(
-                tier = com.example.data.local.CaptureTier.SDK,
-                port = port,
-            )
+        val database = db() ?: return 0L
+        return com.example.data.local.CaptureSessionRegistry.openSessionIdFor(
+            database, com.example.data.local.CaptureTier.SDK, port,
         )
     }
 

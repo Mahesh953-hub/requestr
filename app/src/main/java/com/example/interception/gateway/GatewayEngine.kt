@@ -4,7 +4,6 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.util.Log
-import com.example.data.local.CaptureSessionEntity
 import com.example.data.local.CaptureTier
 import com.example.data.local.CapturedTrafficEntity
 import com.example.data.local.RequestrDatabase
@@ -16,7 +15,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.net.Inet4Address
@@ -86,8 +84,6 @@ object GatewayEngine {
     private val _remoteClients = MutableStateFlow<Set<String>>(emptySet())
     val remoteClientsFlow: StateFlow<Set<String>> = _remoteClients.asStateFlow()
 
-    private var gatewaySessionId: Long = 0L
-
     fun init(context: Context) {
         appContext = context.applicationContext
     }
@@ -138,6 +134,15 @@ object GatewayEngine {
         val remoteAddr = client.inetAddress
         val isRemote = !remoteAddr.isLoopbackAddress
         val clientIp = remoteAddr?.hostAddress ?: "unknown"
+        // FIX 5 (task 12, restored from origin/vorflux/scope-transport): gateway connections
+        // have no TCP 5-tuple key the way TunRelay/CaptureEngine streams do (this is a plain
+        // accepted Socket, not something PacketPump tracks), so the connection identity is
+        // built from the accepted socket's remote address+port -- the same identity `sourceIp`
+        // already reflects -- plus the request target, finalized per-request below once
+        // `rawUrl` is known. This was dropped when the SDK-side ConnectAttemptEntity resolution
+        // was merged in; restoring it for the non-CONNECT path only (CONNECT now persists via
+        // ConnectAttemptEntity instead, which is unrelated).
+        val clientEndpoint = "$clientIp:${client.port}"
 
         if (isRemote) {
             _remoteClients.value = _remoteClients.value + clientIp
@@ -247,8 +252,7 @@ object GatewayEngine {
                         reqBody = bodyStr,
                         respBody = respBody,
                         sourceIp = if (isRemote) clientIp else null,
-                        wasDecrypted = true,
-                        isUndecoded = false,
+                        connectionId = "$clientEndpoint>$rawUrl",
                     )
                 }
             }
@@ -267,8 +271,7 @@ object GatewayEngine {
         reqBody: String,
         respBody: String,
         sourceIp: String?,
-        wasDecrypted: Boolean,
-        isUndecoded: Boolean,
+        connectionId: String?,
     ) {
         val ctx = appContext ?: return
         val (host, path) = runCatching {
@@ -291,9 +294,15 @@ object GatewayEngine {
             requestSizeBytes = reqBody.length.toLong(),
             responseSizeBytes = respBody.length.toLong(),
             latencyMs = latencyMs,
-            wasDecrypted = wasDecrypted,
-            isUndecoded = isUndecoded,
+            // E.2: the engine only ever calls this from the fully-decrypted HTTP relay path
+            // below (every CONNECT tunnel it opaquely relays instead goes through
+            // ConnectAttemptEntity, never here) -- wasDecrypted/isUndecoded were always passed
+            // as true/false at the single call site, so they are inlined as constants rather
+            // than threaded through as dead parameters.
+            wasDecrypted = true,
+            isUndecoded = false,
             sourceIp = sourceIp,
+            connectionId = connectionId,
         )
         runCatching { RequestrDatabase.get(ctx).capturedTrafficDao().insert(entity) }
             .onFailure { Log.w(TAG, "Failed to persist gateway transaction: ${it.message}") }
@@ -303,16 +312,16 @@ object GatewayEngine {
      * Lazily creates (once) and reuses a single always-open [CaptureTier.GATEWAY] session row,
      * mirroring [com.example.api.LocalApiServer.sdkSessionId] — so gateway traffic groups under
      * its own session independent of whether an on-device VPN/root/Shizuku capture is running.
+     *
+     * FIX D: delegates to [com.example.data.local.CaptureSessionRegistry] for the actual
+     * cache/create-once logic. The old `private var gatewaySessionId: Long = 0L` cache here had
+     * no `@Volatile` and no lock, so two connections accepted at once could both observe an
+     * uncached `0L` and each insert a duplicate GATEWAY session row.
      */
-    private suspend fun gatewaySessionId(context: Context): Long {
-        if (gatewaySessionId != 0L) return gatewaySessionId
-        val sessionDao = RequestrDatabase.get(context).captureSessionDao()
-        val existing = sessionDao.observeAll().first().firstOrNull { it.tier == CaptureTier.GATEWAY && it.endedAt == null }
-        gatewaySessionId = existing?.id ?: sessionDao.insert(
-            CaptureSessionEntity(tier = CaptureTier.GATEWAY, port = port)
+    private suspend fun gatewaySessionId(context: Context): Long =
+        com.example.data.local.CaptureSessionRegistry.openSessionIdFor(
+            RequestrDatabase.get(context), CaptureTier.GATEWAY, port,
         )
-        return gatewaySessionId
-    }
 
     /**
      * Best-effort LAN IPv4 address a remote client should point its proxy at. Uses

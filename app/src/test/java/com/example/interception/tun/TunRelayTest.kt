@@ -277,6 +277,80 @@ class TunRelayTest {
         }
     }
 
+    // ── flow-table leak regression (FIX A) ──────────────────────────────
+
+    /**
+     * Regression test for the bug where [RelayFlow]'s old `key` computed property and
+     * [TunRelay.flowKey] formatted the map key differently (the former omitted the protocol
+     * segment), so `tcpFlows.remove(flow.key)`/`closeTcpFlow(flow.key, ...)` could never find the
+     * entry it was supposed to delete: every closed TCP flow leaked its `tcpFlows` map entry
+     * forever. [RelayFlow.mapKey] now holds the exact string [TunRelay] inserted the flow under,
+     * so removal always succeeds.
+     */
+    @Test
+    fun `closing a TCP flow via RST removes it from the flow table and the active-flow stat returns to zero`() {
+        val server = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
+        try {
+            val (relay, _) = startRelay()
+
+            val guestIp = byteArrayOf(10, 111, 222.toByte(), 5)
+            val serverIp = byteArrayOf(127, 0, 0, 1)
+            val guestPort = 51010
+            val serverPort = server.localPort
+
+            val syn = IpPacketBuilder.buildIpv4Tcp(
+                srcIp = guestIp, srcPort = guestPort,
+                dstIp = serverIp, dstPort = serverPort,
+                seq = 1000L, ack = 0L, flags = TcpReassembler.FLAG_SYN,
+            )
+            relay.offer(syn, syn.size, 4)
+            // Keep the accepted socket open (unlike the eviction test above) so the relay's
+            // upstream connection stays alive and cannot race our assertions below by getting an
+            // async EOF-triggered close on the selector thread.
+            val accepted = server.accept()
+
+            // Opening a flow bumps the active-flow stat synchronously inside handleTcpFromGuest.
+            assertEquals(1, relay.stats.value.activeTcpV4)
+            assertEquals("flow table should hold exactly the flow just opened", 1, tcpFlowMapSize(relay))
+
+            val rst = IpPacketBuilder.buildIpv4Tcp(
+                srcIp = guestIp, srcPort = guestPort,
+                dstIp = serverIp, dstPort = serverPort,
+                seq = 1001L, ack = 1L, flags = TcpReassembler.FLAG_RST,
+            )
+            relay.offer(rst, rst.size, 4)
+
+            // Direct proof the map entry was actually removed -- this is exactly the leak FIX A
+            // closes. Before the fix this assertion failed because tcpFlows.remove(flow.key) was
+            // a silent no-op (flow.key and the map's real key could never be equal).
+            assertEquals("flow table must not leak the closed flow's entry", 0, tcpFlowMapSize(relay))
+
+            // bumpFamilyCount() is only invoked synchronously when a flow opens or the periodic
+            // idle-prune sweep runs, not on every individual close, so force the same refresh the
+            // maintenance loop would perform and confirm the active-flow counter agrees with the
+            // now-empty flow table.
+            refreshFamilyCount(relay)
+            assertEquals(0, relay.stats.value.activeTcpV4)
+            accepted.close()
+        } finally {
+            server.close()
+        }
+    }
+
+    /** Reflects into the private `tcpFlows` map to directly observe leaks (or their absence). */
+    private fun tcpFlowMapSize(relay: TunRelay): Int {
+        val field = TunRelay::class.java.getDeclaredField("tcpFlows")
+        field.isAccessible = true
+        return (field.get(relay) as Map<*, *>).size
+    }
+
+    /** Invokes the private `bumpFamilyCount()` to force a stats refresh, mirroring pruneIdle. */
+    private fun refreshFamilyCount(relay: TunRelay) {
+        val method = TunRelay::class.java.getDeclaredMethod("bumpFamilyCount")
+        method.isAccessible = true
+        method.invoke(relay)
+    }
+
     // ── fragmentation ────────────────────────────────────────────────────
 
     @Test

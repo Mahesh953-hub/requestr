@@ -1,7 +1,10 @@
 package com.example.data.local
 
+import android.database.sqlite.SQLiteDatabase
+import androidx.room.Room
 import androidx.room.testing.MigrationTestHelper
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
+import androidx.test.core.app.ApplicationProvider
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -141,5 +144,50 @@ class Migration8To9Test {
             assertEquals("Title", c.getString(0))
         }
         db.close()
+    }
+
+    /**
+     * FIX 4: proves a pre-8 install (any version `main` has actually shipped -- 1 through 7,
+     * per `git log -p` on this file's `version =` field) opens without throwing, via
+     * [RoomDatabase.Builder.fallbackToDestructiveMigrationFrom], instead of crashing on Room's
+     * "A migration from N to 9 was required but not found" `IllegalStateException`. There is no
+     * exported schema JSON below version 8 (`exportSchema` was `false` before this release, and
+     * only 8.json/9.json exist under app/schemas/), so a real non-destructive 5->6->7->8 chain
+     * cannot be authored -- destructive recreation from those specific legacy versions is the
+     * only option that doesn't crash on every launch for those users. This deliberately does NOT
+     * use [MigrationTestHelper] (which needs a real schema JSON per starting version, which does
+     * not exist for v5) -- instead it stamps a raw SQLite file's `user_version` header, which is
+     * all Room actually reads to decide it's looking at "version 5", then opens it with the exact
+     * builder configuration [RequestrDatabase.get] uses.
+     */
+    @Test
+    fun `opening a pre-8 (version 5) database falls back to destructive recreation instead of throwing`() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val dbName = "pre8-fallback-test.db"
+        context.deleteDatabase(dbName)
+        val dbFile = context.getDatabasePath(dbName)
+
+        // Stamp a minimal, empty SQLite file at user_version 5 -- Room's onOpen check only
+        // reads PRAGMA user_version to detect a version mismatch; it doesn't need real v5
+        // tables present for this test, since destructive fallback drops everything anyway.
+        SQLiteDatabase.openOrCreateDatabase(dbFile, null).use { raw ->
+            raw.version = 5
+        }
+
+        val db = Room.databaseBuilder(context, RequestrDatabase::class.java, dbName)
+            .addMigrations(RequestrDatabase.MIGRATION_8_9)
+            .fallbackToDestructiveMigrationFrom(/* dropAllTables = */ true, 1, 2, 3, 4, 5, 6, 7)
+            .build()
+
+        try {
+            // Forces Room to actually open/validate the database rather than lazily deferring.
+            val count = db.openHelper.readableDatabase.query(
+                "SELECT COUNT(*) FROM captured_traffic"
+            ).use { c -> c.moveToFirst(); c.getInt(0) }
+            assertEquals("destructive recreation must yield an empty (but present) table", 0, count)
+        } finally {
+            db.close()
+            context.deleteDatabase(dbName)
+        }
     }
 }

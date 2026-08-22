@@ -136,12 +136,26 @@ on every `fetch()`/XHR call, so BLOCK still works even before the first DNR sync
 6. Click the toolbar icon to open the popup — it should show **Connected** once paired and
    reachable.
 
-## Reaching a non-localhost device
+## Reaching the Local API server from desktop Chrome
 
-Same as before: `localhost:9876` only works when the Local API server and the browser
-share a network namespace. For a physical device on the same Wi-Fi network, use the
-device's LAN IP (e.g. `http://192.168.1.42:9876`), configured via the popup/options API
-base field.
+The Local API server (`LocalApiServer.kt`) binds to `127.0.0.1` only — it never listens on
+the device's LAN interface, and there is no setting that changes that. So a desktop Chrome
+browser (which is a different machine/network namespace than the Android device or
+emulator) can never connect to the device's LAN IP directly; there is no such thing as
+`http://192.168.1.42:9876` reaching this server, no matter how the device's Wi-Fi is
+configured.
+
+The supported path is an ADB port forward, which makes the device's loopback-bound port
+reachable on your desktop's own loopback:
+
+```
+adb forward tcp:9876 tcp:9876
+```
+
+With that running, point the extension's popup/options API base field at
+`http://127.0.0.1:9876` (the default) — Chrome connects to your desktop's own loopback,
+which ADB relays to the device's loopback-bound server. Re-run `adb forward` after every
+device reboot or ADB server restart; it does not persist.
 
 ## Integration testing
 

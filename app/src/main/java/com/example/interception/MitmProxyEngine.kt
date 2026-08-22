@@ -11,12 +11,13 @@ import com.example.data.local.ConnectAttemptEntity
 import com.example.data.local.RequestrDatabase
 import com.example.data.local.RuleAction
 import com.example.data.models.HttpMethod
-import com.example.data.repository.SettingsRepository
+import com.example.data.prefs.SettingsDataStore
 import com.example.interception.http.HttpParser
 import com.example.interception.http.ParsedHttpMessage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.bouncycastle.asn1.x500.X500Name
@@ -278,6 +279,16 @@ class MitmProxyEngine(
             // Inspecting bidirectional relay: parse decrypted HTTP/1.x with
             // HttpParser, enforce rules on the parsed messages, persist each
             // transaction, and forward the (possibly modified) bytes.
+            // Fix C: read the logging toggles once per connection via SettingsDataStore --
+            // SettingsRepository.settings.value silently returns hardcoded `true` defaults
+            // when nothing has ever called SettingsRepository.init() in this process (same
+            // root cause documented at RequestrVpnService's `prefs.requestLogging.first()`
+            // read), so a user with response logging OFF could still get bodies persisted
+            // through this MITM path even though every other producer honoured the toggle.
+            val settingsPrefs = SettingsDataStore.get(context)
+            val logRequests = settingsPrefs.requestLogging.first()
+            val logResponses = settingsPrefs.responseLogging.first()
+
             val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>()
             val clientWriteLock = Any()
             val sent = AtomicLong(0)
@@ -287,7 +298,10 @@ class MitmProxyEngine(
                     clientWriteLock, host, port, pending, sent)
             }
             val t2 = Thread {
-                inspectServerToClient(db, upstreamInput, decryptedOutput, clientWriteLock, pending, host, port, received)
+                inspectServerToClient(
+                    db, upstreamInput, decryptedOutput, clientWriteLock, pending, host, port, received,
+                    logRequests, logResponses,
+                )
             }
             t1.start(); t2.start()
             t1.join(60_000); t2.join(60_000)
@@ -435,6 +449,8 @@ class MitmProxyEngine(
         host: String,
         port: Int,
         bytesReceivedFromUpstream: AtomicLong,
+        logRequests: Boolean,
+        logResponses: Boolean,
     ) {
         val buffer = ByteArrayOutputStream()
         val chunk = ByteArray(BUFFER_SIZE)
@@ -473,7 +489,7 @@ class MitmProxyEngine(
                     } else {
                         val raw = bytes.copyOfRange(0, response.consumedBytes)
                         bytes = bytes.copyOfRange(response.consumedBytes, bytes.size)
-                        handleParsedResponse(db, response, raw, clientOut, clientWriteLock, pending, host, port)
+                        handleParsedResponse(db, response, raw, clientOut, clientWriteLock, pending, host, port, logRequests, logResponses)
                         buffer.reset()
                         buffer.write(bytes)
                     }
@@ -541,6 +557,8 @@ class MitmProxyEngine(
         pending: ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>,
         host: String,
         port: Int,
+        logRequests: Boolean,
+        logResponses: Boolean,
     ) {
         // Interim 1xx responses (e.g. 100 Continue) precede the final response:
         // forward them without consuming the request pairing. 101 is terminal
@@ -568,22 +586,29 @@ class MitmProxyEngine(
         }
         if (request != null) {
             val latencyMs = System.currentTimeMillis() - pair!!.second
-            emitTransaction(request, response, latencyMs, "$host:$port")
+            emitTransaction(request, response, latencyMs, "$host:$port", logRequests, logResponses)
         }
     }
 
     // ── Persistence ─────────────────────────────────────────────────────
 
-    /** Build a [CapturedTrafficEntity] from the decrypted pair and hand it to the callback. */
-    private fun emitTransaction(
+    /**
+     * Build a [CapturedTrafficEntity] from the decrypted pair and hand it to the callback.
+     *
+     * `internal` (not `private`) so [emitTransaction]'s logging-toggle gating -- the part FIX C
+     * changed, from `SettingsRepository.settings.value` to booleans threaded in from
+     * [SettingsDataStore] -- is directly unit-testable without standing up a real TLS/socket
+     * pair end-to-end.
+     */
+    internal fun emitTransaction(
         request: ParsedHttpMessage,
         response: ParsedHttpMessage,
         latencyMs: Long,
         connectionId: String,
+        logRequests: Boolean,
+        logResponses: Boolean,
     ) {
         val callback = onDecryptedTransaction ?: return
-        val logRequests = SettingsRepository.settings.value.requestLoggingEnabled
-        val logResponses = SettingsRepository.settings.value.responseLoggingEnabled
         val entity = CapturedTrafficEntity(
             sessionId = sessionId.get(),
             method = (request.method ?: HttpMethod.GET).name,

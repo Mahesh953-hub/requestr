@@ -3094,14 +3094,26 @@ fun RulesConfigBottomSheet(
                         Button(
                             onClick = {
                                 if (ruleName.isNotBlank() && rulePattern.isNotBlank()) {
+                                    // Capture the current field values into locals BEFORE resetting
+                                    // the form. scope.launch(Dispatchers.IO) only schedules the
+                                    // coroutine -- it does not run synchronously -- so if the
+                                    // mutableStateOf fields were read lazily inside the coroutine
+                                    // body, the form-reset lines below would race ahead and clear
+                                    // them first, causing every inserted rule to be saved with
+                                    // blank name/pattern/domain and the default BLOCK action.
+                                    val nameToSave = ruleName.trim()
+                                    val patternToSave = rulePattern.trim()
+                                    val domainToSave = ruleDomain.trim()
+                                    val actionToSave = ruleAction
+                                    val enabledToSave = ruleEnabled
                                     scope.launch(kotlinx.coroutines.Dispatchers.IO) {
                                         dao.insert(
                                             com.example.data.local.InterceptRuleEntity(
-                                                name = ruleName.trim(),
-                                                pattern = rulePattern.trim(),
-                                                domain = ruleDomain.trim(),
-                                                action = ruleAction,
-                                                enabled = ruleEnabled,
+                                                name = nameToSave,
+                                                pattern = patternToSave,
+                                                domain = domainToSave,
+                                                action = actionToSave,
+                                                enabled = enabledToSave,
                                             )
                                         )
                                     }
