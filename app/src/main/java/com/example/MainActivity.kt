@@ -170,6 +170,13 @@ class MainActivity : ComponentActivity() {
         ApiCollectionsRepository.init(applicationContext)
         // v3.5: backs FlowRepository's nodes/connections from Room so positions survive restart.
         FlowRepository.init(applicationContext)
+        // Task 11: backs NotesRepository (notes/note_folders), ToolsRepository's custom-tool
+        // map, and ChatRepository's message history from the five app-scope Room tables
+        // transport shipped in schema v9 -- previously all three lived only in a plain
+        // MutableStateFlow/ConcurrentHashMap and were wiped on process death.
+        NotesRepository.init(applicationContext)
+        com.example.data.repository.ToolsRepository.init(applicationContext)
+        com.example.data.repository.ChatRepository.init(applicationContext)
         // R3 fix: gives ApiTestrRepository a Context so its OkHttpClient can attach
         // OkHttpProxyInterceptor, wiring requestr's own API Testr traffic into the OkHttp
         // runtime-instrumentation plane (see OkHttpAdapter in HttpStackAdapters.kt).

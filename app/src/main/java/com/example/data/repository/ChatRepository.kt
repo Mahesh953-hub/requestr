@@ -1,9 +1,16 @@
 package com.example.data.repository
 
+import android.content.Context
+import com.example.data.local.ChatMessageEntity
+import com.example.data.local.RequestrDatabase
 import com.example.data.models.ChatMessage
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 
@@ -13,11 +20,11 @@ import okhttp3.RequestBody.Companion.toRequestBody
  * Supports configurable API providers (OpenAI-compatible format) for
  * chat completion. Falls back to a local echo/mock response when no
  * provider is configured.
- *
- * TODO #44 (Chats section).
  */
 object ChatRepository {
 
+    // Task 11: no seed data -- an empty `chat_messages` table just means no conversation has
+    // happened yet, matching NotesRepository's "no seed data" decision for the same reason.
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val messages: StateFlow<List<ChatMessage>> = _messages.asStateFlow()
 
@@ -27,6 +34,24 @@ object ChatRepository {
     var providerUrl: String = ""
     var providerKey: String = ""
     var providerModel: String = ""
+
+    private var appContext: Context? = null
+    private val repoScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    /**
+     * Backs [messages] with the real `chat_messages` Room table (task 11). Call once from
+     * MainActivity.onCreate(), mirroring [NotesRepository.init]/[FlowRepository.init].
+     */
+    fun init(context: Context) {
+        if (appContext != null) return
+        val ctx = context.applicationContext
+        appContext = ctx
+        repoScope.launch {
+            RequestrDatabase.get(ctx).chatMessageDao().observeAll().collect { entities ->
+                _messages.value = entities.map { it.toChatMessage() }
+            }
+        }
+    }
 
     /** Sends a user message and generates a response. */
     suspend fun sendMessage(text: String) {
@@ -40,6 +65,7 @@ object ChatRepository {
             timestamp = System.currentTimeMillis(),
         )
         _messages.value = _messages.value + userMsg
+        persist(userMsg)
 
         _isLoading.value = true
 
@@ -58,13 +84,35 @@ object ChatRepository {
             timestamp = System.currentTimeMillis(),
         )
         _messages.value = _messages.value + assistantMsg
+        persist(assistantMsg)
         _isLoading.value = false
     }
 
-    /** Clears the chat history. */
+    /** Clears the chat history, both in-memory and in Room. */
     fun clearHistory() {
         _messages.value = emptyList()
+        val ctx = appContext ?: return
+        repoScope.launch {
+            RequestrDatabase.get(ctx).chatMessageDao().getAll().forEach {
+                RequestrDatabase.get(ctx).chatMessageDao().deleteById(it.id)
+            }
+        }
     }
+
+    private fun persist(message: ChatMessage) {
+        val ctx = appContext ?: return
+        repoScope.launch {
+            RequestrDatabase.get(ctx).chatMessageDao().upsert(message.toEntity())
+        }
+    }
+
+    private fun ChatMessage.toEntity() = ChatMessageEntity(
+        id = id, role = role, content = content, timestamp = timestamp
+    )
+
+    private fun ChatMessageEntity.toChatMessage() = ChatMessage(
+        id = id, role = role, content = content, timestamp = timestamp
+    )
 
     /**
      * Calls an OpenAI-compatible chat completion API.
