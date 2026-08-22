@@ -822,9 +822,28 @@ fun SettingsScreen(
                             fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         val stackDiagSessionId = InterceptionStateRepository.state.collectAsState().value.sessionId
-                        val stackReport by produceState<com.example.runtime.http.StackDetectionReport?>(initialValue = null, stackDiagSessionId) {
+                        // W4: multi-signal StackFingerprinter (JA3/ALPN/H2 SETTINGS/header-order/
+                        // cache-validation shape), not just User-Agent -- calibrate() runs once
+                        // per Settings-card visit so the JA3/SETTINGS/header-order signals have a
+                        // real per-device baseline to match against instead of only ever using
+                        // the always-available User-Agent/cache-validation signals.
+                        val stackCalibration by produceState<com.example.runtime.http.StackFingerprinter.CalibrationTable?>(initialValue = null) {
+                            value = if (com.example.api.LocalApiServer.isRunning) {
+                                runCatching {
+                                    com.example.runtime.http.StackFingerprinter.calibrate(settingsContext, com.example.api.LocalApiServer.port)
+                                }.getOrNull()
+                            } else {
+                                // calibrate() probes LocalApiServer's own loopback route -- with
+                                // no server running there is nothing to probe against, so this
+                                // honestly stays uncalibrated rather than failing.
+                                null
+                            }
+                        }
+                        val stackReport by produceState<com.example.runtime.http.StackDetectionReport?>(initialValue = null, stackDiagSessionId, stackCalibration) {
                             value = if (stackDiagSessionId != null) {
-                                runCatching { com.example.runtime.http.HttpStackDetector.analyzeSession(settingsContext, stackDiagSessionId) }.getOrNull()
+                                runCatching {
+                                    com.example.runtime.http.HttpStackDetector.analyzeSession(settingsContext, stackDiagSessionId, stackCalibration)
+                                }.getOrNull()
                             } else {
                                 null
                             }
@@ -842,12 +861,23 @@ fun SettingsScreen(
                             }
                             else -> {
                                 Text(
-                                    "Session ${sr.sessionId} (${sr.totalRequests} req, by default User-Agent): " +
+                                    "Session ${sr.sessionId} (${sr.totalRequests} req" +
+                                        (if (sr.calibrated) ", calibrated" else ", not calibrated yet") + "): " +
                                         sr.countsByStack.entries.joinToString(", ") { (stack, count) -> "${stack.label}=$count" },
                                     fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                                 Text(
-                                    "Volley shares HttpURLConnection's default User-Agent and can't be told apart from it by header alone; UNKNOWN means a custom/overridden User-Agent, not a detection failure.",
+                                    "Confidence: " + sr.confidenceHistogram.entries.joinToString(", ") { (c, n) -> "${c.name}=$n" },
+                                    fontSize = 9.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                if (sr.unresolvedReasons.isNotEmpty()) {
+                                    Text(
+                                        "UNKNOWN reasons (first ${sr.unresolvedReasons.size}): " + sr.unresolvedReasons.distinct().joinToString(" | "),
+                                        fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Text(
+                                    "Signals: JA3+ALPN (TLS ClientHello), HTTP/2 SETTINGS multiset, request header order, User-Agent, cache-validation shape (Volley vs HttpURLConnection). DETECTED requires a calibrated JA3 match or a direct runtime-adapter observation; UNKNOWN always names its missing signals above.",
                                     fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
