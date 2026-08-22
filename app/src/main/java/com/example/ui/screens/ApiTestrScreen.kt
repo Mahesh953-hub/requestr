@@ -57,6 +57,7 @@ import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -146,6 +147,70 @@ fun ApiTestrScreen(
     // settings.hapticFeedbackEnabled via the shared helper.
     val performHaptic = rememberAppHapticFeedback()
 
+    // Task 5(c): send/new-request keyboard shortcuts. Previously MainActivity's key listener
+    // called `sendBroadcast(Intent("com.example.requestr.SEND_REQUEST"))` / `.../NEW_REQUEST`
+    // with no registered receiver anywhere, so Ctrl+Enter/Ctrl+Shift+N were silent no-ops.
+    // com.example.AppShortcuts is an in-process SharedFlow this screen collects directly.
+    fun sendCurrentRequest() {
+        isLoading = true
+        coroutineScope.launch {
+            // v3.2 Part C — C2 (Request chaining): substitute {{variableName}}
+            // in URL, headers, and body — not just the URL as before — so a
+            // value extracted from an earlier chained request's response can
+            // be referenced anywhere in this request, per the plan's spec.
+            val env = com.example.data.env.EnvironmentRepository.active()
+            fun sub(s: String) = com.example.data.env.EnvironmentRepository.substitute(s, env)
+            val substitutedState = reqState.copy(
+                url = sub(reqState.url),
+                headers = reqState.headers.map { it.copy(value = sub(it.value)) },
+                queryParams = reqState.queryParams.map { it.copy(value = sub(it.value)) },
+                bodyContent = sub(reqState.bodyContent),
+                bearerToken = sub(reqState.bearerToken),
+                apiKeyValue = sub(reqState.apiKeyValue),
+            )
+            val resp = ApiTestrRepository.executeRequest(substitutedState, followRedirects)
+            responseData = resp
+            // v3.4 Part C — C3: clear any previous run's pass/fail results —
+            // they belong to a different response, not this one.
+            testResults = null
+            isLoading = false
+            selectedViewMode = 1 // auto toggle to response
+
+            // Run this request's chain-extraction rules (if any) against the
+            // response body, writing extracted values into the active
+            // Environment so a subsequent chained request can pick them up.
+            if (resp.isSuccess && reqState.chainExtractions.isNotEmpty()) {
+                val written = ApiCollectionsRepository.runChainExtractions(reqState, resp.body)
+                if (written.isNotEmpty()) {
+                    showSavedSnackbar(
+                        "Extracted " + written.keys.joinToString(", ") { "{{$it}}" }
+                    )
+                }
+            }
+
+            // v3.4 Part C — C3: if this request carries assertions, evaluate
+            // them immediately against the just-received response so a plain
+            // Send already shows pass/fail without a second tap.
+            if (reqState.assertions.any { it.enabled }) {
+                testResults = AssertionRunner.run(reqState.assertions, resp)
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        com.example.AppShortcuts.events.collect { event ->
+            when (event) {
+                is com.example.ShortcutEvent.SendRequest -> {
+                    if (!isLoading) sendCurrentRequest()
+                }
+                is com.example.ShortcutEvent.NewRequest -> {
+                    reqState = ApiRequestItem(name = "New Request", url = "https://httpbin.org/get")
+                    showSavedSnackbar("Started a new request")
+                }
+            }
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
     Column(
         modifier = Modifier
@@ -216,51 +281,7 @@ fun ApiTestrScreen(
                     )
 
                     Button(
-                        onClick = {
-                            isLoading = true
-                            coroutineScope.launch {
-                                // v3.2 Part C — C2 (Request chaining): substitute {{variableName}}
-                                // in URL, headers, and body — not just the URL as before — so a
-                                // value extracted from an earlier chained request's response can
-                                // be referenced anywhere in this request, per the plan's spec.
-                                val env = com.example.data.env.EnvironmentRepository.active()
-                                fun sub(s: String) = com.example.data.env.EnvironmentRepository.substitute(s, env)
-                                val substitutedState = reqState.copy(
-                                    url = sub(reqState.url),
-                                    headers = reqState.headers.map { it.copy(value = sub(it.value)) },
-                                    queryParams = reqState.queryParams.map { it.copy(value = sub(it.value)) },
-                                    bodyContent = sub(reqState.bodyContent),
-                                    bearerToken = sub(reqState.bearerToken),
-                                    apiKeyValue = sub(reqState.apiKeyValue),
-                                )
-                                val resp = ApiTestrRepository.executeRequest(substitutedState, followRedirects)
-                                responseData = resp
-                                // v3.4 Part C — C3: clear any previous run's pass/fail results —
-                                // they belong to a different response, not this one.
-                                testResults = null
-                                isLoading = false
-                                selectedViewMode = 1 // auto toggle to response
-
-                                // Run this request's chain-extraction rules (if any) against the
-                                // response body, writing extracted values into the active
-                                // Environment so a subsequent chained request can pick them up.
-                                if (resp.isSuccess && reqState.chainExtractions.isNotEmpty()) {
-                                    val written = ApiCollectionsRepository.runChainExtractions(reqState, resp.body)
-                                    if (written.isNotEmpty()) {
-                                        showSavedSnackbar(
-                                            "Extracted " + written.keys.joinToString(", ") { "{{$it}}" }
-                                        )
-                                    }
-                                }
-
-                                // v3.4 Part C — C3: if this request carries assertions, evaluate
-                                // them immediately against the just-received response so a plain
-                                // Send already shows pass/fail without a second tap.
-                                if (reqState.assertions.any { it.enabled }) {
-                                    testResults = AssertionRunner.run(reqState.assertions, resp)
-                                }
-                            }
-                        },
+                        onClick = { sendCurrentRequest() },
                         enabled = !isLoading,
                         shape = RoundedCornerShape(10.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)

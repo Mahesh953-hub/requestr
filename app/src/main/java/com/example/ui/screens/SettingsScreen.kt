@@ -645,7 +645,6 @@ fun SettingsScreen(
                         Spacer(modifier = Modifier.height(10.dp))
 
                         val deepLinks = listOf(
-                            "requestr://intercept/toggle" to "Toggle capture state",
                             "requestr://api/run?id=req-1" to "Trigger API payload",
                             "requestr://flow/execute?id=flow-1" to "Run n8n Automation Chain",
                             "requestr://note/create?title=Log" to "New quick note"
