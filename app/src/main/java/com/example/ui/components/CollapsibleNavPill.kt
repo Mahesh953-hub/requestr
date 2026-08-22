@@ -10,7 +10,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -41,7 +40,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -94,7 +92,6 @@ fun CollapsibleNavPill(
     val scope = rememberCoroutineScope()
 
     var collapsed by remember { mutableStateOf(false) }
-    var dragOffset by remember { mutableFloatStateOf(0f) }
     val progressAnim = remember { Animatable(0f) }
     val progress by animateFloatAsState(progressAnim.value, spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessLow), label = "p")
 
@@ -130,21 +127,9 @@ fun CollapsibleNavPill(
                     ))
                 )
                 .border(0.5.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.30f), RoundedCornerShape(24.dp))
+                // Collapsed-state tap: re-expand on tap anywhere inside the pill
                 .pointerInput(collapsed) {
-                    if (!collapsed) {
-                        detectVerticalDragGestures(
-                            onDragEnd = {
-                                if (dragOffset < -20f) { scope.launch { progressAnim.animateTo(1f, spring()); collapsed = true } }
-                                else { scope.launch { progressAnim.animateTo(0f, spring()) } }
-                                dragOffset = 0f
-                            },
-                            onDragCancel = { dragOffset = 0f; scope.launch { progressAnim.animateTo(0f, spring()) } },
-                            onVerticalDrag = { _, amt ->
-                                dragOffset += amt
-                                scope.launch { progressAnim.snapTo((progressAnim.value - amt / 160f).coerceIn(0f, 1f)) }
-                            }
-                        )
-                    } else {
+                    if (collapsed) {
                         detectTapGestures {
                             scope.launch { progressAnim.animateTo(0f, spring()); collapsed = false }
                         }
