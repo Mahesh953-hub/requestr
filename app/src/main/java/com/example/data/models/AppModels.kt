@@ -400,7 +400,7 @@ data class UserSettingsState(
     val themeMode: String = "MONOCHROME_DARK",
     val cornerRadiusDp: Int = 16,
     val proxyPort: Int = 8080,
-    // Fix #30 (TODO): Removed isVpnActive, isRootDetected, isShizukuAvailable,
+    // Fix #30: removed isVpnActive, isRootDetected, isShizukuAvailable,
     // isFridaReady, isLsposedInstalled — these were initialized as false and never
     // updated by CapabilityProbe (which writes to InterceptionStateRepository).
     // The Settings Diagnostics section reads capabilities directly, not these.

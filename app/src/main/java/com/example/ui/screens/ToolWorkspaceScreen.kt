@@ -702,10 +702,10 @@ private fun randomStringGen() = ToolsRepository.generateRandomString(32)
 private fun loremGen() = ToolsRepository.generateLoremIpsum(2)
 
 // ═══════════════════════════════════════════════════════════════════
-// Custom tools (E1) — every custom tool used to dead-end in
-// PlaceholderWorkspace's "🚧 Coming Soon" even though
-// ToolsRepository.executeToolFunction already routed custom-tool ids to a
-// real regex-replace/template implementation. This wires that up.
+// Custom tools (E1) — every custom tool used to dead-end in a placeholder
+// workspace stub even though ToolsRepository.executeToolFunction already
+// routed custom-tool ids to a real regex-replace/template implementation.
+// This wires that up.
 // ═══════════════════════════════════════════════════════════════════
 
 @Composable
