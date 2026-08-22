@@ -15,6 +15,20 @@ package com.example.interception.tcp
  *  - Max stream buffer is soft-capped; oversize streams are flushed as-is
  *    to prevent memory exhaustion.
  */
+/**
+ * Real three-way-handshake phase, tracked from the actual SYN / SYN-ACK / ACK / FIN / RST flags
+ * seen on the wire — not inferred from data arriving. See [TcpReassembler.feedTcp].
+ */
+enum class TcpHandshakePhase {
+    NONE,
+    SYN_SENT,
+    SYN_ACK_SEEN,
+    ESTABLISHED,
+    CLOSING,
+    CLOSED,
+    RESET,
+}
+
 data class TcpStream(
     val srcIp: String,
     val srcPort: Int,
@@ -30,11 +44,32 @@ data class TcpStream(
 
     val key: String get() = "$protocol|$srcIp:$srcPort>$dstIp:$dstPort"
 
-    /** When we first saw this flow (SYN or first data). */
+    /** When this flow was first observed (SYN, or first data if SYN was never seen). Set once. */
     var establishedAt: Long = System.currentTimeMillis()
 
-    /** Whether the handshake completed (SYN → SYN-ACK → ACK seen). */
-    var handshakeComplete: Boolean = false
+    /** Last time any packet was accepted on this flow. Used for idle pruning. */
+    var lastActivityAt: Long = System.currentTimeMillis()
+
+    /** Real handshake phase, driven by SYN/SYN-ACK/ACK/FIN/RST flags. */
+    var handshakePhase: TcpHandshakePhase = TcpHandshakePhase.NONE
+
+    /** Wall-clock time (ms) the SYN was first observed, if any. */
+    var synSeenAt: Long? = null
+
+    /** Wall-clock time (ms) the handshake reached ESTABLISHED, if any. */
+    var establishedAtHandshake: Long? = null
+
+    /** True if a peer sent RST on this flow (as opposed to a clean FIN close). */
+    var resetByPeer: Boolean = false
+
+    /**
+     * Whether the handshake completed (SYN → SYN-ACK → ACK seen). Derived from
+     * [handshakePhase] so existing callers keep compiling unchanged.
+     */
+    val handshakeComplete: Boolean
+        get() = handshakePhase == TcpHandshakePhase.ESTABLISHED ||
+            handshakePhase == TcpHandshakePhase.CLOSING ||
+            handshakePhase == TcpHandshakePhase.CLOSED
 
     /** Whether we've seen a FIN or RST on this flow. */
     var closed: Boolean = false
