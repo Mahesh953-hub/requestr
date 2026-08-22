@@ -17,8 +17,8 @@ android {
     applicationId = "com.kailashhh.requestr"
     minSdk = 24
     targetSdk = 36
-    versionCode = 26
-    versionName = "5.8-backup"
+    versionCode = 27
+    versionName = "5.9-backup"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
