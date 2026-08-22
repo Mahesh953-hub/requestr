@@ -80,6 +80,7 @@ object ConnectionLineage {
                 LineageStep(
                     plane = ObservationEvent.ObserverSource.PACKET,
                     label = "Connection not found",
+                    kind = LineageStep.Kind.CONNECTION_NOT_FOUND,
                     detail = "No tcp_connections or quic_connections row exists for connectionId=$connectionId in session=$sessionId.",
                     timestamp = System.currentTimeMillis(),
                     success = false,
@@ -102,6 +103,7 @@ object ConnectionLineage {
         steps += LineageStep(
             plane = ObservationEvent.ObserverSource.PACKET,
             label = "TCP ${tcp.srcIp}:${tcp.srcPort} -> ${tcp.destIp}:${tcp.destPort}",
+            kind = LineageStep.Kind.TCP,
             detail = "state=${tcp.state} sent=${tcp.bytesSent}B recv=${tcp.bytesReceived}B retransmissions=${tcp.retransmissions}",
             timestamp = tcp.establishedAt,
             success = tcp.state != "SYN_SENT",
@@ -120,6 +122,7 @@ object ConnectionLineage {
             steps += LineageStep(
                 plane = ObservationEvent.ObserverSource.PACKET,
                 label = "No TLS handshake observed",
+                kind = LineageStep.Kind.TLS_MISSING,
                 detail = "Either this connection is plaintext, or a ClientHello was never captured for it (short-lived connection, TLS detection window missed).",
                 timestamp = tcp.establishedAt,
                 success = false,
@@ -147,6 +150,7 @@ object ConnectionLineage {
         steps += LineageStep(
             plane = ObservationEvent.ObserverSource.QUIC,
             label = "QUIC ${quic.srcIp}:${quic.srcPort} -> ${quic.destIp}:${quic.destPort}",
+            kind = LineageStep.Kind.QUIC,
             detail = "sni=${quic.sniHost ?: "unknown"} alpn=${quic.alpn ?: "unknown"} version=0x${(quic.quicVersion ?: 0).toString(16)}",
             timestamp = quic.establishedAt,
             success = quic.sniHost != null,
@@ -185,6 +189,7 @@ object ConnectionLineage {
             LineageStep(
                 plane = ObservationEvent.ObserverSource.DNS,
                 label = "DNS resolved ${dnsRow.hostname} -> $destIp",
+                kind = LineageStep.Kind.DNS,
                 detail = "type=${dnsRow.queryType} resolver=${dnsRow.resolver} answers=${dnsRow.resolvedIps.joinToString()}",
                 timestamp = dnsRow.timestamp,
                 success = true,
@@ -193,6 +198,7 @@ object ConnectionLineage {
             LineageStep(
                 plane = ObservationEvent.ObserverSource.DNS,
                 label = "No DNS resolution found for $destIp",
+                kind = LineageStep.Kind.DNS_MISSING,
                 detail = "Not observed via UDP:53 in this session -- could be a hardcoded IP, an OS-level DNS cache hit from before capture started, or DoH/DoT (this capture path only sees plaintext UDP:53).",
                 timestamp = beforeTs,
                 success = false,
@@ -227,6 +233,7 @@ object ConnectionLineage {
         return LineageStep(
             plane = if (tls.wasDecrypted) ObservationEvent.ObserverSource.MITM else ObservationEvent.ObserverSource.PACKET,
             label = "TLS handshake (${tls.sniHost ?: tls.connectionId})",
+            kind = LineageStep.Kind.TLS,
             detail = "version=${tls.version ?: "?"} cipher=${tls.cipherSuite ?: "unknown (${if (tls.wasDecrypted) "should be known" else "SNI/JA3-only, not negotiated from our view"})"} " +
                 "alpn=${tls.negotiatedProtocol ?: "?"} decrypted=${tls.wasDecrypted} state=${tls.handshakeState}" +
                 (tls.peerCertSubject?.let { " cert=$it" } ?: "") +
@@ -252,6 +259,7 @@ object ConnectionLineage {
                 LineageStep(
                     plane = ObservationEvent.ObserverSource.PROXY,
                     label = "No HTTP transaction observed",
+                    kind = LineageStep.Kind.HTTP_MISSING,
                     detail = "No captured_traffic row carries connectionId=$connectionId -- either no HTTP traffic followed on this connection, it wasn't decoded (non-HTTP protocol, or MITM inspection skipped it), or the producer for this row genuinely has no connection identity to report (e.g. SDK /api/observe).",
                     timestamp = System.currentTimeMillis(),
                     success = false,
@@ -265,6 +273,7 @@ object ConnectionLineage {
         return LineageStep(
             plane = if (row.wasDecrypted) ObservationEvent.ObserverSource.MITM else ObservationEvent.ObserverSource.PROXY,
             label = "${row.method} ${row.path.ifEmpty { row.url }}",
+            kind = LineageStep.Kind.HTTP,
             detail = "status=${row.statusCode ?: "?"} protocol=${row.protocol.ifEmpty { "HTTP/1.1" }} " +
                 "decrypted=${row.wasDecrypted} undecoded=${row.isUndecoded} reqBytes=${row.requestSizeBytes} respBytes=${row.responseSizeBytes}",
             timestamp = row.timestamp,
@@ -280,7 +289,29 @@ data class LineageStep(
     val detail: String,
     val timestamp: Long,
     val success: Boolean,
-)
+    val kind: Kind,
+) {
+    /**
+     * Which stage of the DNS -> TCP/QUIC -> TLS -> HTTP chain this step represents, and whether it
+     * is a real observation or an explicit "we did not see this" marker.
+     *
+     * This exists so consumers ([com.example.diagnostics.VisibilityAnalyzer],
+     * [ProvenanceGraph], UI) can classify steps without string-matching [label] prose. Matching on
+     * label text was a live trip-wire: rewording a user-facing label silently changed the
+     * computed coverage percentages.
+     */
+    enum class Kind {
+        DNS,
+        DNS_MISSING,
+        TCP,
+        QUIC,
+        TLS,
+        TLS_MISSING,
+        HTTP,
+        HTTP_MISSING,
+        CONNECTION_NOT_FOUND,
+    }
+}
 
 /** The full DNS -> TCP/QUIC -> TLS -> HTTP chain for one connection. */
 data class LineageChain(

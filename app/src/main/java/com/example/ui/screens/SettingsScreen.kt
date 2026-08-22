@@ -1123,6 +1123,14 @@ fun SettingsScreen(
                                     "HTTP decoded: ${r.httpDecrypted}/${r.httpTotal} · undecoded: ${r.httpUndecoded} · plaintext: ${r.httpPlaintext}",
                                     fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface
                                 )
+                                // W6/DEC-4: lineage joins HTTP rows on an exact connectionId, so rows
+                                // without one belong to no connection. Show that count instead of
+                                // letting it silently deflate the coverage figures below.
+                                Text(
+                                    "HTTP rows with no connection identity: ${r.unattachedHttpRows}/${r.httpTotal} (excluded from per-connection coverage)",
+                                    fontSize = 11.sp,
+                                    color = if (r.unattachedHttpRows > 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+                                )
                                 Text(
                                     "Connections reaching HTTP: ${r.connectionsWithHttpDecoded}/${r.totalConnections} (${"%.0f".format(r.httpCoverageFraction * 100)}%) · reaching TLS: ${r.connectionsWithTlsObserved}/${r.totalConnections}",
                                     fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface
