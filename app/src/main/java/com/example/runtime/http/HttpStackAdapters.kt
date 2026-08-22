@@ -4,6 +4,7 @@ import android.content.Context
 import com.example.interception.OkHttpProxyInterceptor
 import com.example.runtime.InstrumentationAdapter
 import com.example.runtime.InstrumentationEvent
+import com.example.runtime.webview.WebViewInstrumentation
 
 /**
  * Adapter that instruments OkHttp via interceptor injection.
@@ -49,40 +50,65 @@ class OkHttpAdapter : InstrumentationAdapter {
     }
 }
 
-/** Adapter for Cronet (Chrome's network stack) */
+/**
+ * Adapter for Cronet (Chrome's network stack).
+ *
+ * W2: replaces the previous `Class.forName("org.chromium.net.CronetEngine")` presence-only
+ * shell with a real requestr-owned engine ([CronetInstrumentation]), a genuine
+ * `RequestFinishedInfo.Listener`, and proxy routing through the MITM proxy. `active` is true
+ * only once the engine actually built; a missing/broken provider is a real, reported failure
+ * via [status], not a silent false.
+ */
 class CronetAdapter : InstrumentationAdapter {
     override val name = "Cronet"
     private var active = false
 
     override fun start(context: Context) {
-        active = try {
-            Class.forName("org.chromium.net.CronetEngine")
-            true
-        } catch (_: ClassNotFoundException) { false }
+        active = CronetInstrumentation.engine(context) != null
     }
 
-    override fun stop() { active = false }
+    override fun stop() {
+        CronetInstrumentation.stop()
+        active = false
+    }
 
     override fun isActive() = active
 
-    override fun pollEvents(): List<InstrumentationEvent> = emptyList()
+    override fun status(): String = CronetInstrumentation.statusText()
+
+    override fun pollEvents(): List<InstrumentationEvent> {
+        if (!active) return emptyList()
+        return CronetInstrumentation.drainEvents()
+    }
 }
 
-/** Adapter for WebView */
+/**
+ * Adapter for WebView.
+ *
+ * W3: replaces the previous `Class.forName("android.webkit.WebView")` presence-only shell with
+ * a real requestr-hosted, offscreen WebView ([WebViewInstrumentation]) driven from the Settings
+ * "RUNTIME INSTRUMENTATION" card's URL field (decision DEC-2). `active` is true only once a
+ * WebView instance genuinely exists and its client is installed; [status] reports which
+ * `WebViewFeature`s resolved true and which WebView package/version backs it, so an
+ * unsupported device produces a real diagnostic instead of a silent false.
+ */
 class WebViewAdapter : InstrumentationAdapter {
     override val name = "WebView"
-    private var active = false
 
     override fun start(context: Context) {
-        active = try {
-            Class.forName("android.webkit.WebView")
-            true
-        } catch (_: ClassNotFoundException) { false }
+        WebViewInstrumentation.start(context)
     }
 
-    override fun stop() { active = false }
+    override fun stop() {
+        WebViewInstrumentation.stop()
+    }
 
-    override fun isActive() = active
+    override fun isActive() = WebViewInstrumentation.isActive()
 
-    override fun pollEvents(): List<InstrumentationEvent> = emptyList()
+    override fun status(): String = WebViewInstrumentation.statusText()
+
+    override fun pollEvents(): List<InstrumentationEvent> {
+        if (!isActive()) return emptyList()
+        return WebViewInstrumentation.drainEvents()
+    }
 }
