@@ -370,19 +370,19 @@ data class FlowConnectionItem(
 fun flowConnectionId(fromNodeId: String, fromPort: String, toNodeId: String, toPort: String): String =
     "${fromNodeId}_${fromPort}_${toNodeId}_${toPort}"
 
+// F3: SYNTH_LOFI/AMBIENT_CYBER/CHILL_CODING were fabricated sources with no producer anywhere
+// in the codebase (only data/music/LocalMusicScanner.kt ever produces a MusicTrackItem, and it
+// always sets LOCAL) — deleted so the enum can't misrepresent where a track came from.
 enum class MusicSourceType(val label: String) {
-    SYNTH_LOFI("requestr Synth Beats"),
-    AMBIENT_CYBER("Cyber Cyberpunk Ambience"),
-    CHILL_CODING("Chill Coding Terminal"),
     LOCAL("Local Storage")
 }
 
 data class MusicTrackItem(
     val id: String = UUID.randomUUID().toString(),
-    val title: String = "Neon Trace (Cyber Synth)",
-    val artist: String = "requestr Audio Engine",
-    val durationSec: Int = 184,
-    val source: MusicSourceType = MusicSourceType.SYNTH_LOFI,
+    val title: String = "No Track Selected",
+    val artist: String = "",
+    val durationSec: Int = 0,
+    val source: MusicSourceType = MusicSourceType.LOCAL,
     val albumCoverHex: Long = 0xFF1E3A8A,
     val contentUri: String? = null,
     val albumArtUri: String? = null,
