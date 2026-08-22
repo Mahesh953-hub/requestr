@@ -439,28 +439,87 @@ tracker.
 
 ## Addendum 2 — SDK/CONNECT scope disclosure (2026-08-22, `vorflux/scope-sdk`)
 
-**KNOWN GAP (unfixed this release) — the requestr CA's private key is protected by a hardcoded
-password compiled into the app.** `CertificateAuthority.kt` line 42:
-`private val keystorePassword = "requestr-ca-local".toCharArray()`. This single constant is used
-for two purposes that pull in opposite directions: (1) it protects the CA's PKCS#12 keystore
-persisted to app-private storage (`context.filesDir/requestr_ca.p12`) — this use should genuinely
-be a secret an attacker with filesystem access can't trivially guess; and (2) it is the password
-for the PKCS#12 export a user deliberately produces via `exportP12()` to import the CA into a
-browser or system trust store — this use is *intentionally* known and documented in the
-function's own kdoc ("Password: `requestr-ca-local`"). Because the same constant serves both
-roles, the internal keystore inherits the export path's necessarily-public password, so on-disk
-possession of `requestr_ca.p12` alone is sufficient to extract the CA private key — there is no
-password-based protection against local extraction beyond ordinary app-sandbox isolation.
+**FIXED (2026-08-22) — the requestr CA's private key was previously protected by a hardcoded
+password compiled into the app; it is now protected by a per-install random secret.** The old
+`CertificateAuthority.kt` line 42, `private val keystorePassword = "requestr-ca-local".toCharArray()`,
+served two purposes that pulled in opposite directions: (1) protecting the CA's PKCS#12 keystore
+persisted to app-private storage (`context.filesDir/requestr_ca.p12`) — a use that genuinely needs
+a secret an attacker with filesystem access can't trivially guess; and (2) the password for the
+PKCS#12 export a user deliberately produces via `exportP12()` to import the CA into a browser or
+system trust store — a use that is *intentionally* known and documented. Because one constant
+served both roles, the internal keystore inherited the export path's necessarily-public password.
 
-**Why this is deferred rather than fixed now:** a real fix means splitting the internal-keystore
-password (which should move to a fresh, unpredictable per-install secret, ideally Android
-Keystore-backed rather than a static string at all) from the export-facing password (which stays
-documented and stable, since it is user-facing), plus a read-with-old-password /
-re-encrypt-with-new-password migration path so existing installs that already trust this CA don't
-lose it or fail to load on upgrade. That is materially more risk than a small self-contained fix
-immediately before a release build, so it was explicitly deferred rather than attempted
-unplanned. Tracked here for a future pass; the user has been separately notified to decide
-whether to schedule the real fix.
+**The fix** splits these into two distinct constants in `CertificateAuthority.kt`:
+- `exportKeystorePassword` — unchanged (`"requestr-ca-local"`), still a fixed public constant, used
+  only by `exportP12()`. It stays public and documented because the user must supply this exact
+  password when importing the `.p12` into a browser or OS trust store; by definition that use case
+  cannot be made secret.
+- The internal on-disk keystore is now protected by a fresh 32-byte `SecureRandom` value generated
+  per install, Base64-encoded, and stored via `SecureKeyStore` (`data/prefs/SecureKeyStore.kt`) —
+  i.e. AES-256-GCM-encrypted under an `AndroidKeyStore` key that never leaves hardware/TEE-backed
+  storage where available. It is never shown to the user and never needs to be.
+
+**Migration for existing installs** (installs from before this fix, which wrote `requestr_ca.p12`
+under the old shared literal): `CertificateAuthority.load()` tries the per-install password first;
+if none exists yet (or it doesn't open the file), it falls back to the old literal — kept in source
+only as `legacyInternalKeystorePassword`, clearly commented as legacy-migration-only, safe to
+delete once no pre-fix install is expected to still exist in the field. A successful legacy read
+immediately re-encrypts the same CA under a freshly generated per-install password and writes it
+via `persistAtomic()`: build the new PKCS#12 into a sibling `.tmp` file, verify it round-trips under
+the new password, then rename it over the real file. The original file is never touched before that
+rename succeeds, so a kill mid-migration cannot leave a truncated/unreadable keystore — worst case
+is a harmless orphaned `.tmp` file and the original keystore untouched, retried on the next load.
+If the `AndroidKeyStore`-held password is ever lost while the file survives (e.g. the platform
+invalidates the key on a device credential change) and the legacy literal also doesn't open it,
+`load()` returns null and `getOrCreate()` regenerates a brand-new CA — an honest, user-visible
+"trust store: NOT installed" via the existing `CapabilityProbe.probeCaInstalled()` /
+Settings "Trust store:" line, prompting the same re-install flow the "Regenerate CA" button already
+describes ("re-export and re-install"), rather than a silent MITM failure.
+
+Unit-tested in `CertificateAuthorityTest.kt` (fresh-install random password + loadable keystore,
+legacy-password keystore transparently migrated with byte-identical key material, export path
+still opens under the documented public password, an interrupted/failed re-write leaves the
+original file untouched) via an injectable `CaKeystorePasswordProvider` seam, since Robolectric has
+no `AndroidKeyStore` provider — the real `AndroidKeyStore` round-trip and on-device migration are
+verified separately on a physical device, consistent with this app's existing pattern for
+Keystore-backed code (see `SecureKeyStoreTest`).
+
+---
+
+## Addendum 3 — pre-v8 database upgrade path disclosure (2026-08-22, code-review fix pass)
+
+**KNOWN GAP (fixed this release, but the fix is destructive, not lossless) — any install still on
+a `RequestrDatabase` schema older than version 8 loses its captured traffic, saved requests, and
+flow graphs on upgrade.** Prior to this pass, `RequestrDatabase` registered `MIGRATION_8_9` as the
+*only* migration and had no `fallbackToDestructiveMigrationFrom`/`fallbackToDestructiveMigration`
+configured at all, so any real install still sitting on schema version 1-7 (this app shipped
+versions 1 through 7 historically, per `git log -p` on the `version =` annotation) would hit
+Room's default behavior for a missing migration path: an `IllegalStateException` crash loop on
+every launch, with no way to recover short of clearing app data manually. The fix adds
+`.fallbackToDestructiveMigrationFrom(/* dropAllTables = */ true, 1, 2, 3, 4, 5, 6, 7)` to the
+database builder alongside the existing `.addMigrations(MIGRATION_8_9)`, so those versions now
+destructively recreate the database (wiping it) instead of crashing.
+
+**Why destructive-not-lossless is the right tradeoff here, not a shortcut:** schemas 1-7 were never
+exported (`exportSchema = false` before this app's first `exportSchema = true` release at version
+9, see the version-history comment above the `@Database` annotation) — there is no schema JSON
+snapshot for Room's `MigrationTestHelper` to validate a real ALTER-table migration against for any
+of those versions, so a genuine non-destructive migration chain covering 1→9 cannot be written and
+verified with the same rigor `MIGRATION_8_9` was. A destructive recreation on a real (if unlikely)
+still-pre-8 install is real, disclosed data loss, but it is strictly better than the crash loop it
+replaces, and it only fires for installs that predate this app's first schema-export release —
+every install at version 8 or 9 keeps its data via `MIGRATION_8_9` exactly as before.
+
+**Verification:** `Migration8To9Test.kt`'s new `opening a pre-8 (version 5) database falls back to
+destructive recreation instead of throwing` test stamps a raw SQLite file's `user_version` to 5,
+opens it through the exact same `Room.databaseBuilder` configuration production uses, and asserts
+the open succeeds (no exception) and the resulting `captured_traffic` table is empty (proving
+destructive recreation actually ran rather than silently doing nothing). The pre-existing
+`migrate 8 to 9 preserves existing rows...` test (real `MigrationTestHelper`-driven, backed by the
+`8.json`/`9.json` schema snapshots) is unchanged and still green, confirming the genuine 8→9
+migration path was not touched by this fix.
+
+See `TODO_v5.md`'s BUILD LOG for the same disclosure in the maintained tracker.
 
 ---
 

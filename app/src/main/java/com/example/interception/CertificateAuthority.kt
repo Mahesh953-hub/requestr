@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.security.KeyChain
 import android.util.Log
+import com.example.data.prefs.SecureKeyStore
 import java.io.File
 import java.math.BigInteger
 import java.security.KeyPair
@@ -11,6 +12,7 @@ import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
+import java.util.Arrays
 import java.util.Date
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -33,13 +35,40 @@ import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 object CertificateAuthority {
 
     private const val TAG = "CertificateAuthority"
-    private const val KEYSTORE_FILE = "requestr_ca.p12"
-    private const val KEYSTORE_ALIAS = "requestr-ca"
+    internal const val KEYSTORE_FILE = "requestr_ca.p12"
+    internal const val KEYSTORE_ALIAS = "requestr-ca"
     private const val CA_CN = "requestr Root CA"
     private const val VALIDITY_YEARS = 10
+    private const val PASSWORD_ALIAS = "ca_internal_keystore_password"
 
-    // Password protects the on-disk PKCS#12 in app-private storage.
-    private val keystorePassword = "requestr-ca-local".toCharArray()
+    /**
+     * Password for the [exportP12] PKCS#12 bundle a user deliberately downloads to import the CA
+     * into a browser or a system trust store.
+     *
+     * This is **intentionally a fixed, public, documented constant** — the user has to type or
+     * otherwise supply this exact password during import, so by definition it cannot be secret.
+     * It protects nothing on its own; its only job is to satisfy PKCS#12's mandatory password
+     * field for an export the user asked for. Do not confuse this with the per-install secret
+     * behind [SecureKeyStoreCaPasswordProvider], which is what actually protects the CA private
+     * key at rest in `filesDir`.
+     */
+    private val exportKeystorePassword = "requestr-ca-local".toCharArray()
+
+    /**
+     * LEGACY password used to encrypt every install's on-disk keystore before this fix
+     * (v5.9-backup and earlier). It happened to be the exact same literal as
+     * [exportKeystorePassword], which was the vulnerability: the internal keystore inherited the
+     * export path's necessarily-public password, so on-disk possession of the `.p12` file alone
+     * was sufficient to extract the CA private key.
+     *
+     * [load] tries the current per-install password first and falls back to this literal only to
+     * recognize and migrate a pre-fix keystore ([migrateToPerInstallPassword]); nothing is ever
+     * written under this password again once migrated. Safe to delete once no install predating
+     * this fix is expected to still exist in the field — not before, since removing it early would
+     * strand such an install's already-trusted CA on next load (it would look unreadable and get
+     * silently replaced with a brand-new, not-yet-trusted CA).
+     */
+    private val legacyInternalKeystorePassword = "requestr-ca-local".toCharArray()
 
     init {
         // Register BC so SHA256withRSA and the cert builders resolve on Android.
@@ -52,30 +81,131 @@ object CertificateAuthority {
 
     data class CaMaterial(val certificate: X509Certificate, val keyPair: KeyPair)
 
+    /**
+     * Abstracts where the per-install internal-keystore password lives, so the migration logic in
+     * [load] is unit-testable without a real `AndroidKeyStore` provider. Robolectric ships no
+     * `AndroidKeyStore` (`SecureKeyStoreTest` documents `KeyStore.getInstance("AndroidKeyStore")`
+     * throwing `NoSuchProviderException`), so tests inject a fake in-memory implementation via
+     * [passwordProviderForTest] instead of exercising [SecureKeyStoreCaPasswordProvider] itself —
+     * the real end-to-end `AndroidKeyStore` round-trip is verified on a physical device.
+     */
+    internal interface CaKeystorePasswordProvider {
+        /** The currently stored per-install password, or null if none has been generated yet. */
+        suspend fun read(context: Context): CharArray?
+
+        /** Generates a fresh random password, persists it (replacing any previous one), and returns it. */
+        suspend fun rotate(context: Context): CharArray
+    }
+
+    /**
+     * Production [CaKeystorePasswordProvider]: a 32-byte [SecureRandom] value, Base64-encoded and
+     * held via [SecureKeyStore] — i.e. AES-256-GCM-encrypted under an `AndroidKeyStore` key that
+     * never leaves hardware/TEE-backed storage where available. This is the per-install secret
+     * that actually protects the CA private key at rest in `filesDir`; unlike
+     * [exportKeystorePassword] it is never shown to the user and never needs to be.
+     *
+     * If the `AndroidKeyStore`-held key is ever invalidated (e.g. the device's credentials/
+     * biometrics change) while the `.p12` file survives, [read] and [rotate] both surface that as
+     * "no usable password" (`SecretReadResult.Unreadable`/`Absent` map to `null`/a fresh value
+     * respectively) rather than throwing — see [load]'s kdoc for how that flows into an honest
+     * "regenerate a new CA" outcome instead of a silent failure to intercept.
+     */
+    internal object SecureKeyStoreCaPasswordProvider : CaKeystorePasswordProvider {
+        override suspend fun read(context: Context): CharArray? {
+            val result = SecureKeyStore.getSecret(context, PASSWORD_ALIAS)
+            return (result as? SecureKeyStore.SecretReadResult.Found)?.value?.toCharArray()
+        }
+
+        override suspend fun rotate(context: Context): CharArray {
+            val bytes = ByteArray(32)
+            SecureRandom().nextBytes(bytes)
+            val encoded = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+            Arrays.fill(bytes, 0)
+            SecureKeyStore.putSecret(context, PASSWORD_ALIAS, encoded)
+            return encoded.toCharArray()
+        }
+    }
+
+    /** Test seam for [CaKeystorePasswordProvider] — production code must never set this. */
+    internal var passwordProviderForTest: CaKeystorePasswordProvider? = null
+
+    private val passwordProvider: CaKeystorePasswordProvider
+        get() = passwordProviderForTest ?: SecureKeyStoreCaPasswordProvider
+
     /** Returns the existing CA, generating one on first use. */
     suspend fun getOrCreate(context: Context): CaMaterial = withContext(Dispatchers.IO) {
         load(context) ?: generate(context)
     }
 
-    private fun load(context: Context): CaMaterial? = runCatching {
+    /**
+     * Loads the CA from `filesDir` if present.
+     *
+     * Tries the current per-install password (from [passwordProvider]) first. If that is absent
+     * or doesn't open the file, falls back to [legacyInternalKeystorePassword] to recognize a
+     * pre-fix keystore; a successful legacy read triggers an immediate re-encrypt under a fresh
+     * per-install password ([migrateToPerInstallPassword]). If neither password opens the file —
+     * e.g. the `AndroidKeyStore`-held password was invalidated by an OS credential change while
+     * the file survived, or the file is corrupt — this returns null so [getOrCreate] regenerates a
+     * brand-new CA rather than silently failing to intercept. That regeneration is user-visible on
+     * the *next* trust-store probe (`CapabilityProbe.probeCaInstalled` / the existing "Trust
+     * store:" line in Settings): the freshly generated CA won't yet be in the OS trust store, so
+     * MITM will start failing until the user re-installs it — the same recovery flow the existing
+     * "Regenerate CA" button already documents ("re-export and re-install"), not a new one.
+     */
+    private suspend fun load(context: Context): CaMaterial? {
         val file = File(context.filesDir, KEYSTORE_FILE)
-        if (!file.exists()) return@runCatching null
+        if (!file.exists()) return null
 
+        val perInstall = runCatching { passwordProvider.read(context) }.getOrNull()
+        if (perInstall != null) {
+            val material = tryLoadWithPassword(file, perInstall)
+            Arrays.fill(perInstall, '\u0000')
+            if (material != null) return material
+            Log.w(TAG, "Per-install CA password did not open the existing keystore; trying legacy fallback")
+        }
+
+        val legacy = tryLoadWithPassword(file, legacyInternalKeystorePassword)
+        if (legacy != null) {
+            migrateToPerInstallPassword(context, file, legacy)
+            return legacy
+        }
+
+        Log.w(TAG, "Existing CA keystore is unreadable with any known password; getOrCreate() will regenerate a new CA")
+        return null
+    }
+
+    /** Pure read: opens [file] with [password] and returns the CA material, or null on any failure. */
+    private fun tryLoadWithPassword(file: File, password: CharArray): CaMaterial? = try {
         val ks = KeyStore.getInstance("PKCS12")
-        file.inputStream().use { ks.load(it, keystorePassword) }
-
-        val cert = ks.getCertificate(KEYSTORE_ALIAS) as? X509Certificate ?: return@runCatching null
-        val key = ks.getKey(KEYSTORE_ALIAS, keystorePassword) as? java.security.PrivateKey
-            ?: return@runCatching null
-
-        CaMaterial(cert, KeyPair(cert.publicKey, key))
-    }.getOrElse {
-        Log.w(TAG, "Failed to load existing CA: ${it.message}")
+        file.inputStream().use { ks.load(it, password) }
+        val cert = ks.getCertificate(KEYSTORE_ALIAS) as? X509Certificate
+        val key = cert?.let { ks.getKey(KEYSTORE_ALIAS, password) as? java.security.PrivateKey }
+        if (cert != null && key != null) CaMaterial(cert, KeyPair(cert.publicKey, key)) else null
+    } catch (e: Exception) {
         null
     }
 
+    /**
+     * Re-encrypts an already-loaded [material] under a freshly generated per-install password.
+     * Crash-safe: [persistAtomic] writes to a temp file and only renames it over [file] after
+     * verifying the temp file round-trips under the new password, so a kill mid-migration leaves
+     * the original (legacy-encrypted) file exactly as it was. A failure here is non-fatal to this
+     * call — [load]'s caller already has [material] to return — and is simply retried on the next
+     * load.
+     */
+    private suspend fun migrateToPerInstallPassword(context: Context, file: File, material: CaMaterial) {
+        val newPassword = passwordProvider.rotate(context)
+        val migrated = persistAtomic(file, material.certificate, material.keyPair, newPassword)
+        Arrays.fill(newPassword, '\u0000')
+        if (migrated) {
+            Log.i(TAG, "Migrated CA keystore from the legacy shared password to a per-install secret")
+        } else {
+            Log.w(TAG, "Failed to migrate CA keystore to a per-install password; will retry on next load")
+        }
+    }
+
     /** Creates a genuine self-signed CA certificate with the correct CA extensions. */
-    private fun generate(context: Context): CaMaterial {
+    private suspend fun generate(context: Context): CaMaterial {
         val generator = KeyPairGenerator.getInstance("RSA")
         generator.initialize(2048, SecureRandom())
         val keyPair = generator.generateKeyPair()
@@ -119,21 +249,44 @@ object CertificateAuthority {
         val certificate = JcaX509CertificateConverter()
             .getCertificate(builder.build(signer))
 
-        persist(context, certificate, keyPair)
+        val password = passwordProvider.rotate(context)
+        val persisted = persistAtomic(File(context.filesDir, KEYSTORE_FILE), certificate, keyPair, password)
+        Arrays.fill(password, '\u0000')
+        if (!persisted) Log.e(TAG, "Failed to persist newly generated CA -- it will not survive a process restart")
         Log.i(TAG, "Generated new requestr CA, valid until $notAfter")
         return CaMaterial(certificate, keyPair)
     }
 
-    private fun persist(context: Context, cert: X509Certificate, keyPair: KeyPair) {
+    /**
+     * Writes [cert]/[keyPair] as a PKCS#12 encrypted under [password] to [file], atomically: the
+     * new keystore is built and stored into a sibling temp file, verified to actually round-trip
+     * under [password], and only then renamed over [file]. [file] is never touched before that
+     * rename succeeds, so an interrupted/failed write (process killed, disk full, permission
+     * denied, etc.) can never leave a truncated or unreadable keystore in its place — worst case
+     * is an orphaned temp file, and the real file (old contents, or none) is exactly as it was
+     * before the call.
+     */
+    private fun persistAtomic(file: File, cert: X509Certificate, keyPair: KeyPair, password: CharArray): Boolean =
         runCatching {
+            val temp = File(file.parentFile, "${file.name}.tmp")
             val ks = KeyStore.getInstance("PKCS12")
             ks.load(null, null)
-            ks.setKeyEntry(KEYSTORE_ALIAS, keyPair.private, keystorePassword, arrayOf(cert))
-            File(context.filesDir, KEYSTORE_FILE).outputStream().use {
-                ks.store(it, keystorePassword)
+            ks.setKeyEntry(KEYSTORE_ALIAS, keyPair.private, password, arrayOf(cert))
+            temp.outputStream().use { ks.store(it, password) }
+
+            if (tryLoadWithPassword(temp, password) == null) {
+                temp.delete()
+                return@runCatching false
             }
-        }.onFailure { Log.e(TAG, "Failed to persist CA: ${it.message}") }
-    }
+            if (!temp.renameTo(file)) {
+                temp.delete()
+                return@runCatching false
+            }
+            true
+        }.getOrElse {
+            Log.e(TAG, "Failed to persist CA keystore: ${it.message}")
+            false
+        }
 
     /**
      * Builds the system CA-install intent. The caller must re-probe the trust store afterwards
@@ -168,15 +321,16 @@ object CertificateAuthority {
 
     /**
      * Exports the full CA keypair as PKCS#12 (.p12) bytes.
-     * Password: "requestr-ca-local"
+     * Password: "requestr-ca-local" — see [exportKeystorePassword]'s kdoc for why this is
+     * intentionally public rather than the per-install secret that protects the internal copy.
      */
     suspend fun exportP12(context: Context): ByteArray = withContext(Dispatchers.IO) {
         val material = getOrCreate(context)
         val ks = KeyStore.getInstance("PKCS12")
         ks.load(null, null)
-        ks.setKeyEntry(KEYSTORE_ALIAS, material.keyPair.private, keystorePassword, arrayOf(material.certificate))
+        ks.setKeyEntry(KEYSTORE_ALIAS, material.keyPair.private, exportKeystorePassword, arrayOf(material.certificate))
         val baos = java.io.ByteArrayOutputStream()
-        ks.store(baos, keystorePassword)
+        ks.store(baos, exportKeystorePassword)
         baos.toByteArray()
     }
 
