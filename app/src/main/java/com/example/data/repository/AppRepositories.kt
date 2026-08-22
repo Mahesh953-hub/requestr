@@ -9,6 +9,7 @@ import com.example.data.models.ApiRequestItem
 import com.example.data.models.FlowConnectionItem
 import com.example.data.models.FlowNodeItem
 import com.example.data.models.FlowNodeType
+import com.example.data.models.flowConnectionId
 import com.example.data.models.HttpMethod
 import com.example.data.models.MusicSourceType
 import com.example.data.models.MusicTrackItem
@@ -197,6 +198,12 @@ object FlowRepository {
         persistNode(node)
     }
 
+    /** Upserts an edited node (title/type/configData) both in-memory and in Room. */
+    fun updateNode(node: FlowNodeItem) {
+        _nodes.value = _nodes.value.map { if (it.id == node.id) node else it }
+        persistNode(node)
+    }
+
     fun updateNodePosition(id: String, x: Float, y: Float) {
         _nodes.value = _nodes.value.map {
             if (it.id == id) it.copy(x = x, y = y) else it
@@ -232,6 +239,24 @@ object FlowRepository {
         }
     }
 
+    /**
+     * Replaces the entire graph (used by JSON import): clears both Room tables, inserts the
+     * new nodes/connections, and updates both StateFlows so the canvas reflects the import
+     * immediately rather than waiting on the next Room emission.
+     */
+    fun replaceGraph(nodes: List<FlowNodeItem>, connections: List<FlowConnectionItem>) {
+        _nodes.value = nodes
+        _connections.value = connections
+        val ctx = appContext ?: return
+        repoScope.launch {
+            val db = com.example.data.local.RequestrDatabase.get(ctx)
+            db.flowNodeDao().clearFlow()
+            db.flowConnectionDao().clearFlow()
+            nodes.forEach { db.flowNodeDao().upsert(it.toEntity()) }
+            connections.forEach { db.flowConnectionDao().upsert(it.toEntity()) }
+        }
+    }
+
     private fun persistNode(node: FlowNodeItem) {
         val ctx = appContext ?: return
         repoScope.launch {
@@ -248,34 +273,53 @@ object FlowRepository {
 
     // ── Entity mappers ──────────────────────────────────────────────
 
-    private fun FlowNodeItem.toEntity() = com.example.data.local.FlowNodeEntity(
+    internal fun FlowNodeItem.toEntity() = com.example.data.local.FlowNodeEntity(
         id = id, type = type.name, label = title,
         positionX = x, positionY = y, configData = configData
     )
 
-    private fun com.example.data.local.FlowNodeEntity.toFlowNodeItem() = FlowNodeItem(
-        id = id, title = label,
-        type = try { FlowNodeType.valueOf(type) } catch (_: Exception) { FlowNodeType.TEXT },
-        x = positionX, y = positionY, configData = configData,
-        inputPorts = emptyList(), outputPorts = emptyList() // Ports derived from type at runtime
-    )
+    /**
+     * Ports are derived from [FlowNodeType] here, fixing the data loss where a saved node's
+     * ports came back empty after restart (they were dropped on write and never derived on
+     * read). CONDITION nodes get labelled `true`/`false` output ports so FlowExecutor's
+     * port-based branching (task 3) has something real to match against; every other type
+     * keeps the single `out` port. INTERCEPT_TRIGGER has no upstream, so it gets no input port.
+     */
+    internal fun com.example.data.local.FlowNodeEntity.toFlowNodeItem(): FlowNodeItem {
+        val nodeType = try { FlowNodeType.valueOf(type) } catch (_: Exception) { FlowNodeType.TEXT }
+        val outputPorts = if (nodeType == FlowNodeType.CONDITION) listOf("true", "false") else listOf("out")
+        val inputPorts = if (nodeType == FlowNodeType.INTERCEPT_TRIGGER) emptyList() else listOf("in")
+        return FlowNodeItem(
+            id = id, title = label,
+            type = nodeType,
+            x = positionX, y = positionY, configData = configData,
+            inputPorts = inputPorts, outputPorts = outputPorts
+        )
+    }
 
-    private fun FlowConnectionItem.toEntity() = com.example.data.local.FlowConnectionEntity(
-        id = "${fromNodeId}_${fromPort}_${toNodeId}_${toPort}",
+    internal fun FlowConnectionItem.toEntity() = com.example.data.local.FlowConnectionEntity(
+        id = flowConnectionId(fromNodeId, fromPort, toNodeId, toPort),
         fromNodeId = fromNodeId, fromPort = fromPort,
         toNodeId = toNodeId, toPort = toPort
     )
 
-    private fun com.example.data.local.FlowConnectionEntity.toFlowConnectionItem() = FlowConnectionItem(
+    /** `id` is now mapped through -- previously omitted here, so a Room-loaded connection took
+     * the random-UUID default from [FlowConnectionItem] instead of the id [toEntity] computed,
+     * meaning `removeConnection(id)` could silently miss it after a restart. */
+    internal fun com.example.data.local.FlowConnectionEntity.toFlowConnectionItem() = FlowConnectionItem(
+        id = id,
         fromNodeId = fromNodeId, fromPort = fromPort,
         toNodeId = toNodeId, toPort = toPort
     )
 
-    suspend fun executeFlow(): String {
+    /** Real success/failure signal so [FlowScreen] can colour its run banner honestly. */
+    suspend fun executeFlow(): FlowRunSummary {
         val nodes = _nodes.value.toList()
         val connections = _connections.value.toList()
 
-        if (nodes.isEmpty()) return "No nodes to execute. Add a trigger node to begin."
+        if (nodes.isEmpty()) {
+            return FlowRunSummary(success = false, message = "No nodes to execute. Add a trigger node to begin.")
+        }
 
         val executor = com.example.flow.FlowExecutor { url, method, headers, body ->
             val request = com.example.data.models.ApiRequestItem(
@@ -292,7 +336,7 @@ object FlowRepository {
 
         val result = executor.execute(nodes, connections)
 
-        return buildString {
+        val message = buildString {
             appendLine("Flow execution ${if (result.success) "completed" else "finished with errors"}.")
             appendLine("${result.nodesExecuted} node(s) executed in ${result.totalDurationMs}ms.")
             if (result.errors.isNotEmpty()) {
@@ -308,8 +352,14 @@ object FlowRepository {
                 if (result.outputs.size > 5) appendLine("  ... and ${result.outputs.size - 5} more")
             }
         }.trimEnd()
+
+        return FlowRunSummary(success = result.success, message = message)
     }
 }
+
+/** Carries success/failure out of [FlowRepository.executeFlow] so the caller can render an
+ * honest result banner instead of always assuming success. */
+data class FlowRunSummary(val success: Boolean, val message: String)
 
 // ==========================================
 // 4. MUSIC REPOSITORY
@@ -605,8 +655,12 @@ object ApiCollectionsRepository {
                 try {
                     RequestrDatabase.get(ctx).savedApiRequestDao().upsert(updated.toEntity())
                 } catch (e: Exception) {
-                    // DB write failed — revert optimistic update by re-reading from Room
-                    android.util.Log.w("ApiCollections", "Save failed, reverting: ${e.message}")
+                    // DB write failed. This does NOT revert the optimistic in-memory value --
+                    // there is no re-read here. The optimistic value simply stays until the
+                    // Room observeAll() flow (init()'s collector) next emits and corrects it,
+                    // which will not happen if the write never lands. Logged so a persistent
+                    // save failure is at least diagnosable.
+                    android.util.Log.w("ApiCollections", "Save failed, optimistic value kept until Room reconciles: ${e.message}")
                 }
             }
         }
@@ -794,8 +848,8 @@ object SettingsRepository {
             themeMode = "MONOCHROME_DARK",
             cornerRadiusDp = 16,
             proxyPort = 8080,
-            // Fix #30 (TODO): removed stale runtime flags (isVpnActive, isRootDetected,
-            // isShizukuAvailable, isFridaReady, isLsposedInstalled). They were never updated
+            // Fix #30: stale runtime flags (isVpnActive, isRootDetected, isShizukuAvailable,
+            // isFridaReady, isLsposedInstalled) were removed here. They were never updated
             // by CapabilityProbe and never read by the UI. Diagnostics reads
             // InterceptionStateRepository.capabilities directly.
             autoBeautify = true,

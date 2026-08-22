@@ -359,6 +359,17 @@ data class FlowConnectionItem(
     val toPort: String = "in"
 )
 
+/**
+ * Single source of truth for a flow connection's deterministic id. Previously
+ * `AppRepositories.kt`'s `toEntity()` computed `"${fromNodeId}_${fromPort}_${toNodeId}_${toPort}"`
+ * while `FlowScreen.kt`'s port-drag built a third format (`"${fromId}_out_${toId}_in"`) and
+ * `toFlowConnectionItem()` dropped `id` entirely, taking the random-UUID default instead. All
+ * three call sites now use this function so `removeConnection(id)` can never silently miss a
+ * Room-loaded connection.
+ */
+fun flowConnectionId(fromNodeId: String, fromPort: String, toNodeId: String, toPort: String): String =
+    "${fromNodeId}_${fromPort}_${toNodeId}_${toPort}"
+
 enum class MusicSourceType(val label: String) {
     SYNTH_LOFI("requestr Synth Beats"),
     AMBIENT_CYBER("Cyber Cyberpunk Ambience"),

@@ -232,7 +232,7 @@ object LocalApiServer {
     private suspend fun executeFlow(id: String): Triple<Int, String, String> {
         return try {
             val result = FlowRepository.executeFlow()
-            ok("""{"flowId":"$id","result":${JSONObject.quote(result)}}""")
+            ok("""{"flowId":"$id","success":${result.success},"result":${JSONObject.quote(result.message)}}""")
         } catch (e: Exception) { err(500, e.message ?: "execution failed") }
     }
 
