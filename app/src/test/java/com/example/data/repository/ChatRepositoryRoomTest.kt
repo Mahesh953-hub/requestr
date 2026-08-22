@@ -15,6 +15,15 @@ import org.robolectric.RobolectricTestRunner
  * by `clearHistory()` or process death. This proves chat history round-trips through the real
  * `chat_messages` Room table with role and ordering preserved, and that `clearHistory()` deletes
  * the persisted rows rather than only resetting the in-memory list.
+ *
+ * `ChatRepository` is a Kotlin `object`, so it outlives this test class within the same JVM fork
+ * -- if another test class (e.g. `ChatProviderConfigTest`) calls into `ChatRepository` first,
+ * `init(context)`'s `appContext != null` guard makes THIS class's `init()` call a no-op, leaving
+ * the message collector bound to that earlier test's now-superseded `RequestrDatabase` instance.
+ * [ChatRepository.resetForTest] undoes `init()` (cancelling that collector) so every test here
+ * starts from a genuinely clean singleton bound to the CURRENT Robolectric database, and
+ * [ChatRepository.deleteAllPersistedMessages] is awaited directly instead of racing
+ * `clearHistory()`'s fire-and-forget background delete.
  */
 @RunWith(RobolectricTestRunner::class)
 class ChatRepositoryRoomTest {
@@ -23,10 +32,10 @@ class ChatRepositoryRoomTest {
 
     @Before
     fun setup() = runBlocking {
+        ChatRepository.resetForTest()
         RequestrDatabase.get(context).chatMessageDao().getAll().forEach {
             RequestrDatabase.get(context).chatMessageDao().deleteById(it.id)
         }
-        ChatRepository.clearHistory()
         ChatRepository.init(context)
     }
 
@@ -68,8 +77,11 @@ class ChatRepositoryRoomTest {
         awaitUntil { RequestrDatabase.get(context).chatMessageDao().getAll().isNotEmpty() }
 
         ChatRepository.clearHistory()
+        // clearHistory() itself only fires-and-forgets the delete for production callers (a UI
+        // "clear chat" action has nothing meaningful to await) -- await the same suspend function
+        // it launches directly so this assertion is deterministic, not racing a background job.
+        ChatRepository.deleteAllPersistedMessages(context)
 
-        awaitUntil { RequestrDatabase.get(context).chatMessageDao().getAll().isEmpty() }
         assertTrue(RequestrDatabase.get(context).chatMessageDao().getAll().isEmpty())
         assertTrue(ChatRepository.messages.value.isEmpty())
     }

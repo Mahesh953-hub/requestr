@@ -9,6 +9,7 @@ import com.example.data.models.ChatProviderConfig
 import com.example.data.prefs.SecureKeyStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -50,6 +51,16 @@ object ChatRepository {
     private var appContext: Context? = null
     private val repoScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
+    // Jobs launched by init() -- held so a test-only reset (see [resetForTest]) can cancel
+    // exactly these children of [repoScope] without killing repoScope itself (which would leave
+    // every subsequent init()/sendMessage()/clearHistory() call unable to launch anything).
+    // Without cancelling these, a stale collector from a previous Robolectric test class -- which
+    // is still bound to that test class's now-superseded RequestrDatabase.get(context) instance --
+    // keeps overwriting [_messages] after the reset, which just moves the race rather than fixing
+    // it (see resetForTest's kdoc for the full failure mode this closes).
+    private var observeMessagesJob: Job? = null
+    private var loadProviderConfigJob: Job? = null
+
     /**
      * Backs [messages] with the real `chat_messages` Room table (task 11), and loads the
      * persisted provider config (Room metadata + Keystore key) into [providerConfig]. Call once
@@ -59,12 +70,43 @@ object ChatRepository {
         if (appContext != null) return
         val ctx = context.applicationContext
         appContext = ctx
-        repoScope.launch {
+        observeMessagesJob = repoScope.launch {
             RequestrDatabase.get(ctx).chatMessageDao().observeAll().collect { entities ->
                 _messages.value = entities.map { it.toChatMessage() }
             }
         }
-        repoScope.launch { loadProviderConfig() }
+        loadProviderConfigJob = repoScope.launch { loadProviderConfig() }
+    }
+
+    /**
+     * Test-only reset: undoes [init] so the next call re-attaches to the CURRENT Robolectric
+     * `RequestrDatabase` instance instead of leaving [init]'s guard (`appContext != null`)
+     * short-circuit into a no-op.
+     *
+     * `ChatRepository` is a Kotlin `object`, so it outlives any single test class within the same
+     * JVM fork, but Robolectric hands each test class a fresh `Context`/database. Without this,
+     * whichever test class in the fork calls [init] first "wins": every later test class's own
+     * `init(context)` call hits the early return and does nothing, so its `observeAll()` collector
+     * is still bound to the FIRST test class's (by-then-superseded) database while the later
+     * test's own `RequestrDatabase.get(context)` calls read the CURRENT one -- `messages` never
+     * reflects rows the later test just wrote, and any assertion waiting on it times out. This
+     * only reproduces when class execution order puts another `ChatRepository`-touching test class
+     * first in the same fork, which is why it looked like an intermittent flake rather than a
+     * deterministic bug.
+     *
+     * Cancels the jobs [init] launched (not [repoScope] itself, which must stay usable for
+     * every later `init`/`sendMessage`/`clearHistory`/`saveProviderConfig` call in the same JVM
+     * fork) and resets every mutable field back to its just-loaded-class initial value.
+     */
+    internal fun resetForTest() {
+        observeMessagesJob?.cancel()
+        loadProviderConfigJob?.cancel()
+        observeMessagesJob = null
+        loadProviderConfigJob = null
+        appContext = null
+        _messages.value = emptyList()
+        _isLoading.value = false
+        _providerConfig.value = ChatProviderConfig(id = DEFAULT_PROVIDER_ID)
     }
 
     /**
@@ -175,10 +217,20 @@ object ChatRepository {
     fun clearHistory() {
         _messages.value = emptyList()
         val ctx = appContext ?: return
-        repoScope.launch {
-            RequestrDatabase.get(ctx).chatMessageDao().getAll().forEach {
-                RequestrDatabase.get(ctx).chatMessageDao().deleteById(it.id)
-            }
+        repoScope.launch { deleteAllPersistedMessages(ctx) }
+    }
+
+    /**
+     * The actual row-deletion [clearHistory] fires-and-forgets on [repoScope] for production
+     * callers (a UI "clear chat" action has nothing meaningful to await). Extracted as its own
+     * `suspend` function so tests can call and await it directly instead of racing a background
+     * `launch` -- `ChatRepositoryRoomTest`'s `@Before` previously called `clearHistory()` and
+     * moved on immediately, so a still-in-flight delete from a PREVIOUS test could land after the
+     * next test's `sendMessage()`, deleting the very row that test's assertion was waiting for.
+     */
+    internal suspend fun deleteAllPersistedMessages(context: Context) {
+        RequestrDatabase.get(context).chatMessageDao().getAll().forEach {
+            RequestrDatabase.get(context).chatMessageDao().deleteById(it.id)
         }
     }
 
