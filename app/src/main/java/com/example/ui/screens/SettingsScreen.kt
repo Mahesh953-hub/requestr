@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
@@ -106,6 +108,39 @@ fun SettingsScreen(
     // and six diagnostics rows that always claimed success (APP_v2.md Bug 3.1 / 10).
     val settingsContext = LocalContext.current
     val settingsScope = rememberCoroutineScope()
+
+    // Task 13: workspace export/import — WorkspaceExporter was complete and real but had zero
+    // call sites anywhere in the app. This launcher reads the picked file and runs it through
+    // WorkspaceExporter.importWorkspace, surfacing a real summary (including errors) rather
+    // than swallowing them.
+    val workspaceImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        settingsScope.launch {
+            val json = runCatching {
+                settingsContext.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+            }.getOrNull()
+            if (json == null) {
+                android.widget.Toast.makeText(settingsContext, "Could not read the selected file.", android.widget.Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            val result = runCatching {
+                com.example.data.export.WorkspaceExporter.importWorkspace(settingsContext, json)
+            }.getOrNull()
+            if (result == null) {
+                android.widget.Toast.makeText(settingsContext, "Import failed: file is not a valid workspace export.", android.widget.Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            val message = if (result.errors.isNotEmpty()) {
+                "${result.summary}: ${result.errors.joinToString("; ")}"
+            } else {
+                result.summary
+            }
+            android.widget.Toast.makeText(settingsContext, message, android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
+
     val capabilities by InterceptionStateRepository.capabilities.collectAsState()
     // B9: the port editable here MUST be the same value PreflightController/InterceptScreen
     // actually read (SettingsDataStore), not the separate, unconsumed SettingsRepository copy
@@ -1448,6 +1483,52 @@ fun SettingsScreen(
                         Icon(imageVector = Icons.Default.Share, contentDescription = "Share", tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("Export JSON", color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Workspace export/import — WorkspaceExporter.exportWorkspace/importWorkspace
+                // were complete and real but had zero call sites anywhere in the app.
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            settingsScope.launch {
+                                runCatching {
+                                    val json = com.example.data.export.WorkspaceExporter.exportWorkspace(settingsContext)
+                                    val target = com.example.data.export.FileExporter.writeJson(settingsContext, json)
+                                        ?: error("Failed to write workspace JSON to Downloads/requestr/")
+                                    com.example.data.export.FileExporter.shareFile(
+                                        settingsContext, target,
+                                        "application/json",
+                                        "requestr Workspace"
+                                    )
+                                }.onFailure { e ->
+                                    android.widget.Toast.makeText(settingsContext, "Export failed: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                    ) {
+                        Icon(imageVector = Icons.Default.Upload, contentDescription = "Export Workspace", tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Export Workspace", color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp)
+                    }
+
+                    Button(
+                        onClick = { workspaceImportLauncher.launch(arrayOf("application/json")) },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                    ) {
+                        Icon(imageVector = Icons.Default.Download, contentDescription = "Import Workspace", tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Import Workspace", color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp)
                     }
                 }
             }
