@@ -91,15 +91,20 @@ class RequestrVpnService : VpnService() {
                     .addDnsServer("1.1.1.1")
                     .addDnsServer("8.8.8.8")
 
-                // Real per-app filtering via UID-backed allow-list. Always exclude ourselves so
-                // requestr's own traffic does not loop back through the tun.
-                builder.addDisallowedApplication(packageName)
-                if (filterMode == AppFilterMode.SELECTED_APPS && selected.isNotEmpty()) {
-                    selected.forEach { pkg ->
-                        if (pkg != packageName) {
+                // Real per-app filtering via UID-backed allow-list. VpnService.Builder permits
+                // an allowed set OR a disallowed set, never both -- mixing them throws
+                // UnsupportedOperationException at establish() time, which is exactly why
+                // SELECTED_APPS mode never worked before this fix (see resolveFilterPlan doc).
+                when (val plan = resolveFilterPlan(filterMode, selected, packageName)) {
+                    is FilterPlan.Allowlist -> {
+                        plan.packages.forEach { pkg ->
                             runCatching { builder.addAllowedApplication(pkg) }
                                 .onFailure { Log.w(TAG, "Cannot filter missing package $pkg") }
                         }
+                    }
+                    is FilterPlan.Blocklist -> {
+                        runCatching { builder.addDisallowedApplication(packageName) }
+                            .onFailure { Log.w(TAG, "Cannot exclude self package $packageName") }
                     }
                 }
 
@@ -366,7 +371,6 @@ class RequestrVpnService : VpnService() {
         stopCapture("VPN permission revoked by system")
         super.onRevoke()
     }
-
     override fun onDestroy() {
         cleanup()
         scope.cancel()
@@ -398,4 +402,33 @@ class RequestrVpnService : VpnService() {
             )
         }
     }
+}
+
+/**
+ * The tun app-filter decision, pure and independent of [android.net.VpnService] so it can be
+ * unit-tested (a tun cannot be established in a JVM unit test).
+ */
+sealed class FilterPlan {
+    data class Allowlist(val packages: Set<String>) : FilterPlan()
+    object Blocklist : FilterPlan()
+}
+
+/**
+ * Chooses exactly one of [android.net.VpnService.Builder.addAllowedApplication] /
+ * [android.net.VpnService.Builder.addDisallowedApplication] — never both, since
+ * `VpnService.Builder` throws `UnsupportedOperationException` when mixed, which is why
+ * `SELECTED_APPS` mode never established a tun before this fix.
+ *
+ * - [AppFilterMode.ALL_APPS] → blocklist containing only [self] (excludes requestr's own
+ *   traffic from looping back through the tun).
+ * - [AppFilterMode.SELECTED_APPS] with a non-empty [selected] set (minus [self], which never
+ *   needs to route through its own tun) → allowlist of exactly those packages.
+ * - [AppFilterMode.SELECTED_APPS] where [selected] is empty, or contains only [self] → falls
+ *   back to blocklist rather than establishing a tun that routes nothing.
+ */
+internal fun resolveFilterPlan(mode: AppFilterMode, selected: Set<String>, self: String): FilterPlan {
+    if (mode != AppFilterMode.SELECTED_APPS) return FilterPlan.Blocklist
+    val others = selected.filter { it != self }.toSet()
+    if (others.isEmpty()) return FilterPlan.Blocklist
+    return FilterPlan.Allowlist(others)
 }
