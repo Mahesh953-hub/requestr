@@ -74,9 +74,9 @@ private val NAV = listOf(
  *
  * - No parent block — pill is the only rendered element
  * - Glassy surface: gradient with alpha, hairline border, soft shadow
- * - Swipe up on pill → collapse to icon+label (width = chip)
+ * - Collapse: scroll-driven via external signal only (drag-to-collapse removed
+ *   to fix ADB single-tap — drag gesture on parent consumed child click events)
  * - Tap collapsed pill → expand and STAY OPEN
- * - Scroll-driven collapse via external signal
  * - No ripple indication — only color feedback
  * - Smooth spring animations throughout
  */
