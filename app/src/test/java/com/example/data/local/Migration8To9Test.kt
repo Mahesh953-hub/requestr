@@ -95,6 +95,18 @@ class Migration8To9Test {
         db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'connect_attempts'").use { c ->
             assertTrue("connect_attempts table must exist after migration", c.moveToFirst())
         }
+        // Regression guard for the "id INTEGER PRIMARY KEY AUTOINCREMENT" nullability bug: SQLite
+        // treats that column declaration as implicitly nullable unless NOT NULL is spelled out
+        // explicitly, but Room always generates an explicit NOT NULL for a non-null Kotlin Long
+        // primary key -- so a merge with the SDK scope's ConnectAttemptEntity (Kotlin `val id:
+        // Long = 0`) would throw "Migration didn't properly handle: connect_attempts" at
+        // database-open time on the notNull attribute alone, even with the table and its indices
+        // otherwise present. The table/index existence checks above cannot catch this; only a
+        // column-attribute check can.
+        db.query("SELECT \"notnull\" FROM pragma_table_info('connect_attempts') WHERE name = 'id'").use { c ->
+            assertTrue("connect_attempts.id column must be reported by PRAGMA table_info", c.moveToFirst())
+            assertEquals("connect_attempts.id must be NOT NULL to match Room's generated DDL for an autoincrement primary key", 1, c.getInt(0))
+        }
         listOf(
             "index_connect_attempts_sessionId",
             "index_connect_attempts_targetHost",

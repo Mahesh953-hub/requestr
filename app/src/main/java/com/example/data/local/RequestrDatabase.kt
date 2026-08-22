@@ -170,7 +170,7 @@ abstract class RequestrDatabase : RoomDatabase() {
                 // so no SQL DEFAULT clause is added here for any column.
                 db.execSQL(
                     "CREATE TABLE IF NOT EXISTS connect_attempts (" +
-                        "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
                         "sessionId INTEGER NOT NULL, " +
                         "targetHost TEXT NOT NULL, " +
                         "targetPort INTEGER NOT NULL, " +
