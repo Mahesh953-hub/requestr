@@ -160,6 +160,15 @@ class CdpClient(
     /** listenerKey(sessionId, method) -> listeners invoked with the event's `params` object. */
     private val eventListeners = ConcurrentHashMap<String, MutableList<(JSONObject) -> Unit>>()
 
+    init {
+        // Registered eagerly (not deferred to sendDiscoveryCommands/onOpen) so target
+        // attach/detach bookkeeping works against dispatchForTest without a live socket, and
+        // so a message arriving the instant the socket opens is never missed.
+        on("Target.attachedToTarget", sessionId = null) { params -> handleAttachedToTarget(params) }
+        on("Target.detachedFromTarget", sessionId = null) { params -> handleDetached(params.optString("sessionId")) }
+        on("Target.targetDestroyed", sessionId = null) { params -> handleTargetDestroyed(params) }
+    }
+
     /** Register a listener for a CDP event, e.g. "Network.requestWillBeSent". `sessionId = null` means browser-level. */
     fun on(method: String, sessionId: String? = null, listener: (JSONObject) -> Unit) {
         eventListeners.getOrPut(listenerKey(sessionId, method)) { mutableListOf() }.add(listener)
@@ -244,7 +253,12 @@ class CdpClient(
         })
     }
 
-    /** After connecting, discover every existing/future target and auto-attach in flattened mode. */
+    /**
+     * After connecting, discover every existing/future target and auto-attach in flattened
+     * mode. The `Target.*` event listeners themselves are registered once in [init], not here,
+     * so they survive across reconnects and are testable via [dispatchForTest] without a live
+     * socket.
+     */
     private fun sendDiscoveryCommands() {
         send("Target.setDiscoverTargets", JSONObject().apply { put("discover", true) })
         send(
@@ -255,9 +269,6 @@ class CdpClient(
                 put("flatten", true)
             },
         )
-        on("Target.attachedToTarget", sessionId = null) { params -> handleAttachedToTarget(params) }
-        on("Target.detachedFromTarget", sessionId = null) { params -> handleDetached(params.optString("sessionId")) }
-        on("Target.targetDestroyed", sessionId = null) { params -> handleTargetDestroyed(params) }
     }
 
     private fun handleAttachedToTarget(params: JSONObject) {
