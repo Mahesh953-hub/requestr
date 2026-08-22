@@ -1,6 +1,7 @@
 package com.example.runtime.http
 
 import android.content.Context
+import com.example.data.local.CapturedTrafficEntity
 import com.example.data.local.RequestrDatabase
 
 /**
@@ -94,26 +95,68 @@ object HttpStackDetector {
 
     /**
      * Real, session-scoped stack breakdown: classifies every [com.example.data.local.CapturedTrafficEntity]
-     * row already persisted for [sessionId] by its User-Agent header (via [detectFromHeaders]),
-     * rather than only reporting classpath presence. A session with zero captured requests
-     * legitimately returns a report with [StackDetectionReport.totalRequests] == 0 and an empty
-     * [StackDetectionReport.countsByStack] -- not a fabricated baseline.
+     * row already persisted for [sessionId] through [StackFingerprinter.classify] -- multiple
+     * independent signals scored into a confidence-rated [StackFingerprinter.StackVerdict],
+     * not just the single-signal `User-Agent` `when` this used to be. A session with zero
+     * captured requests legitimately returns a report with [StackDetectionReport.totalRequests]
+     * == 0 and an empty [StackDetectionReport.countsByStack] -- not a fabricated baseline.
+     *
+     * [StackFingerprinter]'s per-connection live signals (JA3/ALPN/H2 SETTINGS/header order)
+     * are looked up from [StackSignalStore] by [com.example.data.local.CapturedTrafficEntity.connectionId]
+     * when that row carries one; rows with a null `connectionId` (HAR imports, SDK
+     * `/api/observe` reports, or captured before this process's [StackSignalStore] had a chance
+     * to see the live connection) are classified on User-Agent/cache-validation signals alone,
+     * same as before this rewrite -- an honest degradation, not a crash.
      */
-    suspend fun analyzeSession(context: Context, sessionId: Long): StackDetectionReport {
+    suspend fun analyzeSession(context: Context, sessionId: Long, calibration: StackFingerprinter.CalibrationTable? = null): StackDetectionReport {
         val db = RequestrDatabase.get(context)
         val rows = db.capturedTrafficDao().getBySession(sessionId)
         val counts = linkedMapOf<HttpStack, Int>()
+        val confidenceHistogram = linkedMapOf<StackFingerprinter.Confidence, Int>()
+        val unresolvedReasons = mutableListOf<String>()
         for (row in rows) {
-            val stack = detectFromHeaders(row.requestHeaders)
-            counts[stack] = (counts[stack] ?: 0) + 1
+            val connectionSignals = row.connectionIdOrNull()?.let { StackSignalStore.get(it) }
+            val verdict = StackFingerprinter.classify(
+                requestHeaders = row.requestHeaders,
+                connectionSignals = connectionSignals,
+                calibration = calibration,
+            )
+            counts[verdict.stack] = (counts[verdict.stack] ?: 0) + 1
+            confidenceHistogram[verdict.confidence] = (confidenceHistogram[verdict.confidence] ?: 0) + 1
+            if (verdict.confidence == StackFingerprinter.Confidence.UNKNOWN && unresolvedReasons.size < 20) {
+                unresolvedReasons.add(verdict.reason)
+            }
         }
         return StackDetectionReport(
             sessionId = sessionId,
             totalRequests = rows.size,
             countsByStack = counts,
             classpathAvailable = detectAvailableOnClasspath(),
+            confidenceHistogram = confidenceHistogram,
+            calibrated = calibration != null,
+            unresolvedReasons = unresolvedReasons,
         )
     }
+}
+
+/**
+ * Reads [CapturedTrafficEntity.connectionId] via reflection instead of a direct property
+ * reference. Transport-scope owns [CapturedTrafficEntity] and its `connectionId` column
+ * (Room schema v9, landed on `origin/vorflux/scope-transport` at commit `c6b7069`, task 12) --
+ * this worktree has not merged that branch in yet, so the field may not exist here at compile
+ * time. Reflection lets this classifier degrade to "no connection signals" honestly (same as
+ * a HAR-imported row with a genuinely null `connectionId`) instead of hard-failing the whole
+ * runtime module's compilation while the merge is pending. Once transport's branch is merged
+ * into `vorflux/scope-runtime`, this can be simplified back to `row.connectionId`.
+ */
+private fun CapturedTrafficEntity.connectionIdOrNull(): String? = try {
+    val field = this::class.java.getDeclaredField("connectionId")
+    field.isAccessible = true
+    field.get(this) as? String
+} catch (_: NoSuchFieldException) {
+    null
+} catch (_: Exception) {
+    null
 }
 
 /** Real, computed-from-Room stack breakdown for one capture session. */
@@ -122,4 +165,7 @@ data class StackDetectionReport(
     val totalRequests: Int,
     val countsByStack: Map<HttpStack, Int>,
     val classpathAvailable: Set<HttpStack>,
+    val confidenceHistogram: Map<StackFingerprinter.Confidence, Int> = emptyMap(),
+    val calibrated: Boolean = false,
+    val unresolvedReasons: List<String> = emptyList(),
 )
