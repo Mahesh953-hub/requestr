@@ -249,7 +249,6 @@ data class UdpFlowEntity(
     val byteCount: Long = 0,
 )
 
-@Entity(tableName = "quic_connections", indices = [Index("sessionId"), Index("sniHost")])
 /**
  * Decode status of a QUIC connection, independent of lifecycle state.
  * Closing a connection (lifecycleState -> CLOSED) never changes this value.
@@ -264,6 +263,8 @@ enum class QuicDecodeStatus {
     /** Handshake and 1-RTT application data were fully decrypted. */
     FULLY_DECODED
 }
+
+@Entity(tableName = "quic_connections", indices = [Index("sessionId"), Index("sniHost")])
 
 data class QuicConnectionEntity(
     @PrimaryKey val connectionId: String,

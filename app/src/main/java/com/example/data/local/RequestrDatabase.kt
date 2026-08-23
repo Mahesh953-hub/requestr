@@ -15,16 +15,6 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * renders a genuine empty state instead of the fabricated sample rows that shipped in v2.1.
  */
 
-    class QuicDecodeStatusConverter {
-        @TypeConverter
-        fun fromStatus(status: QuicDecodeStatus): String = status.name
-        @TypeConverter
-        fun toStatus(name: String): QuicDecodeStatus = try {
-            QuicDecodeStatus.valueOf(name)
-        } catch (e: IllegalArgumentException) {
-            QuicDecodeStatus.DETECTED_ONLY
-        }
-    }
 
 @Database(
     entities = [

@@ -76,6 +76,13 @@ class RequestrTypeConverters {
         if (value.isNullOrBlank() || value == "[]") emptyList()
         else runCatching { assertionListAdapter.fromJson(value) }.getOrNull() ?: emptyList()
 
+    @TypeConverter
+    fun quicDecodeStatusToName(value: QuicDecodeStatus?): String = (value ?: QuicDecodeStatus.DETECTED_ONLY).name
+
+    @TypeConverter
+    fun nameToQuicDecodeStatus(value: String?): QuicDecodeStatus =
+        runCatching { QuicDecodeStatus.valueOf(value ?: "DETECTED_ONLY") }.getOrNull() ?: QuicDecodeStatus.DETECTED_ONLY
+
     private companion object {
         val moshi: Moshi = Moshi.Builder().addLast(KotlinJsonAdapterFactory()).build()
 
