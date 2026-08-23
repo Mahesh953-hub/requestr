@@ -3,7 +3,9 @@ package com.example.interception.quic
 import android.util.Log
 import javax.crypto.Cipher
 import javax.crypto.Mac
+import javax.crypto.spec.ChaCha20ParameterSpec
 import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
@@ -103,26 +105,84 @@ object QuicCrypto {
         val packetNumber: Long,
     )
 
-    /** {key, iv, hp} derived from a TLS 1.3 traffic secret via [deriveKeysFromTrafficSecret]. */
+    /**
+     * {key, iv, hp} derived from a TLS 1.3 traffic secret via [deriveKeysFromTrafficSecret]. The
+     * [cipherSuite] is carried alongside the key material so the decrypt path ([decryptProtectedPayload]
+     * / [decryptShortHeaderOrHandshakePayload]) can pick the right AEAD transformation (AES/GCM vs
+     * ChaCha20-Poly1305) and header-protection construction (AES-ECB vs ChaCha20 keystream) without a
+     * separate suite argument threaded through every call site. It defaults to AES-128-GCM — the
+     * QUIC Initial-key AEAD — so call sites that construct keys for the Initial path keep compiling.
+     */
     data class PacketProtectionKeys(
         val key: ByteArray,
         val iv: ByteArray,
         val hp: ByteArray,
+        val cipherSuite: CipherSuite = CipherSuite.TLS_AES_128_GCM_SHA256,
     )
 
     /**
      * The subset of TLS 1.3 AEAD cipher suites QUIC can negotiate (RFC 9001 §5.3) that this
-     * object currently knows how to derive traffic keys for. [hmacAlgorithm]/[hashLength] pick
-     * the HKDF hash function (the suite's own hash, per RFC 9001 §5.1 — *not* always SHA-256;
-     * only Initial secrets are pinned to SHA-256 regardless of suite). [aeadKeyLength] is the
-     * AEAD key size in bytes, which also sizes the AES-ECB header-protection key for the two
-     * AES-GCM suites below (RFC 9001 §5.4.3). TLS_CHACHA20_POLY1305_SHA256 is intentionally not
-     * listed yet -- its header-protection scheme (RFC 9001 §5.4.4) is a separate ChaCha20
-     * keystream construction, not AES-ECB, and lands in a follow-up change.
+     * object currently knows how to derive traffic keys for and decrypt. [hmacAlgorithm]/
+     * [hashLength] pick the HKDF hash function (the suite's own hash, per RFC 9001 §5.1 — *not*
+     * always SHA-256; only Initial secrets are pinned to SHA-256 regardless of suite). [aeadKeyLength]
+     * is the AEAD key size in bytes (the `keyLength` of the suite); for the two AES-GCM suites it also
+     * sizes the AES-ECB header-protection key (RFC 9001 §5.4.3). [aeadTransformation]/
+     * [aeadKeyAlgorithm] select the JCE AEAD cipher and key algorithm, and
+     * [headerProtectionIsChaCha20] switches header protection from AES-ECB (RFC 9001 §5.4.3) to the
+     * ChaCha20 keystream construction (RFC 9001 §5.4.4).
+     *
+     * The QUIC AEAD nonce is always 12 bytes ([ivLength]) and the AEAD tag is always 16 bytes
+     * ([tagLength] = 128 bits) for every suite QUIC can negotiate (RFC 9001 §5.1), independent of
+     * the suite's key size — so those are constants rather than per-suite fields.
      */
-    enum class CipherSuite(val hmacAlgorithm: String, val hashLength: Int, val aeadKeyLength: Int) {
-        TLS_AES_128_GCM_SHA256(hmacAlgorithm = "HmacSHA256", hashLength = 32, aeadKeyLength = 16),
-        TLS_AES_256_GCM_SHA384(hmacAlgorithm = "HmacSHA384", hashLength = 48, aeadKeyLength = 32),
+    enum class CipherSuite(
+        val hmacAlgorithm: String,
+        val hashLength: Int,
+        val aeadKeyLength: Int,
+        /** JCE AEAD transformation for this suite's bulk cipher (RFC 9001 §5.3). */
+        val aeadTransformation: String,
+        /** JCE algorithm name for the AEAD key ([SecretKeySpec] algorithm). */
+        val aeadKeyAlgorithm: String,
+        /**
+         * True when header protection uses the ChaCha20 keystream construction (RFC 9001 §5.4.4)
+         * instead of AES-ECB (RFC 9001 §5.4.3).
+         */
+        val headerProtectionIsChaCha20: Boolean,
+    ) {
+        TLS_AES_128_GCM_SHA256(
+            hmacAlgorithm = "HmacSHA256", hashLength = 32, aeadKeyLength = 16,
+            aeadTransformation = "AES/GCM/NoPadding", aeadKeyAlgorithm = "AES",
+            headerProtectionIsChaCha20 = false,
+        ),
+        TLS_AES_256_GCM_SHA384(
+            hmacAlgorithm = "HmacSHA384", hashLength = 48, aeadKeyLength = 32,
+            aeadTransformation = "AES/GCM/NoPadding", aeadKeyAlgorithm = "AES",
+            headerProtectionIsChaCha20 = false,
+        ),
+        TLS_CHACHA20_POLY1305_SHA256(
+            // RFC 9001 §5.3 / RFC 8446 §B.4: 32-byte (256-bit) ChaCha20 key, 12-byte AEAD nonce,
+            // 16-byte (128-bit) Poly1305 tag, SHA-256 HKDF hash (hashLength = 32). Header protection
+            // is the RFC 9001 §5.4.4 ChaCha20 keystream construction, not AES-ECB.
+            hmacAlgorithm = "HmacSHA256", hashLength = 32, aeadKeyLength = 32,
+            aeadTransformation = "ChaCha20-Poly1305", aeadKeyAlgorithm = "ChaCha20",
+            headerProtectionIsChaCha20 = true,
+        );
+
+        /** AEAD nonce length in bytes — always 12 for every QUIC AEAD suite (RFC 9001 §5.1). */
+        val ivLength: Int get() = 12
+
+        /** AEAD authentication-tag length in bytes — always 16 (128 bits) for every QUIC AEAD suite. */
+        val tagLength: Int get() = 16
+
+        companion object {
+            /** The IANA TLS cipher-suite identifier ([CipherSuite] was negotiated from), or null. */
+            fun fromIanaCode(code: Int): CipherSuite? = when (code) {
+                0x1301 -> TLS_AES_128_GCM_SHA256
+                0x1302 -> TLS_AES_256_GCM_SHA384
+                0x1303 -> TLS_CHACHA20_POLY1305_SHA256
+                else -> null
+            }
+        }
     }
 
     /**
@@ -175,10 +235,14 @@ object QuicCrypto {
      * `CLIENT_TRAFFIC_SECRET_0`/`SERVER_TRAFFIC_SECRET_0` obtained from
      * [com.example.interception.tls.TlsKeyLogRegistry]. Unlike [deriveClientInitialKeys]/
      * [deriveServerInitialKeys], the HKDF hash function here is the *negotiated* suite's hash
-     * (SHA-256 or SHA-384 for the two [CipherSuite]s currently supported), not always SHA-256 --
-     * Initial secrets are the one exception pinned to SHA-256 regardless of suite (RFC 9001
-     * §5.2). The AEAD nonce (`quic iv`) is always 12 bytes for every AEAD QUIC can negotiate
-     * (RFC 9001 §5.1), independent of the suite's key size.
+     * (SHA-256 or SHA-384 for the two AES-GCM suites, SHA-256 for ChaCha20-Poly1305), not always
+     * SHA-256 -- Initial secrets are the one exception pinned to SHA-256 regardless of suite (RFC
+     * 9001 §5.2). The AEAD key length (`quic key`) and header-protection key length (`quic hp`) are
+     * the negotiated suite's [CipherSuite.aeadKeyLength] (16 for AES-128-GCM, 32 for AES-256-GCM and
+     * ChaCha20-Poly1305); the AEAD nonce (`quic iv`) is always 12 bytes ([CipherSuite.ivLength]) for
+     * every AEAD QUIC can negotiate (RFC 9001 §5.1), independent of the suite's key size. The
+     * negotiated [cipherSuite] is carried on the returned [PacketProtectionKeys] so the decrypt path
+     * selects the matching AEAD/header-protection construction.
      *
      * This is a pure key-derivation primitive -- no decrypt path in this file drives it yet.
      * It exists so Handshake-level and 1-RTT decryption (a separate change) has a single,
@@ -191,8 +255,9 @@ object QuicCrypto {
             val hpLabel = if (version == VERSION_2) "quicv2 hp" else "quic hp"
             PacketProtectionKeys(
                 key = hkdfExpandLabel(secret, keyLabel, cipherSuite.aeadKeyLength, cipherSuite.hmacAlgorithm),
-                iv = hkdfExpandLabel(secret, ivLabel, 12, cipherSuite.hmacAlgorithm),
+                iv = hkdfExpandLabel(secret, ivLabel, cipherSuite.ivLength, cipherSuite.hmacAlgorithm),
                 hp = hkdfExpandLabel(secret, hpLabel, cipherSuite.aeadKeyLength, cipherSuite.hmacAlgorithm),
+                cipherSuite = cipherSuite,
             )
         } catch (e: Exception) {
             Log.w(TAG, "Traffic secret key derivation failed: ${e.message}")
@@ -457,8 +522,11 @@ object QuicCrypto {
      * packet number and the AEAD ciphertext. The header-protection sample (RFC 9001 §5.4) is taken
      * 4 bytes after the start of the packet-number field; the (unprotected) form bit selects whether
      * the low 4 bits (long/Handshake) or low 5 bits (short/1-RTT) of the first byte are protected.
-     * The packet number is removed and the remaining bytes are AEAD-decrypted with an empty AAD.
-     * Returns the plaintext frame bytes or null on any failure.
+     * The mask is generated with the construction selected by [PacketProtectionKeys.cipherSuite]:
+     * AES-ECB (RFC 9001 §5.4.3) for the two AES-GCM suites, or the ChaCha20 keystream construction
+     * (RFC 9001 §5.4.4) for TLS_CHACHA20_POLY1305_SHA256. The packet number is removed and the
+     * remaining bytes are AEAD-decrypted with an empty AAD using the suite's AEAD (AES/GCM or
+     * ChaCha20-Poly1305). Returns the plaintext frame bytes or null on any failure.
      */
     private fun decryptShortHeaderOrHandshakePayload(keys: PacketProtectionKeys, payload: ByteArray): ByteArray? {
         return try {
@@ -467,7 +535,7 @@ object QuicCrypto {
             val sampleOffset = pnStart + 4 // RFC 9001 §5.4: sample = 4 bytes after the PN field start
             if (sampleOffset + 16 > payload.size) return null
             val sample = payload.copyOfRange(sampleOffset, sampleOffset + 16)
-            val mask = aesEcbEncryptBlock(keys.hp, sample)
+            val mask = headerProtectionMask(keys, sample)
 
             val working = payload.copyOf()
             // The form bit (high bit of the first byte) is not header-protected, so read it before
@@ -503,12 +571,11 @@ object QuicCrypto {
                 nonce[nonce.size - 1 - i] = (nonce[nonce.size - 1 - i].toInt() xor pnByte.toInt()).toByte()
             }
 
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keys.key, "AES"), GCMParameterSpec(128, nonce))
             // Empty AAD: this primitive authenticates only the ciphertext + packet number, not the
             // stripped header (callers that need full-header authentication keep using
-            // [decryptInitialPacket], which AADs the whole long header).
-            cipher.doFinal(ciphertext)
+            // [decryptInitialPacket], which AADs the whole long header). The suite's AEAD is selected
+            // by [PacketProtectionKeys.cipherSuite] (AES/GCM or ChaCha20-Poly1305).
+            aeadDecrypt(keys, nonce, ciphertext)
         } catch (e: Exception) {
             Log.d(TAG, "Protected payload decrypt failed: ${e.message}")
             null
@@ -570,6 +637,57 @@ object QuicCrypto {
         val cipher = Cipher.getInstance("AES/ECB/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"))
         return cipher.doFinal(block16)
+    }
+
+    /**
+     * Generates the header-protection mask (RFC 9001 §5.4) for [keys]' negotiated suite. The
+     * returned array always has at least 5 bytes (the first-byte mask + up to 4 packet-number
+     * bytes) so the caller indexes [0] and [1..4] uniformly regardless of suite:
+     * - AES-GCM suites (RFC 9001 §5.4.3): `mask = AES-ECB(hp, sample)` (a 16-byte block; the
+     *   caller uses the first 5 bytes).
+     * - ChaCha20-Poly1305 (RFC 9001 §5.4.4): the 16-byte [sample] is split into a 4-byte ChaCha20
+     *   block counter (`sample[0..3]`, little-endian) and a 12-byte nonce (`sample[4..15]`); the
+     *   mask is the first 5 bytes of the ChaCha20 keystream produced by encrypting five zero bytes
+     *   with the header-protection key (the 32-byte `quic hp` key) under that counter/nonce.
+     */
+    private fun headerProtectionMask(keys: PacketProtectionKeys, sample16: ByteArray): ByteArray =
+        if (keys.cipherSuite.headerProtectionIsChaCha20) chacha20HeaderProtectionMask(keys.hp, sample16)
+        else aesEcbEncryptBlock(keys.hp, sample16)
+
+    /**
+     * ChaCha20 header-protection mask (RFC 9001 §5.4.4): encrypt five zero bytes with ChaCha20
+     * (raw stream cipher, not AEAD) keyed by the header-protection key, using the sample's first 4
+     * bytes as the little-endian block counter and its remaining 12 bytes as the nonce. Returns the
+     * 5-byte keystream — the first-byte mask plus up to 4 packet-number masks.
+     */
+    private fun chacha20HeaderProtectionMask(hpKey: ByteArray, sample16: ByteArray): ByteArray {
+        val counter = (sample16[0].toInt() and 0xFF) or
+            ((sample16[1].toInt() and 0xFF) shl 8) or
+            ((sample16[2].toInt() and 0xFF) shl 16) or
+            ((sample16[3].toInt() and 0xFF) shl 24)
+        val nonce = sample16.copyOfRange(4, 16)
+        val cipher = Cipher.getInstance("ChaCha20")
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(hpKey, "ChaCha20"), ChaCha20ParameterSpec(nonce, counter))
+        return cipher.doFinal(ByteArray(5)) // XOR of 5 zero bytes with keystream = the keystream itself
+    }
+
+    /**
+     * AEAD-decrypts [ciphertext] (with its trailing 16-byte tag appended) under [keys]' negotiated
+     * suite, using [nonce] (the `quic iv` XOR packet number) and an empty AAD. Branches on
+     * [PacketProtectionKeys.cipherSuite]: AES/GCM via `GCMParameterSpec(128, nonce)` (the 128-bit
+     * tag length), or ChaCha20-Poly1305 via `IvParameterSpec(nonce)` (its 16-byte tag is built into
+     * the algorithm). Throws on a bad tag / wrong key / malformed input; callers wrap in try/catch.
+     */
+    private fun aeadDecrypt(keys: PacketProtectionKeys, nonce: ByteArray, ciphertext: ByteArray): ByteArray {
+        val suite = keys.cipherSuite
+        val cipher = Cipher.getInstance(suite.aeadTransformation)
+        return if (suite.headerProtectionIsChaCha20) {
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keys.key, suite.aeadKeyAlgorithm), IvParameterSpec(nonce))
+            cipher.doFinal(ciphertext)
+        } else {
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keys.key, suite.aeadKeyAlgorithm), GCMParameterSpec(128, nonce))
+            cipher.doFinal(ciphertext)
+        }
     }
 
     /**

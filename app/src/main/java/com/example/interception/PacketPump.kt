@@ -121,6 +121,36 @@ class PacketPump(
     private val quicConnectionState = LinkedHashMap<String, com.example.interception.quic.QuicConnection>()
 
     /**
+     * The negotiated TLS 1.3 AEAD cipher suite locked per connection (keyed by the same
+     * [connectionId] used for [quicConnectionState]). Set by [lockCipherSuite] once the server's
+     * ServerHello has been parsed (its selected cipher suite, RFC 8446 §4.1.3), and read by the
+     * 1-RTT decrypt path to pick the AEAD transformation and header-protection construction
+     * ([QuicCrypto.deriveKeysFromTrafficSecret]). Until a suite is locked, a connection has no
+     * negotiated AEAD and its 1-RTT packets cannot be decrypted (the honest key-miss path).
+     */
+    private val quicCipherSuites = mutableMapOf<String, com.example.interception.quic.QuicCrypto.CipherSuite>()
+
+    /**
+     * Locks the negotiated TLS 1.3 AEAD cipher suite for [connectionId] from the IANA cipher-suite
+     * code the server selected in its ServerHello (RFC 8446 §4.1.3 / RFC 9001 §5.3), so the 1-RTT
+     * decrypt path can derive correctly-sized traffic keys and pick the right AEAD + header
+     * protection. Returns the locked [com.example.interception.quic.QuicCrypto.CipherSuite], or null
+     * for an unrecognized code (a suite QUIC cannot negotiate, e.g. an obsolete CBC suite) -- in
+     * which case nothing is locked and the connection stays undecryptable. Covers all three AEAD
+     * suites QUIC can negotiate: AES-128-GCM-SHA256 (0x1301), AES-256-GCM-SHA384 (0x1302), and
+     * ChaCha20-Poly1305-SHA256 (0x1303).
+     */
+    fun lockCipherSuite(connectionId: String, ianaCode: Int): com.example.interception.quic.QuicCrypto.CipherSuite? {
+        val suite = com.example.interception.quic.QuicCrypto.CipherSuite.fromIanaCode(ianaCode) ?: return null
+        quicCipherSuites[connectionId] = suite
+        return suite
+    }
+
+    /** The locked negotiated cipher suite for [connectionId], or null if none has been locked yet. */
+    fun lockedCipherSuite(connectionId: String): com.example.interception.quic.QuicCrypto.CipherSuite? =
+        quicCipherSuites[connectionId]
+
+    /**
      * Task 14: read-only snapshot of [quicConnectionState] for the HTTP/3 UI surface, which
      * needs the live [com.example.interception.quic.QuicState] (`INITIALIZING`,
      * `HANDSHAKE_IN_PROGRESS`, ...) and per-connection decoded-vs-Initial-only status that
@@ -502,6 +532,7 @@ class PacketPump(
         lastUdpPersist.entries.removeAll { it.value < cutoff }
         if (quicConnections.size > MAX_TRACKED_FLOWS) quicConnections.clear()
         if (quicConnectionState.size > MAX_TRACKED_FLOWS) quicConnectionState.clear()
+        if (quicCipherSuites.size > MAX_TRACKED_FLOWS) quicCipherSuites.clear()
 
         InterceptionStateRepository.updateCounters(
             packetCount = packetCount,
