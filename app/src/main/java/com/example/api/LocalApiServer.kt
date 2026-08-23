@@ -14,7 +14,6 @@ import kotlinx.coroutines.flow.first
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
-import java.io.OutputStreamWriter
 import java.net.ServerSocket
 import java.security.SecureRandom
 
@@ -133,7 +132,6 @@ object LocalApiServer {
             socket.use { s ->
                 s.soTimeout = 10_000
                 val reader = BufferedReader(InputStreamReader(s.getInputStream()))
-                val writer = OutputStreamWriter(s.outputStream)
                 val line = reader.readLine() ?: return
                 val parts = line.split(" ", limit = 3)
                 if (parts.size < 2) return
@@ -175,13 +173,30 @@ object LocalApiServer {
                 }
 
                 val (status, ct, resp) = route(method, path, body, authHeader)
-                writer.write("HTTP/1.1 $status ${statusText(status)}\r\n")
-                writer.write("Content-Type: $ct\r\n")
-                writer.write("Content-Length: ${resp.length}\r\n")
-                writer.write("Access-Control-Allow-Origin: *\r\n")
-                writer.write("Connection: close\r\n\r\n")
-                writer.write(resp)
-                writer.flush()
+                // FIX (CAT-1): `resp.length` is the UTF-16 *code-unit* count of the Kotlin
+                // String, not its wire byte count. Any response containing a non-ASCII
+                // character (e.g. the "Hex ↔ String Converter" tool title, U+2194 encodes to
+                // 3 UTF-8 bytes but counts as 1 UTF-16 code unit) previously produced a
+                // `Content-Length` smaller than the bytes actually written below, so
+                // HTTP-compliant clients (including this app's own CLI, which reads exactly
+                // `Content-Length` bytes) truncated the body mid-character and failed to parse
+                // it as JSON. Encoding once to a UTF-8 `ByteArray` and measuring/writing that
+                // makes the declared length and the wire bytes agree for every response, ASCII
+                // or not. Written straight to the raw `OutputStream` (never through a char
+                // `Writer`, which could re-encode with a different charset) so what's counted is
+                // exactly what's sent.
+                val bodyBytes = resp.toByteArray(Charsets.UTF_8)
+                val header = buildString {
+                    append("HTTP/1.1 $status ${statusText(status)}\r\n")
+                    append("Content-Type: $ct\r\n")
+                    append("Content-Length: ${bodyBytes.size}\r\n")
+                    append("Access-Control-Allow-Origin: *\r\n")
+                    append("Connection: close\r\n\r\n")
+                }
+                val out = s.getOutputStream()
+                out.write(header.toByteArray(Charsets.UTF_8))
+                out.write(bodyBytes)
+                out.flush()
             }
         } catch (_: Exception) { }
     }
@@ -240,6 +255,19 @@ object LocalApiServer {
                         err(401, "missing or invalid Authorization: Bearer <pairing token>")
                     } else {
                         receiveObserverEvents(body)
+                    }
+                }
+
+                path == "/api/keylog" && method == "POST" -> {
+                    // Task 13 / CAT-2d: the authenticated cross-process PRIMARY path for TLS/QUIC
+                    // key material -- gated by the exact same pairing-Bearer check as
+                    // /api/observe and /api/rules. A bearer of this material can decrypt TLS
+                    // 1.3/QUIC traffic matching the recorded client random, so this is at least
+                    // as sensitive as observed traffic and must never be reachable unauthenticated.
+                    if (!isAuthorized(authHeader)) {
+                        err(401, "missing or invalid Authorization: Bearer <pairing token>")
+                    } else {
+                        receiveKeylogLines(body)
                     }
                 }
 
@@ -309,14 +337,30 @@ object LocalApiServer {
         return ok("""{"root":$root,"shizuku":$shizuku,"ca":$ca,"api_running":true,"port":$port}""")
     }
 
+    /**
+     * `GET /api/captures` — built on [org.json.JSONArray]/[JSONObject] rather than hand-rolled
+     * string interpolation with `.replace("\"","\\\"")`, which only escapes double quotes: a
+     * `url`/`method` containing a backslash (or any other JSON-significant character) produced
+     * invalid JSON the CLI's `org.json.JSONArray(response)` call would then throw on. `statusCode`
+     * is nullable on the entity, so it serializes as JSON `null` (via [JSONObject.NULL]) rather
+     * than the literal string `"null"` that plain interpolation would have produced.
+     */
     private suspend fun listCaptures(): Triple<Int, String, String> {
         return try {
             val dao = db()?.capturedTrafficDao() ?: return ok("[]")
             val logs = dao.observeAll().first()
-            val items = logs.take(50).joinToString(",") { log ->
-                """{"id":${log.id},"method":"${log.method}","url":"${log.url.replace("\"","\\\"")}","status":${log.statusCode},"timestamp":${log.timestamp}}"""
+            val arr = org.json.JSONArray()
+            for (log in logs.take(50)) {
+                arr.put(
+                    JSONObject()
+                        .put("id", log.id)
+                        .put("method", log.method)
+                        .put("url", log.url)
+                        .put("status", log.statusCode ?: JSONObject.NULL)
+                        .put("timestamp", log.timestamp)
+                )
             }
-            ok("[$items]")
+            ok(arr.toString())
         } catch (_: Exception) { ok("[]") }
     }
 
@@ -331,13 +375,25 @@ object LocalApiServer {
         } catch (_: Exception) { err(500, "query failed") }
     }
 
+    /**
+     * `GET /api/flows` — see [listCaptures]'s kdoc: built on [org.json.JSONArray]/[JSONObject]
+     * instead of hand-rolled `.replace("\"","\\\"")` interpolation, which only escapes double
+     * quotes and produces invalid JSON for a `label` containing a backslash.
+     */
     private suspend fun listFlows(): Triple<Int, String, String> {
         return try {
             val dao = db()?.flowNodeDao() ?: return ok("[]")
             val nodes = dao.getAll()
-            ok("[" + nodes.joinToString(",") { n ->
-                """{"id":"${n.id}","type":"${n.type}","label":"${n.label.replace("\"","\\\"")}"}"""
-            } + "]")
+            val arr = org.json.JSONArray()
+            for (n in nodes) {
+                arr.put(
+                    JSONObject()
+                        .put("id", n.id)
+                        .put("type", n.type)
+                        .put("label", n.label)
+                )
+            }
+            ok(arr.toString())
         } catch (_: Exception) { ok("[]") }
     }
 
@@ -372,12 +428,29 @@ object LocalApiServer {
         } catch (e: Exception) { err(500, e.message ?: "delete failed") }
     }
 
+    /**
+     * `GET /api/tools` — see [listCaptures]'s kdoc: built on [org.json.JSONArray]/[JSONObject]
+     * instead of hand-rolled `.replace("\"","\\\"")` interpolation. That interpolation only
+     * escaped double quotes, so a custom tool's `description` containing a raw backslash (e.g.
+     * `ToolsRepository.customToolToItem`'s `"Custom regex: ${ct.pattern} → ${ct.replacement}"`
+     * for a `\d+`-style regex pattern) produced a bare `\d` in the response body — not valid
+     * JSON per RFC 8259 (`\d` is not a legal escape), so any correct JSON parser (including the
+     * CLI's `org.json.JSONArray(response)`) threw on it.
+     */
     private fun listTools(): Triple<Int, String, String> {
         return try {
             val tools = ToolsRepository.getToolsCatalog()
-            ok("[" + tools.joinToString(",") { tool ->
-                """{"id":"${tool.id}","title":"${tool.title.replace("\"","\\\"")}","description":"${tool.description.replace("\"","\\\"")}","category":"${tool.category.name}"}"""
-            } + "]")
+            val arr = org.json.JSONArray()
+            for (tool in tools) {
+                arr.put(
+                    JSONObject()
+                        .put("id", tool.id)
+                        .put("title", tool.title)
+                        .put("description", tool.description)
+                        .put("category", tool.category.name)
+                )
+            }
+            ok(arr.toString())
         } catch (_: Exception) { ok("[]") }
     }
 
@@ -580,6 +653,61 @@ object LocalApiServer {
                 inserted++
             }
             ok("""{"received":$inserted}""")
+        } catch (e: Exception) {
+            err(400, e.message ?: "bad request")
+        }
+    }
+
+    /**
+     * At most this many lines from a single `/api/keylog` request body are ever handed to
+     * [com.example.interception.tls.TlsKeyLogRegistry] -- independent of (and in addition to)
+     * that registry's own `MAX_ENTRIES`/TTL bounds. Mirrors [com.requestr.sdk.RequestrObserver]'s
+     * `MAX_PENDING_EVENTS` -- same rationale: one oversized or malicious POST body must not be
+     * able to spend unbounded CPU walking a huge line list before any per-line validation gets a
+     * chance to reject anything.
+     */
+    private const val MAX_KEYLOG_LINES_PER_REQUEST = 2000
+
+    /**
+     * `POST /api/keylog` — Task 13 / CAT-2d: the authenticated, cross-process PRIMARY producer
+     * path for TLS 1.3 / QUIC key material. This is what lets an SDK-embedded third-party host
+     * app (which never shares a process, let alone a classpath, with requestr's own `:app`
+     * module) feed real key material into [com.example.interception.tls.TlsKeyLogRegistry] --
+     * the SDK's previous sole mechanism, `KeyLogRegistryBridge`'s `Class.forName` reflection (see
+     * that class's kdoc in the `:sdk` module), is a permanent no-op outside of requestr's own
+     * process and is now demoted to an optional same-process fast path behind this HTTP path.
+     *
+     * Gated by the exact same [isAuthorized] pairing-Bearer-token check `/api/observe`/`/api/rules`
+     * already use (401 on missing/invalid, enforced by the [route] dispatcher before this is ever
+     * called) -- a bearer of this material can decrypt matching TLS/QUIC traffic, at least as
+     * sensitive as observed plaintext traffic itself.
+     *
+     * Accepts either body shape:
+     *  - `{"lines": ["LABEL <64-hex client_random> <hex secret>", ...]}` (what
+     *    `KeyLogProducer`'s HTTP path posts), or
+     *  - a raw newline-delimited NSS keylog text body, so a user-supplied `SSLKEYLOGFILE` can be
+     *    piped in directly (e.g. `curl --data-binary @keylog.txt`) without any JSON wrapping.
+     *
+     * Per-line validation (`LABEL <64-hex client_random> <hex secret>`, a recognised
+     * [com.example.interception.tls.KeyLogLabel], well-formed hex) is
+     * [com.example.interception.tls.TlsKeyLogRegistry.importNssKeyLog]'s own frozen contract --
+     * malformed lines are skipped there, never thrown, and this handler forwards its accepted
+     * count verbatim. **Bounded** by [MAX_KEYLOG_LINES_PER_REQUEST] -- see its kdoc.
+     */
+    private fun receiveKeylogLines(body: String): Triple<Int, String, String> {
+        return try {
+            // Prefer the JSON `{"lines":[...]}` shape; a body that isn't valid JSON at all (e.g.
+            // a raw NSS keylog file piped straight through) falls back to plain newline
+            // splitting rather than failing the request.
+            val linesArray = runCatching { JSONObject(body).optJSONArray("lines") }.getOrNull()
+            val rawLines: List<String> = if (linesArray != null) {
+                (0 until linesArray.length()).map { linesArray.optString(it, "") }
+            } else {
+                body.lineSequence().toList()
+            }
+            val bounded = rawLines.asSequence().take(MAX_KEYLOG_LINES_PER_REQUEST)
+            val accepted = com.example.interception.tls.TlsKeyLogRegistry.importNssKeyLog(bounded)
+            ok("""{"accepted":$accepted}""")
         } catch (e: Exception) {
             err(400, e.message ?: "bad request")
         }
