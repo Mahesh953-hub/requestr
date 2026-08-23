@@ -6,6 +6,29 @@
 
 ---
 
+## v6.0 — Completion Snapshot (2026-08-23)
+
+> All 50 numbered TODO items below remain ✅ complete (unchanged since v4.0). v6.0 is the
+> follow-on release that closes v5 *pending* work + a CLI defect. See `TODO_v5.md` for the
+> per-item v5 tracker and `RELEASE_NOTES_v6.0.md` for full detail. Five of nine tracked v6 items
+> are wired at this snapshot; four are foundation follow-ons (primitives in place, decrypt
+> wiring not yet landed) — documented honestly, not fabricated as complete.
+
+### ✅ Resolved in v6.0 (wired at this snapshot)
+- [x] **UTF-8 Content-Length fix** — `LocalApiServer` byte-accurate responses + `org.json` serialization; fixes the CLI `tools` `↔`-truncation crash.
+- [x] **10-accent theme system** — `AppAccent` (10) + universal dynamic light/dark schemes; `selectedAccent` persistence; accent-aware `MainActivity` resolution; 10-accent picker in Settings, accent step in Onboarding, quick-switcher in the drawer (orthogonal axis — light/dark/system family preserved).
+- [x] **Authenticated cross-process keylog ingestion (`POST /api/keylog`)** — bearer-gated route in `LocalApiServer` + SDK `KeyLogProducer` HTTP primary transport; reflective bridge demoted to optional same-process fast path.
+- [x] **QUIC crypto foundation** — server Initial key derivation + decrypt; `deriveKeysFromTrafficSecret` primitive (AES-128-GCM/AES-256-GCM); `decodePacketNumber` per space; v1/v2 version-aware long-header classification + Retry Integrity Tag validation.
+- [x] **Room v10 (decode + lifecycle state on QUIC connections)** — authoritative decode-only `QuicDecodeStatus` enum + separate lifecycle `lifecycleState` column + `updatedAt`/`clientRandomHex`; real `MIGRATION_9_10`; `QuicDecodeStatusConverter`; exported `10.json`; nonexistent `wasDecrypted` QUIC-row write removed.
+
+### ⬜ Foundation follow-ons (primitives in place, decrypt wiring NOT in this release)
+- [ ] **Handshake long-header decryption** — `deriveKeysFromTrafficSecret` exists as a tested primitive but no decrypt path drives it yet.
+- [ ] **ServerHello cipher extraction (`parseServerHello`)** — not present in `TlsDecoder.kt` at this snapshot.
+- [ ] **`QuicStreamReassembler`** — file not present.
+- [ ] **`QuicCidTable` (CID lifecycle)** — file not present.
+
+---
+
 ## CATEGORY 1: Important + Critical
 
 These are trust-breaking bugs or missing core features that make the app lie to the user.
@@ -136,6 +159,7 @@ These are polish items, future roadmap features, or items that don't affect curr
 | v3.8 | DNS capture, QUIC SNI, Flow export/import, Notes export, HAR import, API Discovery, Schema, Workspace | 2026-08-20 |
 | v3.9 | Custom tools, Chats, Diff view, HAR import, API Discovery, Schema, Workspace | 2026-08-20 |
 | v4.0 | **ProGuard fix** (-dontoptimize + comprehensive keep rules → APK 10→15MB), **MediaPlayer** audio playback, custom tools in catalog, Chat nav wiring, GlassCard border fix, keyboard shortcuts | 2026-08-20 |
+| v6.0 | UTF-8 Content-Length fix (CLI `tools`), 10-accent theme (settings/onboarding/drawer), authenticated `POST /api/keylog` ingestion, QUIC crypto foundation (client+server Initial, traffic-secret derivation, PN reconstruction, v1/v2 Retry integrity), Room v10 (decode + lifecycle state on QUIC connections). Foundation follow-ons (handshake decrypt, `parseServerHello`, `QuicStreamReassembler`, `QuicCidTable`) not wired — see `RELEASE_NOTES_v6.0.md` & `TODO_v5.md` | 2026-08-23 |
 
 **Remaining (separate modules):** ~~#47 Plugin architecture~~, ~~#48 Local API~~, ~~#49 CLI~~ — ALL DONE in v4.0
 
