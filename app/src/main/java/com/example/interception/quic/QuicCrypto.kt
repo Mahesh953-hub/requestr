@@ -35,9 +35,61 @@ object QuicCrypto {
     /** RFC 9369 §3.3.1, QUIC version 2. */
     private val SALT_V2 = hexToBytes("0dede3def700a6db819381be6e269dcbf9bd2ed9")
 
+    /**
+     * RFC 9001 §5.8, QUIC version 1 Retry Integrity Tag key/nonce. The RFC publishes these as
+     * fixed hex constants (themselves an HKDF-Expand-Label output of a fixed secret with labels
+     * "quic key"/"quic iv") rather than something derived per-connection, so — matching how
+     * [SALT_V1]/[SALT_V2] are stored as already-computed constants — these are hardcoded rather
+     * than re-derived at runtime.
+     */
+    private val RETRY_INTEGRITY_KEY_V1 = hexToBytes("be0c690b9f66575a1d766b54e368c84e")
+    private val RETRY_INTEGRITY_NONCE_V1 = hexToBytes("461599d35d632bf2239825bb")
+
+    /** RFC 9369 §3.3.3, QUIC version 2 Retry Integrity Tag key/nonce (same construction as v1). */
+    private val RETRY_INTEGRITY_KEY_V2 = hexToBytes("8fb4b01b56ac48e260fbcbcead7ccc92")
+    private val RETRY_INTEGRITY_NONCE_V2 = hexToBytes("d86969bc2d7c6d9990efb04a")
+
     /** Known QUIC version magic numbers (mirrors [QuicParser]'s version whitelist). */
     const val VERSION_1 = 0x00000001
     const val VERSION_2 = 0x6b3343cf.toInt()
+
+    /** RFC 9000 §17.2 Table 5 (v1) / RFC 9369 §3.2 (v2) long-header packet types. */
+    enum class LongHeaderPacketType { INITIAL, ZERO_RTT, HANDSHAKE, RETRY }
+
+    /**
+     * Maps a long header's 2-bit Long Packet Type field (RFC 9000 §17.2, mask `0x30` of byte 0,
+     * i.e. bits 4-5) to its meaning -- **the same 2 bits mean a different packet type depending
+     * on the QUIC version**, so this must never be read through v1-only constants. RFC 9000
+     * §17.2 Table 5 (v1): Initial=0b00, 0-RTT=0b01, Handshake=0b10, Retry=0b11. RFC 9369 §3.2
+     * (v2) shifts every value by one (mod 4): Initial=0b01, 0-RTT=0b10, Handshake=0b11,
+     * Retry=0b00 -- explicitly to combat wire-format ossification (RFC 9369 §1). [firstByte] is
+     * the packet's raw, still-protected first byte (header protection covers only the low 4
+     * bits for a long header, RFC 9001 §5.4, so the type bits at `0x30` are always readable in
+     * the clear); this function extracts bits 4-5 itself. Returns null for an unrecognized
+     * version (matches [deriveClientInitialKeys]'s "no known mapping" behavior) -- version `0`
+     * (Version Negotiation / draft packets) uses the v1 mapping, the same fallback
+     * [deriveInitialKeys] uses for its salt.
+     */
+    fun classifyLongHeaderPacketType(version: Int, firstByte: Int): LongHeaderPacketType? {
+        val bits = (firstByte shr 4) and 0x3
+        return when (version) {
+            VERSION_1, 0 -> when (bits) {
+                0 -> LongHeaderPacketType.INITIAL
+                1 -> LongHeaderPacketType.ZERO_RTT
+                2 -> LongHeaderPacketType.HANDSHAKE
+                3 -> LongHeaderPacketType.RETRY
+                else -> null // unreachable: `bits` is masked to 2 bits
+            }
+            VERSION_2 -> when (bits) {
+                1 -> LongHeaderPacketType.INITIAL
+                2 -> LongHeaderPacketType.ZERO_RTT
+                3 -> LongHeaderPacketType.HANDSHAKE
+                0 -> LongHeaderPacketType.RETRY
+                else -> null
+            }
+            else -> null
+        }
+    }
 
     data class InitialKeys(
         val key: ByteArray,
@@ -170,6 +222,64 @@ object QuicCrypto {
             candidatePn <= expectedPn - pnHwin && candidatePn < (1L shl 62) - pnWin -> candidatePn + pnWin
             candidatePn > expectedPn + pnHwin && candidatePn >= pnWin -> candidatePn - pnWin
             else -> candidatePn
+        }
+    }
+
+    /**
+     * Validates a Retry packet's 128-bit Retry Integrity Tag (RFC 9001 §5.8 for v1, RFC 9369
+     * §3.3.3 for v2) and returns true only if it authenticates. **Callers MUST call this before
+     * accepting the Retry's new Source Connection ID or its token, and before re-keying the
+     * Initial secrets from that new CID** — an invalid tag means the packet is either corrupted
+     * in transit or an attacker's spoofed Retry (the tag's whole purpose per RFC 9001 §5.8 is
+     * that "only an entity that observes an Initial packet can send a valid Retry packet"); a
+     * spoofed Retry that were acted upon could redirect the connection or poison the CID/token
+     * used for the next Initial.
+     *
+     * [retryPacketWithoutTag] is the on-wire Retry packet (long header + token), **not**
+     * including the trailing 16-byte tag itself; [tag] is those trailing 16 bytes; [odcid] is
+     * the Original Destination Connection ID — the DCID from the *client's* Initial packet that
+     * this Retry is responding to (not any field inside the Retry packet itself; RFC 9001 §5.8's
+     * Retry Pseudo-Packet prepends it precisely because a Retry does not otherwise prove it was
+     * sent in response to that specific Initial). The key/nonce used are the version-specific
+     * fixed constants the RFC publishes ([RETRY_INTEGRITY_KEY_V1]/[RETRY_INTEGRITY_NONCE_V1] for
+     * v1, the "quicv2"-labelled equivalents for v2) — never anything derived per-connection.
+     *
+     * Returns false (never throws) for an unrecognized [version] or on any AEAD failure
+     * (mismatched tag, malformed input) — matching this object's existing "never propagate a
+     * crypto exception to the caller" contract.
+     */
+    fun validateRetryIntegrityTag(
+        version: Int,
+        odcid: ByteArray,
+        retryPacketWithoutTag: ByteArray,
+        tag: ByteArray,
+    ): Boolean {
+        if (tag.size != 16 || odcid.size > 255) return false
+        val (key, nonce) = when (version) {
+            VERSION_1 -> RETRY_INTEGRITY_KEY_V1 to RETRY_INTEGRITY_NONCE_V1
+            VERSION_2 -> RETRY_INTEGRITY_KEY_V2 to RETRY_INTEGRITY_NONCE_V2
+            else -> return false
+        }
+        return try {
+            // Retry Pseudo-Packet (RFC 9001 §5.8 Figure 8): ODCID Length(1) || ODCID || the
+            // transmitted Retry packet with its Retry Integrity Tag removed.
+            val pseudoPacket = ByteArray(1 + odcid.size + retryPacketWithoutTag.size)
+            pseudoPacket[0] = odcid.size.toByte()
+            System.arraycopy(odcid, 0, pseudoPacket, 1, odcid.size)
+            System.arraycopy(retryPacketWithoutTag, 0, pseudoPacket, 1 + odcid.size, retryPacketWithoutTag.size)
+
+            // AEAD_AES_128_GCM with an empty plaintext (RFC 9001 §5.8): the "ciphertext" is
+            // just the tag, and GCM decryption with empty ciphertext input succeeds iff the tag
+            // authenticates the associated data -- exactly the check we need, with no plaintext
+            // to discard.
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce))
+            cipher.updateAAD(pseudoPacket)
+            cipher.doFinal(tag) // throws AEADBadTagException on mismatch; returns empty array on success
+            true
+        } catch (e: Exception) {
+            Log.d(TAG, "Retry Integrity Tag validation failed: ${e.message}")
+            false
         }
     }
 

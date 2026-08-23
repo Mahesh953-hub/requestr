@@ -298,4 +298,177 @@ class QuicCryptoTest {
         // (428), so the algorithm must subtract a window to land back on 200, not stay at 456.
         assertEquals(200L, QuicCrypto.decodePacketNumber(299L, 200L, 1))
     }
+
+    // ── Version-aware long-header packet-type classification (RFC 9000 §17.2 / RFC 9369 §3.2) ──
+
+    @Test
+    fun `classifyLongHeaderPacketType maps v1 type bits per RFC 9000 Table 5`() {
+        // v1: Initial=0b00, 0-RTT=0b01, Handshake=0b10, Retry=0b11 -- packed into bits 4-5 of a
+        // long-header first byte (header form=1, fixed bit=1 -> high nibble starts at 0xC/0xD/
+        // 0xE/0xF depending on the type bits, low nibble irrelevant to this function).
+        assertEquals(
+            QuicCrypto.LongHeaderPacketType.INITIAL,
+            QuicCrypto.classifyLongHeaderPacketType(QuicCrypto.VERSION_1, 0xC0),
+        )
+        assertEquals(
+            QuicCrypto.LongHeaderPacketType.ZERO_RTT,
+            QuicCrypto.classifyLongHeaderPacketType(QuicCrypto.VERSION_1, 0xD0),
+        )
+        assertEquals(
+            QuicCrypto.LongHeaderPacketType.HANDSHAKE,
+            QuicCrypto.classifyLongHeaderPacketType(QuicCrypto.VERSION_1, 0xE0),
+        )
+        assertEquals(
+            QuicCrypto.LongHeaderPacketType.RETRY,
+            QuicCrypto.classifyLongHeaderPacketType(QuicCrypto.VERSION_1, 0xF0),
+        )
+    }
+
+    @Test
+    fun `classifyLongHeaderPacketType maps v2 shifted type bits per RFC 9369 section 3-2`() {
+        // v2 shifts every value by one (mod 4) vs v1: the *same* 2 bits (0b00) that mean Initial
+        // in v1 mean Retry in v2, and vice versa -- this is the exact ossification-resistance
+        // property under test, so each assertion below uses the v1 bit pattern that would
+        // decode to a *different* type if this function ever fell back to v1-only constants.
+        assertEquals(
+            QuicCrypto.LongHeaderPacketType.RETRY, // v1's Initial bits (0b00) mean Retry in v2
+            QuicCrypto.classifyLongHeaderPacketType(QuicCrypto.VERSION_2, 0xC0),
+        )
+        assertEquals(
+            QuicCrypto.LongHeaderPacketType.INITIAL, // v1's 0-RTT bits (0b01) mean Initial in v2
+            QuicCrypto.classifyLongHeaderPacketType(QuicCrypto.VERSION_2, 0xD0),
+        )
+        assertEquals(
+            QuicCrypto.LongHeaderPacketType.ZERO_RTT, // v1's Handshake bits (0b10) mean 0-RTT in v2
+            QuicCrypto.classifyLongHeaderPacketType(QuicCrypto.VERSION_2, 0xE0),
+        )
+        assertEquals(
+            QuicCrypto.LongHeaderPacketType.HANDSHAKE, // v1's Retry bits (0b11) mean Handshake in v2
+            QuicCrypto.classifyLongHeaderPacketType(QuicCrypto.VERSION_2, 0xF0),
+        )
+    }
+
+    @Test
+    fun `classifyLongHeaderPacketType classifies the real RFC test-vector Initial and Retry packets`() {
+        // First byte of the RFC 9001 A.2 client Initial (0xc3, before header-protection removal
+        // -- the type bits at 0x30 are unprotected for a long header) must classify as Initial;
+        // the RFC 9001 A.4 v1 Retry's first byte (0xff) must classify as Retry.
+        assertEquals(
+            QuicCrypto.LongHeaderPacketType.INITIAL,
+            QuicCrypto.classifyLongHeaderPacketType(QuicCrypto.VERSION_1, 0xc3),
+        )
+        assertEquals(
+            QuicCrypto.LongHeaderPacketType.RETRY,
+            QuicCrypto.classifyLongHeaderPacketType(QuicCrypto.VERSION_1, 0xff),
+        )
+        // RFC 9369 A.2 v2 client Initial first byte 0xd7 -> type bits 0b01 -> Initial in v2.
+        assertEquals(
+            QuicCrypto.LongHeaderPacketType.INITIAL,
+            QuicCrypto.classifyLongHeaderPacketType(QuicCrypto.VERSION_2, 0xd7),
+        )
+        // RFC 9369 A.4 v2 Retry first byte 0xcf -> type bits 0b00 -> Retry in v2.
+        assertEquals(
+            QuicCrypto.LongHeaderPacketType.RETRY,
+            QuicCrypto.classifyLongHeaderPacketType(QuicCrypto.VERSION_2, 0xcf),
+        )
+    }
+
+    @Test
+    fun `classifyLongHeaderPacketType returns null for an unrecognized version`() {
+        assertNull(QuicCrypto.classifyLongHeaderPacketType(0x12345678, 0xc3))
+    }
+
+    // ── Retry Integrity Tag validation (RFC 9001 §5.8 v1 / RFC 9369 §3.3.3 v2) ──────
+
+    @Test
+    fun `validateRetryIntegrityTag accepts the RFC 9001 Appendix A4 v1 Retry`() {
+        // Full v1 Retry packet from RFC 9001 Appendix A.4, split into the packet-minus-tag and
+        // the trailing 16-byte tag; the ODCID is the client-chosen DCID from the Initial this
+        // Retry answers (RFC 9001 Appendix A.2's DCID), not any field carried in the Retry
+        // packet itself.
+        val odcid = hex("8394c8f03e515708")
+        val withoutTag = hex("ff000000010008f067a5502a4262b5746f6b656e")
+        val tag = hex("04a265ba2eff4d829058fb3f0f2496ba")
+
+        assertTrue(
+            "a genuine RFC test-vector v1 Retry must validate",
+            QuicCrypto.validateRetryIntegrityTag(QuicCrypto.VERSION_1, odcid, withoutTag, tag),
+        )
+    }
+
+    @Test
+    fun `validateRetryIntegrityTag accepts the RFC 9369 Appendix A4 v2 Retry`() {
+        // Same ODCID and retry token as the v1 vector, but the v2-encoded packet (shifted type
+        // bits, v2 version field) and its own tag, computed with the v2 key/nonce.
+        val odcid = hex("8394c8f03e515708")
+        val withoutTag = hex("cf6b3343cf0008f067a5502a4262b5746f6b656e")
+        val tag = hex("c8646ce8bfe33952d955543665dcc7b6")
+
+        assertTrue(
+            "a genuine RFC test-vector v2 Retry must validate",
+            QuicCrypto.validateRetryIntegrityTag(QuicCrypto.VERSION_2, odcid, withoutTag, tag),
+        )
+    }
+
+    @Test
+    fun `validateRetryIntegrityTag rejects a corrupted v1 tag and does not throw`() {
+        val odcid = hex("8394c8f03e515708")
+        val withoutTag = hex("ff000000010008f067a5502a4262b5746f6b656e")
+        val corruptedTag = hex("04a265ba2eff4d829058fb3f0f249645") // last byte flipped from ba to 45
+
+        assertFalse(
+            "a corrupted v1 tag must be rejected, not accepted",
+            QuicCrypto.validateRetryIntegrityTag(QuicCrypto.VERSION_1, odcid, withoutTag, corruptedTag),
+        )
+    }
+
+    @Test
+    fun `validateRetryIntegrityTag rejects a corrupted v2 tag and does not throw`() {
+        val odcid = hex("8394c8f03e515708")
+        val withoutTag = hex("cf6b3343cf0008f067a5502a4262b5746f6b656e")
+        val corruptedTag = hex("c8646ce8bfe33952d955543665dcc700") // last byte flipped from b6 to 00
+
+        assertFalse(
+            "a corrupted v2 tag must be rejected, not accepted",
+            QuicCrypto.validateRetryIntegrityTag(QuicCrypto.VERSION_2, odcid, withoutTag, corruptedTag),
+        )
+    }
+
+    @Test
+    fun `validateRetryIntegrityTag rejects a v1-valid tag checked against the v2 key and vice versa`() {
+        // Cross-version rejection: the v1 packet+tag must not validate under the v2 key/nonce
+        // (and the v2 packet+tag must not validate under the v1 key/nonce) -- proves the two
+        // constant sets are actually wired to their own version, not silently sharing one.
+        val odcid = hex("8394c8f03e515708")
+        val v1WithoutTag = hex("ff000000010008f067a5502a4262b5746f6b656e")
+        val v1Tag = hex("04a265ba2eff4d829058fb3f0f2496ba")
+        val v2WithoutTag = hex("cf6b3343cf0008f067a5502a4262b5746f6b656e")
+        val v2Tag = hex("c8646ce8bfe33952d955543665dcc7b6")
+
+        assertFalse(QuicCrypto.validateRetryIntegrityTag(QuicCrypto.VERSION_2, odcid, v1WithoutTag, v1Tag))
+        assertFalse(QuicCrypto.validateRetryIntegrityTag(QuicCrypto.VERSION_1, odcid, v2WithoutTag, v2Tag))
+    }
+
+    @Test
+    fun `validateRetryIntegrityTag rejects the wrong ODCID and an unrecognized version`() {
+        val withoutTag = hex("ff000000010008f067a5502a4262b5746f6b656e")
+        val tag = hex("04a265ba2eff4d829058fb3f0f2496ba")
+
+        // Wrong ODCID -- the AAD no longer matches what the tag authenticated over.
+        val wrongOdcid = hex("0000000000000000")
+        assertFalse(QuicCrypto.validateRetryIntegrityTag(QuicCrypto.VERSION_1, wrongOdcid, withoutTag, tag))
+
+        // Unrecognized version -- no known Retry Integrity Tag key/nonce, must fail closed.
+        val odcid = hex("8394c8f03e515708")
+        assertFalse(QuicCrypto.validateRetryIntegrityTag(0x0a0a0a0a, odcid, withoutTag, tag))
+    }
+
+    @Test
+    fun `validateRetryIntegrityTag rejects a malformed (wrong-length) tag without throwing`() {
+        val odcid = hex("8394c8f03e515708")
+        val withoutTag = hex("ff000000010008f067a5502a4262b5746f6b656e")
+        val shortTag = hex("04a265ba2eff4d") // 7 bytes, not 16
+
+        assertFalse(QuicCrypto.validateRetryIntegrityTag(QuicCrypto.VERSION_1, odcid, withoutTag, shortTag))
+    }
 }
