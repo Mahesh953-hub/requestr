@@ -103,6 +103,7 @@ import com.example.ui.screens.SavedApisScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.ToolsScreen
 import com.example.ui.screens.ToolWorkspaceScreen
+import com.example.ui.theme.AppAccent
 import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.theme.TextMuted
@@ -338,7 +339,8 @@ fun RequestrApp() {
         }
     }
 
-    MyApplicationTheme(themeMode = themeMode) {
+    val selectedAccent = remember(settings.selectedAccent) { AppAccent.fromKey(settings.selectedAccent) }
+    MyApplicationTheme(isDarkTheme = !themeMode.isLight, accent = selectedAccent) {
       // v3.1 B8: "Display Scale" (SMALL/NORMAL/LARGE) — override LocalDensity's fontScale
       // so every sp-sized text and dp-based layout below actually renders larger/smaller,
       // instead of the setting being stored and never read.
