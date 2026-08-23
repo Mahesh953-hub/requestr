@@ -18,6 +18,7 @@ import com.example.data.models.NoteItem
 import com.example.data.models.RequestBodyType
 import com.example.data.models.UserSettingsState
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
 import com.example.data.prefs.unifiedDataStore
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
@@ -838,6 +839,11 @@ object SettingsRepository {
     private val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var initialized = false
 
+    // v6.0 — accent axis persistence key. Defined here (not in AppSettingsKeys) because this
+    // persistence-only change is scoped to AppModels.kt + AppRepositories.kt only; orthogonal
+    // to appearanceMode/selectedDarkTheme/selectedLightTheme (see UserSettingsState.selectedAccent).
+    private val SELECTED_ACCENT = stringPreferencesKey("selected_accent")
+
     /**
      * Call once from Application.onCreate() or early in MainActivity before any
      * read of [settings]. Loads persisted values; runtime-only flags (root,
@@ -863,6 +869,7 @@ object SettingsRepository {
                     appearanceMode = p[K.APPEARANCE_MODE] ?: _settings.value.appearanceMode,
                     selectedDarkTheme = p[K.SELECTED_DARK_THEME] ?: _settings.value.selectedDarkTheme,
                     selectedLightTheme = p[K.SELECTED_LIGHT_THEME] ?: _settings.value.selectedLightTheme,
+                    selectedAccent = p[SELECTED_ACCENT] ?: _settings.value.selectedAccent,
                     swipeToDeleteEnabled = p[K.SWIPE_TO_DELETE] ?: _settings.value.swipeToDeleteEnabled,
                     hapticFeedbackEnabled = p[K.HAPTIC_FEEDBACK] ?: _settings.value.hapticFeedbackEnabled,
                     gestureNavigationEnabled = p[K.GESTURE_NAVIGATION] ?: _settings.value.gestureNavigationEnabled,
@@ -989,6 +996,12 @@ object SettingsRepository {
         _settings.value = _settings.value.copy(selectedLightTheme = theme)
         persist(K.SELECTED_LIGHT_THEME, theme)
     }
+    // v6.0 — orthogonal accent axis. Mirrors updateAppearanceMode: writes only the accent
+    // field, never touches appearanceMode/selectedDarkTheme/selectedLightTheme.
+    fun updateAccent(accent: String) {
+        _settings.value = _settings.value.copy(selectedAccent = accent)
+        persist(SELECTED_ACCENT, accent)
+    }
     // Fix 02 — UI & UX
     fun updateSwipeToDelete(enabled: Boolean) {
         _settings.value = _settings.value.copy(swipeToDeleteEnabled = enabled)
@@ -1093,6 +1106,7 @@ object SettingsRepository {
                 prefs[K.APPEARANCE_MODE] = newSettings.appearanceMode
                 prefs[K.SELECTED_DARK_THEME] = newSettings.selectedDarkTheme
                 prefs[K.SELECTED_LIGHT_THEME] = newSettings.selectedLightTheme
+                prefs[SELECTED_ACCENT] = newSettings.selectedAccent
                 prefs[K.SWIPE_TO_DELETE] = newSettings.swipeToDeleteEnabled
                 prefs[K.HAPTIC_FEEDBACK] = newSettings.hapticFeedbackEnabled
                 prefs[K.GESTURE_NAVIGATION] = newSettings.gestureNavigationEnabled
