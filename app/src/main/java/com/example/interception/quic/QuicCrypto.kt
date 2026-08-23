@@ -51,13 +51,50 @@ object QuicCrypto {
         val packetNumber: Long,
     )
 
+    /** {key, iv, hp} derived from a TLS 1.3 traffic secret via [deriveKeysFromTrafficSecret]. */
+    data class PacketProtectionKeys(
+        val key: ByteArray,
+        val iv: ByteArray,
+        val hp: ByteArray,
+    )
+
+    /**
+     * The subset of TLS 1.3 AEAD cipher suites QUIC can negotiate (RFC 9001 §5.3) that this
+     * object currently knows how to derive traffic keys for. [hmacAlgorithm]/[hashLength] pick
+     * the HKDF hash function (the suite's own hash, per RFC 9001 §5.1 — *not* always SHA-256;
+     * only Initial secrets are pinned to SHA-256 regardless of suite). [aeadKeyLength] is the
+     * AEAD key size in bytes, which also sizes the AES-ECB header-protection key for the two
+     * AES-GCM suites below (RFC 9001 §5.4.3). TLS_CHACHA20_POLY1305_SHA256 is intentionally not
+     * listed yet -- its header-protection scheme (RFC 9001 §5.4.4) is a separate ChaCha20
+     * keystream construction, not AES-ECB, and lands in a follow-up change.
+     */
+    enum class CipherSuite(val hmacAlgorithm: String, val hashLength: Int, val aeadKeyLength: Int) {
+        TLS_AES_128_GCM_SHA256(hmacAlgorithm = "HmacSHA256", hashLength = 32, aeadKeyLength = 16),
+        TLS_AES_256_GCM_SHA384(hmacAlgorithm = "HmacSHA384", hashLength = 48, aeadKeyLength = 32),
+    }
+
     /**
      * Derives the client's Initial {key, iv, hp} per RFC 9001 §5.2/RFC 9369 §3.3.2, keyed off
      * the client-chosen Destination Connection ID (public, sent in cleartext on the wire).
      * Returns null for unrecognized versions (Google QUIC / gQUIC has no equivalent TLS 1.3
      * Initial protection scheme, so those are left SNI-only via [QuicParser.extractSni]).
      */
-    fun deriveClientInitialKeys(version: Int, dcid: ByteArray): InitialKeys? {
+    fun deriveClientInitialKeys(version: Int, dcid: ByteArray): InitialKeys? =
+        deriveInitialKeys(version, dcid, "client in")
+
+    /**
+     * Derives the server's Initial {key, iv, hp} per RFC 9001 §5.2/RFC 9369 §3.3.2 -- same
+     * public `initial_secret` as [deriveClientInitialKeys] (still keyed only off the client's
+     * Destination Connection ID), just expanded with the "server in" label instead of
+     * "client in". This is what lets a server-sourced Initial packet's ServerHello CRYPTO
+     * frame be recovered, exactly as available to a passive observer as the client's own
+     * ClientHello is (RFC 9001 §5.2's "no assurance" note about Initial protection applies
+     * symmetrically to both directions).
+     */
+    fun deriveServerInitialKeys(version: Int, dcid: ByteArray): InitialKeys? =
+        deriveInitialKeys(version, dcid, "server in")
+
+    private fun deriveInitialKeys(version: Int, dcid: ByteArray, secretLabel: String): InitialKeys? {
         val salt = when (version) {
             VERSION_1, 0 -> SALT_V1 // draft/negotiation packets commonly reuse the v1 salt
             VERSION_2 -> SALT_V2
@@ -65,18 +102,74 @@ object QuicCrypto {
         }
         return try {
             val initialSecret = hkdfExtract(salt, dcid)
-            val clientSecret = hkdfExpandLabel(initialSecret, "client in", 32)
+            val directionSecret = hkdfExpandLabel(initialSecret, secretLabel, 32)
             val keyLabel = if (version == VERSION_2) "quicv2 key" else "quic key"
             val ivLabel = if (version == VERSION_2) "quicv2 iv" else "quic iv"
             val hpLabel = if (version == VERSION_2) "quicv2 hp" else "quic hp"
             InitialKeys(
-                key = hkdfExpandLabel(clientSecret, keyLabel, 16),
-                iv = hkdfExpandLabel(clientSecret, ivLabel, 12),
-                hp = hkdfExpandLabel(clientSecret, hpLabel, 16),
+                key = hkdfExpandLabel(directionSecret, keyLabel, 16),
+                iv = hkdfExpandLabel(directionSecret, ivLabel, 12),
+                hp = hkdfExpandLabel(directionSecret, hpLabel, 16),
             )
         } catch (e: Exception) {
-            Log.w(TAG, "Initial key derivation failed: ${e.message}")
+            Log.w(TAG, "Initial key derivation ($secretLabel) failed: ${e.message}")
             null
+        }
+    }
+
+    /**
+     * Derives {key, iv, hp} from an already-known TLS 1.3 traffic secret (RFC 9001 §5.1), e.g.
+     * a `CLIENT_HANDSHAKE_TRAFFIC_SECRET`/`SERVER_HANDSHAKE_TRAFFIC_SECRET`/
+     * `CLIENT_TRAFFIC_SECRET_0`/`SERVER_TRAFFIC_SECRET_0` obtained from
+     * [com.example.interception.tls.TlsKeyLogRegistry]. Unlike [deriveClientInitialKeys]/
+     * [deriveServerInitialKeys], the HKDF hash function here is the *negotiated* suite's hash
+     * (SHA-256 or SHA-384 for the two [CipherSuite]s currently supported), not always SHA-256 --
+     * Initial secrets are the one exception pinned to SHA-256 regardless of suite (RFC 9001
+     * §5.2). The AEAD nonce (`quic iv`) is always 12 bytes for every AEAD QUIC can negotiate
+     * (RFC 9001 §5.1), independent of the suite's key size.
+     *
+     * This is a pure key-derivation primitive -- no decrypt path in this file drives it yet.
+     * It exists so Handshake-level and 1-RTT decryption (a separate change) has a single,
+     * already-tested place to get correctly-sized keys from a traffic secret.
+     */
+    fun deriveKeysFromTrafficSecret(version: Int, cipherSuite: CipherSuite, secret: ByteArray): PacketProtectionKeys? {
+        return try {
+            val keyLabel = if (version == VERSION_2) "quicv2 key" else "quic key"
+            val ivLabel = if (version == VERSION_2) "quicv2 iv" else "quic iv"
+            val hpLabel = if (version == VERSION_2) "quicv2 hp" else "quic hp"
+            PacketProtectionKeys(
+                key = hkdfExpandLabel(secret, keyLabel, cipherSuite.aeadKeyLength, cipherSuite.hmacAlgorithm),
+                iv = hkdfExpandLabel(secret, ivLabel, 12, cipherSuite.hmacAlgorithm),
+                hp = hkdfExpandLabel(secret, hpLabel, cipherSuite.aeadKeyLength, cipherSuite.hmacAlgorithm),
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Traffic secret key derivation failed: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Reconstructs a full QUIC packet number from its truncated on-wire encoding, per RFC 9000
+     * §17.1 / Appendix A.3's `DecodePacketNumber`. [largestPn] is the largest packet number
+     * already successfully processed in the *same* packet-number space (Initial/Handshake/
+     * 1-RTT each have their own, independent space -- RFC 9000 §12.3), or `-1L` if none has
+     * been processed yet in that space (the sentinel that makes the very first packet's own
+     * truncated value the answer, e.g. RFC 9001 Appendix A.2/A.3's first Initial packets with
+     * packet numbers 2 and 1 respectively). [truncatedPn] is the raw value read from the
+     * (already header-protection-removed) Packet Number field, and [pnLenBytes] is that
+     * field's on-wire length in bytes (1-4, i.e. an 8/16/24/32-bit field).
+     */
+    fun decodePacketNumber(largestPn: Long, truncatedPn: Long, pnLenBytes: Int): Long {
+        val pnBits = pnLenBytes * 8
+        val expectedPn = largestPn + 1
+        val pnWin = 1L shl pnBits
+        val pnHwin = pnWin / 2
+        val pnMask = pnWin - 1
+        val candidatePn = (expectedPn and pnMask.inv()) or truncatedPn
+        return when {
+            candidatePn <= expectedPn - pnHwin && candidatePn < (1L shl 62) - pnWin -> candidatePn + pnWin
+            candidatePn > expectedPn + pnHwin && candidatePn >= pnWin -> candidatePn - pnWin
+            else -> candidatePn
         }
     }
 
@@ -91,12 +184,18 @@ object QuicCrypto {
      * Returns null if header-protection removal or AEAD decryption fails (wrong keys, corrupt
      * packet, coalesced packet with an unexpected boundary, etc.) — callers fall back to the
      * existing SNI-scan heuristic in that case, so this is purely additive.
+     *
+     * [largestPn] is the largest packet number already seen in this packet's space, passed to
+     * [decodePacketNumber] for full RFC 9000 §17.1 reconstruction; it defaults to `-1L` (no
+     * prior packet), which is correct for a connection's first Initial packet in either
+     * direction and is also what every existing call site relies on today.
      */
     fun decryptInitialPacket(
         packet: ByteArray,
         pnOffset: Int,
         payloadEnd: Int,
         keys: InitialKeys,
+        largestPn: Long = -1L,
     ): DecryptedInitial? {
         try {
             if (pnOffset + 4 + 16 > payloadEnd) return null // not even long enough for a sample
@@ -112,14 +211,17 @@ object QuicCrypto {
                 working[pnOffset + i] = (working[pnOffset + i].toInt() xor (mask[1 + i].toInt() and 0xFF)).toByte()
             }
 
-            // Reconstruct the truncated packet number (RFC 9000 §17.1) — we don't track the
-            // largest acked PN across packets (no state machine yet at this layer), so just
-            // decode the raw truncated value; Initial packets are always early in the
-            // connection so full decode-with-context isn't needed to get a sane packet number.
-            var pn = 0L
+            // Read the truncated on-wire value, then reconstruct the full packet number (RFC
+            // 9000 §17.1) via [decodePacketNumber]. [largestPn] defaults to -1 (no packet
+            // processed yet in this space), which callers use until real per-space
+            // largest-packet-number tracking is threaded through (a separate, connection-level
+            // change) -- the RFC algorithm with that sentinel returns exactly the truncated
+            // value for a first packet, matching this function's previous raw-read behavior.
+            var truncatedPn = 0L
             for (i in 0 until pnLength) {
-                pn = (pn shl 8) or (working[pnOffset + i].toLong() and 0xFF)
+                truncatedPn = (truncatedPn shl 8) or (working[pnOffset + i].toLong() and 0xFF)
             }
+            val pn = decodePacketNumber(largestPn, truncatedPn, pnLength)
 
             val headerLen = pnOffset + pnLength
             val header = working.copyOfRange(0, headerLen)
@@ -147,23 +249,31 @@ object QuicCrypto {
     }
 
     // ── HKDF (RFC 5869) + TLS 1.3 HKDF-Expand-Label (RFC 8446 §7.1) ────────────────────
+    //
+    // Both helpers take an explicit [hmacAlgorithm] (default "HmacSHA256") because HKDF's hash
+    // function must match the negotiated cipher suite's hash (RFC 9001 §5.1) once we're keying
+    // from a real traffic secret ([deriveKeysFromTrafficSecret]) rather than the Initial
+    // encryption level, which is always SHA-256 regardless of suite (RFC 9001 §5.2) -- e.g.
+    // TLS_AES_256_GCM_SHA384 needs HKDF over SHA-384, not SHA-256.
 
-    private fun hmacSha256(key: ByteArray, data: ByteArray): ByteArray {
-        val mac = Mac.getInstance("HmacSHA256")
-        mac.init(SecretKeySpec(if (key.isEmpty()) ByteArray(32) else key, "HmacSHA256"))
+    private fun hmac(hmacAlgorithm: String, key: ByteArray, data: ByteArray): ByteArray {
+        val mac = Mac.getInstance(hmacAlgorithm)
+        val hashLen = mac.macLength
+        mac.init(SecretKeySpec(if (key.isEmpty()) ByteArray(hashLen) else key, hmacAlgorithm))
         return mac.doFinal(data)
     }
 
-    private fun hkdfExtract(salt: ByteArray, ikm: ByteArray): ByteArray = hmacSha256(salt, ikm)
+    private fun hkdfExtract(salt: ByteArray, ikm: ByteArray, hmacAlgorithm: String = "HmacSHA256"): ByteArray =
+        hmac(hmacAlgorithm, salt, ikm)
 
-    private fun hkdfExpand(prk: ByteArray, info: ByteArray, length: Int): ByteArray {
+    private fun hkdfExpand(prk: ByteArray, info: ByteArray, length: Int, hmacAlgorithm: String = "HmacSHA256"): ByteArray {
         val out = ByteArray(length)
         var t = ByteArray(0)
         var pos = 0
         var counter = 1
         while (pos < length) {
             val input = t + info + byteArrayOf(counter.toByte())
-            t = hmacSha256(prk, input)
+            t = hmac(hmacAlgorithm, prk, input)
             val copyLen = minOf(t.size, length - pos)
             System.arraycopy(t, 0, out, pos, copyLen)
             pos += copyLen
@@ -177,7 +287,7 @@ object QuicCrypto {
      * (1-byte length prefix + bytes) || context (1-byte length prefix + bytes, empty here for
      * all QUIC labels).
      */
-    private fun hkdfExpandLabel(secret: ByteArray, label: String, length: Int): ByteArray {
+    private fun hkdfExpandLabel(secret: ByteArray, label: String, length: Int, hmacAlgorithm: String = "HmacSHA256"): ByteArray {
         val fullLabel = ("tls13 " + label).toByteArray(Charsets.US_ASCII)
         val info = ByteArray(2 + 1 + fullLabel.size + 1)
         info[0] = ((length shr 8) and 0xFF).toByte()
@@ -185,7 +295,7 @@ object QuicCrypto {
         info[2] = fullLabel.size.toByte()
         System.arraycopy(fullLabel, 0, info, 3, fullLabel.size)
         info[3 + fullLabel.size] = 0 // empty context
-        return hkdfExpand(secret, info, length)
+        return hkdfExpand(secret, info, length, hmacAlgorithm)
     }
 
     /** AES-ECB single-block encrypt, used for header-protection mask generation (RFC 9001 §5.4.3). */
