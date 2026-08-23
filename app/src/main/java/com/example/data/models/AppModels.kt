@@ -418,6 +418,9 @@ data class UserSettingsState(
     // where picking a theme always overwrote themeMode with no regard to which
     // appearanceMode family it belonged to.
     val selectedLightTheme: String = "EDITORIAL_LIGHT",
+    // v6.0 — orthogonal accent axis: independent of appearanceMode/selectedDarkTheme/
+    // selectedLightTheme. Picking an accent never touches the light/dark family fields.
+    val selectedAccent: String = "INDIGO",
     // Fix 02 — UI & UX preferences
     val swipeToDeleteEnabled: Boolean = true,
     val hapticFeedbackEnabled: Boolean = true,

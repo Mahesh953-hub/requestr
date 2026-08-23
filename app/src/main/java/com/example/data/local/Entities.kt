@@ -249,7 +249,23 @@ data class UdpFlowEntity(
     val byteCount: Long = 0,
 )
 
+/**
+ * Decode status of a QUIC connection, independent of lifecycle state.
+ * Closing a connection (lifecycleState -> CLOSED) never changes this value.
+ */
+enum class QuicDecodeStatus {
+    /** Detected by 5-tuple but never inspected for content. */
+    DETECTED_ONLY,
+    /** Key material is missing; connection was observed but never decrypted. */
+    OBSERVED_NO_KEYS,
+    /** Initial or Handshake was decrypted but full HTTP/3 was not. */
+    PARTIALLY_DECODED,
+    /** Handshake and 1-RTT application data were fully decrypted. */
+    FULLY_DECODED
+}
+
 @Entity(tableName = "quic_connections", indices = [Index("sessionId"), Index("sniHost")])
+
 data class QuicConnectionEntity(
     @PrimaryKey val connectionId: String,
     val sessionId: Long,
@@ -260,6 +276,11 @@ data class QuicConnectionEntity(
     val quicVersion: Int?,
     val dstConnectionId: String,
     val establishedAt: Long = System.currentTimeMillis(),
+    val decodeStatus: QuicDecodeStatus = QuicDecodeStatus.DETECTED_ONLY,
+    val lifecycleState: String = "INITIALIZING",
+    val updatedAt: Long = System.currentTimeMillis(),
+    val clientRandomHex: String? = null,
+    val keylogLabels: String? = null,
 )
 
 // ═══════════════════════════════════════════════════════════════════

@@ -61,14 +61,18 @@ object RequestrSdk {
      *   [KtorInterceptor.installRequestrPlugin] onto the host app's own Ktor
      *   `HttpClientConfig`. Opt-in and false by default for the same reason as [captureCronet]
      *   (`io.ktor:ktor-client-core` is `compileOnly`).
-     * @param enableKeyLog when true, starts [KeyLogProducer.startCronetKeyLogMonitor] (Cronet's
-     *   NSS keylog file tail) and enables [OkHttpInterceptor]'s `RequestrEventListener` TLS
-     *   secret reflection (task 8) so requestr's own passive decoders can decrypt this app's
-     *   TLS 1.3/QUIC traffic. Degrades gracefully to a no-op (see [KeyLogRegistryBridge]) when
-     *   `TlsKeyLogRegistry` isn't on the host app's classpath -- i.e. in every third-party app
-     *   except requestr's own `:app` module. Body capture via [RequestrObserver] works
-     *   identically whether or not this is enabled -- keylog production is a bonus signal for
-     *   requestr's independent wire-level decoders, never a prerequisite.
+     * @param enableKeyLog when true, configures [KeyLogProducer]'s PRIMARY producer path --
+     *   authenticated `POST /api/keylog` calls to requestr's `LocalApiServer` carrying the same
+     *   `pairingToken` as [RequestrObserver] -- and starts [KeyLogProducer.startCronetKeyLogMonitor]
+     *   (Cronet's NSS keylog file tail) plus [OkHttpInterceptor]'s `RequestrEventListener` TLS
+     *   secret reflection (task 8), so requestr's own passive decoders can decrypt this app's
+     *   TLS 1.3/QUIC traffic. The cross-process HTTP path (Task 13 / CAT-2d) is what actually
+     *   works for a real third-party host app; [KeyLogRegistryBridge]'s same-process reflection
+     *   into `TlsKeyLogRegistry` is kept only as an OPTIONAL fast path, harmless (silent no-op)
+     *   when that class isn't on the host app's classpath -- i.e. in every third-party app except
+     *   requestr's own `:app` module. Body capture via [RequestrObserver] works identically
+     *   whether or not this is enabled -- keylog production is a bonus signal for requestr's
+     *   independent wire-level decoders, never a prerequisite.
      * @param requestrApiBase base URL of requestr's embedded Local API server. Defaults to the
      *   loopback address requestr's `LocalApiServer` binds by default; override only if
      *   requestr is reachable at a different host/port (e.g. `adb reverse`, an emulator's
@@ -118,6 +122,13 @@ object RequestrSdk {
             HttpUrlConnectionWrapper.install(RequestrObserver)
         }
         if (options.enableKeyLog) {
+            // Task 13 / CAT-2d: configures KeyLogProducer's PRIMARY cross-process HTTP posting
+            // target with the same apiBase/pairingToken RequestrObserver just got above, then
+            // starts the Cronet keylog tail. recordFromSslSocket (wired via
+            // RequestrEventListener.connectionAcquired in OkHttpInterceptor.kt, unconditional --
+            // no enableKeyLog gate there) also depends on this init() call having run so its
+            // HTTP posts have a token to send.
+            KeyLogProducer.init(options.requestrApiBase, pairingToken)
             KeyLogProducer.startCronetKeyLogMonitor(context.applicationContext, scope)
         }
 

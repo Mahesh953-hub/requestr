@@ -81,6 +81,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.example.ui.components.RequestrWordmark
+import com.example.ui.theme.AppAccent
 import com.example.ui.theme.AppThemeMode
 
 // ─── Onboarding entry ─────────────────────────────────────────────
@@ -101,6 +102,7 @@ fun OnboardingScreen(
     var appearanceMode by remember { mutableStateOf(savedMode) }
     var selectedLightAccent by remember { mutableStateOf(settings.selectedLightTheme) }
     var selectedDarkAccent by remember { mutableStateOf(settings.selectedDarkTheme) }
+    var selectedAccent by remember { mutableStateOf(settings.selectedAccent) }
 
     // Permissions
     val context = LocalContext.current
@@ -203,6 +205,7 @@ fun OnboardingScreen(
                         selectedMode = appearanceMode,
                         lightAccent = selectedLightAccent,
                         darkAccent = selectedDarkAccent,
+                        selectedAccent = selectedAccent,
                         onModeSelected = { mode ->
                             appearanceMode = mode
                             com.example.data.repository.SettingsRepository.updateAppearanceMode(mode)
@@ -221,9 +224,14 @@ fun OnboardingScreen(
                                 com.example.data.repository.SettingsRepository.updateThemeSelection(name)
                             }
                         },
+                        onAccentSelected = { name ->
+                            selectedAccent = name
+                            com.example.data.repository.SettingsRepository.updateAccent(name)
+                        },
                         onFinish = {
                             // Persist everything
                             com.example.data.repository.SettingsRepository.updateUserName(userName)
+                            com.example.data.repository.SettingsRepository.updateAccent(selectedAccent)
                             com.example.data.repository.SettingsRepository.updateAppearanceMode(appearanceMode)
                             when (appearanceMode) {
                                 "LIGHT" -> com.example.data.repository.SettingsRepository.updateThemeSelection(selectedLightAccent)
@@ -584,9 +592,11 @@ private fun AppearanceStep(
     selectedMode: String,
     lightAccent: String,
     darkAccent: String,
+    selectedAccent: String,
     onModeSelected: (String) -> Unit,
     onLightAccent: (String) -> Unit,
     onDarkAccent: (String) -> Unit,
+    onAccentSelected: (String) -> Unit,
     onFinish: () -> Unit,
     onBack: () -> Unit
 ) {
@@ -667,6 +677,43 @@ private fun AppearanceStep(
             color = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.padding(bottom = 4.dp)
         )
+        val allAccents = AppAccent.values().toList()
+
+        Text(
+            "Choose your accent color",
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(bottom = 6.dp)
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            allAccents.forEach { accent ->
+                val accentSelected = selectedAccent.equals(accent.name, ignoreCase = true)
+                val accentSize by animateDpAsState(if (accentSelected) 40.dp else 32.dp, tween(200), label = "accentSize")
+                Box(
+                    modifier = Modifier
+                        .size(accentSize)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(accent.primary)
+                        .then(
+                            if (accentSelected) Modifier.border(2.dp, MaterialTheme.colorScheme.onSurface, RoundedCornerShape(8.dp))
+                            else Modifier
+                        )
+                        .clickable { onAccentSelected(accent.name) },
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (accentSelected) {
+                        Icon(Icons.Default.Check, "Selected", tint = Color.White, modifier = Modifier.size(14.dp))
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
         Text(
             "Changes accent only — never flips Light/Dark mode",
             style = MaterialTheme.typography.bodySmall,
