@@ -9,6 +9,7 @@ import com.example.data.models.ApiRequestItem
 import com.example.data.models.FlowConnectionItem
 import com.example.data.models.FlowNodeItem
 import com.example.data.models.FlowNodeType
+import com.example.data.models.FlowPipelineItem
 import com.example.data.models.HttpMethod
 import com.example.data.models.MusicSourceType
 import com.example.data.models.MusicTrackItem
@@ -152,11 +153,119 @@ object FlowRepository {
         FlowConnectionItem(fromNodeId = "node-3", fromPort = "analysis", toNodeId = "node-4", toPort = "analysis")
     )
 
+    private val initialFlows = listOf(
+        FlowPipelineItem(
+            id = "flow-1",
+            name = "Auth Login Guard",
+            description = "4 nodes · trigger: Intercept",
+            triggerType = "Intercept",
+            status = "RUNNING",
+            lastRunText = "2m ago",
+            runsCount = 42,
+            nodes = defaultNodes,
+            connections = defaultConnections
+        ),
+        FlowPipelineItem(
+            id = "flow-2",
+            name = "JWT Refresh Watcher",
+            description = "3 nodes · trigger: API Poller",
+            triggerType = "API Poller",
+            status = "PAUSED",
+            lastRunText = "1h ago",
+            runsCount = 128,
+            nodes = listOf(
+                FlowNodeItem(id = "jwt-1", title = "Poll Auth State", type = FlowNodeType.API, x = 80f, y = 80f, configData = "https://httpbin.org/bearer"),
+                FlowNodeItem(id = "jwt-2", title = "Check Expiry", type = FlowNodeType.CONDITION, x = 360f, y = 80f, configData = "Rule: exp < now() + 300"),
+                FlowNodeItem(id = "jwt-3", title = "Trigger Refresh", type = FlowNodeType.API, x = 640f, y = 80f, configData = "POST /auth/refresh")
+            ),
+            connections = listOf(
+                FlowConnectionItem(id = "c1", fromNodeId = "jwt-1", toNodeId = "jwt-2"),
+                FlowConnectionItem(id = "c2", fromNodeId = "jwt-2", toNodeId = "jwt-3")
+            )
+        ),
+        FlowPipelineItem(
+            id = "flow-3",
+            name = "Payment Confirm Logger",
+            description = "3 nodes · trigger: Webhook",
+            triggerType = "Webhook",
+            status = "RUNNING",
+            lastRunText = "14m ago",
+            runsCount = 89,
+            nodes = listOf(
+                FlowNodeItem(id = "pay-1", title = "Webhook Listener", type = FlowNodeType.INTERCEPT_TRIGGER, x = 80f, y = 80f, configData = "/v1/webhook/stripe"),
+                FlowNodeItem(id = "pay-2", title = "Parse Charge Event", type = FlowNodeType.TRANSFORM, x = 360f, y = 80f, configData = "JSONPath: $.data.object.id"),
+                FlowNodeItem(id = "pay-3", title = "Audit Log", type = FlowNodeType.OUTPUT, x = 640f, y = 80f, configData = "Save to note: Payments")
+            ),
+            connections = listOf(
+                FlowConnectionItem(id = "c3", fromNodeId = "pay-1", toNodeId = "pay-2"),
+                FlowConnectionItem(id = "c4", fromNodeId = "pay-2", toNodeId = "pay-3")
+            )
+        )
+    )
+
+    private val _allFlows = MutableStateFlow<List<FlowPipelineItem>>(initialFlows)
+    val allFlows: StateFlow<List<FlowPipelineItem>> = _allFlows.asStateFlow()
+
+    private val _activeFlowId = MutableStateFlow<String>("flow-1")
+    val activeFlowId: StateFlow<String> = _activeFlowId.asStateFlow()
+
     private val _nodes = MutableStateFlow<List<FlowNodeItem>>(defaultNodes)
     val nodes: StateFlow<List<FlowNodeItem>> = _nodes.asStateFlow()
 
     private val _connections = MutableStateFlow<List<FlowConnectionItem>>(defaultConnections)
     val connections: StateFlow<List<FlowConnectionItem>> = _connections.asStateFlow()
+
+    fun setActiveFlow(flowId: String) {
+        val flow = _allFlows.value.find { it.id == flowId } ?: return
+        _activeFlowId.value = flowId
+        _nodes.value = flow.nodes
+        _connections.value = flow.connections
+    }
+
+    fun setFlowStatus(flowId: String, newStatus: String) {
+        _allFlows.value = _allFlows.value.map {
+            if (it.id == flowId) it.copy(status = newStatus) else it
+        }
+    }
+
+    fun createNewFlow(name: String, triggerType: String): FlowPipelineItem {
+        val newFlow = FlowPipelineItem(
+            id = "flow-${UUID.randomUUID().toString().take(6)}",
+            name = name.ifBlank { "Untitled Flow" },
+            description = "1 node · trigger: $triggerType",
+            triggerType = triggerType,
+            status = "DRAFT",
+            lastRunText = "Never",
+            runsCount = 0,
+            nodes = listOf(
+                FlowNodeItem(
+                    id = "node-${UUID.randomUUID().toString().take(4)}",
+                    title = "$triggerType Trigger",
+                    type = FlowNodeType.INTERCEPT_TRIGGER,
+                    x = 80f,
+                    y = 80f,
+                    configData = "Pattern: .*"
+                )
+            ),
+            connections = emptyList()
+        )
+        _allFlows.value = _allFlows.value + newFlow
+        setActiveFlow(newFlow.id)
+        return newFlow
+    }
+
+    fun createPipeline(name: String): FlowPipelineItem {
+        return createNewFlow(name, "Manual")
+    }
+
+    fun deleteFlow(flowId: String) {
+        if (_allFlows.value.size <= 1) return
+        _allFlows.value = _allFlows.value.filter { it.id != flowId }
+        if (_activeFlowId.value == flowId) {
+            val next = _allFlows.value.firstOrNull() ?: return
+            setActiveFlow(next.id)
+        }
+    }
 
     /**
      * Fix 8 (AUDIT_REPORT) / GAP_ANALYSIS Tier 3 #15: Back FlowRepository from Room.

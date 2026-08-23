@@ -89,6 +89,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -98,6 +99,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
@@ -174,6 +176,7 @@ fun ApiTestrScreen(
     val coroutineScope = rememberCoroutineScope()
     val appContext = LocalContext.current
     val currentRequest by ApiCollectionsRepository.currentActiveRequest.collectAsState()
+    val userSettings by SettingsRepository.settings.collectAsState()
 
     var reqState by remember(currentRequest) { mutableStateOf(currentRequest) }
     var responseData by remember { mutableStateOf<ApiResponseData?>(null) }
@@ -643,8 +646,8 @@ fun ApiTestrScreen(
                 }
             }
 
-            // Bottom Spacer to prevent floating Send bar from overlapping content
-            Spacer(modifier = Modifier.height(84.dp))
+            // Bottom Spacer to prevent floating Send bar and navigation bar from overlapping content
+            Spacer(modifier = Modifier.height((userSettings.fabBottomSpacingDp + 64).dp))
         }
 
         // ==========================================
@@ -740,14 +743,19 @@ fun ApiTestrScreen(
                 .padding(top = 4.dp)
         )
 
-        // Snackbar Host
+        // Snackbar Host positioned above the floating action bar
         SnackbarHost(
             hostState = snackbarHostState,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 76.dp)
+                .padding(bottom = (userSettings.fabBottomSpacingDp + 54).dp)
         ) { data ->
-            Snackbar(snackbarData = data)
+            Snackbar(
+                snackbarData = data,
+                shape = RoundedCornerShape(12.dp),
+                containerColor = MaterialTheme.colorScheme.inverseSurface,
+                contentColor = MaterialTheme.colorScheme.inverseOnSurface
+            )
         }
     }
 
@@ -1035,6 +1043,39 @@ private fun TitleAndUrlCard(
     val primaryColor = MaterialTheme.colorScheme.primary
     val methodColor = getMethodColor(reqState.method)
 
+    val menuArrowRotation by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (showMethodMenu) 180f else 0f,
+        animationSpec = androidx.compose.animation.core.spring(
+            dampingRatio = androidx.compose.animation.core.Spring.DampingRatioMediumBouncy,
+            stiffness = androidx.compose.animation.core.Spring.StiffnessLow
+        ),
+        label = "menuArrowRotation"
+    )
+
+    val rocketTilt by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (followRedirects) -18f else 0f,
+        animationSpec = androidx.compose.animation.core.spring(
+            dampingRatio = androidx.compose.animation.core.Spring.DampingRatioMediumBouncy,
+            stiffness = androidx.compose.animation.core.Spring.StiffnessLow
+        ),
+        label = "rocketTilt"
+    )
+
+    val rocketScale by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (followRedirects) 1.15f else 1.0f,
+        animationSpec = androidx.compose.animation.core.spring(
+            dampingRatio = androidx.compose.animation.core.Spring.DampingRatioMediumBouncy,
+            stiffness = androidx.compose.animation.core.Spring.StiffnessMedium
+        ),
+        label = "rocketScale"
+    )
+
+    val rocketBg by androidx.compose.animation.animateColorAsState(
+        targetValue = if (followRedirects) primaryColor.copy(alpha = if (isDark) 0.22f else 0.15f) else Color.Transparent,
+        animationSpec = androidx.compose.animation.core.tween(200),
+        label = "rocketBg"
+    )
+
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(18.dp),
@@ -1136,7 +1177,7 @@ private fun TitleAndUrlCard(
                             .clip(RoundedCornerShape(topStart = 14.dp, bottomStart = 14.dp))
                             .background(methodColor.copy(alpha = if (isDark) 0.22f else 0.14f))
                             .clickable { showMethodMenu = true }
-                            .padding(horizontal = 10.dp, vertical = 11.dp),
+                            .padding(horizontal = 11.dp, vertical = 11.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
@@ -1151,7 +1192,9 @@ private fun TitleAndUrlCard(
                             imageVector = Icons.Default.KeyboardArrowDown,
                             contentDescription = "Select method",
                             tint = methodColor,
-                            modifier = Modifier.size(13.dp)
+                            modifier = Modifier
+                                .size(14.dp)
+                                .graphicsLayer { rotationZ = menuArrowRotation }
                         )
                     }
 
@@ -1174,7 +1217,7 @@ private fun TitleAndUrlCard(
                                             modifier = Modifier
                                                 .clip(RoundedCornerShape(6.dp))
                                                 .background(mCol.copy(alpha = 0.18f))
-                                                .padding(horizontal = 7.dp, vertical = 3.dp)
+                                                .padding(horizontal = 8.dp, vertical = 4.dp)
                                         ) {
                                             Text(
                                                 text = m.name,
@@ -1204,14 +1247,6 @@ private fun TitleAndUrlCard(
                     }
                 }
 
-                // Divider
-                Box(
-                    modifier = Modifier
-                        .width(1.dp)
-                        .height(36.dp)
-                        .background(MaterialTheme.colorScheme.outlineVariant)
-                )
-
                 // Editable URL Text Field
                 BasicTextField(
                     value = reqState.url,
@@ -1227,7 +1262,7 @@ private fun TitleAndUrlCard(
                     decorationBox = { innerTextField ->
                         Box(
                             modifier = Modifier
-                                .weight(1f)
+                                .fillMaxWidth()
                                 .padding(horizontal = 10.dp),
                             contentAlignment = Alignment.CenterStart
                         ) {
@@ -1245,28 +1280,26 @@ private fun TitleAndUrlCard(
                     modifier = Modifier.weight(1f)
                 )
 
-                // Divider
+                // Follow Redirects Rocket Toggle with Animated Pill
                 Box(
                     modifier = Modifier
-                        .width(1.dp)
-                        .height(36.dp)
-                        .background(MaterialTheme.colorScheme.outlineVariant)
-                )
-
-                // Follow Redirects Rocket Toggle
-                Box(
-                    modifier = Modifier
-                        .size(38.dp)
+                        .size(40.dp)
                         .clip(RoundedCornerShape(topEnd = 14.dp, bottomEnd = 14.dp))
-                        .background(if (followRedirects) primaryColor.copy(alpha = 0.15f) else Color.Transparent)
+                        .background(rocketBg)
                         .clickable { onToggleRedirects() },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = Icons.Default.RocketLaunch,
                         contentDescription = "Follow redirects",
-                        tint = if (followRedirects) primaryColor else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                        modifier = Modifier.size(16.dp)
+                        tint = if (followRedirects) primaryColor else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                        modifier = Modifier
+                            .size(16.dp)
+                            .graphicsLayer {
+                                rotationZ = rocketTilt
+                                scaleX = rocketScale
+                                scaleY = rocketScale
+                            }
                     )
                 }
             }
@@ -1308,115 +1341,108 @@ private fun KeyValueTabContent(
     }
 
     Column(modifier = Modifier.fillMaxWidth()) {
-        // Key-Value Table Container
+        // Key-Value Table Container (Clean modern surface, dividers removed)
         Surface(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp),
             color = MaterialTheme.colorScheme.surface,
             border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
         ) {
-            Column {
-                // Table Header
+            Column(modifier = Modifier.padding(bottom = 6.dp)) {
+                // Table Header with Right-Aligned Add Row Action
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                        .padding(horizontal = 12.dp, vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Spacer(modifier = Modifier.width(28.dp))
-                    Text(
-                        text = "KEY",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "VALUE",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Spacer(modifier = Modifier.width(32.dp))
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Spacer(modifier = Modifier.width(28.dp))
+                        Text(
+                            text = "KEY",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "VALUE",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    // Right-Aligned "+ Add Row" Button
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f))
+                            .clickable { onItemsChanged(items + KeyValueItem()) }
+                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Add,
+                                contentDescription = "Add Row",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "Add row",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
                 }
 
-                // Table Rows
+                // Table Rows (Dividers removed for seamless pixel-like design)
                 if (items.isEmpty()) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(20.dp),
+                            .padding(24.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "No parameters. Tap '+ Add row' below to insert.",
+                            text = "No parameters. Tap '+ Add row' on the right to insert.",
                             fontSize = 11.5.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                         )
                     }
                 } else {
-                    items.forEachIndexed { index, item ->
-                        KeyValueTableRow(
-                            item = item,
-                            isDark = isDark,
-                            onToggle = { isEnabled ->
-                                onItemsChanged(items.map { if (it.id == item.id) it.copy(isEnabled = isEnabled) else it })
-                            },
-                            onKeyChange = { newKey ->
-                                onItemsChanged(items.map { if (it.id == item.id) it.copy(key = newKey) else it })
-                            },
-                            onValueChange = { newVal ->
-                                onItemsChanged(items.map { if (it.id == item.id) it.copy(value = newVal) else it })
-                            },
-                            onDelete = {
-                                onItemsChanged(items.filter { it.id != item.id })
-                            }
-                        )
-                        if (index < items.size - 1) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(1.dp)
-                                    .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    Spacer(modifier = Modifier.height(4.dp))
+                    items.forEach { item ->
+                        key(item.id) {
+                            KeyValueTableRow(
+                                item = item,
+                                isDark = isDark,
+                                onToggle = { isEnabled ->
+                                    onItemsChanged(items.map { if (it.id == item.id) it.copy(isEnabled = isEnabled) else it })
+                                },
+                                onKeyChange = { newKey ->
+                                    onItemsChanged(items.map { if (it.id == item.id) it.copy(key = newKey) else it })
+                                },
+                                onValueChange = { newVal ->
+                                    onItemsChanged(items.map { if (it.id == item.id) it.copy(value = newVal) else it })
+                                },
+                                onDelete = {
+                                    onItemsChanged(items.filter { it.id != item.id })
+                                }
                             )
                         }
                     }
-                }
-
-                // Add Row Action
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .drawBehind {
-                            val strokeWidth = 1.dp.toPx()
-                            drawLine(
-                                color = Color.Gray.copy(alpha = 0.3f),
-                                start = Offset(0f, 0f),
-                                end = Offset(size.width, 0f),
-                                strokeWidth = strokeWidth,
-                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f), 0f)
-                            )
-                        }
-                        .clickable { onItemsChanged(items + KeyValueItem()) }
-                        .padding(horizontal = 14.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Add,
-                        contentDescription = "Add Row",
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(15.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "Add row",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
                 }
             }
         }
@@ -1465,18 +1491,47 @@ private fun KeyValueTableRow(
     val primaryColor = MaterialTheme.colorScheme.primary
     val valueColor = if (isDark) Color(0xFF4ADE80) else Color(0xFF16A34A)
 
+    // Local mutable state to deliver 100% responsive fast typing with zero dropped characters
+    var localKey by remember(item.id) { mutableStateOf(item.key) }
+    var localValue by remember(item.id) { mutableStateOf(item.value) }
+
+    LaunchedEffect(item.key) {
+        if (localKey != item.key) localKey = item.key
+    }
+    LaunchedEffect(item.value) {
+        if (localValue != item.value) localValue = item.value
+    }
+
+    val checkboxScale by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (item.isEnabled) 1.0f else 0.92f,
+        animationSpec = androidx.compose.animation.core.spring(
+            dampingRatio = androidx.compose.animation.core.Spring.DampingRatioMediumBouncy,
+            stiffness = androidx.compose.animation.core.Spring.StiffnessMedium
+        ),
+        label = "checkboxScale"
+    )
+
+    val checkboxBg by androidx.compose.animation.animateColorAsState(
+        targetValue = if (item.isEnabled) primaryColor else Color.Transparent,
+        label = "checkboxBg"
+    )
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 10.dp, vertical = 6.dp),
+            .padding(horizontal = 10.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Custom Checkbox
+        // Custom Animated Checkbox
         Box(
             modifier = Modifier
                 .size(20.dp)
+                .graphicsLayer {
+                    scaleX = checkboxScale
+                    scaleY = checkboxScale
+                }
                 .clip(RoundedCornerShape(6.dp))
-                .background(if (item.isEnabled) primaryColor else Color.Transparent)
+                .background(checkboxBg)
                 .border(
                     1.5.dp,
                     if (item.isEnabled) primaryColor else MaterialTheme.colorScheme.outlineVariant,
@@ -1497,10 +1552,13 @@ private fun KeyValueTableRow(
 
         Spacer(modifier = Modifier.width(8.dp))
 
-        // Key Input
+        // Key Input with zero lag
         BasicTextField(
-            value = item.key,
-            onValueChange = onKeyChange,
+            value = localKey,
+            onValueChange = {
+                localKey = it
+                onKeyChange(it)
+            },
             textStyle = TextStyle(
                 fontFamily = FontFamily.Monospace,
                 fontSize = 11.5.sp,
@@ -1515,11 +1573,11 @@ private fun KeyValueTableRow(
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(8.dp))
                         .background(MaterialTheme.colorScheme.surfaceVariant)
-                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
+                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
                         .padding(horizontal = 8.dp, vertical = 7.dp),
                     contentAlignment = Alignment.CenterStart
                 ) {
-                    if (item.key.isEmpty()) {
+                    if (localKey.isEmpty()) {
                         Text("Key", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
                     }
                     innerTextField()
@@ -1530,10 +1588,13 @@ private fun KeyValueTableRow(
 
         Spacer(modifier = Modifier.width(6.dp))
 
-        // Value Input
+        // Value Input with zero lag
         BasicTextField(
-            value = item.value,
-            onValueChange = onValueChange,
+            value = localValue,
+            onValueChange = {
+                localValue = it
+                onValueChange(it)
+            },
             textStyle = TextStyle(
                 fontFamily = FontFamily.Monospace,
                 fontSize = 11.5.sp,
@@ -1548,11 +1609,11 @@ private fun KeyValueTableRow(
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(8.dp))
                         .background(MaterialTheme.colorScheme.surfaceVariant)
-                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
+                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
                         .padding(horizontal = 8.dp, vertical = 7.dp),
                     contentAlignment = Alignment.CenterStart
                 ) {
-                    if (item.value.isEmpty()) {
+                    if (localValue.isEmpty()) {
                         Text("Value", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
                     }
                     innerTextField()

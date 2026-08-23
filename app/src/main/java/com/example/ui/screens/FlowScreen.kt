@@ -1,6 +1,12 @@
 package com.example.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -38,25 +44,25 @@ import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.LinearScale
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
-import androidx.compose.material3.TabRowDefaults.SecondaryIndicator
-import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -70,12 +76,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
@@ -84,16 +93,12 @@ import androidx.compose.ui.unit.sp
 import com.example.data.models.FlowConnectionItem
 import com.example.data.models.FlowNodeItem
 import com.example.data.models.FlowNodeType
+import com.example.data.models.FlowPipelineItem
 import com.example.data.repository.FlowRepository
+import com.example.ui.components.FloatingCapsuleHeader
 import com.example.ui.components.GlassActionPill
 import com.example.ui.components.GlassCard
-import com.example.ui.components.RequestrFilterChip
-import com.example.ui.components.SectionHeader
 import com.example.ui.components.rememberAppHapticFeedback
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import com.example.ui.theme.TextMuted
-import com.example.ui.theme.TextPrimary
-import com.example.ui.theme.TextSecondary
 import java.util.UUID
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
@@ -104,18 +109,20 @@ fun FlowScreen(
     onMiniSettings: () -> Unit
 ) {
     val coroutineScope = rememberCoroutineScope()
+    val context = LocalContext.current
     val nodes by FlowRepository.nodes.collectAsState()
     val connections by FlowRepository.connections.collectAsState()
+    val allPipelines by FlowRepository.allFlows.collectAsState()
+    val activeFlowId by FlowRepository.activeFlowId.collectAsState()
     val userSettings by com.example.data.repository.SettingsRepository.settings.collectAsState()
 
-    // B4: real tactile confirmation for node drag/delete, gated once behind
-    // settings.hapticFeedbackEnabled via the shared helper.
     val performHaptic = rememberAppHapticFeedback()
 
     var isRunning by remember { mutableStateOf(false) }
     var executionResult by remember { mutableStateOf<String?>(null) }
-    var viewMode by remember { mutableIntStateOf(0) } // 0 = Canvas, 1 = Node Sequence List
+    var viewMode by remember { mutableIntStateOf(0) } // 0 = Visual Canvas, 1 = Sequence List
     var showAddNodeSheet by remember { mutableStateOf(false) }
+    var showNewPipelineSheet by remember { mutableStateOf(false) }
     var nodeForEdit by remember { mutableStateOf<FlowNodeItem?>(null) }
 
     Box(
@@ -128,172 +135,304 @@ fun FlowScreen(
                 .fillMaxSize()
                 .padding(top = 58.dp)
         ) {
+            // Pipeline Selector Strip
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                allPipelines.forEach { pipeline ->
+                    PipelinePillItem(
+                        pipeline = pipeline,
+                        isActive = pipeline.id == activeFlowId,
+                        onClick = {
+                            performHaptic(HapticFeedbackType.TextHandleMove)
+                            FlowRepository.setActiveFlow(pipeline.id)
+                        }
+                    )
+                }
+
+                // Add Pipeline Pill
+                Surface(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .clickable { showNewPipelineSheet = true },
+                    shape = RoundedCornerShape(20.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Add,
+                            contentDescription = "New Pipeline",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = "New Pipeline",
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            }
+
             // Execution status banner
             if (executionResult != null) {
-                GlassCard(
+                Surface(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 4.dp),
-                    backgroundColor = Color(0xFF10B981).copy(alpha = 0.15f),
-                    borderColor = Color(0xFF10B981).copy(alpha = 0.5f)
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFF10B981).copy(alpha = 0.15f),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF10B981).copy(alpha = 0.5f))
                 ) {
                     Row(
                         modifier = Modifier.padding(12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(imageVector = Icons.Default.CheckCircle, contentDescription = "Success", tint = Color(0xFF10B981), modifier = Modifier.size(18.dp))
+                        Icon(
+                            imageVector = Icons.Default.CheckCircle,
+                            contentDescription = "Success",
+                            tint = Color(0xFF10B981),
+                            modifier = Modifier.size(18.dp)
+                        )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text(executionResult!!, color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            text = executionResult!!,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(
+                            onClick = { executionResult = null },
+                            modifier = Modifier.size(20.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Dismiss",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
                     }
                 }
             }
 
-        if (viewMode == 0) {
-            // Visual Canvas Mode — with pan/zoom, port-drag, context menu, mini-map
-            FlowCanvas(
-                nodes = nodes,
-                connections = connections,
-                performHaptic = performHaptic,
-                onNodeMoved = { id, x, y -> FlowRepository.updateNodePosition(id, x, y) },
-                onNodeDeleted = { id ->
-                    performHaptic(HapticFeedbackType.LongPress)
-                    FlowRepository.removeNode(id)
-                },
-                onNodeEdit = { nodeForEdit = it },
-                onConnectionCreated = { fromId, toId ->
-                    val fromNode = nodes.find { it.id == fromId }
-                    val toNode = nodes.find { it.id == toId }
-                    if (fromNode != null && toNode != null) {
-                        FlowRepository.addConnection(
-                            com.example.data.models.FlowConnectionItem(
-                                id = "${fromId}_out_${toId}_in",
-                                fromNodeId = fromId,
-                                toNodeId = toId,
-                                fromPort = "out",
-                                toPort = "in",
+            // Main Content: Visual Canvas (0) or Sequence List (1)
+            if (viewMode == 0) {
+                FlowCanvas(
+                    nodes = nodes,
+                    connections = connections,
+                    performHaptic = performHaptic,
+                    onNodeMoved = { id, x, y -> FlowRepository.updateNodePosition(id, x, y) },
+                    onNodeDeleted = { id ->
+                        performHaptic(HapticFeedbackType.LongPress)
+                        FlowRepository.removeNode(id)
+                    },
+                    onNodeEdit = { nodeForEdit = it },
+                    onConnectionCreated = { fromId, toId ->
+                        val fromNode = nodes.find { it.id == fromId }
+                        val toNode = nodes.find { it.id == toId }
+                        if (fromNode != null && toNode != null) {
+                            FlowRepository.addConnection(
+                                FlowConnectionItem(
+                                    id = "${fromId}_out_${toId}_in",
+                                    fromNodeId = fromId,
+                                    toNodeId = toId,
+                                    fromPort = "out",
+                                    toPort = "in",
+                                )
+                            )
+                            performHaptic(HapticFeedbackType.LongPress)
+                        }
+                    },
+                    onNodeDuplicated = { node ->
+                        FlowRepository.addNode(
+                            node.copy(
+                                id = UUID.randomUUID().toString(),
+                                x = node.x + 30f,
+                                y = node.y + 30f,
+                                title = "${node.title} (copy)"
                             )
                         )
-                        performHaptic(HapticFeedbackType.LongPress)
+                    },
+                    onNodeDisconnected = { nodeId ->
+                        connections.filter { it.fromNodeId == nodeId || it.toNodeId == nodeId }
+                            .forEach { FlowRepository.removeConnection(it.id) }
                     }
-                },
-                onNodeDuplicated = { node ->
-                    FlowRepository.addNode(
-                        node.copy(
-                            id = java.util.UUID.randomUUID().toString(),
-                            x = node.x + 30f,
-                            y = node.y + 30f,
-                            title = "${node.title} (copy)"
-                        )
-                    )
-                },
-                onNodeDisconnected = { nodeId ->
-                    connections.filter { it.fromNodeId == nodeId || it.toNodeId == nodeId }
-                        .forEach { FlowRepository.removeConnection(it.id) }
-                }
-            )
-        } else {
-            // Sequence List Mode
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                item {
-                    Text("Automation Steps (${nodes.size})", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
-                }
-
-                items(nodes, key = { it.id }) { node ->
-                    GlassCard(
-                        modifier = Modifier.fillMaxWidth(),
-                        backgroundColor = MaterialTheme.colorScheme.surface
-                    ) {
+                )
+            } else {
+                // Sequence List Mode
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    item {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(14.dp),
+                                .padding(vertical = 4.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(node.title, fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
-                                Text("Type: ${node.type.name} · ${node.configData}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
+                            Text(
+                                text = "Automation Steps (${nodes.size})",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = "+ Add Step",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.clickable { showAddNodeSheet = true }
+                            )
+                        }
+                    }
 
-                            Row {
-                                IconButton(onClick = { nodeForEdit = node }) {
-                                    Icon(imageVector = Icons.Default.Edit, contentDescription = "Edit", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                    items(nodes, key = { it.id }) { node ->
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp)),
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.surface,
+                            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(14.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(node.type.iconEmoji, fontSize = 14.sp)
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            node.title,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 13.5.sp,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(3.dp))
+                                    Text(
+                                        "Type: ${node.type.name} · ${node.configData}",
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontFamily = FontFamily.Monospace,
+                                        maxLines = 1
+                                    )
                                 }
-                                IconButton(onClick = { FlowRepository.removeNode(node.id) }) {
-                                    Icon(imageVector = Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
+
+                                Row {
+                                    IconButton(onClick = { nodeForEdit = node }, modifier = Modifier.size(32.dp)) {
+                                        Icon(
+                                            imageVector = Icons.Default.Edit,
+                                            contentDescription = "Edit",
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(17.dp)
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            performHaptic(HapticFeedbackType.LongPress)
+                                            FlowRepository.removeNode(node.id)
+                                        },
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Delete,
+                                            contentDescription = "Delete",
+                                            tint = MaterialTheme.colorScheme.error,
+                                            modifier = Modifier.size(17.dp)
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                item { Spacer(modifier = Modifier.height((userSettings.fabBottomSpacingDp + 48).dp)) }
+                    item { Spacer(modifier = Modifier.height((userSettings.fabBottomSpacingDp + 56).dp)) }
+                }
             }
         }
-    }
 
-    SectionHeader(
+        // Floating Capsule Header
+        FloatingCapsuleHeader(
             title = "Flow & Automation",
             icon = Icons.Default.LinearScale,
-            onMiniSettings = onMiniSettings,
-            actions = {
+            trailingContent = {
+                // Add step pill
                 GlassActionPill(
                     icon = Icons.Default.Add,
                     contentDescription = "Add Step",
                     tint = MaterialTheme.colorScheme.primary,
                     onClick = { showAddNodeSheet = true }
                 )
+
+                // View Mode toggle pill
                 GlassActionPill(
                     icon = if (viewMode == 0) Icons.Default.LinearScale else Icons.Default.GridView,
                     contentDescription = "Toggle View",
-                    onClick = { viewMode = if (viewMode == 0) 1 else 0 }
+                    onClick = {
+                        performHaptic(HapticFeedbackType.TextHandleMove)
+                        viewMode = if (viewMode == 0) 1 else 0
+                    }
                 )
+
+                // Run Flow Action pill
                 GlassActionPill(
-                    icon = Icons.Default.PlayArrow,
+                    icon = if (isRunning) null else Icons.Default.PlayArrow,
                     contentDescription = "Run Flow",
                     tint = MaterialTheme.colorScheme.primary,
                     onClick = {
                         if (!isRunning) {
                             isRunning = true
+                            performHaptic(HapticFeedbackType.LongPress)
                             coroutineScope.launch {
                                 val res = FlowRepository.executeFlow()
                                 executionResult = res
                                 isRunning = false
                             }
                         }
-                    }
-                )
-                val flowContext = androidx.compose.ui.platform.LocalContext.current
-                GlassActionPill(
-                    icon = androidx.compose.material.icons.Icons.Default.Share,
-                    contentDescription = "Export Flow",
-                    onClick = {
-                        coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                            runCatching {
-                                val json = com.example.flow.FlowSerializer.exportToJson(
-                                    "requestr-flow",
-                                    nodes,
-                                    connections
-                                )
-                                val file = com.example.data.export.FileExporter.writeJson(flowContext, json)
-                                com.example.data.export.FileExporter.shareFile(
-                                    flowContext, file,
-                                    "application/json",
-                                    "Flow export"
-                                )
-                            }
+                    },
+                    customIcon = if (isRunning) {
+                        {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
                         }
-                    }
+                    } else null
+                )
+
+                // Settings pill
+                GlassActionPill(
+                    icon = Icons.Default.Settings,
+                    contentDescription = "Settings",
+                    onClick = onMiniSettings
                 )
             },
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .padding(top = 4.dp)
+                .padding(top = 8.dp)
         )
     }
 
@@ -318,18 +457,69 @@ fun FlowScreen(
             }
         )
     }
+
+    // Create New Pipeline Bottom Sheet
+    if (showNewPipelineSheet) {
+        var pipelineName by remember { mutableStateOf("") }
+
+        ModalBottomSheet(
+            onDismissRequest = { showNewPipelineSheet = false },
+            containerColor = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    "Create New Pipeline",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+
+                OutlinedTextField(
+                    value = pipelineName,
+                    onValueChange = { pipelineName = it },
+                    label = { Text("Pipeline Name (e.g. Auth & Token Refresh Flow)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
+                )
+
+                Button(
+                    onClick = {
+                        if (pipelineName.isNotBlank()) {
+                            val newId = UUID.randomUUID().toString()
+                            FlowRepository.createPipeline(pipelineName)
+                            showNewPipelineSheet = false
+                        }
+                    },
+                    enabled = pipelineName.isNotBlank(),
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                ) {
+                    Text("Create Pipeline")
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+        }
+    }
 }
 
 /**
  * Flow canvas with pan/zoom, port-drag connection creation, and long-press
- * context menu. Implements TODO items #23, #24, #32, #33, #34.
+ * context menu.
  */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun FlowCanvas(
     nodes: List<FlowNodeItem>,
     connections: List<FlowConnectionItem>,
-    performHaptic: (androidx.compose.ui.hapticfeedback.HapticFeedbackType) -> Unit,
+    performHaptic: (HapticFeedbackType) -> Unit,
     onNodeMoved: (String, Float, Float) -> Unit,
     onNodeDeleted: (String) -> Unit,
     onNodeEdit: (FlowNodeItem) -> Unit,
@@ -355,19 +545,29 @@ fun FlowCanvas(
     // Long-press context menu state
     var contextMenuNode by remember { mutableStateOf<FlowNodeItem?>(null) }
 
+    val infiniteTransition = rememberInfiniteTransition(label = "flowPulse")
+    val pulseAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.4f,
+        targetValue = 0.9f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1200),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulse"
+    )
+
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp)
+            .padding(horizontal = 14.dp, vertical = 6.dp)
             .clip(RoundedCornerShape(16.dp))
             .background(MaterialTheme.colorScheme.surface)
-            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(16.dp))
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(16.dp))
             .transformable(state = transformState)
     ) {
         // Fit-to-view button
         IconButton(
             onClick = {
-                // Calculate bounding box of all nodes and center+scale to fit
                 if (nodes.isNotEmpty()) {
                     val minX = nodes.minOf { it.x }
                     val maxX = nodes.maxOf { it.x } + 180f
@@ -376,9 +576,9 @@ fun FlowCanvas(
                     val contentW = maxX - minX
                     val contentH = maxY - minY
                     if (contentW > 0 && contentH > 0) {
-                        scale = 0.8f
-                        offsetX = -(minX + contentW / 2) * scale + 300f
-                        offsetY = -(minY + contentH / 2) * scale + 300f
+                        scale = 0.85f
+                        offsetX = -(minX + contentW / 2) * scale + 240f
+                        offsetY = -(minY + contentH / 2) * scale + 200f
                     }
                 }
             },
@@ -394,7 +594,7 @@ fun FlowCanvas(
             )
         }
 
-        // Canvas: grid dots + connection lines + drag preview line
+        // Canvas: grid dots + connection bezier lines + drag preview line
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
@@ -411,7 +611,7 @@ fun FlowCanvas(
                 var y = -offsetY / scale - 500f
                 while (y < size.height / scale + 500f) {
                     drawCircle(
-                        color = Color.White.copy(alpha = 0.06f),
+                        color = Color.White.copy(alpha = 0.07f),
                         radius = 1.5f / scale,
                         center = Offset(x, y)
                     )
@@ -420,7 +620,7 @@ fun FlowCanvas(
                 x += step
             }
 
-            // Draw existing connections
+            // Draw existing connections with smooth bezier curve and glow
             connections.forEach { conn ->
                 val from = nodes.find { it.id == conn.fromNodeId }
                 val to = nodes.find { it.id == conn.toNodeId }
@@ -433,14 +633,14 @@ fun FlowCanvas(
                     val path = Path().apply {
                         moveTo(startX, startY)
                         cubicTo(
-                            startX + 60f, startY,
-                            endX - 60f, endY,
+                            startX + 70f, startY,
+                            endX - 70f, endY,
                             endX, endY
                         )
                     }
                     drawPath(
                         path = path,
-                        color = Color(0xFF38BDF8),
+                        color = Color(0xFF38BDF8).copy(alpha = pulseAlpha),
                         style = Stroke(width = 3.dp.toPx() / scale)
                     )
                 }
@@ -462,8 +662,11 @@ fun FlowCanvas(
                     }
                     drawPath(
                         path = path,
-                        color = Color(0xFF38BDF8).copy(alpha = 0.5f),
-                        style = Stroke(width = 2.dp.toPx() / scale, pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 10f)))
+                        color = Color(0xFF38BDF8).copy(alpha = 0.7f),
+                        style = Stroke(
+                            width = 2.5.dp.toPx() / scale,
+                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 10f))
+                        )
                     )
                 }
             }
@@ -488,10 +691,12 @@ fun FlowCanvas(
                     expanded = true,
                     onDismissRequest = { contextMenuNode = null },
                     modifier = Modifier
-                        .offset { IntOffset(
-                            (node.x.dp.roundToPx() * scale + offsetX).toInt(),
-                            (node.y.dp.roundToPx() * scale + offsetY).toInt() + 60
-                        )}
+                        .offset {
+                            IntOffset(
+                                (node.x.dp.roundToPx() * scale + offsetX).toInt(),
+                                (node.y.dp.roundToPx() * scale + offsetY).toInt() + 60
+                            )
+                        }
                 ) {
                     DropdownMenuItem(
                         text = { Text("Edit") },
@@ -560,7 +765,12 @@ fun FlowCanvas(
                             onClick = { onNodeDeleted(node.id) },
                             modifier = Modifier.size(16.dp)
                         ) {
-                            Icon(imageVector = Icons.Default.Close, contentDescription = "Delete", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(12.dp))
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Delete",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(12.dp)
+                            )
                         }
                     }
 
@@ -606,11 +816,10 @@ fun FlowCanvas(
                                             dragEndY += dragAmount.y / scale
                                         },
                                         onDragEnd = {
-                                            // Check if dropped on another node's input port
                                             val dropNode = nodes.find { n ->
                                                 n.id != node.id &&
-                                                kotlin.math.abs(dragEndX - n.x.dp.toPx()) < 30f &&
-                                                kotlin.math.abs(dragEndY - (n.y.dp.toPx() + 35.dp.toPx())) < 30f
+                                                        kotlin.math.abs(dragEndX - n.x.dp.toPx()) < 30f &&
+                                                        kotlin.math.abs(dragEndY - (n.y.dp.toPx() + 35.dp.toPx())) < 30f
                                             }
                                             if (dropNode != null) {
                                                 onConnectionCreated(node.id, dropNode.id)
@@ -636,7 +845,11 @@ fun FlowCanvas(
                     .background(Color.Black.copy(alpha = 0.5f))
                     .border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
             ) {
-                Canvas(modifier = Modifier.fillMaxSize().padding(4.dp)) {
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(4.dp)
+                ) {
                     val minX = nodes.minOf { it.x }
                     val maxX = nodes.maxOf { it.x } + 180f
                     val minY = nodes.minOf { it.y }
@@ -715,7 +928,12 @@ fun AddFlowNodeBottomSheet(
                 .padding(horizontal = 20.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text("Add Automation Step", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+            Text(
+                "Add Automation Step",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
 
             OutlinedTextField(
                 value = stepTitle,
@@ -734,10 +952,11 @@ fun AddFlowNodeBottomSheet(
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 FlowNodeType.values().forEach { t ->
-                    RequestrFilterChip(
-                        selected = selectedType == t,
+                    val isSel = selectedType == t
+                    FilterChip(
+                        selected = isSel,
                         onClick = { selectedType = t },
-                        label = "${t.iconEmoji} ${t.label}"
+                        label = { Text("${t.iconEmoji} ${t.label}", fontSize = 11.5.sp) }
                     )
                 }
             }
@@ -765,6 +984,48 @@ fun AddFlowNodeBottomSheet(
             }
 
             Spacer(modifier = Modifier.height(20.dp))
+        }
+    }
+}
+
+@Composable
+fun PipelinePillItem(
+    pipeline: FlowPipelineItem,
+    isActive: Boolean,
+    onClick: () -> Unit
+) {
+    val pillBg by animateColorAsState(
+        targetValue = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+        label = "pillBg"
+    )
+    val pillText by animateColorAsState(
+        targetValue = if (isActive) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+        label = "pillText"
+    )
+
+    Surface(
+        modifier = Modifier
+            .clip(RoundedCornerShape(20.dp))
+            .clickable { onClick() },
+        shape = RoundedCornerShape(20.dp),
+        color = pillBg
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                text = pipeline.name,
+                fontSize = 12.sp,
+                fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
+                color = pillText
+            )
+            Text(
+                text = "(${pipeline.nodes.size})",
+                fontSize = 10.sp,
+                color = pillText.copy(alpha = 0.8f)
+            )
         }
     }
 }

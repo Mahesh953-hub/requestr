@@ -357,6 +357,18 @@ data class FlowConnectionItem(
     val toPort: String = "in"
 )
 
+data class FlowPipelineItem(
+    val id: String = UUID.randomUUID().toString(),
+    val name: String = "Auth Login Guard",
+    val description: String = "5 nodes · trigger: Intercept",
+    val triggerType: String = "Intercept",
+    val status: String = "RUNNING", // "RUNNING", "PAUSED", "DRAFT"
+    val lastRunText: String = "2m ago",
+    val runsCount: Int = 42,
+    val nodes: List<FlowNodeItem> = emptyList(),
+    val connections: List<FlowConnectionItem> = emptyList()
+)
+
 enum class MusicSourceType(val label: String) {
     SYNTH_LOFI("requestr Synth Beats"),
     AMBIENT_CYBER("Cyber Cyberpunk Ambience"),
