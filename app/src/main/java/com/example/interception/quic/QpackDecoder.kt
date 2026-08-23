@@ -235,7 +235,17 @@ object QpackDecoder {
      * so far are committed) so a partial encoder-stream delivery across STREAM frames is tolerated —
      * a later [feedEncoderStream] with the remaining bytes resumes from the next instruction.
      */
-    fun feedEncoderStream(table: DynamicTable, bytes: ByteArray, offset: Int = 0): Int {
+    fun feedEncoderStream(table: DynamicTable, bytes: ByteArray, offset: Int = 0): Int =
+        feedEncoderStreamWithOffset(table, bytes, offset).first
+
+    /**
+     * Same as [feedEncoderStream] but also returns the byte offset at which the walk stopped, so a
+     * caller feeding the encoder stream incrementally across STREAM deliveries can buffer the
+     * un-consumed tail (a truncated final instruction) and resume from there on the next delivery
+     * instead of misparsing a delta that begins mid-instruction. Returns
+     * `(instructionCount, consumedOffset)`; the offset is always within `[offset, bytes.size]`.
+     */
+    fun feedEncoderStreamWithOffset(table: DynamicTable, bytes: ByteArray, offset: Int = 0): Pair<Int, Int> {
         var pos = offset
         var count = 0
         while (pos < bytes.size) {
@@ -245,7 +255,7 @@ object QpackDecoder {
                     // Insert With Name Reference: T(bit 6) static/dynamic, 6-bit prefix name index.
                     val isStatic = firstByte and 0x40 != 0
                     val (np, nameIdx) = decodeInt(bytes, pos, 6)
-                    if (np > bytes.size) return count
+                    if (np > bytes.size) return count to pos
                     val name = if (isStatic) {
                         STATIC.getOrNull(nameIdx)?.first
                     } else {
@@ -253,37 +263,37 @@ object QpackDecoder {
                         table.entry(abs)?.name
                     }
                     val (sp, value) = decodeStrN(bytes, np, 7)
-                    if (sp > bytes.size) return count
+                    if (sp > bytes.size) return count to pos
                     if (name != null) table.insert(HeaderEntry(name, value))
                     pos = sp
                 }
                 firstByte and 0x40 != 0 -> {
                     // Insert With Literal Name: H(bit 5) Huffman, 5-bit prefix name length, then value(7-bit).
                     val (np, name) = decodeStrN(bytes, pos, 5)
-                    if (np > bytes.size) return count
+                    if (np > bytes.size) return count to pos
                     val (sp, value) = decodeStrN(bytes, np, 7)
-                    if (sp > bytes.size) return count
+                    if (sp > bytes.size) return count to pos
                     table.insert(HeaderEntry(name, value))
                     pos = sp
                 }
                 firstByte and 0x20 != 0 -> {
                     // Set Dynamic Table Capacity: 5-bit prefix capacity.
                     val (np, cap) = decodeInt(bytes, pos, 5)
-                    if (np > bytes.size) return count
+                    if (np > bytes.size) return count to pos
                     table.setCapacity(cap)
                     pos = np
                 }
                 else -> {
                     // Duplicate: 5-bit prefix relative index (relative to the latest insert).
                     val (np, relIdx) = decodeInt(bytes, pos, 5)
-                    if (np > bytes.size) return count
+                    if (np > bytes.size) return count to pos
                     table.duplicate(table.insertCount - 1 - relIdx)
                     pos = np
                 }
             }
             count++
         }
-        return count
+        return count to pos
     }
 
     /**
