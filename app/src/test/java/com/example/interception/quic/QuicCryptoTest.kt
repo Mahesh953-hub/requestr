@@ -713,6 +713,12 @@ class QuicCryptoTest {
      * counter (sample[0..3]) and a 12-byte nonce (sample[4..15]); the 5-byte mask is the ChaCha20
      * keystream from encrypting five zero bytes with the header-protection key under that
      * counter/nonce.
+     *
+     * Pinned to the `"SunJCE"` provider because the host test JVM installs Conscrypt at the highest
+     * priority, and Conscrypt's raw `"ChaCha20"` cipher is stateful/incorrect for this counter/nonce
+     * mode (it drifts across calls once other tests exercise it). SunJCE's `"ChaCha20"` is the
+     * RFC-8439-compliant, stateless reference, so a passing round-trip against [QuicCrypto]'s direct
+     * block-function decrypt side proves the production mask matches the RFC vector.
      */
     private fun chacha20HeaderMask(hpKey: ByteArray, sample16: ByteArray): ByteArray {
         val counter = (sample16[0].toInt() and 0xFF) or
@@ -720,7 +726,7 @@ class QuicCryptoTest {
             ((sample16[2].toInt() and 0xFF) shl 16) or
             ((sample16[3].toInt() and 0xFF) shl 24)
         val nonce = sample16.copyOfRange(4, 16)
-        val cipher = Cipher.getInstance("ChaCha20")
+        val cipher = Cipher.getInstance("ChaCha20", "SunJCE")
         cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(hpKey, "ChaCha20"), ChaCha20ParameterSpec(nonce, counter))
         return cipher.doFinal(ByteArray(5))
     }

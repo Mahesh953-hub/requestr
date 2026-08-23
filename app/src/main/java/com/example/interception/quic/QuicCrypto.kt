@@ -3,7 +3,6 @@ package com.example.interception.quic
 import android.util.Log
 import javax.crypto.Cipher
 import javax.crypto.Mac
-import javax.crypto.spec.ChaCha20ParameterSpec
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -832,10 +831,19 @@ object QuicCrypto {
         else aesEcbEncryptBlock(keys.hp, sample16)
 
     /**
-     * ChaCha20 header-protection mask (RFC 9001 §5.4.4): encrypt five zero bytes with ChaCha20
-     * (raw stream cipher, not AEAD) keyed by the header-protection key, using the sample's first 4
-     * bytes as the little-endian block counter and its remaining 12 bytes as the nonce. Returns the
-     * 5-byte keystream — the first-byte mask plus up to 4 packet-number masks.
+     * ChaCha20 header-protection mask (RFC 9001 §5.4.4): the 16-byte [sample] is split into a 4-byte
+     * little-endian ChaCha20 block counter (`sample[0..3]`) and a 12-byte nonce (`sample[4..15]`); the
+     * 5-byte mask is the first 5 bytes of the ChaCha20 keystream block (keyed by the 32-byte `quic hp`
+     * header-protection key) XORed with five zero bytes — i.e. the keystream itself.
+     *
+     * This computes the ChaCha20 block *directly* (RFC 8439 §2.3/§2.4) rather than via the JCE
+     * `"ChaCha20"` stream cipher + `ChaCha20ParameterSpec`, because some installed JCE providers —
+     * notably Conscrypt, which registers as the highest-priority provider in the host test JVM —
+     * implement the raw `"ChaCha20"` cipher statefully/incorrectly for this counter/nonce mode,
+     * producing a keystream that drifts across calls once other tests exercise the cipher. That
+     * drift makes the protect-side and unprotect-side masks disagree for the same sample, corrupting
+     * the recovered packet number and failing AEAD. The direct block function is deterministic and
+     * provider-independent, so header protection is correct on both the host JVM and Android.
      */
     private fun chacha20HeaderProtectionMask(hpKey: ByteArray, sample16: ByteArray): ByteArray {
         val counter = (sample16[0].toInt() and 0xFF) or
@@ -843,9 +851,53 @@ object QuicCrypto {
             ((sample16[2].toInt() and 0xFF) shl 16) or
             ((sample16[3].toInt() and 0xFF) shl 24)
         val nonce = sample16.copyOfRange(4, 16)
-        val cipher = Cipher.getInstance("ChaCha20")
-        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(hpKey, "ChaCha20"), ChaCha20ParameterSpec(nonce, counter))
-        return cipher.doFinal(ByteArray(5)) // XOR of 5 zero bytes with keystream = the keystream itself
+        return chacha20Block(hpKey, counter, nonce).copyOfRange(0, 5)
+    }
+
+    /**
+     * ChaCha20 block function (RFC 8439 §2.3/§2.4): the 64-byte keystream block for 32-byte [key],
+     * block [counter], and 12-byte [nonce], computed directly from the quarter-round ARX construction
+     * — no JCE provider, so it is deterministic and identical on the host JVM and Android. The 16
+     * state words are the four `"expand 32-byte k"` constants, the eight key words, the counter, and
+     * the three nonce words (all little-endian); 20 rounds (10 double rounds) are applied and the
+     * original state is added back (mod 2^32) before serializing little-endian.
+     */
+    private fun chacha20Block(key: ByteArray, counter: Int, nonce: ByteArray): ByteArray {
+        val state = IntArray(16)
+        state[0] = 0x61707865; state[1] = 0x3320646e; state[2] = 0x79622d32; state[3] = 0x6b206574
+        for (i in 0 until 8) state[4 + i] = leInt(key, i * 4)
+        state[12] = counter
+        state[13] = leInt(nonce, 0)
+        state[14] = leInt(nonce, 4)
+        state[15] = leInt(nonce, 8)
+        val x = state.copyOf()
+        repeat(10) {
+            quarterRound(x, 0, 4, 8, 12); quarterRound(x, 1, 5, 9, 13)
+            quarterRound(x, 2, 6, 10, 14); quarterRound(x, 3, 7, 11, 15)
+            quarterRound(x, 0, 5, 10, 15); quarterRound(x, 1, 6, 11, 12)
+            quarterRound(x, 2, 7, 8, 13); quarterRound(x, 3, 4, 9, 14)
+        }
+        val out = ByteArray(64)
+        for (i in 0 until 16) leIntPut(x[i] + state[i], out, i * 4)
+        return out
+    }
+
+    private fun quarterRound(x: IntArray, a: Int, b: Int, c: Int, d: Int) {
+        x[a] += x[b]; x[d] = Integer.rotateLeft(x[d] xor x[a], 16)
+        x[c] += x[d]; x[b] = Integer.rotateLeft(x[b] xor x[c], 12)
+        x[a] += x[b]; x[d] = Integer.rotateLeft(x[d] xor x[a], 8)
+        x[c] += x[d]; x[b] = Integer.rotateLeft(x[b] xor x[c], 7)
+    }
+
+    private fun leInt(b: ByteArray, off: Int): Int =
+        (b[off].toInt() and 0xFF) or ((b[off + 1].toInt() and 0xFF) shl 8) or
+            ((b[off + 2].toInt() and 0xFF) shl 16) or ((b[off + 3].toInt() and 0xFF) shl 24)
+
+    private fun leIntPut(v: Int, b: ByteArray, off: Int) {
+        b[off] = v.toByte()
+        b[off + 1] = (v ushr 8).toByte()
+        b[off + 2] = (v ushr 16).toByte()
+        b[off + 3] = (v ushr 24).toByte()
     }
 
     /**

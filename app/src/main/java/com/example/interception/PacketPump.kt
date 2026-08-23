@@ -131,6 +131,19 @@ class PacketPump(
     private val quicCipherSuites = mutableMapOf<String, com.example.interception.quic.QuicCrypto.CipherSuite>()
 
     /**
+     * P2 QUIC connection-ID routing table and datagram router. [quicDatagramRouter] splits a
+     * coalesced UDP/443 datagram into its QUIC packets, dispatches each by Destination Connection
+     * ID through [quicCidTable] (with a 5-tuple fallback for zero-length-DCID connections),
+     * classifies each packet's type, and recovers the Initial SNI/ALPN. [parseIpv4]/[parseIpv6]
+     * hand the QUIC payload to [ingestQuicDatagram] instead of parsing Initial packets inline, so
+     * this pump only persists (and, via the separate key-log-sourced 1-RTT path, decrypts). A
+     * single [quicCidTable] instance is shared with the NEW/RETIRE_CONNECTION_ID frame walker so
+     * CIDs issued mid-connection route to the same connection.
+     */
+    private val quicCidTable = com.example.interception.quic.QuicCidTable()
+    private val quicDatagramRouter = com.example.interception.quic.QuicDatagramRouter(quicCidTable)
+
+    /**
      * Locks the negotiated TLS 1.3 AEAD cipher suite for [connectionId] from the IANA cipher-suite
      * code the server selected in its ServerHello (RFC 8446 §4.1.3 / RFC 9001 §5.3), so the 1-RTT
      * decrypt path can derive correctly-sized traffic keys and pick the right AEAD + header
@@ -316,24 +329,15 @@ class PacketPump(
             }
         }
 
-        // Fix #26 / P2: parse QUIC Initial packets on UDP port 443. [QuicParser.parseInitial]
-        // does the real work now -- AEAD-decrypts the Initial packet using the public
-        // RFC 9001 Initial keys (derived from the client DCID) when the version supports it,
-        // recovering the real SNI *and* ALPN from the actual ClientHello, and falls back to
-        // the plaintext heuristic scan (SNI only) for unsupported/gQUIC versions or on any
-        // decrypt failure. Either way this is real session identity, not a placeholder.
+        // Fix #26 / P2: route QUIC datagrams on UDP port 443 through the datagram router, which
+        // splits coalesced packets, dispatches each by Destination Connection ID through the CID
+        // table, classifies each packet's type, and recovers the Initial SNI/ALPN (via
+        // [QuicParser.parseInitial] for Initial packets). This pump then only persists -- the
+        // inline Initial-parsing that used to live here moved into the router so coalesced
+        // Initial+Handshake datagrams (a server's common response shape) are handled end to end.
         if (protocol == 17 && (sPort == 443 || dPort == 443)) {
             val quicPayload = packet.copyOfRange(ihl + 8, length)
-            val initial = com.example.interception.quic.QuicParser.parseInitial(quicPayload)
-            if (initial != null) {
-                Log.i(
-                    TAG,
-                    "QUIC ${if (initial.decrypted) "decrypted" else "heuristic"} SNI: " +
-                        "${initial.sniHostname} alpn=${initial.alpn} " +
-                        "(${if (dPort == 443) "outbound" else "inbound"})",
-                )
-                persistQuicConnection(src, sPort, dst, dPort, initial, quicPayload)
-            }
+            ingestQuicDatagram(quicPayload, src, sPort, dst, dPort, isIpv6 = false)
         }
 
         // M1: general UDP flow tracking (byte counters), covering all UDP traffic including
@@ -368,44 +372,82 @@ class PacketPump(
     }
 
     /**
-     * M1/P2: upsert a quic_connections row once per connection (identified by 5-tuple), and
-     * maintain the in-memory [com.example.interception.quic.QuicConnection] state machine for
-     * this connectionId (P2) -- the persisted row is a connection-level summary; the live
+     * P2: ingests one UDP/443 datagram's QUIC payload through [quicDatagramRouter], which splits
+     * coalesced packets, routes each by Destination Connection ID, classifies each packet's type,
+     * and recovers the Initial SNI/ALPN, then persists each routed packet. This replaces the
+     * inline `QuicParser.parseInitial` + `persistQuicConnection` blocks that used to live in
+     * [parseIpv4]/[parseIpv6] (Initial-only, no coalescing, no CID routing): the router owns
+     * parsing/routing/classification, this pump owns persist (and, via the separate key-log-sourced
+     * 1-RTT path, decrypt). [isIpv6] is metadata only and does not change routing.
+     */
+    internal fun ingestQuicDatagram(
+        datagramPayload: ByteArray,
+        src: String,
+        sPort: Int,
+        dst: String,
+        dPort: Int,
+        isIpv6: Boolean = false,
+    ) {
+        val routed = quicDatagramRouter.ingest(datagramPayload, src, sPort, dst, dPort, isIpv6)
+        for (packet in routed) {
+            persistQuicConnection(src, sPort, dst, dPort, packet)
+        }
+    }
+
+    /**
+     * M1/P2: upsert a quic_connections row once per connection (identified by the routed
+     * connectionId, a [com.example.correlation.ConnectionKey.forQuic] 5-tuple key resolved by
+     * [quicDatagramRouter] via the CID table), and maintain the in-memory
+     * [com.example.interception.quic.QuicConnection] state machine for this connectionId (P2) --
+     * the persisted row is a connection-level summary; the live
      * [com.example.interception.quic.QuicConnection]/[com.example.interception.quic.QuicState]
      * transition is what makes [com.example.interception.quic.QuicConnection],
      * [com.example.interception.quic.QuicState] and [com.example.interception.quic.QuicStream]
      * (previously zero-call-site dead code) an actually-running part of the pipeline.
+     *
+     * Each [routed] packet advances the in-memory state by its packet type (an Initial whose
+     * ClientHello was AEAD-decrypted, or a Handshake packet, marks the handshake in progress); the
+     * Room row is written once, on first observation of the connection, carrying the Initial's
+     * recovered SNI/ALPN/version. Subsequent packets (e.g. a coalesced Handshare after the Initial,
+     * or the server's response routed back to the same connectionId by DCID) only advance state.
      */
     private fun persistQuicConnection(
         src: String,
         sPort: Int,
         dst: String,
         dPort: Int,
-        initial: com.example.interception.quic.QuicParser.QuicInitial,
-        quicPayload: ByteArray,
+        routed: com.example.interception.quic.QuicDatagramRouter.RoutedPacket,
     ) {
-        val connectionId = com.example.correlation.ConnectionKey.forQuic(src, sPort, dst, dPort)
+        val connectionId = routed.connectionId
 
-        // Advance (or create) the in-memory state machine for every Initial packet we see on
-        // this 5-tuple, regardless of whether we've already persisted the Room row below --
-        // e.g. a retransmitted/second Initial still means "handshake in progress".
+        // Advance (or create) the in-memory state machine for every routed packet on this
+        // connection, regardless of whether we've already persisted the Room row below -- e.g. a
+        // coalesced Handshake after the Initial, or a retransmitted/second Initial, still means
+        // "handshake in progress".
         val conn = quicConnectionState.getOrPut(connectionId) {
             com.example.interception.quic.QuicConnection(
                 connectionId = connectionId,
                 sessionId = sessionId,
                 srcIp = src, srcPort = sPort,
                 dstIp = dst, dstPort = dPort,
-                sniHost = initial.sniHostname,
-                alpn = initial.alpn,
-                quicVersion = initial.version,
+                sniHost = routed.sniHostname,
+                alpn = routed.alpn,
+                quicVersion = routed.version,
                 dstConnectionId = connectionId,
             )
         }
-        conn.bytesReceived += quicPayload.size
-        conn.state = if (initial.decrypted) {
-            com.example.interception.quic.QuicState.HANDSHAKE_IN_PROGRESS
-        } else {
-            com.example.interception.quic.QuicState.INITIALIZING
+        conn.bytesReceived += routed.payloadBytes.size
+        // Advance the in-memory lifecycle state by packet type. Decode status is owned by the
+        // 1-RTT decrypt path; here we only reflect that the handshake is underway once an
+        // Initial/Handshake packet is seen -- the same transition the inline Initial-parsing code
+        // made (INITIALIZING until a decrypted Initial, then HANDSHAKE_IN_PROGRESS).
+        conn.state = when (routed.packetType) {
+            com.example.interception.quic.QuicCrypto.LongHeaderPacketType.INITIAL ->
+                if (routed.decrypted) com.example.interception.quic.QuicState.HANDSHAKE_IN_PROGRESS
+                else com.example.interception.quic.QuicState.INITIALIZING
+            com.example.interception.quic.QuicCrypto.LongHeaderPacketType.HANDSHAKE ->
+                com.example.interception.quic.QuicState.HANDSHAKE_IN_PROGRESS
+            else -> conn.state // 0-RTT / RETRY / short header: left to the 1-RTT decrypt path
         }
         // Every QUIC stream carrying request/response data multiplexes over this connection;
         // stream 0 (client-initiated bidirectional control/first-request stream) is the one
@@ -417,15 +459,24 @@ class PacketPump(
             com.example.interception.quic.QuicStream(streamId = 0, connectionId = connectionId)
         }
 
-        if (!quicConnections.add(connectionId)) return // Room row already persisted for this 5-tuple
+        if (routed.packetType == com.example.interception.quic.QuicCrypto.LongHeaderPacketType.INITIAL && routed.sniHostname != null) {
+            Log.i(
+                TAG,
+                "QUIC ${if (routed.decrypted) "decrypted" else "heuristic"} SNI: " +
+                    "${routed.sniHostname} alpn=${routed.alpn} " +
+                    "(${if (routed.direction == com.example.interception.quic.QuicDatagramRouter.Direction.OUTBOUND) "outbound" else "inbound"})",
+            )
+        }
+
+        if (!quicConnections.add(connectionId)) return // Room row already persisted for this connection
         val entity = QuicConnectionEntity(
             connectionId = connectionId,
             sessionId = sessionId,
             srcIp = src, destIp = dst,
             srcPort = sPort, destPort = dPort,
-            sniHost = initial.sniHostname,
-            alpn = initial.alpn,
-            quicVersion = initial.version,
+            sniHost = routed.sniHostname,
+            alpn = routed.alpn,
+            quicVersion = routed.version,
             dstConnectionId = connectionId,
             establishedAt = System.currentTimeMillis(),
             decodeStatus = QuicDecodeStatus.DETECTED_ONLY,
@@ -479,19 +530,12 @@ class PacketPump(
             }
         }
 
-        // Fix #26 / P2 parity: parse QUIC Initial packets on UDP port 443.
+        // Fix #26 / P2 parity: route QUIC datagrams on UDP port 443 through the same datagram
+        // router as the IPv4 path (address family does not change DCID-based routing), so a v6
+        // coalesced Initial+Handshake datagram is handled identically to a v4 one.
         if (protocol == 17 && (sPort == 443 || dPort == 443) && length >= transportOffset + 8) {
             val quicPayload = packet.copyOfRange(transportOffset + 8, length)
-            val initial = com.example.interception.quic.QuicParser.parseInitial(quicPayload)
-            if (initial != null) {
-                Log.i(
-                    TAG,
-                    "QUIC ${if (initial.decrypted) "decrypted" else "heuristic"} SNI: " +
-                        "${initial.sniHostname} alpn=${initial.alpn} " +
-                        "(${if (dPort == 443) "outbound" else "inbound"})",
-                )
-                persistQuicConnection(src, sPort, dst, dPort, initial, quicPayload)
-            }
+            ingestQuicDatagram(quicPayload, src, sPort, dst, dPort, isIpv6 = true)
         }
 
         // M1 parity: general UDP flow tracking (byte counters), covering all UDP traffic
