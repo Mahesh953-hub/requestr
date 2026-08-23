@@ -290,6 +290,183 @@ object QuicCrypto {
         }
     }
 
+    // ── Key-phase rotation (RFC 9001 §6): prev / current / next with auth-before-promotion ──
+
+    /**
+     * One generation of QUIC 1-RTT traffic keys under the key-update rotation (RFC 9001 §6). [key]
+     * is the generation counter (0 for the initial `CLIENT/SERVER_TRAFFIC_SECRET_0`-derived
+     * application-data keys, incremented on each key update). [protectKeys] are the keys used to
+     * protect (encrypt) outgoing packets at this generation; [unprotectKeys] are used to unprotect
+     * (decrypt) incoming packets at this generation. A retired previous generation keeps only
+     * [unprotectKeys] (we no longer send with it but still accept delayed/reordered packets
+     * encrypted under it for a bounded window) -- see [KeyPhaseManager].
+     */
+    data class KeyPhase(
+        val key: Int,
+        val protectKeys: PacketProtectionKeys,
+        val unprotectKeys: PacketProtectionKeys?,
+    )
+
+    /**
+     * Manages the prev/current/next key-phase rotation for one direction of a QUIC connection's
+     * 1-RTT traffic (RFC 9001 §6), with auth-before-promotion and bounded retirement of previous
+     * generations.
+     *
+     * A key update derives the next-generation traffic secret as
+     * `HKDF-Expand-Label(secret_N, "quic ku", "", Hash.length)` (RFC 9001 §6.1) and then traffic
+     * keys via [deriveKeysFromTrafficSecret]. The KEY_PHASE bit carried in each short header equals
+     * `generation % 2`, so after two updates the bit wraps back to 0 -- a packet's bit alone is
+     * ambiguous about which generation it used, which is why decryption tries candidates in priority
+     * order rather than indexing a single key set.
+     *
+     * **Auth-before-promotion** (RFC 9001 §6): when a short header's KEY_PHASE bit signals a
+     * peer-initiated update (it differs from the current generation's bit), the next-generation
+     * keys are derived SPECULATIVELY and tried with AEAD -- they are promoted (current→previous, new
+     * current) ONLY if that AEAD authenticates. A spoofed key-phase flip that fails AEAD is
+     * discarded and never promoted, and the current generation's keys are left untouched. After
+     * promotion, the previous generation is retained (unprotect-only) for [maxRetainedPrevious]
+     * generations so delayed/reordered packets from the old phase still decrypt (the configurable
+     * byte/packet window modeled here as a retained-generation count).
+     *
+     * @param version QUIC version (v1/v2) -- selects the `quic`/`quicv2` key labels.
+     * @param cipherSuite the negotiated AEAD suite -- selects HKDF hash + AEAD key/header-protection.
+     * @param initialSecret the generation-0 traffic secret (e.g. `CLIENT/SERVER_TRAFFIC_SECRET_0`).
+     * @param maxRetainedPrevious how many previous generations to keep for decrypting delayed packets.
+     */
+    class KeyPhaseManager(
+        private val version: Int,
+        private val cipherSuite: CipherSuite,
+        initialSecret: ByteArray,
+        private val maxRetainedPrevious: Int = 1,
+    ) {
+        // phases: index 0 = oldest retained previous generation; last = current generation.
+        private val phases: MutableList<KeyPhase> = mutableListOf()
+        private var currentGeneration: Int = 0
+        private var currentSecret: ByteArray = initialSecret
+
+        init {
+            val keys = deriveKeysFromTrafficSecret(version, cipherSuite, initialSecret)
+                ?: throw IllegalArgumentException("failed to derive initial key-phase traffic keys")
+            phases.add(KeyPhase(key = 0, protectKeys = keys, unprotectKeys = keys))
+        }
+
+        /** The current generation number (0 for the initial application-data keys, +1 per key update). */
+        val generation: Int get() = currentGeneration
+
+        /** The current generation's KEY_PHASE bit value (`generation % 2`, RFC 9001 §6). */
+        val currentKeyPhaseBit: Int get() = currentGeneration % 2
+
+        /** The keys used to protect (encrypt) outgoing packets at the current generation. */
+        fun currentProtectKeys(): PacketProtectionKeys = phases.last().protectKeys
+
+        /** The keys used to unprotect (decrypt) incoming packets at the current generation. */
+        fun currentUnprotectKeys(): PacketProtectionKeys =
+            phases.last().unprotectKeys ?: phases.last().protectKeys
+
+        /** All retained generations, oldest first (for inspection/testing). */
+        fun retainedPhases(): List<KeyPhase> = phases.toList()
+
+        /**
+         * Derives the next-generation traffic secret + keys WITHOUT promoting -- the speculative
+         * next generation [attemptUnprotect] tries for a peer-signaled key update. Returns null on
+         * a derivation failure (never throws).
+         */
+        private fun deriveNextGeneration(): Pair<ByteArray, PacketProtectionKeys>? {
+            // RFC 9001 §6.1: secret_{N+1} = HKDF-Expand-Label(secret_N, "quic ku", "", Hash.length).
+            val nextSecret = hkdfExpandLabel(currentSecret, "quic ku", cipherSuite.hashLength, cipherSuite.hmacAlgorithm)
+            val keys = deriveKeysFromTrafficSecret(version, cipherSuite, nextSecret) ?: return null
+            return nextSecret to keys
+        }
+
+        /**
+         * Commits a key update: the current generation is demoted to a previous generation (kept
+         * unprotect-only), the given [nextSecret]/[nextKeys] become the new current generation, and
+         * previous generations beyond [maxRetainedPrevious] are dropped (bounded retirement). Call
+         * ONLY after the next-generation keys have authenticated (the promotion half of
+         * auth-before-promotion).
+         */
+        private fun promote(nextSecret: ByteArray, nextKeys: PacketProtectionKeys) {
+            currentGeneration += 1
+            currentSecret = nextSecret
+            phases.add(KeyPhase(key = currentGeneration, protectKeys = nextKeys, unprotectKeys = nextKeys))
+            while (phases.size > maxRetainedPrevious + 1) phases.removeAt(0)
+        }
+
+        /**
+         * Initiates a key update from THIS endpoint's side (we are about to start sending with the
+         * next generation). Unlike a peer-signaled update detected in [attemptUnprotect], our own
+         * update is trusted, so the promotion is committed immediately and the previous generation
+         * is retained for the delayed-packet window. Returns the new current generation's protect
+         * keys (to send with).
+         */
+        fun initiateKeyUpdate(): PacketProtectionKeys {
+            val (nextSecret, nextKeys) = deriveNextGeneration()
+                ?: throw IllegalStateException("failed to derive next key-phase generation")
+            promote(nextSecret, nextKeys)
+            return currentProtectKeys()
+        }
+
+        /** Outcome of [attemptUnprotect]. */
+        data class DecryptResult(
+            val plaintext: ByteArray,
+            val generation: Int,
+            /** True if a peer-signaled key update authenticated and was promoted. */
+            val promoted: Boolean,
+        )
+
+        /**
+         * Attempts to AEAD-decrypt [ciphertext] (the protected payload after header-protection +
+         * packet-number removal) for a short-header packet whose KEY_PHASE bit is [keyPhaseBit],
+         * using [nonce] (the `quic iv` XOR packet number) and [aad]. Implements auth-before-promotion:
+         * - tries the current generation first when its bit matches [keyPhaseBit];
+         * - when [keyPhaseBit] signals a peer update (differs from the current bit), derives the
+         *   speculative next generation and tries it, promoting ONLY on authentication;
+         * - tries retained previous generations whose bit matches, so delayed old-phase packets decrypt.
+         *
+         * Returns the [DecryptResult] (plaintext + the generation that authenticated + whether a
+         * promotion occurred), or null if no candidate authenticates (never throws, never promotes on
+         * failure, never disturbs the current generation).
+         */
+        fun attemptUnprotect(keyPhaseBit: Int, nonce: ByteArray, aad: ByteArray, ciphertext: ByteArray): DecryptResult? {
+            // Build candidate (generation, keys) pairs in try-order. currentBit and nextBit always
+            // differ (gen%2 vs (gen+1)%2), so exactly one of the current / speculative-next branches
+            // applies for a given keyPhaseBit; the speculative next is derived lazily.
+            val currentBit = currentKeyPhaseBit
+            val candidates = mutableListOf<Pair<Int, PacketProtectionKeys>>()
+            if (currentBit == keyPhaseBit) {
+                candidates.add(currentGeneration to currentUnprotectKeys())
+            }
+            var stagedNext: Pair<ByteArray, PacketProtectionKeys>? = null
+            if ((currentGeneration + 1) % 2 == keyPhaseBit) {
+                stagedNext = deriveNextGeneration()
+                if (stagedNext != null) candidates.add((currentGeneration + 1) to stagedNext.second)
+            }
+            // Retained previous generations (newest retained prev first) whose bit matches.
+            for (i in phases.size - 2 downTo 0) {
+                val phase = phases[i]
+                if (phase.key % 2 == keyPhaseBit && phase.unprotectKeys != null) {
+                    candidates.add(phase.key to phase.unprotectKeys)
+                }
+            }
+            for ((gen, keys) in candidates) {
+                val plaintext = try {
+                    aeadDecrypt(keys, nonce, ciphertext, aad)
+                } catch (e: Exception) {
+                    null // wrong generation / bad tag -- try the next candidate
+                } ?: continue
+                // Authenticated. Promote only if this was the speculative next generation (a retained
+                // previous generation is strictly older than currentGeneration+1, so the check is exact).
+                val promoted = gen == currentGeneration + 1 && stagedNext != null
+                if (promoted) {
+                    val (nextSecret, nextKeys) = stagedNext!!
+                    promote(nextSecret, nextKeys)
+                }
+                return DecryptResult(plaintext = plaintext, generation = gen, promoted = promoted)
+            }
+            return null
+        }
+    }
+
     /**
      * Validates a Retry packet's 128-bit Retry Integrity Tag (RFC 9001 §5.8 for v1, RFC 9369
      * §3.3.3 for v2) and returns true only if it authenticates. **Callers MUST call this before
@@ -673,21 +850,23 @@ object QuicCrypto {
 
     /**
      * AEAD-decrypts [ciphertext] (with its trailing 16-byte tag appended) under [keys]' negotiated
-     * suite, using [nonce] (the `quic iv` XOR packet number) and an empty AAD. Branches on
-     * [PacketProtectionKeys.cipherSuite]: AES/GCM via `GCMParameterSpec(128, nonce)` (the 128-bit
-     * tag length), or ChaCha20-Poly1305 via `IvParameterSpec(nonce)` (its 16-byte tag is built into
-     * the algorithm). Throws on a bad tag / wrong key / malformed input; callers wrap in try/catch.
+     * suite, using [nonce] (the `quic iv` XOR packet number) and [aad] (empty by default -- the
+     * stripped-payload primitive authenticates only the ciphertext + packet number; the 1-RTT
+     * key-phase path AADs the short header). Branches on [PacketProtectionKeys.cipherSuite]:
+     * AES/GCM via `GCMParameterSpec(128, nonce)` (the 128-bit tag length), or ChaCha20-Poly1305 via
+     * `IvParameterSpec(nonce)` (its 16-byte tag is built into the algorithm). Throws on a bad tag /
+     * wrong key / malformed input; callers wrap in try/catch.
      */
-    private fun aeadDecrypt(keys: PacketProtectionKeys, nonce: ByteArray, ciphertext: ByteArray): ByteArray {
+    private fun aeadDecrypt(keys: PacketProtectionKeys, nonce: ByteArray, ciphertext: ByteArray, aad: ByteArray = ByteArray(0)): ByteArray {
         val suite = keys.cipherSuite
         val cipher = Cipher.getInstance(suite.aeadTransformation)
-        return if (suite.headerProtectionIsChaCha20) {
+        if (suite.headerProtectionIsChaCha20) {
             cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keys.key, suite.aeadKeyAlgorithm), IvParameterSpec(nonce))
-            cipher.doFinal(ciphertext)
         } else {
             cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keys.key, suite.aeadKeyAlgorithm), GCMParameterSpec(128, nonce))
-            cipher.doFinal(ciphertext)
         }
+        if (aad.isNotEmpty()) cipher.updateAAD(aad)
+        return cipher.doFinal(ciphertext)
     }
 
     /**
