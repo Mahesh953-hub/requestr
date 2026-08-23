@@ -3,7 +3,9 @@ package com.example.interception.quic
 import org.junit.Assert.*
 import org.junit.Test
 import javax.crypto.Cipher
+import javax.crypto.spec.ChaCha20ParameterSpec
 import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
@@ -694,5 +696,177 @@ class QuicCryptoTest {
         val keys = QuicCrypto.PacketProtectionKeys(key = ByteArray(16), iv = ByteArray(12), hp = ByteArray(16))
         assertNull(QuicCrypto.decryptProtectedPayload(keys, ByteArray(5))) // too short for the 16-byte sample
         assertNull(QuicCrypto.decryptProtectedPayload(keys, ByteArray(0)))
+    }
+
+    // ── ChaCha20-Poly1305 cipher suite (RFC 9001 §5.3 AEAD / §5.4.4 header protection) ──
+
+    /** ChaCha20-Poly1305 AEAD encrypt: plaintext -> ciphertext + 16-byte Poly1305 tag (RFC 8439). */
+    private fun chacha20AeadEncrypt(key: ByteArray, nonce: ByteArray, plaintext: ByteArray): ByteArray {
+        val cipher = Cipher.getInstance("ChaCha20-Poly1305")
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "ChaCha20"), IvParameterSpec(nonce))
+        return cipher.doFinal(plaintext)
+    }
+
+    /**
+     * RFC 9001 §5.4.4 ChaCha20 header-protection mask (encrypt side, mirrors [QuicCrypto]'s decrypt
+     * construction): the 16-byte [sample] is split into a 4-byte little-endian ChaCha20 block
+     * counter (sample[0..3]) and a 12-byte nonce (sample[4..15]); the 5-byte mask is the ChaCha20
+     * keystream from encrypting five zero bytes with the header-protection key under that
+     * counter/nonce.
+     *
+     * Pinned to the `"SunJCE"` provider because the host test JVM installs Conscrypt at the highest
+     * priority, and Conscrypt's raw `"ChaCha20"` cipher is stateful/incorrect for this counter/nonce
+     * mode (it drifts across calls once other tests exercise it). SunJCE's `"ChaCha20"` is the
+     * RFC-8439-compliant, stateless reference, so a passing round-trip against [QuicCrypto]'s direct
+     * block-function decrypt side proves the production mask matches the RFC vector.
+     */
+    private fun chacha20HeaderMask(hpKey: ByteArray, sample16: ByteArray): ByteArray {
+        val counter = (sample16[0].toInt() and 0xFF) or
+            ((sample16[1].toInt() and 0xFF) shl 8) or
+            ((sample16[2].toInt() and 0xFF) shl 16) or
+            ((sample16[3].toInt() and 0xFF) shl 24)
+        val nonce = sample16.copyOfRange(4, 16)
+        val cipher = Cipher.getInstance("ChaCha20", "SunJCE")
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(hpKey, "ChaCha20"), ChaCha20ParameterSpec(nonce, counter))
+        return cipher.doFinal(ByteArray(5))
+    }
+
+    /** Encrypt side of a v1 Handshake long-header packet using ChaCha20-Poly1305 (mirrors the AES [buildProtectedHandshakePacket]). */
+    private fun buildProtectedChaCha20HandshakePacket(
+        keys: QuicCrypto.PacketProtectionKeys,
+        pn: Long,
+        pnLen: Int,
+        plaintext: ByteArray,
+        dcid: ByteArray,
+    ): ByteArray {
+        val ciphertext = chacha20AeadEncrypt(keys.key, nonceFor(keys, pn), plaintext)
+
+        val lengthValue = pnLen + ciphertext.size
+        val lengthVarint = encodeVarint(lengthValue.toLong())
+        val pnOffset = 1 + 4 + 1 + dcid.size + 1 + 0 + lengthVarint.size
+        val packet = ByteArray(pnOffset + pnLen + ciphertext.size)
+        var p = 0
+        packet[p++] = (0xE0 or (pnLen - 1)).toByte() // v1 Handshake: form=1 fixed=1 type=10, pn_len in bits 0-1
+        packet[p++] = 0x00; packet[p++] = 0x00; packet[p++] = 0x00; packet[p++] = 0x01
+        packet[p++] = dcid.size.toByte()
+        System.arraycopy(dcid, 0, packet, p, dcid.size); p += dcid.size
+        packet[p++] = 0 // SCID length
+        System.arraycopy(lengthVarint, 0, packet, p, lengthVarint.size); p += lengthVarint.size
+        for (i in 0 until pnLen) packet[pnOffset + (pnLen - 1 - i)] = ((pn ushr (i * 8)) and 0xFF).toByte()
+        p += pnLen
+        System.arraycopy(ciphertext, 0, packet, p, ciphertext.size)
+
+        // ChaCha20 header protection (RFC 9001 §5.4.4): low 4 bits of byte 0 + PN bytes.
+        val sample = packet.copyOfRange(pnOffset + 4, pnOffset + 4 + 16)
+        val mask = chacha20HeaderMask(keys.hp, sample)
+        packet[0] = (packet[0].toInt() xor (mask[0].toInt() and 0x0f)).toByte()
+        for (i in 0 until pnLen) packet[pnOffset + i] = (packet[pnOffset + i].toInt() xor (mask[1 + i].toInt() and 0xFF)).toByte()
+        return packet
+    }
+
+    @Test
+    fun `fromIanaCode maps all three QUIC AEAD suites including ChaCha20`() {
+        assertEquals(QuicCrypto.CipherSuite.TLS_AES_128_GCM_SHA256, QuicCrypto.CipherSuite.fromIanaCode(0x1301))
+        assertEquals(QuicCrypto.CipherSuite.TLS_AES_256_GCM_SHA384, QuicCrypto.CipherSuite.fromIanaCode(0x1302))
+        assertEquals(QuicCrypto.CipherSuite.TLS_CHACHA20_POLY1305_SHA256, QuicCrypto.CipherSuite.fromIanaCode(0x1303))
+        assertNull("an unknown code must not map to a suite", QuicCrypto.CipherSuite.fromIanaCode(0x1304))
+        assertNull("a non-AEAD TLS suite must not map", QuicCrypto.CipherSuite.fromIanaCode(0x002f))
+    }
+
+    @Test
+    fun `TLS_CHACHA20_POLY1305_SHA256 declares the RFC 9001 suite parameters`() {
+        val suite = QuicCrypto.CipherSuite.TLS_CHACHA20_POLY1305_SHA256
+        assertEquals(32, suite.aeadKeyLength) // 256-bit ChaCha20 key
+        assertEquals(12, suite.ivLength) // AEAD nonce always 12 bytes
+        assertEquals(16, suite.tagLength) // 128-bit Poly1305 tag
+        assertEquals("HmacSHA256", suite.hmacAlgorithm) // SHA-256 HKDF hash
+        assertEquals(32, suite.hashLength) // hkdfHashLength
+        assertTrue("ChaCha20 uses the §5.4.4 keystream header protection", suite.headerProtectionIsChaCha20)
+        assertEquals("ChaCha20-Poly1305", suite.aeadTransformation)
+        assertEquals("ChaCha20", suite.aeadKeyAlgorithm)
+    }
+
+    @Test
+    fun `deriveKeysFromTrafficSecret for ChaCha20-Poly1305-SHA256 derives correctly-sized SHA-256 keys carrying the suite`() {
+        val secret = hex("c00cf151ca5be075ed0ebfb5c80323c42d6b7db67881289af4008f1f6c357aea")
+        val keys = QuicCrypto.deriveKeysFromTrafficSecret(
+            QuicCrypto.VERSION_1, QuicCrypto.CipherSuite.TLS_CHACHA20_POLY1305_SHA256, secret,
+        )!!
+        assertEquals(32, keys.key.size) // 256-bit ChaCha20 AEAD key
+        assertEquals(12, keys.iv.size) // AEAD nonce always 12 bytes
+        assertEquals(32, keys.hp.size) // 256-bit header-protection key (same length as the AEAD key)
+        assertEquals(QuicCrypto.CipherSuite.TLS_CHACHA20_POLY1305_SHA256, keys.cipherSuite)
+    }
+
+    @Test
+    fun `decryptHandshakePacket round-trips a ChaCha20-Poly1305-encrypted Handshake CRYPTO frame`() {
+        val secret = hex("c00cf151ca5be075ed0ebfb5c80323c42d6b7db67881289af4008f1f6c357aea")
+        val keys = QuicCrypto.deriveKeysFromTrafficSecret(
+            QuicCrypto.VERSION_1, QuicCrypto.CipherSuite.TLS_CHACHA20_POLY1305_SHA256, secret,
+        )!!
+        assertEquals(32, keys.key.size)
+        val packet = buildProtectedChaCha20HandshakePacket(keys, 1L, 1, cryptoFramePlaintext, handshakeDcid)
+
+        val result = QuicCrypto.decryptHandshakePacket(
+            QuicCrypto.VERSION_1, QuicCrypto.CipherSuite.TLS_CHACHA20_POLY1305_SHA256, secret, handshakeDcid, packet,
+        )
+        assertNotNull("ChaCha20 handshake decrypt should succeed with the correct secret", result)
+        assertArrayEquals(cryptoFramePlaintext, result)
+    }
+
+    @Test
+    fun `decryptProtectedPayload round-trips a ChaCha20-Poly1305 1-RTT short header`() {
+        val secret = hex("c00cf151ca5be075ed0ebfb5c80323c42d6b7db67881289af4008f1f6c357aea")
+        val keys = QuicCrypto.deriveKeysFromTrafficSecret(
+            QuicCrypto.VERSION_1, QuicCrypto.CipherSuite.TLS_CHACHA20_POLY1305_SHA256, secret,
+        )!!
+        val plaintext = "1-rtt-chacha".toByteArray(Charsets.US_ASCII)
+        val pn = 0L
+        val pnLen = 1
+        val ciphertext = chacha20AeadEncrypt(keys.key, nonceFor(keys, pn), plaintext)
+
+        val aligned = ByteArray(1 + pnLen + ciphertext.size)
+        aligned[0] = 0x40.toByte() // short header: form=0 fixed=1 key_phase=0 pn_len=1
+        aligned[1] = pn.toByte()
+        System.arraycopy(ciphertext, 0, aligned, 2, ciphertext.size)
+        val sample = aligned.copyOfRange(5, 21) // 4 bytes after the PN field (at offset 1)
+        val mask = chacha20HeaderMask(keys.hp, sample)
+        aligned[0] = (aligned[0].toInt() xor (mask[0].toInt() and 0x1f)).toByte() // short header: low 5 bits
+        for (i in 0 until pnLen) aligned[1 + i] = (aligned[1 + i].toInt() xor (mask[1 + i].toInt() and 0xFF)).toByte()
+
+        val result = QuicCrypto.decryptProtectedPayload(keys, aligned)
+        assertNotNull(result)
+        assertArrayEquals(plaintext, result)
+    }
+
+    @Test
+    fun `ChaCha20 header protection unprotects a 4-byte packet number and decrypts the payload`() {
+        // Exercises the full 5-byte ChaCha20 header-protection mask (first-byte mask + 4 PN bytes)
+        // under the long-header low-4-bit first-byte mask — the maximum PN length, so every byte the
+        // RFC 9001 §5.4.4 keystream supplies is touched, and a wrong mask byte would corrupt the PN
+        // and make the AEAD nonce wrong, failing the round-trip.
+        val secret = hex("c00cf151ca5be075ed0ebfb5c80323c42d6b7db67881289af4008f1f6c357aea")
+        val keys = QuicCrypto.deriveKeysFromTrafficSecret(
+            QuicCrypto.VERSION_1, QuicCrypto.CipherSuite.TLS_CHACHA20_POLY1305_SHA256, secret,
+        )!!
+        val plaintext = byteArrayOf(0x06, 0x00, 0x05) + "HPN!!".toByteArray() // a CRYPTO-shaped frame
+        val pn = 0x01020304L
+        val pnLen = 4
+        val ciphertext = chacha20AeadEncrypt(keys.key, nonceFor(keys, pn), plaintext)
+
+        val aligned = ByteArray(1 + pnLen + ciphertext.size)
+        aligned[0] = 0xE3.toByte() // long header: form=1 fixed=1 type=10 pn_len=4 (0b11)
+        for (i in 0 until pnLen) aligned[1 + (pnLen - 1 - i)] = ((pn ushr (i * 8)) and 0xFF).toByte()
+        System.arraycopy(ciphertext, 0, aligned, 1 + pnLen, ciphertext.size)
+
+        val sample = aligned.copyOfRange(5, 21) // 4 bytes after the PN field start (offset 1)
+        val mask = chacha20HeaderMask(keys.hp, sample)
+        assertEquals("ChaCha20 header-protection mask is exactly 5 bytes (vs AES-ECB's 16)", 5, mask.size)
+        aligned[0] = (aligned[0].toInt() xor (mask[0].toInt() and 0x0f)).toByte() // long header: low 4 bits
+        for (i in 0 until pnLen) aligned[1 + i] = (aligned[1 + i].toInt() xor (mask[1 + i].toInt() and 0xFF)).toByte()
+
+        val result = QuicCrypto.decryptProtectedPayload(keys, aligned)
+        assertNotNull("ChaCha20 header protection + AEAD should round-trip a 4-byte PN", result)
+        assertArrayEquals(plaintext, result)
     }
 }

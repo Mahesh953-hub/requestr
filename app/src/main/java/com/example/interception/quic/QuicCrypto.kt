@@ -4,6 +4,7 @@ import android.util.Log
 import javax.crypto.Cipher
 import javax.crypto.Mac
 import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
@@ -103,26 +104,84 @@ object QuicCrypto {
         val packetNumber: Long,
     )
 
-    /** {key, iv, hp} derived from a TLS 1.3 traffic secret via [deriveKeysFromTrafficSecret]. */
+    /**
+     * {key, iv, hp} derived from a TLS 1.3 traffic secret via [deriveKeysFromTrafficSecret]. The
+     * [cipherSuite] is carried alongside the key material so the decrypt path ([decryptProtectedPayload]
+     * / [decryptShortHeaderOrHandshakePayload]) can pick the right AEAD transformation (AES/GCM vs
+     * ChaCha20-Poly1305) and header-protection construction (AES-ECB vs ChaCha20 keystream) without a
+     * separate suite argument threaded through every call site. It defaults to AES-128-GCM — the
+     * QUIC Initial-key AEAD — so call sites that construct keys for the Initial path keep compiling.
+     */
     data class PacketProtectionKeys(
         val key: ByteArray,
         val iv: ByteArray,
         val hp: ByteArray,
+        val cipherSuite: CipherSuite = CipherSuite.TLS_AES_128_GCM_SHA256,
     )
 
     /**
      * The subset of TLS 1.3 AEAD cipher suites QUIC can negotiate (RFC 9001 §5.3) that this
-     * object currently knows how to derive traffic keys for. [hmacAlgorithm]/[hashLength] pick
-     * the HKDF hash function (the suite's own hash, per RFC 9001 §5.1 — *not* always SHA-256;
-     * only Initial secrets are pinned to SHA-256 regardless of suite). [aeadKeyLength] is the
-     * AEAD key size in bytes, which also sizes the AES-ECB header-protection key for the two
-     * AES-GCM suites below (RFC 9001 §5.4.3). TLS_CHACHA20_POLY1305_SHA256 is intentionally not
-     * listed yet -- its header-protection scheme (RFC 9001 §5.4.4) is a separate ChaCha20
-     * keystream construction, not AES-ECB, and lands in a follow-up change.
+     * object currently knows how to derive traffic keys for and decrypt. [hmacAlgorithm]/
+     * [hashLength] pick the HKDF hash function (the suite's own hash, per RFC 9001 §5.1 — *not*
+     * always SHA-256; only Initial secrets are pinned to SHA-256 regardless of suite). [aeadKeyLength]
+     * is the AEAD key size in bytes (the `keyLength` of the suite); for the two AES-GCM suites it also
+     * sizes the AES-ECB header-protection key (RFC 9001 §5.4.3). [aeadTransformation]/
+     * [aeadKeyAlgorithm] select the JCE AEAD cipher and key algorithm, and
+     * [headerProtectionIsChaCha20] switches header protection from AES-ECB (RFC 9001 §5.4.3) to the
+     * ChaCha20 keystream construction (RFC 9001 §5.4.4).
+     *
+     * The QUIC AEAD nonce is always 12 bytes ([ivLength]) and the AEAD tag is always 16 bytes
+     * ([tagLength] = 128 bits) for every suite QUIC can negotiate (RFC 9001 §5.1), independent of
+     * the suite's key size — so those are constants rather than per-suite fields.
      */
-    enum class CipherSuite(val hmacAlgorithm: String, val hashLength: Int, val aeadKeyLength: Int) {
-        TLS_AES_128_GCM_SHA256(hmacAlgorithm = "HmacSHA256", hashLength = 32, aeadKeyLength = 16),
-        TLS_AES_256_GCM_SHA384(hmacAlgorithm = "HmacSHA384", hashLength = 48, aeadKeyLength = 32),
+    enum class CipherSuite(
+        val hmacAlgorithm: String,
+        val hashLength: Int,
+        val aeadKeyLength: Int,
+        /** JCE AEAD transformation for this suite's bulk cipher (RFC 9001 §5.3). */
+        val aeadTransformation: String,
+        /** JCE algorithm name for the AEAD key ([SecretKeySpec] algorithm). */
+        val aeadKeyAlgorithm: String,
+        /**
+         * True when header protection uses the ChaCha20 keystream construction (RFC 9001 §5.4.4)
+         * instead of AES-ECB (RFC 9001 §5.4.3).
+         */
+        val headerProtectionIsChaCha20: Boolean,
+    ) {
+        TLS_AES_128_GCM_SHA256(
+            hmacAlgorithm = "HmacSHA256", hashLength = 32, aeadKeyLength = 16,
+            aeadTransformation = "AES/GCM/NoPadding", aeadKeyAlgorithm = "AES",
+            headerProtectionIsChaCha20 = false,
+        ),
+        TLS_AES_256_GCM_SHA384(
+            hmacAlgorithm = "HmacSHA384", hashLength = 48, aeadKeyLength = 32,
+            aeadTransformation = "AES/GCM/NoPadding", aeadKeyAlgorithm = "AES",
+            headerProtectionIsChaCha20 = false,
+        ),
+        TLS_CHACHA20_POLY1305_SHA256(
+            // RFC 9001 §5.3 / RFC 8446 §B.4: 32-byte (256-bit) ChaCha20 key, 12-byte AEAD nonce,
+            // 16-byte (128-bit) Poly1305 tag, SHA-256 HKDF hash (hashLength = 32). Header protection
+            // is the RFC 9001 §5.4.4 ChaCha20 keystream construction, not AES-ECB.
+            hmacAlgorithm = "HmacSHA256", hashLength = 32, aeadKeyLength = 32,
+            aeadTransformation = "ChaCha20-Poly1305", aeadKeyAlgorithm = "ChaCha20",
+            headerProtectionIsChaCha20 = true,
+        );
+
+        /** AEAD nonce length in bytes — always 12 for every QUIC AEAD suite (RFC 9001 §5.1). */
+        val ivLength: Int get() = 12
+
+        /** AEAD authentication-tag length in bytes — always 16 (128 bits) for every QUIC AEAD suite. */
+        val tagLength: Int get() = 16
+
+        companion object {
+            /** The IANA TLS cipher-suite identifier ([CipherSuite] was negotiated from), or null. */
+            fun fromIanaCode(code: Int): CipherSuite? = when (code) {
+                0x1301 -> TLS_AES_128_GCM_SHA256
+                0x1302 -> TLS_AES_256_GCM_SHA384
+                0x1303 -> TLS_CHACHA20_POLY1305_SHA256
+                else -> null
+            }
+        }
     }
 
     /**
@@ -175,10 +234,14 @@ object QuicCrypto {
      * `CLIENT_TRAFFIC_SECRET_0`/`SERVER_TRAFFIC_SECRET_0` obtained from
      * [com.example.interception.tls.TlsKeyLogRegistry]. Unlike [deriveClientInitialKeys]/
      * [deriveServerInitialKeys], the HKDF hash function here is the *negotiated* suite's hash
-     * (SHA-256 or SHA-384 for the two [CipherSuite]s currently supported), not always SHA-256 --
-     * Initial secrets are the one exception pinned to SHA-256 regardless of suite (RFC 9001
-     * §5.2). The AEAD nonce (`quic iv`) is always 12 bytes for every AEAD QUIC can negotiate
-     * (RFC 9001 §5.1), independent of the suite's key size.
+     * (SHA-256 or SHA-384 for the two AES-GCM suites, SHA-256 for ChaCha20-Poly1305), not always
+     * SHA-256 -- Initial secrets are the one exception pinned to SHA-256 regardless of suite (RFC
+     * 9001 §5.2). The AEAD key length (`quic key`) and header-protection key length (`quic hp`) are
+     * the negotiated suite's [CipherSuite.aeadKeyLength] (16 for AES-128-GCM, 32 for AES-256-GCM and
+     * ChaCha20-Poly1305); the AEAD nonce (`quic iv`) is always 12 bytes ([CipherSuite.ivLength]) for
+     * every AEAD QUIC can negotiate (RFC 9001 §5.1), independent of the suite's key size. The
+     * negotiated [cipherSuite] is carried on the returned [PacketProtectionKeys] so the decrypt path
+     * selects the matching AEAD/header-protection construction.
      *
      * This is a pure key-derivation primitive -- no decrypt path in this file drives it yet.
      * It exists so Handshake-level and 1-RTT decryption (a separate change) has a single,
@@ -191,8 +254,9 @@ object QuicCrypto {
             val hpLabel = if (version == VERSION_2) "quicv2 hp" else "quic hp"
             PacketProtectionKeys(
                 key = hkdfExpandLabel(secret, keyLabel, cipherSuite.aeadKeyLength, cipherSuite.hmacAlgorithm),
-                iv = hkdfExpandLabel(secret, ivLabel, 12, cipherSuite.hmacAlgorithm),
+                iv = hkdfExpandLabel(secret, ivLabel, cipherSuite.ivLength, cipherSuite.hmacAlgorithm),
                 hp = hkdfExpandLabel(secret, hpLabel, cipherSuite.aeadKeyLength, cipherSuite.hmacAlgorithm),
+                cipherSuite = cipherSuite,
             )
         } catch (e: Exception) {
             Log.w(TAG, "Traffic secret key derivation failed: ${e.message}")
@@ -222,6 +286,183 @@ object QuicCrypto {
             candidatePn <= expectedPn - pnHwin && candidatePn < (1L shl 62) - pnWin -> candidatePn + pnWin
             candidatePn > expectedPn + pnHwin && candidatePn >= pnWin -> candidatePn - pnWin
             else -> candidatePn
+        }
+    }
+
+    // ── Key-phase rotation (RFC 9001 §6): prev / current / next with auth-before-promotion ──
+
+    /**
+     * One generation of QUIC 1-RTT traffic keys under the key-update rotation (RFC 9001 §6). [key]
+     * is the generation counter (0 for the initial `CLIENT/SERVER_TRAFFIC_SECRET_0`-derived
+     * application-data keys, incremented on each key update). [protectKeys] are the keys used to
+     * protect (encrypt) outgoing packets at this generation; [unprotectKeys] are used to unprotect
+     * (decrypt) incoming packets at this generation. A retired previous generation keeps only
+     * [unprotectKeys] (we no longer send with it but still accept delayed/reordered packets
+     * encrypted under it for a bounded window) -- see [KeyPhaseManager].
+     */
+    data class KeyPhase(
+        val key: Int,
+        val protectKeys: PacketProtectionKeys,
+        val unprotectKeys: PacketProtectionKeys?,
+    )
+
+    /**
+     * Manages the prev/current/next key-phase rotation for one direction of a QUIC connection's
+     * 1-RTT traffic (RFC 9001 §6), with auth-before-promotion and bounded retirement of previous
+     * generations.
+     *
+     * A key update derives the next-generation traffic secret as
+     * `HKDF-Expand-Label(secret_N, "quic ku", "", Hash.length)` (RFC 9001 §6.1) and then traffic
+     * keys via [deriveKeysFromTrafficSecret]. The KEY_PHASE bit carried in each short header equals
+     * `generation % 2`, so after two updates the bit wraps back to 0 -- a packet's bit alone is
+     * ambiguous about which generation it used, which is why decryption tries candidates in priority
+     * order rather than indexing a single key set.
+     *
+     * **Auth-before-promotion** (RFC 9001 §6): when a short header's KEY_PHASE bit signals a
+     * peer-initiated update (it differs from the current generation's bit), the next-generation
+     * keys are derived SPECULATIVELY and tried with AEAD -- they are promoted (current→previous, new
+     * current) ONLY if that AEAD authenticates. A spoofed key-phase flip that fails AEAD is
+     * discarded and never promoted, and the current generation's keys are left untouched. After
+     * promotion, the previous generation is retained (unprotect-only) for [maxRetainedPrevious]
+     * generations so delayed/reordered packets from the old phase still decrypt (the configurable
+     * byte/packet window modeled here as a retained-generation count).
+     *
+     * @param version QUIC version (v1/v2) -- selects the `quic`/`quicv2` key labels.
+     * @param cipherSuite the negotiated AEAD suite -- selects HKDF hash + AEAD key/header-protection.
+     * @param initialSecret the generation-0 traffic secret (e.g. `CLIENT/SERVER_TRAFFIC_SECRET_0`).
+     * @param maxRetainedPrevious how many previous generations to keep for decrypting delayed packets.
+     */
+    class KeyPhaseManager(
+        private val version: Int,
+        private val cipherSuite: CipherSuite,
+        initialSecret: ByteArray,
+        private val maxRetainedPrevious: Int = 1,
+    ) {
+        // phases: index 0 = oldest retained previous generation; last = current generation.
+        private val phases: MutableList<KeyPhase> = mutableListOf()
+        private var currentGeneration: Int = 0
+        private var currentSecret: ByteArray = initialSecret
+
+        init {
+            val keys = deriveKeysFromTrafficSecret(version, cipherSuite, initialSecret)
+                ?: throw IllegalArgumentException("failed to derive initial key-phase traffic keys")
+            phases.add(KeyPhase(key = 0, protectKeys = keys, unprotectKeys = keys))
+        }
+
+        /** The current generation number (0 for the initial application-data keys, +1 per key update). */
+        val generation: Int get() = currentGeneration
+
+        /** The current generation's KEY_PHASE bit value (`generation % 2`, RFC 9001 §6). */
+        val currentKeyPhaseBit: Int get() = currentGeneration % 2
+
+        /** The keys used to protect (encrypt) outgoing packets at the current generation. */
+        fun currentProtectKeys(): PacketProtectionKeys = phases.last().protectKeys
+
+        /** The keys used to unprotect (decrypt) incoming packets at the current generation. */
+        fun currentUnprotectKeys(): PacketProtectionKeys =
+            phases.last().unprotectKeys ?: phases.last().protectKeys
+
+        /** All retained generations, oldest first (for inspection/testing). */
+        fun retainedPhases(): List<KeyPhase> = phases.toList()
+
+        /**
+         * Derives the next-generation traffic secret + keys WITHOUT promoting -- the speculative
+         * next generation [attemptUnprotect] tries for a peer-signaled key update. Returns null on
+         * a derivation failure (never throws).
+         */
+        private fun deriveNextGeneration(): Pair<ByteArray, PacketProtectionKeys>? {
+            // RFC 9001 §6.1: secret_{N+1} = HKDF-Expand-Label(secret_N, "quic ku", "", Hash.length).
+            val nextSecret = hkdfExpandLabel(currentSecret, "quic ku", cipherSuite.hashLength, cipherSuite.hmacAlgorithm)
+            val keys = deriveKeysFromTrafficSecret(version, cipherSuite, nextSecret) ?: return null
+            return nextSecret to keys
+        }
+
+        /**
+         * Commits a key update: the current generation is demoted to a previous generation (kept
+         * unprotect-only), the given [nextSecret]/[nextKeys] become the new current generation, and
+         * previous generations beyond [maxRetainedPrevious] are dropped (bounded retirement). Call
+         * ONLY after the next-generation keys have authenticated (the promotion half of
+         * auth-before-promotion).
+         */
+        private fun promote(nextSecret: ByteArray, nextKeys: PacketProtectionKeys) {
+            currentGeneration += 1
+            currentSecret = nextSecret
+            phases.add(KeyPhase(key = currentGeneration, protectKeys = nextKeys, unprotectKeys = nextKeys))
+            while (phases.size > maxRetainedPrevious + 1) phases.removeAt(0)
+        }
+
+        /**
+         * Initiates a key update from THIS endpoint's side (we are about to start sending with the
+         * next generation). Unlike a peer-signaled update detected in [attemptUnprotect], our own
+         * update is trusted, so the promotion is committed immediately and the previous generation
+         * is retained for the delayed-packet window. Returns the new current generation's protect
+         * keys (to send with).
+         */
+        fun initiateKeyUpdate(): PacketProtectionKeys {
+            val (nextSecret, nextKeys) = deriveNextGeneration()
+                ?: throw IllegalStateException("failed to derive next key-phase generation")
+            promote(nextSecret, nextKeys)
+            return currentProtectKeys()
+        }
+
+        /** Outcome of [attemptUnprotect]. */
+        data class DecryptResult(
+            val plaintext: ByteArray,
+            val generation: Int,
+            /** True if a peer-signaled key update authenticated and was promoted. */
+            val promoted: Boolean,
+        )
+
+        /**
+         * Attempts to AEAD-decrypt [ciphertext] (the protected payload after header-protection +
+         * packet-number removal) for a short-header packet whose KEY_PHASE bit is [keyPhaseBit],
+         * using [nonce] (the `quic iv` XOR packet number) and [aad]. Implements auth-before-promotion:
+         * - tries the current generation first when its bit matches [keyPhaseBit];
+         * - when [keyPhaseBit] signals a peer update (differs from the current bit), derives the
+         *   speculative next generation and tries it, promoting ONLY on authentication;
+         * - tries retained previous generations whose bit matches, so delayed old-phase packets decrypt.
+         *
+         * Returns the [DecryptResult] (plaintext + the generation that authenticated + whether a
+         * promotion occurred), or null if no candidate authenticates (never throws, never promotes on
+         * failure, never disturbs the current generation).
+         */
+        fun attemptUnprotect(keyPhaseBit: Int, nonce: ByteArray, aad: ByteArray, ciphertext: ByteArray): DecryptResult? {
+            // Build candidate (generation, keys) pairs in try-order. currentBit and nextBit always
+            // differ (gen%2 vs (gen+1)%2), so exactly one of the current / speculative-next branches
+            // applies for a given keyPhaseBit; the speculative next is derived lazily.
+            val currentBit = currentKeyPhaseBit
+            val candidates = mutableListOf<Pair<Int, PacketProtectionKeys>>()
+            if (currentBit == keyPhaseBit) {
+                candidates.add(currentGeneration to currentUnprotectKeys())
+            }
+            var stagedNext: Pair<ByteArray, PacketProtectionKeys>? = null
+            if ((currentGeneration + 1) % 2 == keyPhaseBit) {
+                stagedNext = deriveNextGeneration()
+                if (stagedNext != null) candidates.add((currentGeneration + 1) to stagedNext.second)
+            }
+            // Retained previous generations (newest retained prev first) whose bit matches.
+            for (i in phases.size - 2 downTo 0) {
+                val phase = phases[i]
+                if (phase.key % 2 == keyPhaseBit && phase.unprotectKeys != null) {
+                    candidates.add(phase.key to phase.unprotectKeys)
+                }
+            }
+            for ((gen, keys) in candidates) {
+                val plaintext = try {
+                    aeadDecrypt(keys, nonce, ciphertext, aad)
+                } catch (e: Exception) {
+                    null // wrong generation / bad tag -- try the next candidate
+                } ?: continue
+                // Authenticated. Promote only if this was the speculative next generation (a retained
+                // previous generation is strictly older than currentGeneration+1, so the check is exact).
+                val promoted = gen == currentGeneration + 1 && stagedNext != null
+                if (promoted) {
+                    val (nextSecret, nextKeys) = stagedNext!!
+                    promote(nextSecret, nextKeys)
+                }
+                return DecryptResult(plaintext = plaintext, generation = gen, promoted = promoted)
+            }
+            return null
         }
     }
 
@@ -457,8 +698,11 @@ object QuicCrypto {
      * packet number and the AEAD ciphertext. The header-protection sample (RFC 9001 §5.4) is taken
      * 4 bytes after the start of the packet-number field; the (unprotected) form bit selects whether
      * the low 4 bits (long/Handshake) or low 5 bits (short/1-RTT) of the first byte are protected.
-     * The packet number is removed and the remaining bytes are AEAD-decrypted with an empty AAD.
-     * Returns the plaintext frame bytes or null on any failure.
+     * The mask is generated with the construction selected by [PacketProtectionKeys.cipherSuite]:
+     * AES-ECB (RFC 9001 §5.4.3) for the two AES-GCM suites, or the ChaCha20 keystream construction
+     * (RFC 9001 §5.4.4) for TLS_CHACHA20_POLY1305_SHA256. The packet number is removed and the
+     * remaining bytes are AEAD-decrypted with an empty AAD using the suite's AEAD (AES/GCM or
+     * ChaCha20-Poly1305). Returns the plaintext frame bytes or null on any failure.
      */
     private fun decryptShortHeaderOrHandshakePayload(keys: PacketProtectionKeys, payload: ByteArray): ByteArray? {
         return try {
@@ -467,7 +711,7 @@ object QuicCrypto {
             val sampleOffset = pnStart + 4 // RFC 9001 §5.4: sample = 4 bytes after the PN field start
             if (sampleOffset + 16 > payload.size) return null
             val sample = payload.copyOfRange(sampleOffset, sampleOffset + 16)
-            val mask = aesEcbEncryptBlock(keys.hp, sample)
+            val mask = headerProtectionMask(keys, sample)
 
             val working = payload.copyOf()
             // The form bit (high bit of the first byte) is not header-protected, so read it before
@@ -503,12 +747,11 @@ object QuicCrypto {
                 nonce[nonce.size - 1 - i] = (nonce[nonce.size - 1 - i].toInt() xor pnByte.toInt()).toByte()
             }
 
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keys.key, "AES"), GCMParameterSpec(128, nonce))
             // Empty AAD: this primitive authenticates only the ciphertext + packet number, not the
             // stripped header (callers that need full-header authentication keep using
-            // [decryptInitialPacket], which AADs the whole long header).
-            cipher.doFinal(ciphertext)
+            // [decryptInitialPacket], which AADs the whole long header). The suite's AEAD is selected
+            // by [PacketProtectionKeys.cipherSuite] (AES/GCM or ChaCha20-Poly1305).
+            aeadDecrypt(keys, nonce, ciphertext)
         } catch (e: Exception) {
             Log.d(TAG, "Protected payload decrypt failed: ${e.message}")
             null
@@ -570,6 +813,112 @@ object QuicCrypto {
         val cipher = Cipher.getInstance("AES/ECB/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"))
         return cipher.doFinal(block16)
+    }
+
+    /**
+     * Generates the header-protection mask (RFC 9001 §5.4) for [keys]' negotiated suite. The
+     * returned array always has at least 5 bytes (the first-byte mask + up to 4 packet-number
+     * bytes) so the caller indexes [0] and [1..4] uniformly regardless of suite:
+     * - AES-GCM suites (RFC 9001 §5.4.3): `mask = AES-ECB(hp, sample)` (a 16-byte block; the
+     *   caller uses the first 5 bytes).
+     * - ChaCha20-Poly1305 (RFC 9001 §5.4.4): the 16-byte [sample] is split into a 4-byte ChaCha20
+     *   block counter (`sample[0..3]`, little-endian) and a 12-byte nonce (`sample[4..15]`); the
+     *   mask is the first 5 bytes of the ChaCha20 keystream produced by encrypting five zero bytes
+     *   with the header-protection key (the 32-byte `quic hp` key) under that counter/nonce.
+     */
+    private fun headerProtectionMask(keys: PacketProtectionKeys, sample16: ByteArray): ByteArray =
+        if (keys.cipherSuite.headerProtectionIsChaCha20) chacha20HeaderProtectionMask(keys.hp, sample16)
+        else aesEcbEncryptBlock(keys.hp, sample16)
+
+    /**
+     * ChaCha20 header-protection mask (RFC 9001 §5.4.4): the 16-byte [sample] is split into a 4-byte
+     * little-endian ChaCha20 block counter (`sample[0..3]`) and a 12-byte nonce (`sample[4..15]`); the
+     * 5-byte mask is the first 5 bytes of the ChaCha20 keystream block (keyed by the 32-byte `quic hp`
+     * header-protection key) XORed with five zero bytes — i.e. the keystream itself.
+     *
+     * This computes the ChaCha20 block *directly* (RFC 8439 §2.3/§2.4) rather than via the JCE
+     * `"ChaCha20"` stream cipher + `ChaCha20ParameterSpec`, because some installed JCE providers —
+     * notably Conscrypt, which registers as the highest-priority provider in the host test JVM —
+     * implement the raw `"ChaCha20"` cipher statefully/incorrectly for this counter/nonce mode,
+     * producing a keystream that drifts across calls once other tests exercise the cipher. That
+     * drift makes the protect-side and unprotect-side masks disagree for the same sample, corrupting
+     * the recovered packet number and failing AEAD. The direct block function is deterministic and
+     * provider-independent, so header protection is correct on both the host JVM and Android.
+     */
+    private fun chacha20HeaderProtectionMask(hpKey: ByteArray, sample16: ByteArray): ByteArray {
+        val counter = (sample16[0].toInt() and 0xFF) or
+            ((sample16[1].toInt() and 0xFF) shl 8) or
+            ((sample16[2].toInt() and 0xFF) shl 16) or
+            ((sample16[3].toInt() and 0xFF) shl 24)
+        val nonce = sample16.copyOfRange(4, 16)
+        return chacha20Block(hpKey, counter, nonce).copyOfRange(0, 5)
+    }
+
+    /**
+     * ChaCha20 block function (RFC 8439 §2.3/§2.4): the 64-byte keystream block for 32-byte [key],
+     * block [counter], and 12-byte [nonce], computed directly from the quarter-round ARX construction
+     * — no JCE provider, so it is deterministic and identical on the host JVM and Android. The 16
+     * state words are the four `"expand 32-byte k"` constants, the eight key words, the counter, and
+     * the three nonce words (all little-endian); 20 rounds (10 double rounds) are applied and the
+     * original state is added back (mod 2^32) before serializing little-endian.
+     */
+    private fun chacha20Block(key: ByteArray, counter: Int, nonce: ByteArray): ByteArray {
+        val state = IntArray(16)
+        state[0] = 0x61707865; state[1] = 0x3320646e; state[2] = 0x79622d32; state[3] = 0x6b206574
+        for (i in 0 until 8) state[4 + i] = leInt(key, i * 4)
+        state[12] = counter
+        state[13] = leInt(nonce, 0)
+        state[14] = leInt(nonce, 4)
+        state[15] = leInt(nonce, 8)
+        val x = state.copyOf()
+        repeat(10) {
+            quarterRound(x, 0, 4, 8, 12); quarterRound(x, 1, 5, 9, 13)
+            quarterRound(x, 2, 6, 10, 14); quarterRound(x, 3, 7, 11, 15)
+            quarterRound(x, 0, 5, 10, 15); quarterRound(x, 1, 6, 11, 12)
+            quarterRound(x, 2, 7, 8, 13); quarterRound(x, 3, 4, 9, 14)
+        }
+        val out = ByteArray(64)
+        for (i in 0 until 16) leIntPut(x[i] + state[i], out, i * 4)
+        return out
+    }
+
+    private fun quarterRound(x: IntArray, a: Int, b: Int, c: Int, d: Int) {
+        x[a] += x[b]; x[d] = Integer.rotateLeft(x[d] xor x[a], 16)
+        x[c] += x[d]; x[b] = Integer.rotateLeft(x[b] xor x[c], 12)
+        x[a] += x[b]; x[d] = Integer.rotateLeft(x[d] xor x[a], 8)
+        x[c] += x[d]; x[b] = Integer.rotateLeft(x[b] xor x[c], 7)
+    }
+
+    private fun leInt(b: ByteArray, off: Int): Int =
+        (b[off].toInt() and 0xFF) or ((b[off + 1].toInt() and 0xFF) shl 8) or
+            ((b[off + 2].toInt() and 0xFF) shl 16) or ((b[off + 3].toInt() and 0xFF) shl 24)
+
+    private fun leIntPut(v: Int, b: ByteArray, off: Int) {
+        b[off] = v.toByte()
+        b[off + 1] = (v ushr 8).toByte()
+        b[off + 2] = (v ushr 16).toByte()
+        b[off + 3] = (v ushr 24).toByte()
+    }
+
+    /**
+     * AEAD-decrypts [ciphertext] (with its trailing 16-byte tag appended) under [keys]' negotiated
+     * suite, using [nonce] (the `quic iv` XOR packet number) and [aad] (empty by default -- the
+     * stripped-payload primitive authenticates only the ciphertext + packet number; the 1-RTT
+     * key-phase path AADs the short header). Branches on [PacketProtectionKeys.cipherSuite]:
+     * AES/GCM via `GCMParameterSpec(128, nonce)` (the 128-bit tag length), or ChaCha20-Poly1305 via
+     * `IvParameterSpec(nonce)` (its 16-byte tag is built into the algorithm). Throws on a bad tag /
+     * wrong key / malformed input; callers wrap in try/catch.
+     */
+    private fun aeadDecrypt(keys: PacketProtectionKeys, nonce: ByteArray, ciphertext: ByteArray, aad: ByteArray = ByteArray(0)): ByteArray {
+        val suite = keys.cipherSuite
+        val cipher = Cipher.getInstance(suite.aeadTransformation)
+        if (suite.headerProtectionIsChaCha20) {
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keys.key, suite.aeadKeyAlgorithm), IvParameterSpec(nonce))
+        } else {
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keys.key, suite.aeadKeyAlgorithm), GCMParameterSpec(128, nonce))
+        }
+        if (aad.isNotEmpty()) cipher.updateAAD(aad)
+        return cipher.doFinal(ciphertext)
     }
 
     /**
