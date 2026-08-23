@@ -1,6 +1,12 @@
 package com.example.ui.components
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
@@ -65,9 +71,23 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 
+import com.example.data.repository.SettingsRepository
+import androidx.compose.runtime.collectAsState
+
 data class NavDestination(val route: String, val label: String, val icon: ImageVector)
 
-private val NAV = listOf(
+val ALL_NAV_DESTINATIONS = listOf(
+    NavDestination("home", "Home", Icons.Default.Home),
+    NavDestination("intercept", "Intercept", Icons.Default.Radar),
+    NavDestination("apis", "APIs", Icons.Default.Public),
+    NavDestination("tools", "Tools", Icons.Default.Tune),
+    NavDestination("notes", "Notes", Icons.Default.Code),
+    NavDestination("flow", "Flow", Icons.Default.Code),
+    NavDestination("music", "Music", Icons.Default.MusicNote),
+    NavDestination("chat", "Reqy AI", Icons.Default.Tune)
+)
+
+private val DEFAULT_NAV = listOf(
     NavDestination("home", "Home", Icons.Default.Home),
     NavDestination("intercept", "Intercept", Icons.Default.Radar),
     NavDestination("apis", "APIs", Icons.Default.Public),
@@ -77,12 +97,13 @@ private val NAV = listOf(
 )
 
 /**
- * Rebranded Dynamic iOS-style Frosted Glass Collapsible Navigation Pill.
+ * Rebranded Dynamic iOS-style Frosted Glass Navigation Pill.
  *
- * - Smooth spring-driven collapse/expand
- * - Android 17+ Pixel dynamic colors & active pill halo
- * - Haptic feedback on tap
- * - Active glowing dot indicator
+ * - Smooth spring-driven animated tab transitions
+ * - Dynamic color tokens matching user's active theme accent
+ * - Crisp floating glass capsule with zero muddy overlay
+ * - Configurable transparency, glass effects, and item visibility
+ * - Haptic tactile response on tab selection
  */
 @Composable
 fun CollapsibleNavPill(
@@ -92,106 +113,90 @@ fun CollapsibleNavPill(
     scrollExpandSignal: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    val activeIdx = NAV.indexOfFirst { it.route == currentRoute }.coerceAtLeast(0)
-    val scope = rememberCoroutineScope()
     val haptics = rememberAppHapticFeedback()
+    val settings by SettingsRepository.settings.collectAsState()
+    val opacity = settings.navBarBackgroundOpacity.coerceIn(0.2f, 1f)
+    val blurEffect = settings.navBarBlurEffect
+    val hiddenItems = settings.navBarHiddenItems
 
-    var collapsed by remember { mutableStateOf(false) }
-    var dragOffset by remember { mutableFloatStateOf(0f) }
-    val progressAnim = remember { Animatable(0f) }
-    val progress by animateFloatAsState(
-        progressAnim.value,
-        spring(dampingRatio = 0.75f, stiffness = 400f),
-        label = "pillProgress"
-    )
-
-    // Scroll-driven: collapse on scroll-down, expand on scroll-up
-    if (scrollCollapseSignal && !collapsed) {
-        scope.launch {
-            progressAnim.animateTo(1f, spring(dampingRatio = 0.75f, stiffness = 400f))
-            collapsed = true
-        }
-    }
-    if (scrollExpandSignal && collapsed) {
-        scope.launch {
-            progressAnim.animateTo(0f, spring(dampingRatio = 0.75f, stiffness = 400f))
-            collapsed = false
-        }
+    val activeNavList = remember(hiddenItems) {
+        DEFAULT_NAV.filter { it.route !in hiddenItems }
     }
 
-    val f = progress.coerceIn(0f, 1f)
-    val widthMod = if (f > 0.92f) Modifier.wrapContentWidth() else Modifier.fillMaxWidth()
+    val bgBrush = when (blurEffect) {
+        "SOLID_M3" -> Brush.verticalGradient(
+            listOf(
+                MaterialTheme.colorScheme.surface,
+                MaterialTheme.colorScheme.surfaceVariant
+            )
+        )
+        "OLED_BLACK" -> Brush.verticalGradient(
+            listOf(
+                Color.Black.copy(alpha = opacity),
+                Color(0xFF0F172A).copy(alpha = opacity)
+            )
+        )
+        "TRANSLUCENT" -> Brush.verticalGradient(
+            listOf(
+                MaterialTheme.colorScheme.surface.copy(alpha = (opacity * 0.7f).coerceIn(0.2f, 1f)),
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = (opacity * 0.5f).coerceIn(0.2f, 1f))
+            )
+        )
+        else -> Brush.verticalGradient( // "FROSTED_GLASS"
+            listOf(
+                MaterialTheme.colorScheme.surface.copy(alpha = opacity),
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = (opacity * 0.95f).coerceIn(0.2f, 1f))
+            )
+        )
+    }
+
+    val borderColor = when (blurEffect) {
+        "SOLID_M3" -> MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+        "OLED_BLACK" -> Color.White.copy(alpha = 0.15f)
+        else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+    }
 
     Box(
         modifier = modifier
-            .padding(horizontal = 12.dp, vertical = 8.dp)
-            .then(widthMod),
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp),
         contentAlignment = Alignment.Center
     ) {
         Box(
             modifier = Modifier
-                .then(widthMod)
-                .height(52.dp)
                 .shadow(
-                    elevation = 14.dp,
-                    shape = RoundedCornerShape(26.dp),
-                    ambientColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f),
-                    spotColor = Color.Black.copy(alpha = 0.15f)
+                    elevation = 12.dp,
+                    shape = RoundedCornerShape(28.dp),
+                    ambientColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
+                    spotColor = Color.Black.copy(alpha = 0.25f)
                 )
-                .clip(RoundedCornerShape(26.dp))
-                .background(
-                    Brush.verticalGradient(
-                        listOf(
-                            MaterialTheme.colorScheme.surface.copy(alpha = 0.88f),
-                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.82f)
-                        )
-                    )
-                )
+                .clip(RoundedCornerShape(28.dp))
+                .background(bgBrush)
                 .border(
-                    0.8.dp,
-                    MaterialTheme.colorScheme.outline.copy(alpha = 0.35f),
-                    RoundedCornerShape(26.dp)
+                    0.9.dp,
+                    borderColor,
+                    RoundedCornerShape(28.dp)
                 )
-                .pointerInput(collapsed) {
-                    if (!collapsed) {
-                        detectVerticalDragGestures(
-                            onDragEnd = {
-                                if (dragOffset < -20f) {
-                                    scope.launch { progressAnim.animateTo(1f, spring()); collapsed = true }
-                                } else {
-                                    scope.launch { progressAnim.animateTo(0f, spring()) }
-                                }
-                                dragOffset = 0f
-                            },
-                            onDragCancel = {
-                                dragOffset = 0f
-                                scope.launch { progressAnim.animateTo(0f, spring()) }
-                            },
-                            onVerticalDrag = { _, amt ->
-                                dragOffset += amt
-                                scope.launch {
-                                    progressAnim.snapTo((progressAnim.value - amt / 160f).coerceIn(0f, 1f))
-                                }
-                            }
-                        )
-                    } else {
-                        detectTapGestures {
-                            haptics(HapticFeedbackType.LongPress)
-                            scope.launch {
-                                progressAnim.animateTo(0f, spring())
-                                collapsed = false
-                            }
-                        }
-                    }
-                },
+                .padding(horizontal = 6.dp, vertical = 6.dp),
             contentAlignment = Alignment.Center
         ) {
-            if (f > 0.90f) {
-                CollapsedChip(NAV[activeIdx])
-            } else {
-                ExpandedRow(NAV, activeIdx, f) { route ->
-                    haptics(HapticFeedbackType.LongPress)
-                    onNavigate(route)
+            Row(
+                modifier = Modifier.wrapContentWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                activeNavList.forEach { dest ->
+                    val isActive = dest.route == currentRoute
+                    NavPillTab(
+                        dest = dest,
+                        isActive = isActive,
+                        onClick = {
+                            if (!isActive) {
+                                haptics(HapticFeedbackType.LongPress)
+                                onNavigate(dest.route)
+                            }
+                        }
+                    )
                 }
             }
         }
@@ -199,105 +204,89 @@ fun CollapsibleNavPill(
 }
 
 @Composable
-private fun ExpandedRow(
-    dests: List<NavDestination>,
-    activeIdx: Int,
-    progress: Float,
-    onNav: (String) -> Unit
+private fun NavPillTab(
+    dest: NavDestination,
+    isActive: Boolean,
+    onClick: () -> Unit
 ) {
-    Row(
-        modifier = Modifier
-            .padding(horizontal = 6.dp, vertical = 4.dp)
-            .height(IntrinsicSize.Min),
-        horizontalArrangement = Arrangement.SpaceEvenly,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        dests.forEachIndexed { i, d ->
-            val a = if (i == activeIdx) 1f else (1f - progress * 1.3f).coerceIn(0f, 1f)
-            if (a > 0.03f) PillItem(d, i == activeIdx, a) { onNav(d.route) }
-        }
-    }
-}
+    val bgAnim by animateColorAsState(
+        targetValue = if (isActive) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f) else Color.Transparent,
+        animationSpec = spring(dampingRatio = 0.75f, stiffness = 350f),
+        label = "tabBg"
+    )
+    val fgAnim by animateColorAsState(
+        targetValue = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+        animationSpec = spring(dampingRatio = 0.75f, stiffness = 350f),
+        label = "tabFg"
+    )
+    val scaleAnim by animateFloatAsState(
+        targetValue = if (isActive) 1.04f else 1.0f,
+        animationSpec = spring(dampingRatio = 0.65f, stiffness = 400f),
+        label = "tabScale"
+    )
 
-@Composable
-private fun PillItem(dest: NavDestination, active: Boolean, alpha: Float, onClick: () -> Unit) {
-    val bg by animateColorAsState(
-        if (active) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f)
-        else Color.Transparent,
-        tween(220),
-        label = "pillItemBg"
-    )
-    val fg by animateColorAsState(
-        if (active) MaterialTheme.colorScheme.primary
-        else MaterialTheme.colorScheme.onSurfaceVariant,
-        tween(220),
-        label = "pillItemFg"
-    )
+    val tabShape = if (isActive) RoundedCornerShape(24.dp) else RoundedCornerShape(10.dp)
 
     Box(
-        Modifier
-            .alpha(alpha)
-            .clip(RoundedCornerShape(20.dp))
-            .background(bg)
+        modifier = Modifier
+            .scale(scaleAnim)
+            .animateContentSize(
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                    stiffness = Spring.StiffnessMediumLow
+                )
+            )
+            .clip(tabShape)
+            .background(bgAnim)
+            .border(
+                width = if (isActive) 0.8.dp else 0.dp,
+                color = if (isActive) MaterialTheme.colorScheme.primary.copy(alpha = 0.35f) else Color.Transparent,
+                shape = tabShape
+            )
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 7.dp),
+            .padding(horizontal = if (isActive) 13.dp else 10.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
             Icon(
                 imageVector = dest.icon,
                 contentDescription = dest.label,
-                tint = fg,
-                modifier = Modifier.size(18.dp)
+                tint = fgAnim,
+                modifier = Modifier.size(19.dp)
             )
-            if (active) {
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    text = dest.label,
-                    color = fg,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace
-                )
-                Spacer(Modifier.width(4.dp))
-                Box(
-                    modifier = Modifier
-                        .size(4.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary)
-                )
+            AnimatedVisibility(
+                visible = isActive,
+                enter = fadeIn(animationSpec = spring(dampingRatio = 0.75f, stiffness = 400f)) +
+                        expandHorizontally(animationSpec = spring(dampingRatio = 0.75f, stiffness = 400f)),
+                exit = fadeOut(animationSpec = spring(dampingRatio = 0.75f, stiffness = 400f)) +
+                        shrinkHorizontally(animationSpec = spring(dampingRatio = 0.75f, stiffness = 400f))
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = dest.label,
+                        color = fgAnim,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.SansSerif
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Box(
+                        modifier = Modifier
+                            .size(4.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary)
+                    )
+                }
             }
         }
     }
 }
 
-@Composable
-private fun CollapsedChip(dest: NavDestination) {
-    Row(
-        Modifier
-            .clip(RoundedCornerShape(20.dp))
-            .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.90f))
-            .padding(horizontal = 14.dp, vertical = 9.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(
-            imageVector = dest.icon,
-            contentDescription = dest.label,
-            tint = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.size(18.dp)
-        )
-        Spacer(Modifier.width(6.dp))
-        Text(
-            text = dest.label,
-            color = MaterialTheme.colorScheme.primary,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Bold,
-            fontFamily = FontFamily.Monospace
-        )
-    }
-}
-
-// ─── Music Mini-Player (Dynamic iOS Glass Capsule) ─────────────────────────────
+// ─── Music Mini-Player (Detached Actionable Thumbnail + Details Bar) ──────────
 
 @Composable
 fun MusicMiniPlayer(
@@ -311,113 +300,164 @@ fun MusicMiniPlayer(
 ) {
     val haptics = rememberAppHapticFeedback()
 
-    Box(
+    Row(
         modifier = modifier
-            .padding(horizontal = 12.dp, vertical = 4.dp)
-            .shadow(
-                elevation = 10.dp,
-                shape = RoundedCornerShape(20.dp),
-                ambientColor = Color.Black.copy(alpha = 0.08f),
-                spotColor = Color.Black.copy(alpha = 0.12f)
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // ── 1. DETACHED ACTIONABLE LEFT ICON / THUMBNAIL ──
+        Box(
+            modifier = Modifier
+                .size(46.dp)
+                .shadow(
+                    elevation = 8.dp,
+                    shape = RoundedCornerShape(16.dp),
+                    ambientColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                    spotColor = Color.Black.copy(alpha = 0.16f)
+                )
+                .clip(RoundedCornerShape(16.dp))
+                .border(
+                    1.dp,
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.45f),
+                    RoundedCornerShape(16.dp)
+                )
+                .clickable(onClick = {
+                    haptics(HapticFeedbackType.LongPress)
+                    onExpand()
+                }),
+            contentAlignment = Alignment.Center
+        ) {
+            TrackArtworkView(
+                track = track,
+                size = 46.dp,
+                shape = RoundedCornerShape(16.dp),
+                iconSize = 22.dp,
+                showBorder = false
             )
-            .clip(RoundedCornerShape(20.dp))
-            .background(
-                Brush.verticalGradient(
-                    listOf(
-                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.88f),
-                        MaterialTheme.colorScheme.surface.copy(alpha = 0.84f)
+        }
+
+        // ── 2. SPACE #1 (DETACHED SEPARATION) ──
+        Spacer(modifier = Modifier.width(10.dp))
+
+        // ── 3. MUSIC DETAILS BAR (NO SECOND DETACHED ICON) ──
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .height(46.dp)
+                .shadow(
+                    elevation = 8.dp,
+                    shape = RoundedCornerShape(23.dp),
+                    ambientColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f),
+                    spotColor = Color.Black.copy(alpha = 0.14f)
+                )
+                .clip(RoundedCornerShape(23.dp))
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.86f)
+                        )
                     )
                 )
-            )
-            .border(
-                0.6.dp,
-                MaterialTheme.colorScheme.outline.copy(alpha = 0.35f),
-                RoundedCornerShape(20.dp)
-            )
-            .clickable(onClick = {
-                haptics(HapticFeedbackType.LongPress)
-                onExpand()
-            })
-            .padding(horizontal = 12.dp, vertical = 8.dp)
-    ) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                Modifier
-                    .size(38.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(
-                        Brush.linearGradient(
-                            listOf(Color(track.albumCoverHex), MaterialTheme.colorScheme.primary)
+                .border(
+                    0.8.dp,
+                    MaterialTheme.colorScheme.outline.copy(alpha = 0.30f),
+                    RoundedCornerShape(23.dp)
+                )
+                .padding(start = 14.dp, end = 6.dp),
+            contentAlignment = Alignment.CenterStart
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Title, Artist, & Equalizer
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable(onClick = {
+                            haptics(HapticFeedbackType.LongPress)
+                            onExpand()
+                        }),
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Text(
+                        text = track.title.ifBlank { "No Track" },
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                    )
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        if (isPlaying) {
+                            com.example.ui.screens.MiniLiveEqualizer(
+                                modifier = Modifier.size(12.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        Text(
+                            text = track.artist.ifBlank { "Unknown Artist" },
+                            fontSize = 10.5.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                         )
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("🎧", fontSize = 16.sp)
-            }
+                    }
+                }
 
-            Spacer(Modifier.width(10.dp))
+                // Play / Pause Button
+                IconButton(
+                    onClick = {
+                        haptics(HapticFeedbackType.LongPress)
+                        onTogglePlay()
+                    },
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = if (isPlaying) "Pause" else "Play",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(19.dp)
+                    )
+                }
 
-            Column(Modifier.weight(1f)) {
-                Text(
-                    text = track.title,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1
-                )
-                Text(
-                    text = track.artist,
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1
-                )
-            }
-
-            IconButton(
-                onClick = {
-                    haptics(HapticFeedbackType.LongPress)
-                    onTogglePlay()
-                },
-                modifier = Modifier.size(34.dp)
-            ) {
-                Icon(
-                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                    contentDescription = if (isPlaying) "Pause" else "Play",
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-
-            if (isPlaying) {
+                // Next Track Button
                 IconButton(
                     onClick = {
                         haptics(HapticFeedbackType.LongPress)
                         onNext()
                     },
-                    modifier = Modifier.size(34.dp)
+                    modifier = Modifier.size(32.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.SkipNext,
                         contentDescription = "Next",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(18.dp)
                     )
                 }
-            }
 
-            IconButton(
-                onClick = {
-                    haptics(HapticFeedbackType.LongPress)
-                    onClose()
-                },
-                modifier = Modifier.size(34.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Close,
-                    contentDescription = "Close",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(18.dp)
-                )
+                // Close / Dismiss Button
+                IconButton(
+                    onClick = {
+                        haptics(HapticFeedbackType.LongPress)
+                        onClose()
+                    },
+                    modifier = Modifier.size(30.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Close",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
             }
         }
     }

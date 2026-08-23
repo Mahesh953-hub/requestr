@@ -120,6 +120,48 @@ object FileExporter {
         file
     }
 
+    /**
+     * Export response body with automatic filename extension and beautification based on contentType and url.
+     */
+    suspend fun writeResponseBody(
+        context: Context,
+        body: String,
+        contentType: String,
+        url: String,
+        isHex: Boolean = false
+    ): Pair<File, String> = withContext(Dispatchers.IO) {
+        val safeHost = try {
+            java.net.URI(url).host?.replace(Regex("[^a-zA-Z0-9.-]"), "_")?.take(24) ?: "api"
+        } catch (_: Exception) {
+            "api"
+        }
+        val ct = contentType.lowercase()
+        val (extension, mimeType) = when {
+            isHex -> "txt" to "text/plain"
+            ct.contains("json") || body.trimStart().startsWith("{") || body.trimStart().startsWith("[") -> "json" to "application/json"
+            ct.contains("html") || body.trimStart().startsWith("<!doctype", ignoreCase = true) || body.trimStart().startsWith("<html", ignoreCase = true) -> "html" to "text/html"
+            ct.contains("xml") || body.trimStart().startsWith("<?xml", ignoreCase = true) -> "xml" to "application/xml"
+            ct.contains("javascript") || ct.contains("ecmascript") -> "js" to "application/javascript"
+            ct.contains("css") -> "css" to "text/css"
+            ct.contains("csv") -> "csv" to "text/csv"
+            else -> "txt" to "text/plain"
+        }
+
+        val formattedContent = if (!isHex && extension == "json") {
+            try {
+                com.example.data.repository.ToolsRepository.formatJson(body)
+            } catch (_: Exception) {
+                body
+            }
+        } else {
+            body
+        }
+
+        val file = File(getExportFolder(context), "response-${safeHost}-${timestamp()}.$extension")
+        file.writeText(formattedContent)
+        Pair(file, mimeType)
+    }
+
     // ─── Share helper ────────────────────────────────────────────────────
 
     /**

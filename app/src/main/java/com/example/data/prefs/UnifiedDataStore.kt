@@ -97,6 +97,15 @@ object AppSettingsKeys {
     val LOGGING_ENABLED = booleanPreferencesKey("logging_enabled")         // show debug overlay
     val PRINT_UNDECODED = booleanPreferencesKey("print_undecoded")         // show raw TLS/TCP in list
     val DUMP_TO_FILE = booleanPreferencesKey("dump_to_file")               // dump raw packets to disk
+
+    // -- Navigation & Header Modifiers --
+    val NAV_BAR_OPACITY = androidx.datastore.preferences.core.floatPreferencesKey("nav_bar_opacity")
+    val NAV_BAR_BLUR_EFFECT = stringPreferencesKey("nav_bar_blur_effect")
+    val NAV_BAR_HIDDEN_ITEMS = androidx.datastore.preferences.core.stringSetPreferencesKey("nav_bar_hidden_items")
+    val HEADER_TOP_PADDING = intPreferencesKey("header_top_padding")
+    val HEADER_OPACITY = androidx.datastore.preferences.core.floatPreferencesKey("header_opacity")
+    val HEADER_BLUR_STYLE = stringPreferencesKey("header_blur_style")
+    val FAB_BOTTOM_SPACING = intPreferencesKey("fab_bottom_spacing")
 }
 
 /**

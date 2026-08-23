@@ -25,6 +25,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Refresh
@@ -58,6 +59,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.repository.ToolsRepository
+import com.example.ui.components.SectionHeader
 
 /** Look up a tool by id and render its domain-specific workspace. */
 @Composable
@@ -69,45 +71,11 @@ fun ToolWorkspaceScreen(
         ToolsRepository.getToolsCatalog().find { it.id == toolId }
     }
 
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
-        // Header
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = onBack) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = "Back",
-                    tint = MaterialTheme.colorScheme.onSurface
-                )
-            }
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = tool?.title ?: "Unknown Tool",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 18.sp,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                if (tool != null) {
-                    Text(
-                        text = "${tool.category.displayName} · ${tool.description}",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1
-                    )
-                }
-            }
-        }
-
-        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
-
         // Workspace body
         if (tool == null) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -119,7 +87,7 @@ fun ToolWorkspaceScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .verticalScroll(scrollState)
-                    .padding(16.dp)
+                    .padding(start = 16.dp, end = 16.dp, top = 64.dp, bottom = 16.dp)
             ) {
                 when (tool.id) {
                     // ── Reversible simple tools ──────────────────
@@ -159,6 +127,16 @@ fun ToolWorkspaceScreen(
                 }
             }
         }
+
+        // Header
+        SectionHeader(
+            title = tool?.title ?: "Tool Workspace",
+            icon = tool?.icon ?: Icons.Default.Build,
+            onBack = onBack,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 4.dp)
+        )
     }
 }
 
@@ -263,20 +241,24 @@ private fun ReversibleWorkspace(
 
 @Composable
 private fun ModeChip(label: String, selected: Boolean, onClick: () -> Unit) {
-    Text(
-        text = label,
-        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-        fontSize = 11.sp,
-        color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+    val chipShape = if (selected) RoundedCornerShape(20.dp) else RoundedCornerShape(8.dp)
+    Box(
         modifier = Modifier
+            .clip(chipShape)
             .background(
                 if (selected) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.surfaceVariant,
-                RoundedCornerShape(6.dp)
+                else MaterialTheme.colorScheme.surfaceVariant
             )
             .clickable { onClick() }
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-    )
+            .padding(horizontal = 14.dp, vertical = 6.dp)
+    ) {
+        Text(
+            text = label,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            fontSize = 12.sp,
+            color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
 }
 
 @Composable private fun Base64Workspace() = ReversibleWorkspace(
@@ -729,16 +711,22 @@ private fun modeRow(title: String) {
 }
 
 @Composable
-private fun outputBlock(label: String, value: String, ctx: Context) {
+private fun outputBlock(label: String, value: String, ctx: Context, onClear: (() -> Unit)? = null) {
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
     ) {
         Text(label, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (value.isNotBlank()) {
-            Row {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 IconButton(onClick = { copyToClipboard(ctx, value) }, modifier = Modifier.size(28.dp)) {
-                    Icon(Icons.Default.ContentCopy, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Default.ContentCopy, contentDescription = "Copy", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                }
+                if (onClear != null) {
+                    IconButton(onClick = onClear, modifier = Modifier.size(28.dp)) {
+                        Icon(Icons.Default.Clear, contentDescription = "Clear", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
+                    }
                 }
             }
         }

@@ -118,8 +118,8 @@ val CyberTerminalBackground = UniversalDarkBackground
 val CyberTerminalSurface = UniversalDarkSurface
 val CyberTerminalSurfaceVariant = UniversalDarkSurfaceVariant
 val CyberTerminalBorder = UniversalDarkBorder
-val CyberTerminalPrimary = Color(0xFF00FF88)
-val CyberTerminalPrimaryBright = Color(0xFF55FFAA)
+val CyberTerminalPrimary = AccentLime
+val CyberTerminalPrimaryBright = AccentLimeBright
 val CyberTerminalAccent = AccentCyan
 
 val DuskTerracottaBackground = UniversalDarkBackground

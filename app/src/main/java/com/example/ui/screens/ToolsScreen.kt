@@ -27,8 +27,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
+import com.example.ui.components.RequestrFilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -80,43 +82,42 @@ fun ToolsScreen(
         }
     }
 
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
-        SectionHeader(
-            title = "Tool Library",
-            onMiniSettings = onMiniSettings,
-            onBack = null
-        )
-
-        // Search
-        SearchInputField(
-            query = searchQuery,
-            onQueryChange = { searchQuery = it },
-            placeholder = "Search tools…",
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-        )
-
-        // Category selector — Fix 07 redesign: text-only, accent underline
-        CategorySelector(
-            selected = selectedCategory,
-            onSelect = { selectedCategory = it },
-            modifier = Modifier.padding(vertical = 4.dp)
-        )
-
-        // Tool grid — 2 columns, icon + name
-        LazyVerticalGrid(
-            state = gridState,
-            columns = GridCells.Fixed(2),
+        Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 14.dp),
-            contentPadding = PaddingValues(vertical = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+                .padding(top = 58.dp)
         ) {
+            // Search
+            SearchInputField(
+                query = searchQuery,
+                onQueryChange = { searchQuery = it },
+                placeholder = "Search tools…",
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+            )
+
+            // Category selector — Fix 07 redesign: text-only, accent underline
+            CategorySelector(
+                selected = selectedCategory,
+                onSelect = { selectedCategory = it },
+                modifier = Modifier.padding(vertical = 4.dp)
+            )
+
+            // Tool grid — 2 columns, icon + name
+            LazyVerticalGrid(
+                state = gridState,
+                columns = GridCells.Fixed(2),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 14.dp),
+                contentPadding = PaddingValues(top = 8.dp, bottom = 96.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
             items(filteredTools, key = { it.id }) { tool ->
                 ToolCard(tool = tool, onClick = { onNavigateToTool(tool.id) })
             }
@@ -159,6 +160,17 @@ fun ToolsScreen(
             }
         }
     }
+
+    SectionHeader(
+        title = "Tool Library",
+        icon = Icons.Default.Build,
+        onMiniSettings = onMiniSettings,
+        onBack = null,
+        modifier = Modifier
+            .align(Alignment.TopCenter)
+            .padding(top = 4.dp)
+    )
+}
 
     // Custom tool creation bottom sheet
     if (showCustomToolSheet) {
@@ -273,40 +285,15 @@ private fun CategorySelector(
             .fillMaxWidth()
             .horizontalScroll(rememberScrollState())
             .padding(horizontal = 16.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         categories.forEach { (cat, label) ->
             val isActive = cat == selected
-            val textColor by animateColorAsState(
-                if (isActive) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.onSurfaceVariant,
-                animationSpec = com.example.ui.theme.scaledTween(250),
-                label = "catTextColor"
+            RequestrFilterChip(
+                selected = isActive,
+                onClick = { onSelect(cat) },
+                label = label
             )
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(2.dp))
-                    .clickable { onSelect(cat) }
-                    .padding(vertical = 6.dp)
-            ) {
-                Text(
-                    text = label,
-                    color = textColor,
-                    fontSize = 12.sp,
-                    fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal
-                )
-                if (isActive) {
-                    Spacer(modifier = Modifier.height(3.dp))
-                    Box(
-                        modifier = Modifier
-                            .width(24.dp)
-                            .height(2.dp)
-                            .clip(RoundedCornerShape(1.dp))
-                            .background(MaterialTheme.colorScheme.primary)
-                    )
-                }
-            }
         }
     }
 }

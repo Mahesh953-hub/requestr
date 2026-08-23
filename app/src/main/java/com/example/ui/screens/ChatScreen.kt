@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.CircularProgressIndicator
@@ -42,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.models.ChatMessage
 import com.example.data.repository.ChatRepository
+import com.example.ui.components.GlassActionPill
 import com.example.ui.components.SectionHeader
 import kotlinx.coroutines.launch
 
@@ -71,53 +73,43 @@ fun ChatScreen(
         }
     }
 
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
-        SectionHeader(
-            title = "Chats",
-            onMiniSettings = onMiniSettings,
-            onBack = null,
-            actions = {
-                IconButton(onClick = { ChatRepository.clearHistory() }) {
-                    Icon(
-                        imageVector = Icons.Default.Delete,
-                        contentDescription = "Clear chat history",
-                        tint = MaterialTheme.colorScheme.error
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(top = 58.dp)
+        ) {
+            // Provider status banner
+            if (ChatRepository.providerUrl.isBlank()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.tertiaryContainer)
+                        .padding(8.dp)
+                ) {
+                    Text(
+                        "No AI provider configured. Running in local mode. Configure in Settings.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer
                     )
                 }
             }
-        )
 
-        // Provider status banner
-        if (ChatRepository.providerUrl.isBlank()) {
-            Box(
+            // Messages list
+            LazyColumn(
+                state = listState,
                 modifier = Modifier
+                    .weight(1f)
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 4.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(MaterialTheme.colorScheme.tertiaryContainer)
-                    .padding(8.dp)
+                    .padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text(
-                    "No AI provider configured. Running in local mode. Configure in Settings.",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onTertiaryContainer
-                )
-            }
-        }
-
-        // Messages list
-        LazyColumn(
-            state = listState,
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
             if (messages.isEmpty()) {
                 item {
                     Column(
@@ -197,6 +189,25 @@ fun ChatScreen(
                 )
             }
         }
+    }
+
+    SectionHeader(
+        title = "Chats",
+        icon = Icons.Default.AutoAwesome,
+        onMiniSettings = onMiniSettings,
+        onBack = null,
+        actions = {
+            GlassActionPill(
+                icon = Icons.Default.Delete,
+                contentDescription = "Clear chat history",
+                tint = MaterialTheme.colorScheme.error,
+                onClick = { ChatRepository.clearHistory() }
+            )
+        },
+        modifier = Modifier
+            .align(Alignment.TopCenter)
+            .padding(top = 4.dp)
+    )
     }
 }
 

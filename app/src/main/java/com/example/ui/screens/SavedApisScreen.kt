@@ -25,6 +25,7 @@ import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
@@ -63,6 +64,7 @@ import com.example.data.models.CollectionTestReport
 import com.example.data.models.HttpMethod
 import com.example.data.models.RequestTestResult
 import com.example.data.repository.ApiCollectionsRepository
+import com.example.ui.components.GlassActionPill
 import com.example.ui.components.MethodBadge
 import com.example.ui.components.SectionHeader
 import kotlinx.coroutines.launch
@@ -95,65 +97,23 @@ fun SavedApisScreen(
         else allRequests.filter { it.isFavorite }
     }.sortedByDescending { it.updatedAt }
 
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
-        // Header
-        Row(
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .fillMaxSize()
+                .padding(top = 58.dp)
         ) {
-            IconButton(onClick = onBack) {
-                Icon(
-                    Icons.AutoMirrored.Filled.ArrowBack, "Back",
-                    tint = MaterialTheme.colorScheme.onSurface
-                )
-            }
-            Text(
-                "Saved APIs",
-                fontWeight = FontWeight.Bold,
-                fontSize = 18.sp,
-                color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.weight(1f)
-            )
-
-            // v3.4 Part C — C3: only shown when at least one saved request actually has an
-            // enabled assertion — otherwise there is nothing to run and the button would just
-            // be a dead end.
-            if (testableCount > 0) {
-                IconButton(
-                    onClick = {
-                        isRunningTests = true
-                        coroutineScope.launch {
-                            testReport = ApiCollectionsRepository.runCollectionTests(folderId = null)
-                            isRunningTests = false
-                        }
-                    },
-                    enabled = !isRunningTests
-                ) {
-                    if (isRunningTests) {
-                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                    } else {
-                        Icon(
-                            Icons.Default.PlayArrow, "Run All Tests ($testableCount)",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                }
-            }
-        }
-
-        // Tab row: Saved / Liked
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
+            // Tab row: Saved / Liked
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
             TabChip("Saved", allRequests.size, showSaved) {
                 showSaved = true
             }
@@ -235,6 +195,35 @@ fun SavedApisScreen(
                 item { Spacer(modifier = Modifier.height(80.dp)) }
             }
         }
+    }
+
+    // Header
+    SectionHeader(
+            title = "Saved APIs",
+            icon = Icons.Default.Folder,
+            onBack = onBack,
+            actions = {
+                if (testableCount > 0) {
+                    GlassActionPill(
+                        icon = Icons.Default.PlayArrow,
+                        contentDescription = "Run All Tests ($testableCount)",
+                        tint = MaterialTheme.colorScheme.primary,
+                        onClick = {
+                            if (!isRunningTests) {
+                                isRunningTests = true
+                                coroutineScope.launch {
+                                    testReport = ApiCollectionsRepository.runCollectionTests(folderId = null)
+                                    isRunningTests = false
+                                }
+                            }
+                        }
+                    )
+                }
+            },
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 4.dp)
+        )
     }
 
     // v3.4 Part C — C3: summary report modal for "Run All Tests" — X passed / Y failed overall,

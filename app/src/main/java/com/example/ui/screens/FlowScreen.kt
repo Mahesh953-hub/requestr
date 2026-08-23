@@ -85,7 +85,9 @@ import com.example.data.models.FlowConnectionItem
 import com.example.data.models.FlowNodeItem
 import com.example.data.models.FlowNodeType
 import com.example.data.repository.FlowRepository
+import com.example.ui.components.GlassActionPill
 import com.example.ui.components.GlassCard
+import com.example.ui.components.RequestrFilterChip
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.rememberAppHapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -104,6 +106,7 @@ fun FlowScreen(
     val coroutineScope = rememberCoroutineScope()
     val nodes by FlowRepository.nodes.collectAsState()
     val connections by FlowRepository.connections.collectAsState()
+    val userSettings by com.example.data.repository.SettingsRepository.settings.collectAsState()
 
     // B4: real tactile confirmation for node drag/delete, gated once behind
     // settings.hapticFeedbackEnabled via the shared helper.
@@ -115,119 +118,35 @@ fun FlowScreen(
     var showAddNodeSheet by remember { mutableStateOf(false) }
     var nodeForEdit by remember { mutableStateOf<FlowNodeItem?>(null) }
 
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
-        SectionHeader(
-            title = "Flow & Automation (n8n Engine)",
-            onMiniSettings = onMiniSettings,
-            actions = {
-                // Fix #25 (TODO): Flow export/import via FlowSerializer
-                val flowContext = androidx.compose.ui.platform.LocalContext.current
-                IconButton(onClick = {
-                    coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                        runCatching {
-                            val json = com.example.flow.FlowSerializer.exportToJson(
-                                "requestr-flow",
-                                nodes,
-                                connections
-                            )
-                            val file = com.example.data.export.FileExporter.writeJson(flowContext, json)
-                            com.example.data.export.FileExporter.shareFile(
-                                flowContext, file,
-                                "application/json",
-                                "Flow export"
-                            )
-                        }
-                    }
-                }) {
-                    Icon(
-                        imageVector = androidx.compose.material.icons.Icons.Default.Share,
-                        contentDescription = "Export Flow",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-
-                IconButton(onClick = { viewMode = if (viewMode == 0) 1 else 0 }) {
-                    Icon(
-                        imageVector = if (viewMode == 0) Icons.Default.LinearScale else Icons.Default.GridView,
-                        contentDescription = "Toggle View",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-
-                IconButton(onClick = { showAddNodeSheet = true }) {
-                    Icon(
-                        imageVector = Icons.Default.Add,
-                        contentDescription = "Add Step",
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                }
-
-                // Fix #25: Import flow from JSON (share sheet)
-                IconButton(onClick = {
-                    coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                        runCatching {
-                            val importIntent = android.content.Intent(android.content.Intent.ACTION_GET_CONTENT).apply {
-                                type = "application/json"
-                                addCategory(android.content.Intent.CATEGORY_OPENABLE)
-                            }
-                            flowContext.startActivity(importIntent)
-                        }
-                    }
-                }) {
-                    Icon(
-                        imageVector = Icons.Default.FileDownload,
-                        contentDescription = "Import Flow",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-
-                Button(
-                    onClick = {
-                        isRunning = true
-                        coroutineScope.launch {
-                            val res = FlowRepository.executeFlow()
-                            executionResult = res
-                            isRunning = false
-                        }
-                    },
-                    enabled = !isRunning,
-                    shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(top = 58.dp)
+        ) {
+            // Execution status banner
+            if (executionResult != null) {
+                GlassCard(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                    backgroundColor = Color(0xFF10B981).copy(alpha = 0.15f),
+                    borderColor = Color(0xFF10B981).copy(alpha = 0.5f)
                 ) {
-                    if (isRunning) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
-                    } else {
-                        Icon(imageVector = Icons.Default.PlayArrow, contentDescription = "Run flow", modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Run Flow", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(imageVector = Icons.Default.CheckCircle, contentDescription = "Success", tint = Color(0xFF10B981), modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(executionResult!!, color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
-        )
-
-        // Execution status banner
-        if (executionResult != null) {
-            GlassCard(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 4.dp),
-                backgroundColor = Color(0xFF10B981).copy(alpha = 0.15f),
-                borderColor = Color(0xFF10B981).copy(alpha = 0.5f)
-            ) {
-                Row(
-                    modifier = Modifier.padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(imageVector = Icons.Default.CheckCircle, contentDescription = "Success", tint = Color(0xFF10B981), modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(executionResult!!, color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                }
-            }
-        }
 
         if (viewMode == 0) {
             // Visual Canvas Mode — with pan/zoom, port-drag, context menu, mini-map
@@ -313,9 +232,69 @@ fun FlowScreen(
                     }
                 }
 
-                item { Spacer(modifier = Modifier.height(80.dp)) }
+                item { Spacer(modifier = Modifier.height((userSettings.fabBottomSpacingDp + 48).dp)) }
             }
         }
+    }
+
+    SectionHeader(
+            title = "Flow & Automation",
+            icon = Icons.Default.LinearScale,
+            onMiniSettings = onMiniSettings,
+            actions = {
+                GlassActionPill(
+                    icon = Icons.Default.Add,
+                    contentDescription = "Add Step",
+                    tint = MaterialTheme.colorScheme.primary,
+                    onClick = { showAddNodeSheet = true }
+                )
+                GlassActionPill(
+                    icon = if (viewMode == 0) Icons.Default.LinearScale else Icons.Default.GridView,
+                    contentDescription = "Toggle View",
+                    onClick = { viewMode = if (viewMode == 0) 1 else 0 }
+                )
+                GlassActionPill(
+                    icon = Icons.Default.PlayArrow,
+                    contentDescription = "Run Flow",
+                    tint = MaterialTheme.colorScheme.primary,
+                    onClick = {
+                        if (!isRunning) {
+                            isRunning = true
+                            coroutineScope.launch {
+                                val res = FlowRepository.executeFlow()
+                                executionResult = res
+                                isRunning = false
+                            }
+                        }
+                    }
+                )
+                val flowContext = androidx.compose.ui.platform.LocalContext.current
+                GlassActionPill(
+                    icon = androidx.compose.material.icons.Icons.Default.Share,
+                    contentDescription = "Export Flow",
+                    onClick = {
+                        coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                            runCatching {
+                                val json = com.example.flow.FlowSerializer.exportToJson(
+                                    "requestr-flow",
+                                    nodes,
+                                    connections
+                                )
+                                val file = com.example.data.export.FileExporter.writeJson(flowContext, json)
+                                com.example.data.export.FileExporter.shareFile(
+                                    flowContext, file,
+                                    "application/json",
+                                    "Flow export"
+                                )
+                            }
+                        }
+                    }
+                )
+            },
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 4.dp)
+        )
     }
 
     // Add Step Bottom Sheet
@@ -755,16 +734,11 @@ fun AddFlowNodeBottomSheet(
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 FlowNodeType.values().forEach { t ->
-                    val isSel = selectedType == t
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(if (isSel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
-                            .clickable { selectedType = t }
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
-                    ) {
-                        Text("${t.iconEmoji} ${t.label}", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = if (isSel) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+                    RequestrFilterChip(
+                        selected = selectedType == t,
+                        onClick = { selectedType = t },
+                        label = "${t.iconEmoji} ${t.label}"
+                    )
                 }
             }
 

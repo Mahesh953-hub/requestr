@@ -19,10 +19,10 @@ enum class AppAccent(
     val containerDark: Color
 ) {
     INDIGO("INDIGO", "Electric Indigo", AccentIndigo, AccentIndigoBright, AccentIndigoContainerLight, AccentIndigoContainerDark),
-    CYAN("CYAN", "Cyber Cyan", AccentCyan, AccentCyanBright, AccentCyanContainerLight, AccentCyanContainerDark),
+    CYAN("CYAN", "Dynamic Cyan", AccentCyan, AccentCyanBright, AccentCyanContainerLight, AccentCyanContainerDark),
     EMERALD("EMERALD", "Emerald Mint", AccentEmerald, AccentEmeraldBright, AccentEmeraldContainerLight, AccentEmeraldContainerDark),
     ORANGE("ORANGE", "Sunset Orange", AccentOrange, AccentOrangeBright, AccentOrangeContainerLight, AccentOrangeContainerDark),
-    LIME("LIME", "Cyber Lime", AccentLime, AccentLimeBright, AccentLimeContainerLight, AccentLimeContainerDark),
+    LIME("LIME", "Dynamic Lime", AccentLime, AccentLimeBright, AccentLimeContainerLight, AccentLimeContainerDark),
     VIOLET("VIOLET", "Royal Violet", AccentViolet, AccentVioletBright, AccentVioletContainerLight, AccentVioletContainerDark),
     ROSE("ROSE", "Crimson Rose", AccentRose, AccentRoseBright, AccentRoseContainerLight, AccentRoseContainerDark),
     AMBER("AMBER", "Solar Amber", AccentAmber, AccentAmberBright, AccentAmberContainerLight, AccentAmberContainerDark),
@@ -38,6 +38,7 @@ enum class AppAccent(
                     "MIDNIGHT_SAPPHIRE" -> SAPPHIRE
                     "KYOTO_MATCHA" -> EMERALD
                     "CYBER_TERMINAL" -> LIME
+                    "DYNAMIC_LIME" -> LIME
                     "DUSK_TERRACOTTA" -> ORANGE
                     "SOLAR_AMBER" -> AMBER
                     else -> INDIGO
@@ -54,7 +55,7 @@ enum class AppThemeMode(val displayName: String, val isLight: Boolean, val sampl
     MONOCHROME_DARK("Obsidian Dark", false, AccentObsidianBright, UniversalDarkBackground),
     MIDNIGHT_SAPPHIRE("Midnight Sapphire", false, AccentSapphireBright, UniversalDarkBackground),
     KYOTO_MATCHA("Kyoto Matcha", true, AccentEmerald, UniversalLightBackground),
-    CYBER_TERMINAL("Cyber Terminal", false, AccentLimeBright, UniversalDarkBackground),
+    CYBER_TERMINAL("Dynamic Lime", false, AccentLimeBright, UniversalDarkBackground),
     DUSK_TERRACOTTA("Dusk Terracotta", false, AccentOrangeBright, UniversalDarkBackground),
     SOLAR_AMBER("Solar Amber", false, AccentAmberBright, UniversalDarkBackground);
 

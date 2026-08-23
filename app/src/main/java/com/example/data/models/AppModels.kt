@@ -422,7 +422,15 @@ data class UserSettingsState(
     val musicPermissionStatus: String = "NOT_REQUESTED",
     val musicBarDismissed: Boolean = false,
     val musicLibraryScanned: Boolean = false,
-    val selectedLocalTrackId: String? = null
+    val selectedLocalTrackId: String? = null,
+    // Navigation and Header Modifiers
+    val navBarBackgroundOpacity: Float = 0.92f,
+    val navBarBlurEffect: String = "FROSTED_GLASS", // "FROSTED_GLASS", "SOLID_M3", "TRANSLUCENT", "OLED_BLACK"
+    val navBarHiddenItems: Set<String> = emptySet(),
+    val headerTopPaddingDp: Int = 8,
+    val headerBackgroundOpacity: Float = 0.90f,
+    val headerBlurStyle: String = "FROSTED_GLASS",
+    val fabBottomSpacingDp: Int = 84
 )
 
 /** Chat message for the Chats section (#44). */

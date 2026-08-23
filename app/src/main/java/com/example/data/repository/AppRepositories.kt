@@ -26,6 +26,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 // ==========================================
@@ -738,51 +739,73 @@ object SettingsRepository {
      * read of [settings]. Loads persisted values; runtime-only flags (root,
      * Shizuku, Frida, VPN) stay false until [CapabilityProbe] runs.
      */
+    private fun applyPrefs(p: androidx.datastore.preferences.core.Preferences) {
+        _settings.value = _settings.value.copy(
+            userName = p[K.USER_NAME] ?: _settings.value.userName,
+            themeMode = p[K.THEME_MODE] ?: _settings.value.themeMode,
+            isDarkTheme = p[K.IS_DARK_THEME] ?: _settings.value.isDarkTheme,
+            selectedAccent = p[K.SELECTED_ACCENT] ?: _settings.value.selectedAccent,
+            cornerRadiusDp = p[K.CORNER_RADIUS] ?: _settings.value.cornerRadiusDp,
+            proxyPort = p[K.PROXY_PORT] ?: _settings.value.proxyPort,
+            autoBeautify = p[K.AUTO_BEAUTIFY] ?: _settings.value.autoBeautify,
+            sslVerification = p[K.SSL_VERIFY] ?: _settings.value.sslVerification,
+            defaultSnippetLang = p[K.SNIPPET_LANG] ?: _settings.value.defaultSnippetLang,
+            onboardingCompleted = p[K.ONBOARDING] ?: _settings.value.onboardingCompleted,
+            appearanceMode = p[K.APPEARANCE_MODE] ?: _settings.value.appearanceMode,
+            selectedDarkTheme = p[K.SELECTED_DARK_THEME] ?: _settings.value.selectedDarkTheme,
+            selectedLightTheme = p[K.SELECTED_LIGHT_THEME] ?: _settings.value.selectedLightTheme,
+            swipeToDeleteEnabled = p[K.SWIPE_TO_DELETE] ?: _settings.value.swipeToDeleteEnabled,
+            hapticFeedbackEnabled = p[K.HAPTIC_FEEDBACK] ?: _settings.value.hapticFeedbackEnabled,
+            gestureNavigationEnabled = p[K.GESTURE_NAVIGATION] ?: _settings.value.gestureNavigationEnabled,
+            densityMode = p[K.DENSITY_MODE] ?: _settings.value.densityMode,
+            updateNotificationPolicy = p[K.UPDATE_NOTIFICATION_POLICY] ?: _settings.value.updateNotificationPolicy,
+            animationEnabled = p[K.ANIMATION_ENABLED] ?: _settings.value.animationEnabled,
+            transitionBehavior = p[K.TRANSITION_BEHAVIOR] ?: _settings.value.transitionBehavior,
+            displayScale = p[K.DISPLAY_SCALE] ?: _settings.value.displayScale,
+            autoRecordingEnabled = p[K.AUTO_RECORDING] ?: _settings.value.autoRecordingEnabled,
+            trafficLogEnabled = p[K.TRAFFIC_LOG] ?: _settings.value.trafficLogEnabled,
+            recordingNotificationsEnabled = p[K.RECORDING_NOTIFICATIONS] ?: _settings.value.recordingNotificationsEnabled,
+            remoteControlEnabled = p[K.REMOTE_CONTROL] ?: _settings.value.remoteControlEnabled,
+            remoteCommandsEnabled = p[K.REMOTE_COMMANDS] ?: _settings.value.remoteCommandsEnabled,
+            lanDeviceDiscoveryEnabled = p[K.LAN_DISCOVERY] ?: _settings.value.lanDeviceDiscoveryEnabled,
+            deviceBroadcastingEnabled = p[K.DEVICE_BROADCASTING] ?: _settings.value.deviceBroadcastingEnabled,
+            trafficCaptureEnabled = p[K.TRAFFIC_CAPTURE] ?: _settings.value.trafficCaptureEnabled,
+            requestLoggingEnabled = p[K.REQUEST_LOGGING] ?: _settings.value.requestLoggingEnabled,
+            responseLoggingEnabled = p[K.RESPONSE_LOGGING] ?: _settings.value.responseLoggingEnabled,
+            musicPermissionStatus = p[K.MUSIC_PERMISSION_STATUS] ?: _settings.value.musicPermissionStatus,
+            musicBarDismissed = p[K.MUSIC_BAR_DISMISSED] ?: _settings.value.musicBarDismissed,
+            musicLibraryScanned = p[K.MUSIC_LIBRARY_SCANNED] ?: _settings.value.musicLibraryScanned,
+            selectedLocalTrackId = p[K.SELECTED_LOCAL_TRACK_ID] ?: _settings.value.selectedLocalTrackId,
+            navBarBackgroundOpacity = p[K.NAV_BAR_OPACITY] ?: _settings.value.navBarBackgroundOpacity,
+            navBarBlurEffect = p[K.NAV_BAR_BLUR_EFFECT] ?: _settings.value.navBarBlurEffect,
+            navBarHiddenItems = p[K.NAV_BAR_HIDDEN_ITEMS] ?: _settings.value.navBarHiddenItems,
+            headerTopPaddingDp = p[K.HEADER_TOP_PADDING] ?: _settings.value.headerTopPaddingDp,
+            headerBackgroundOpacity = p[K.HEADER_OPACITY] ?: _settings.value.headerBackgroundOpacity,
+            headerBlurStyle = p[K.HEADER_BLUR_STYLE] ?: _settings.value.headerBlurStyle,
+            fabBottomSpacingDp = p[K.FAB_BOTTOM_SPACING] ?: _settings.value.fabBottomSpacingDp,
+        )
+    }
+
+    /**
+     * Initialises the repository by migrating any legacy SharedPreferences/DataStore data into
+     * the unified store, then collecting updates continuously.
+     */
     fun init(context: android.content.Context) {
         if (initialized) return
         initialized = true
         val ctx = context.applicationContext
         appContext = ctx
+        // Synchronously load initial snapshot to avoid race conditions on cold launch
+        runCatching {
+            kotlinx.coroutines.runBlocking(kotlinx.coroutines.Dispatchers.IO) {
+                com.example.data.prefs.LegacyDataMigration.migrateIfNeeded(ctx)
+                val initialPrefs = ctx.unifiedDataStore.data.first()
+                applyPrefs(initialPrefs)
+            }
+        }
         repoScope.launch {
-            com.example.data.prefs.LegacyDataMigration.migrateIfNeeded(ctx)
             ctx.unifiedDataStore.data.collect { p ->
-                _settings.value = _settings.value.copy(
-                    userName = p[K.USER_NAME] ?: _settings.value.userName,
-                    themeMode = p[K.THEME_MODE] ?: _settings.value.themeMode,
-                    isDarkTheme = p[K.IS_DARK_THEME] ?: _settings.value.isDarkTheme,
-                    selectedAccent = p[K.SELECTED_ACCENT] ?: _settings.value.selectedAccent,
-                    cornerRadiusDp = p[K.CORNER_RADIUS] ?: _settings.value.cornerRadiusDp,
-                    proxyPort = p[K.PROXY_PORT] ?: _settings.value.proxyPort,
-                    autoBeautify = p[K.AUTO_BEAUTIFY] ?: _settings.value.autoBeautify,
-                    sslVerification = p[K.SSL_VERIFY] ?: _settings.value.sslVerification,
-                    defaultSnippetLang = p[K.SNIPPET_LANG] ?: _settings.value.defaultSnippetLang,
-                    onboardingCompleted = p[K.ONBOARDING] ?: _settings.value.onboardingCompleted,
-                    appearanceMode = p[K.APPEARANCE_MODE] ?: _settings.value.appearanceMode,
-                    selectedDarkTheme = p[K.SELECTED_DARK_THEME] ?: _settings.value.selectedDarkTheme,
-                    selectedLightTheme = p[K.SELECTED_LIGHT_THEME] ?: _settings.value.selectedLightTheme,
-                    swipeToDeleteEnabled = p[K.SWIPE_TO_DELETE] ?: _settings.value.swipeToDeleteEnabled,
-                    hapticFeedbackEnabled = p[K.HAPTIC_FEEDBACK] ?: _settings.value.hapticFeedbackEnabled,
-                    gestureNavigationEnabled = p[K.GESTURE_NAVIGATION] ?: _settings.value.gestureNavigationEnabled,
-                    densityMode = p[K.DENSITY_MODE] ?: _settings.value.densityMode,
-                    updateNotificationPolicy = p[K.UPDATE_NOTIFICATION_POLICY] ?: _settings.value.updateNotificationPolicy,
-                    animationEnabled = p[K.ANIMATION_ENABLED] ?: _settings.value.animationEnabled,
-                    transitionBehavior = p[K.TRANSITION_BEHAVIOR] ?: _settings.value.transitionBehavior,
-                    displayScale = p[K.DISPLAY_SCALE] ?: _settings.value.displayScale,
-                    autoRecordingEnabled = p[K.AUTO_RECORDING] ?: _settings.value.autoRecordingEnabled,
-                    trafficLogEnabled = p[K.TRAFFIC_LOG] ?: _settings.value.trafficLogEnabled,
-                    recordingNotificationsEnabled = p[K.RECORDING_NOTIFICATIONS] ?: _settings.value.recordingNotificationsEnabled,
-                    remoteControlEnabled = p[K.REMOTE_CONTROL] ?: _settings.value.remoteControlEnabled,
-                    remoteCommandsEnabled = p[K.REMOTE_COMMANDS] ?: _settings.value.remoteCommandsEnabled,
-                    lanDeviceDiscoveryEnabled = p[K.LAN_DISCOVERY] ?: _settings.value.lanDeviceDiscoveryEnabled,
-                    deviceBroadcastingEnabled = p[K.DEVICE_BROADCASTING] ?: _settings.value.deviceBroadcastingEnabled,
-                    trafficCaptureEnabled = p[K.TRAFFIC_CAPTURE] ?: _settings.value.trafficCaptureEnabled,
-                    requestLoggingEnabled = p[K.REQUEST_LOGGING] ?: _settings.value.requestLoggingEnabled,
-                    responseLoggingEnabled = p[K.RESPONSE_LOGGING] ?: _settings.value.responseLoggingEnabled,
-                    musicPermissionStatus = p[K.MUSIC_PERMISSION_STATUS] ?: _settings.value.musicPermissionStatus,
-                    musicBarDismissed = p[K.MUSIC_BAR_DISMISSED] ?: _settings.value.musicBarDismissed,
-                    musicLibraryScanned = p[K.MUSIC_LIBRARY_SCANNED] ?: _settings.value.musicLibraryScanned,
-                    selectedLocalTrackId = p[K.SELECTED_LOCAL_TRACK_ID] ?: _settings.value.selectedLocalTrackId,
-                )
+                applyPrefs(p)
             }
         }
     }
@@ -981,6 +1004,49 @@ object SettingsRepository {
         if (id != null) persist(K.SELECTED_LOCAL_TRACK_ID, id)
     }
 
+    // Navigation & Header Modifier Updaters
+    fun updateNavBarOpacity(opacity: Float) {
+        _settings.value = _settings.value.copy(navBarBackgroundOpacity = opacity)
+        persist(K.NAV_BAR_OPACITY, opacity)
+    }
+
+    fun updateNavBarBlurEffect(effect: String) {
+        _settings.value = _settings.value.copy(navBarBlurEffect = effect)
+        persist(K.NAV_BAR_BLUR_EFFECT, effect)
+    }
+
+    fun toggleNavBarHiddenItem(route: String) {
+        val current = _settings.value.navBarHiddenItems
+        val updated = if (route in current) current - route else current + route
+        _settings.value = _settings.value.copy(navBarHiddenItems = updated)
+        persist(K.NAV_BAR_HIDDEN_ITEMS, updated)
+    }
+
+    fun setNavBarHiddenItems(items: Set<String>) {
+        _settings.value = _settings.value.copy(navBarHiddenItems = items)
+        persist(K.NAV_BAR_HIDDEN_ITEMS, items)
+    }
+
+    fun updateHeaderTopPadding(paddingDp: Int) {
+        _settings.value = _settings.value.copy(headerTopPaddingDp = paddingDp)
+        persist(K.HEADER_TOP_PADDING, paddingDp)
+    }
+
+    fun updateHeaderOpacity(opacity: Float) {
+        _settings.value = _settings.value.copy(headerBackgroundOpacity = opacity)
+        persist(K.HEADER_OPACITY, opacity)
+    }
+
+    fun updateHeaderBlurStyle(style: String) {
+        _settings.value = _settings.value.copy(headerBlurStyle = style)
+        persist(K.HEADER_BLUR_STYLE, style)
+    }
+
+    fun updateFabBottomSpacing(spacingDp: Int) {
+        _settings.value = _settings.value.copy(fabBottomSpacingDp = spacingDp)
+        persist(K.FAB_BOTTOM_SPACING, spacingDp)
+    }
+
     fun updateSettings(newSettings: UserSettingsState) {
         _settings.value = newSettings
         val ctx = appContext ?: return
@@ -1019,6 +1085,13 @@ object SettingsRepository {
                 prefs[K.MUSIC_BAR_DISMISSED] = newSettings.musicBarDismissed
                 prefs[K.MUSIC_LIBRARY_SCANNED] = newSettings.musicLibraryScanned
                 if (newSettings.selectedLocalTrackId != null) prefs[K.SELECTED_LOCAL_TRACK_ID] = newSettings.selectedLocalTrackId
+                prefs[K.NAV_BAR_OPACITY] = newSettings.navBarBackgroundOpacity
+                prefs[K.NAV_BAR_BLUR_EFFECT] = newSettings.navBarBlurEffect
+                prefs[K.NAV_BAR_HIDDEN_ITEMS] = newSettings.navBarHiddenItems
+                prefs[K.HEADER_TOP_PADDING] = newSettings.headerTopPaddingDp
+                prefs[K.HEADER_OPACITY] = newSettings.headerBackgroundOpacity
+                prefs[K.HEADER_BLUR_STYLE] = newSettings.headerBlurStyle
+                prefs[K.FAB_BOTTOM_SPACING] = newSettings.fabBottomSpacingDp
             }
         }
     }
@@ -1034,6 +1107,16 @@ object SettingsRepository {
     }
 
     private fun persist(key: androidx.datastore.preferences.core.Preferences.Key<Boolean>, value: Boolean) {
+        val ctx = appContext ?: return
+        repoScope.launch { ctx.unifiedDataStore.edit { it[key] = value } }
+    }
+
+    private fun persist(key: androidx.datastore.preferences.core.Preferences.Key<Float>, value: Float) {
+        val ctx = appContext ?: return
+        repoScope.launch { ctx.unifiedDataStore.edit { it[key] = value } }
+    }
+
+    private fun persist(key: androidx.datastore.preferences.core.Preferences.Key<Set<String>>, value: Set<String>) {
         val ctx = appContext ?: return
         repoScope.launch { ctx.unifiedDataStore.edit { it[key] = value } }
     }

@@ -390,58 +390,20 @@ fun RequestrApp() {
                 }
             ) {
                 Scaffold(
-                modifier = Modifier.fillMaxSize().nestedScroll(scrollConnection),
-                containerColor = MaterialTheme.colorScheme.background,
-                bottomBar = {
-                    if (showPillNav) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .windowInsetsPadding(WindowInsets.navigationBars)
-                        ) {
-                            // Music mini-player — independent floating element per spec §1-B
-                            if (currentRoute != Screen.Music.route && !isMiniPlayerDismissed) {
-                                MusicMiniPlayer(
-                                    track = currentTrack,
-                                    isPlaying = isMusicPlaying,
-                                    onTogglePlay = { MusicRepository.togglePlayPause() },
-                                    onNext = { MusicRepository.nextTrack() },
-                                    onClose = {
-                                        MusicRepository.stopMusic()
-                                        isMiniPlayerDismissed = true
-                                    },
-                                    onExpand = { navController.navigate(Screen.Music.route) }
-                                )
-                            }
-
-                            // Collapsible glassmorphic navigation pill per requestr_nav_pill_spec.md
-                            CollapsibleNavPill(
-                                currentRoute = currentRoute,
-                                onNavigate = { route ->
-                                    if (currentRoute != route) {
-                                        navController.navigate(route) {
-                                            popUpTo(Screen.Home.route) { saveState = true }
-                                            launchSingleTop = true
-                                            restoreState = true
-                                        }
-                                    }
-                                },
-                                scrollCollapseSignal = scrollDown,
-                                scrollExpandSignal = scrollUp
-                            )
-                        }
-                    }
-                }
-            ) { innerPadding ->
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(innerPadding)
-                ) {
-                    NavHost(
-                        navController = navController,
-                        startDestination = if (settings.onboardingCompleted) Screen.Home.route else Screen.Onboarding.route
+                    modifier = Modifier.fillMaxSize().nestedScroll(scrollConnection),
+                    containerColor = MaterialTheme.colorScheme.background,
+                    contentWindowInsets = WindowInsets(0, 0, 0, 0)
+                ) { innerPadding ->
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(innerPadding)
                     ) {
+                        NavHost(
+                            navController = navController,
+                            startDestination = if (settings.onboardingCompleted) Screen.Home.route else Screen.Onboarding.route,
+                            modifier = Modifier.fillMaxSize()
+                        ) {
                         composable(Screen.Onboarding.route) {
                             OnboardingScreen(
                                 onFinishOnboarding = { name, theme ->
@@ -629,6 +591,49 @@ fun RequestrApp() {
                                     showMiniSettingsForSection = null
                                     navController.navigate(Screen.Settings.route)
                                 }
+                            )
+                        }
+                    }
+
+                    // Floating Nav Pill & Mini Player (No solid filled background block)
+                    if (showPillNav) {
+                        Column(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth()
+                                .windowInsetsPadding(WindowInsets.navigationBars)
+                                .padding(bottom = 4.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            // Music mini-player — ONLY shown while music is actively playing, never on Home or Music screen
+                            if (isMusicPlaying && currentRoute != Screen.Home.route && currentRoute != Screen.Music.route && !isMiniPlayerDismissed) {
+                                MusicMiniPlayer(
+                                    track = currentTrack,
+                                    isPlaying = isMusicPlaying,
+                                    onTogglePlay = { MusicRepository.togglePlayPause() },
+                                    onNext = { MusicRepository.nextTrack() },
+                                    onClose = {
+                                        MusicRepository.stopMusic()
+                                        isMiniPlayerDismissed = true
+                                    },
+                                    onExpand = { navController.navigate(Screen.Music.route) }
+                                )
+                            }
+
+                            // Collapsible glassmorphic navigation pill floating with zero solid background block
+                            CollapsibleNavPill(
+                                currentRoute = currentRoute,
+                                onNavigate = { route ->
+                                    if (currentRoute != route) {
+                                        navController.navigate(route) {
+                                            popUpTo(Screen.Home.route) { saveState = true }
+                                            launchSingleTop = true
+                                            restoreState = true
+                                        }
+                                    }
+                                },
+                                scrollCollapseSignal = scrollDown,
+                                scrollExpandSignal = scrollUp
                             )
                         }
                     }

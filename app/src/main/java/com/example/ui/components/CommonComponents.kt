@@ -1,9 +1,12 @@
 package com.example.ui.components
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
@@ -12,8 +15,12 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.ui.draw.shadow
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -189,7 +196,7 @@ fun LucideMenuIcon(
 @Composable
 fun GlassActionPill(
     icon: ImageVector? = null,
-    contentDescription: String?,
+    contentDescription: String? = null,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     tint: Color = MaterialTheme.colorScheme.onSurface,
@@ -199,6 +206,10 @@ fun GlassActionPill(
     customIcon: (@Composable () -> Unit)? = null
 ) {
     val haptics = rememberAppHapticFeedback()
+    val settings by SettingsRepository.settings.collectAsState()
+    val opacity = settings.headerBackgroundOpacity.coerceIn(0.2f, 1f)
+    val blurStyle = settings.headerBlurStyle
+
     var isPressed by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(
         targetValue = if (isPressed) 0.90f else 1.0f,
@@ -206,15 +217,48 @@ fun GlassActionPill(
         label = "glassPillScale"
     )
 
+    val bgBrush = when (blurStyle) {
+        "SOLID_M3" -> Brush.verticalGradient(
+            listOf(MaterialTheme.colorScheme.surface, MaterialTheme.colorScheme.surfaceVariant)
+        )
+        "OLED_BLACK" -> Brush.verticalGradient(
+            listOf(Color.Black.copy(alpha = opacity), Color(0xFF0F172A).copy(alpha = opacity))
+        )
+        "TRANSLUCENT" -> Brush.verticalGradient(
+            listOf(
+                MaterialTheme.colorScheme.surface.copy(alpha = (opacity * 0.65f).coerceIn(0.2f, 1f)),
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = (opacity * 0.45f).coerceIn(0.2f, 1f))
+            )
+        )
+        else -> Brush.verticalGradient( // FROSTED_GLASS
+            listOf(
+                MaterialTheme.colorScheme.surface.copy(alpha = opacity),
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = (opacity * 0.95f).coerceIn(0.2f, 1f))
+            )
+        )
+    }
+
+    val borderColor = when (blurStyle) {
+        "SOLID_M3" -> MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+        "OLED_BLACK" -> Color.White.copy(alpha = 0.15f)
+        else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.30f)
+    }
+
     Box(
         modifier = modifier
             .size(size)
             .scale(scale)
+            .shadow(
+                elevation = 6.dp,
+                shape = RoundedCornerShape(14.dp),
+                ambientColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f),
+                spotColor = Color.Black.copy(alpha = 0.15f)
+            )
             .clip(RoundedCornerShape(14.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f))
+            .background(bgBrush)
             .border(
-                0.6.dp,
-                MaterialTheme.colorScheme.outline.copy(alpha = 0.35f),
+                0.8.dp,
+                borderColor,
                 RoundedCornerShape(14.dp)
             )
             .pointerInput(Unit) {
@@ -257,107 +301,202 @@ fun GlassActionPill(
 }
 
 /**
- * Dynamic iOS-style Frosted Glass Header.
- * Stays positioned cleanly above scrollable content in a static hovered glass capsule.
+ * Floating Capsule Header (Android 12+ Material 3 dynamic styling).
+ * Detached overlay composed of independent floating rounded controls:
+ * - Leading navigation capsule (menu or back button) + Left-Aligned Title Capsule
+ * - Trailing independent action capsules
+ * - Configurable top status bar offset, opacity, and glass blur styling
+ * Never merges into a solid toolbar container; floats cleanly above scrollable content.
+ */
+@Composable
+fun FloatingCapsuleHeader(
+    title: String,
+    modifier: Modifier = Modifier,
+    icon: ImageVector? = null,
+    onOpenDrawer: (() -> Unit)? = null,
+    onBack: (() -> Unit)? = null,
+    leadingContent: (@Composable () -> Unit)? = null,
+    showWordmarkDot: Boolean = true,
+    statusDotColor: Color? = null,
+    trailingContent: @Composable (RowScope.() -> Unit)? = null
+) {
+    val settings by SettingsRepository.settings.collectAsState()
+    val topPadding = (6 + settings.headerTopPaddingDp).dp
+    val opacity = settings.headerBackgroundOpacity.coerceIn(0.2f, 1f)
+    val blurStyle = settings.headerBlurStyle
+
+    val bgBrush = when (blurStyle) {
+        "SOLID_M3" -> Brush.verticalGradient(
+            listOf(MaterialTheme.colorScheme.surface, MaterialTheme.colorScheme.surfaceVariant)
+        )
+        "OLED_BLACK" -> Brush.verticalGradient(
+            listOf(Color.Black.copy(alpha = opacity), Color(0xFF0F172A).copy(alpha = opacity))
+        )
+        "TRANSLUCENT" -> Brush.verticalGradient(
+            listOf(
+                MaterialTheme.colorScheme.surface.copy(alpha = (opacity * 0.65f).coerceIn(0.2f, 1f)),
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = (opacity * 0.45f).coerceIn(0.2f, 1f))
+            )
+        )
+        else -> Brush.verticalGradient( // FROSTED_GLASS
+            listOf(
+                MaterialTheme.colorScheme.surface.copy(alpha = opacity),
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = (opacity * 0.95f).coerceIn(0.2f, 1f))
+            )
+        )
+    }
+
+    val borderColor = when (blurStyle) {
+        "SOLID_M3" -> MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+        "OLED_BLACK" -> Color.White.copy(alpha = 0.15f)
+        else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.30f)
+    }
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 16.dp, top = topPadding, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        // Left-Aligned: Leading Navigation Capsule + Left-Aligned Title Capsule
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.weight(1f, fill = false)
+        ) {
+            if (leadingContent != null) {
+                leadingContent()
+            } else if (onBack != null) {
+                GlassActionPill(
+                    icon = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    onClick = onBack
+                )
+            } else if (onOpenDrawer != null) {
+                GlassActionPill(
+                    contentDescription = "Open Navigation Menu",
+                    onClick = onOpenDrawer,
+                    customIcon = {
+                        LucideMenuIcon(tint = MaterialTheme.colorScheme.onSurface)
+                    }
+                )
+            }
+
+            // Dynamically Sized Left-Aligned Identity Capsule: ( icon title • )
+            Box(
+                modifier = Modifier
+                    .shadow(
+                        elevation = 6.dp,
+                        shape = RoundedCornerShape(18.dp),
+                        ambientColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f),
+                        spotColor = Color.Black.copy(alpha = 0.12f)
+                    )
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(bgBrush)
+                    .border(
+                        0.8.dp,
+                        borderColor,
+                        RoundedCornerShape(18.dp)
+                    )
+                    .animateContentSize(
+                        animationSpec = spring(
+                            dampingRatio = Spring.DampingRatioMediumBouncy,
+                            stiffness = Spring.StiffnessMediumLow
+                        )
+                    )
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Start
+                ) {
+                    if (icon != null) {
+                        Icon(
+                            imageVector = icon,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                    }
+
+                    // Text cross-fade in place
+                    AnimatedContent(
+                        targetState = title,
+                        transitionSpec = {
+                            fadeIn(animationSpec = tween(durationMillis = 180, delayMillis = 60))
+                                .togetherWith(fadeOut(animationSpec = tween(durationMillis = 100)))
+                        },
+                        label = "titleTextFade"
+                    ) { targetTitle ->
+                        if (targetTitle.equals("requestr", ignoreCase = true)) {
+                            RequestrWordmark(fontSize = 17)
+                        } else {
+                            Text(
+                                text = targetTitle.lowercase(),
+                                fontFamily = FontFamily.SansSerif,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.5.sp,
+                                letterSpacing = (-0.2).sp,
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+
+                    // Trailing status dot (if not requestr wordmark which already has its own dot)
+                    if (showWordmarkDot && !title.equals("requestr", ignoreCase = true)) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Box(
+                            modifier = Modifier
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(statusDotColor ?: MaterialTheme.colorScheme.primary)
+                        )
+                    }
+                }
+            }
+        }
+
+        // Trailing Independent Action Capsules
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            if (trailingContent != null) {
+                trailingContent()
+            }
+        }
+    }
+}
+
+/**
+ * Dynamic Frosted Glass Header alias for FloatingCapsuleHeader.
  */
 @Composable
 fun DynamicGlassHeader(
     title: String,
     modifier: Modifier = Modifier,
+    icon: ImageVector? = null,
     onOpenDrawer: (() -> Unit)? = null,
     onBack: (() -> Unit)? = null,
     showWordmarkDot: Boolean = true,
+    statusDotColor: Color? = null,
     trailingContent: @Composable (RowScope.() -> Unit)? = null
 ) {
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(20.dp))
-                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.88f))
-                .border(
-                    0.5.dp,
-                    MaterialTheme.colorScheme.outline.copy(alpha = 0.30f),
-                    RoundedCornerShape(20.dp)
-                )
-                .padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            // Left Action Pill: Back button or 3-lines Lucide menu icon
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                if (onBack != null) {
-                    GlassActionPill(
-                        icon = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back",
-                        onClick = onBack
-                    )
-                } else if (onOpenDrawer != null) {
-                    GlassActionPill(
-                        contentDescription = "Open Navigation Menu",
-                        onClick = onOpenDrawer,
-                        customIcon = {
-                            LucideMenuIcon(tint = MaterialTheme.colorScheme.onSurface)
-                        }
-                    )
-                }
-
-                // Center/Left Title Pill
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.50f))
-                        .border(
-                            0.5.dp,
-                            MaterialTheme.colorScheme.outline.copy(alpha = 0.20f),
-                            RoundedCornerShape(14.dp)
-                        )
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                ) {
-                    if (title.equals("requestr", ignoreCase = true)) {
-                        RequestrWordmark(fontSize = 18)
-                    } else {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = title.lowercase(),
-                                fontFamily = FontFamily.SansSerif,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 16.sp,
-                                letterSpacing = (-0.3).sp,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            if (showWordmarkDot) {
-                                Spacer(modifier = Modifier.width(5.dp))
-                                Box(
-                                    modifier = Modifier
-                                        .size(6.dp)
-                                        .clip(CircleShape)
-                                        .background(MaterialTheme.colorScheme.primary)
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Right Trailing Action Pills
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                if (trailingContent != null) {
-                    trailingContent()
-                }
-            }
-        }
-    }
+    FloatingCapsuleHeader(
+        title = title,
+        icon = icon,
+        modifier = modifier,
+        onOpenDrawer = onOpenDrawer,
+        onBack = onBack,
+        showWordmarkDot = showWordmarkDot,
+        statusDotColor = statusDotColor,
+        trailingContent = trailingContent
+    )
 }
 
 /**
@@ -621,16 +760,22 @@ val LocalAppDrawerController = androidx.compose.runtime.compositionLocalOf<(() -
 fun SectionHeader(
     title: String,
     modifier: Modifier = Modifier,
+    icon: ImageVector? = null,
     onBack: (() -> Unit)? = null,
     onMiniSettings: (() -> Unit)? = null,
+    showWordmarkDot: Boolean = true,
+    statusDotColor: Color? = null,
     actions: @Composable (() -> Unit)? = null
 ) {
     val drawerController = LocalAppDrawerController.current
-    DynamicGlassHeader(
+    FloatingCapsuleHeader(
         title = title,
+        icon = icon,
         modifier = modifier,
         onOpenDrawer = if (onBack == null) drawerController else null,
         onBack = onBack,
+        showWordmarkDot = showWordmarkDot,
+        statusDotColor = statusDotColor,
         trailingContent = {
             if (actions != null) {
                 actions()
@@ -652,7 +797,8 @@ fun SearchInputField(
     onQueryChange: (String) -> Unit,
     placeholder: String,
     modifier: Modifier = Modifier,
-    onClear: (() -> Unit)? = null
+    onClear: (() -> Unit)? = null,
+    onOpenFilter: (() -> Unit)? = null
 ) {
     OutlinedTextField(
         value = query,
@@ -672,6 +818,15 @@ fun SearchInputField(
                     Icon(
                         imageVector = Icons.Default.Close,
                         contentDescription = "Clear",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            } else if (onOpenFilter != null) {
+                IconButton(onClick = onOpenFilter) {
+                    Icon(
+                        imageVector = Icons.Default.Tune,
+                        contentDescription = "Advanced Filters",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(18.dp)
                     )
@@ -1205,6 +1360,164 @@ fun InPageMiniSettingsSheet(
             }
 
             Spacer(modifier = Modifier.height(24.dp))
+        }
+    }
+}
+
+/**
+ * Standardized Pill-Styled Segmented Tabs (Selected: Full Pill 24dp, Non-Selected: Polished 10dp).
+ */
+@Composable
+fun <T> RequestrSegmentedTabs(
+    items: List<T>,
+    selectedItem: T,
+    onItemSelected: (T) -> Unit,
+    label: (T) -> String,
+    modifier: Modifier = Modifier,
+    badge: @Composable ((T) -> Unit)? = null,
+    icon: ((T) -> ImageVector?)? = null,
+    equalWeight: Boolean = false,
+    horizontalPadding: Dp = 4.dp,
+    verticalPadding: Dp = 4.dp
+) {
+    val haptics = rememberAppHapticFeedback()
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(26.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+            .border(
+                0.8.dp,
+                MaterialTheme.colorScheme.outline.copy(alpha = 0.2f),
+                RoundedCornerShape(26.dp)
+            )
+            .padding(horizontal = horizontalPadding, vertical = verticalPadding),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        items.forEach { item ->
+            val isSelected = item == selectedItem
+            val targetBg = if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent
+            val targetFg = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+            val targetBorder = if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.5f) else Color.Transparent
+
+            val bgAnim by androidx.compose.animation.animateColorAsState(targetValue = targetBg, animationSpec = tween(200), label = "tabBg")
+            val fgAnim by androidx.compose.animation.animateColorAsState(targetValue = targetFg, animationSpec = tween(200), label = "tabFg")
+            val shapeAnim by animateDpAsState(targetValue = if (isSelected) 24.dp else 10.dp, animationSpec = tween(200), label = "tabShape")
+
+            val itemModifier = if (equalWeight) Modifier.weight(1f) else Modifier
+            Box(
+                modifier = itemModifier
+                    .clip(RoundedCornerShape(shapeAnim))
+                    .background(bgAnim)
+                    .border(
+                        width = if (isSelected) 1.dp else 0.dp,
+                        color = targetBorder,
+                        shape = RoundedCornerShape(shapeAnim)
+                    )
+                    .clickable {
+                        if (!isSelected) {
+                            haptics(HapticFeedbackType.TextHandleMove)
+                            onItemSelected(item)
+                        }
+                    }
+                    .padding(horizontal = 12.dp, vertical = 7.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    val ic = icon?.invoke(item)
+                    if (ic != null) {
+                        Icon(
+                            imageVector = ic,
+                            contentDescription = null,
+                            tint = fgAnim,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                    }
+                    Text(
+                        text = label(item),
+                        fontSize = 12.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                        color = fgAnim,
+                        maxLines = 1
+                    )
+                    if (badge != null) {
+                        badge(item)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Standardized Filter Chip (Selected: Full Pill 24dp, Non-Selected: Polished 10dp).
+ */
+@Composable
+fun RequestrFilterChip(
+    selected: Boolean,
+    onClick: () -> Unit,
+    label: String,
+    modifier: Modifier = Modifier,
+    count: Int? = null,
+    icon: ImageVector? = null
+) {
+    val haptics = rememberAppHapticFeedback()
+    val shape = if (selected) RoundedCornerShape(24.dp) else RoundedCornerShape(10.dp)
+    val bg = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+    val fg = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+    val border = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)
+
+    Box(
+        modifier = modifier
+            .clip(shape)
+            .background(bg)
+            .border(0.8.dp, border, shape)
+            .clickable {
+                haptics(HapticFeedbackType.TextHandleMove)
+                onClick()
+            }
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            if (icon != null) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = fg,
+                    modifier = Modifier.size(14.dp)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+            }
+            Text(
+                text = label,
+                fontSize = 11.sp,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                color = fg
+            )
+            if (count != null && count > 0) {
+                Spacer(modifier = Modifier.width(4.dp))
+                Box(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(if (selected) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.25f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.15f))
+                        .padding(horizontal = 5.dp, vertical = 1.dp)
+                ) {
+                    Text(
+                        text = "$count",
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
         }
     }
 }

@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.Button
@@ -60,7 +61,10 @@ import com.example.data.models.NoteFormatType
 import com.example.data.models.NoteItem
 import com.example.data.repository.NoteFolder
 import com.example.data.repository.NotesRepository
+import com.example.data.repository.SettingsRepository
+import com.example.ui.components.GlassActionPill
 import com.example.ui.components.GlassCard
+import com.example.ui.components.RequestrFilterChip
 import com.example.ui.components.SearchInputField
 import com.example.ui.components.SectionHeader
 import com.example.ui.theme.TextMuted
@@ -276,63 +280,47 @@ fun NotesScreen(
         }
     } else {
         // Main Notes List View
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.background)
         ) {
-            SectionHeader(
-                title = "Notes & Docs",
-                onMiniSettings = onMiniSettings,
-                actions = {
-                    IconButton(onClick = { isCreatingNew = true }) {
-                        Icon(imageVector = Icons.Default.Add, contentDescription = "New Note", tint = MaterialTheme.colorScheme.primary)
-                    }
-                }
-            )
-
-            Box(modifier = Modifier.padding(horizontal = 16.dp)) {
-                SearchInputField(
-                    query = searchQuery,
-                    onQueryChange = { searchQuery = it },
-                    placeholder = "Search notes & documentation...",
-                    onClear = { searchQuery = "" }
-                )
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // Folders Row
-            Row(
+            Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp)
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    .fillMaxSize()
+                    .padding(top = 58.dp)
             ) {
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(if (selectedFolderId == null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
-                        .clickable { selectedFolderId = null }
-                        .padding(horizontal = 12.dp, vertical = 7.dp)
-                ) {
-                    Text("All Notes", color = if (selectedFolderId == null) Color.White else TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+                    SearchInputField(
+                        query = searchQuery,
+                        onQueryChange = { searchQuery = it },
+                        placeholder = "Search notes & documentation...",
+                        onClear = { searchQuery = "" }
+                    )
                 }
 
-                folders.forEach { f ->
-                    val isSelected = selectedFolderId == f.id
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(if (isSelected) Color(f.colorHex) else MaterialTheme.colorScheme.surfaceVariant)
-                            .clickable { selectedFolderId = f.id }
-                            .padding(horizontal = 12.dp, vertical = 7.dp)
-                    ) {
-                        Text("${f.iconEmoji} ${f.name}", color = if (isSelected) Color.White else TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                // Folders Row
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    RequestrFilterChip(
+                        selected = selectedFolderId == null,
+                        onClick = { selectedFolderId = null },
+                        label = "All Notes"
+                    )
+
+                    folders.forEach { f ->
+                        RequestrFilterChip(
+                            selected = selectedFolderId == f.id,
+                            onClick = { selectedFolderId = f.id },
+                            label = "${f.iconEmoji} ${f.name}"
+                        )
                     }
                 }
-            }
 
             Spacer(modifier = Modifier.height(14.dp))
 
@@ -401,7 +389,30 @@ fun NotesScreen(
                         }
                     }
                 }
+
+                item {
+                    val settings by SettingsRepository.settings.collectAsState()
+                    Spacer(modifier = Modifier.height((settings.fabBottomSpacingDp + 48).dp))
+                }
             }
         }
+
+        SectionHeader(
+            title = "Notes & Docs",
+            icon = Icons.Default.Description,
+            onMiniSettings = onMiniSettings,
+            actions = {
+                GlassActionPill(
+                    icon = Icons.Default.Add,
+                    contentDescription = "New Note",
+                    tint = MaterialTheme.colorScheme.primary,
+                    onClick = { isCreatingNew = true }
+                )
+            },
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 4.dp)
+        )
     }
+}
 }

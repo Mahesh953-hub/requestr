@@ -140,13 +140,17 @@ import com.example.data.models.RuleAction
 import com.example.data.models.TrafficRuleItem
 import com.example.data.models.CertificateDetails
 import com.example.data.repository.FridaScript
+import com.example.data.repository.SettingsRepository
 import com.example.data.repository.TrafficInterceptorRepository
 import com.example.ui.components.ContextActionItem
 import com.example.ui.components.ContextualActionMenuDialog
 import com.example.ui.components.ConfirmActionDialog
+import com.example.ui.components.GlassActionPill
 import com.example.ui.components.GlassCard
 import com.example.ui.components.MethodBadge
 import com.example.ui.components.ProtocolBadge
+import com.example.ui.components.RequestrFilterChip
+import com.example.ui.components.RequestrSegmentedTabs
 import com.example.ui.components.SearchInputField
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.StatusCodeBadge
@@ -200,6 +204,7 @@ fun InterceptScreen(
 
     // Persisted capture settings. These are the same values the VpnService reads, so what the
     // picker shows is exactly what gets applied.
+    val globalSettings by SettingsRepository.settings.collectAsState()
     val settings = remember(screenContext) { SettingsDataStore.get(screenContext) }
     val appFilterMode by settings.appFilterMode.collectAsState(initial = AppFilterMode.ALL_APPS)
     val selectedPackages by settings.selectedPackages.collectAsState(initial = emptySet())
@@ -272,24 +277,11 @@ fun InterceptScreen(
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            // Decluttered header (APP_v2.md Bug 3.7): title plus a single setup entry point.
-            // The four capability chips and the app/rule/clear actions moved into the
-            // "Capture setup" sheet rather than competing for the top bar.
-            SectionHeader(
-                title = "Interceptr",
-                onMiniSettings = onMiniSettings,
-                actions = {
-                    IconButton(onClick = { showCaptureSetupSheet = true }) {
-                        Icon(
-                            imageVector = Icons.Default.Tune,
-                            contentDescription = "Capture setup",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                }
-            )
-
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(top = 58.dp)
+        ) {
             // Live status readout. Every value here is real: status, tier, port and the packet
             // counter written by the capture engine.
             GlassCard(
@@ -304,7 +296,10 @@ fun InterceptScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f, fill = false)
+                        ) {
                             Box(
                                 modifier = Modifier
                                     .size(8.dp)
@@ -338,9 +333,13 @@ fun InterceptScreen(
                                 fontFamily = FontFamily.Monospace,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                         }
+
+                        Spacer(modifier = Modifier.width(8.dp))
 
                         Text(
                             text = "$vpnPacketsCount pkts / ${formatByteCount(vpnBytesTransferred)}",
@@ -348,25 +347,26 @@ fun InterceptScreen(
                             fontSize = 10.sp,
                             color = MaterialTheme.colorScheme.primary
                         )
+                    }
 
-                        // Honest decryption status
-                        val decryptText = when {
-                            interceptionState.decryptedTransactionCount > 0 ->
-                                "HTTPS DECRYPTED ✓ · ${interceptionState.decryptedTransactionCount} transactions"
-                            interceptionState.captureMethod == CaptureMethod.VPN_TUN ->
-                                "PLAINTEXT ONLY · HTTPS bodies not captured"
-                            interceptionState.tier == ActiveTier.PROXY ->
-                                "PROXY · decrypting..."
-                            else -> ""
-                        }
-                        if (decryptText.isNotEmpty()) {
-                            Text(
-                                text = decryptText,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 9.sp,
-                                color = if (interceptionState.decryptedTransactionCount > 0) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
+                    // Honest decryption status
+                    val decryptText = when {
+                        interceptionState.decryptedTransactionCount > 0 ->
+                            "HTTPS DECRYPTED ✓ · ${interceptionState.decryptedTransactionCount} transactions"
+                        interceptionState.captureMethod == CaptureMethod.VPN_TUN ->
+                            "PLAINTEXT ONLY · HTTPS bodies not captured"
+                        interceptionState.tier == ActiveTier.PROXY ->
+                            "PROXY · decrypting..."
+                        else -> ""
+                    }
+                    if (decryptText.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = decryptText,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 9.5.sp,
+                            color = if (interceptionState.decryptedTransactionCount > 0) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
 
                     // A real error is shown verbatim instead of being swallowed.
@@ -404,38 +404,22 @@ fun InterceptScreen(
                         .horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(if (selectedMethodFilter == null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
-                            .clickable { selectedMethodFilter = null }
-                            .padding(horizontal = 10.dp, vertical = 5.dp)
-                    ) {
-                        Text(
-                            text = "ALL (${capturedTraffic.size})",
-                            color = if (selectedMethodFilter == null) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
+                    RequestrFilterChip(
+                        selected = selectedMethodFilter == null,
+                        onClick = { selectedMethodFilter = null },
+                        label = "ALL",
+                        count = capturedTraffic.size
+                    )
 
                     HttpMethod.values().forEach { method ->
                         val isSelected = selectedMethodFilter == method
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
-                            .clickable { selectedMethodFilter = if (isSelected) null else method }
-                            .padding(horizontal = 10.dp, vertical = 5.dp)
-                        ) {
-                            Text(
-                                text = method.name,
-                                color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace
-                            )
-                        }
+                        val count = capturedTraffic.count { it.method == method }
+                        RequestrFilterChip(
+                            selected = isSelected,
+                            onClick = { selectedMethodFilter = if (isSelected) null else method },
+                            label = method.name,
+                            count = if (count > 0) count else null
+                        )
                     }
                 }
             }
@@ -523,7 +507,7 @@ fun InterceptScreen(
                             onLongClick = { itemForContextMenu = item }
                         )
                     }
-                    item { Spacer(modifier = Modifier.height(80.dp)) }
+                    item { Spacer(modifier = Modifier.height((globalSettings.fabBottomSpacingDp + 48).dp)) }
                 }
             }
         }
@@ -562,7 +546,7 @@ fun InterceptScreen(
             shape = CircleShape,
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .padding(bottom = 16.dp, end = 20.dp)
+                .padding(bottom = (globalSettings.fabBottomSpacingDp).dp, end = 20.dp)
                 .scale(pulseScale)
                 .size(56.dp)
         ) {
@@ -575,6 +559,22 @@ fun InterceptScreen(
                 )
             }
         }
+
+        SectionHeader(
+            title = "Interceptr",
+            icon = Icons.Default.Radar,
+            onMiniSettings = onMiniSettings,
+            actions = {
+                GlassActionPill(
+                    icon = Icons.Default.Tune,
+                    contentDescription = "Capture setup",
+                    onClick = { showCaptureSetupSheet = true }
+                )
+            },
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 4.dp)
+        )
     }
 
     // ── Debug log: shows every interception state change in real-time ──
@@ -2307,24 +2307,14 @@ fun CapturedDetailBottomSheet(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            TabRow(
-                selectedTabIndex = selectedTab,
-                containerColor = Color.Transparent,
-                indicator = { tabPositions ->
-                    SecondaryIndicator(
-                        modifier = Modifier.tabIndicatorOffset(tabPositions[selectedTab]),
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-            ) {
-                listOf("Overview", "Headers", "Body", "Timing", "TLS", "Raw").forEachIndexed { idx, title ->
-                    Tab(
-                        selected = selectedTab == idx,
-                        onClick = { selectedTab = idx },
-                        text = { Text(title, fontSize = 11.sp, fontWeight = if (selectedTab == idx) FontWeight.Bold else FontWeight.Normal) }
-                    )
-                }
-            }
+            val detailTabs = listOf("Overview", "Headers", "Body", "Timing", "TLS", "Raw")
+            RequestrSegmentedTabs(
+                items = detailTabs,
+                selectedItem = detailTabs.getOrElse(selectedTab) { "Overview" },
+                onItemSelected = { selectedTab = detailTabs.indexOf(it) },
+                label = { it },
+                modifier = Modifier.fillMaxWidth()
+            )
 
             Spacer(modifier = Modifier.height(12.dp))
 

@@ -105,10 +105,10 @@ fun OnboardingScreen(
     var currentStep by remember { mutableIntStateOf(1) }
     var userName by remember { mutableStateOf(settings.userName.ifBlank { "Operator" }) }
 
-    // Appearance State
-    var isDarkSelected by remember { mutableStateOf(settings.appearanceMode.uppercase() != "LIGHT") }
+    // Appearance State — Defaults to Device Default (SYSTEM)
+    var appearanceMode by remember { mutableStateOf(settings.appearanceMode.ifBlank { "SYSTEM" }) }
     var selectedAccent by remember {
-        mutableStateOf(AppAccent.fromKey(if (isDarkSelected) settings.selectedDarkTheme else settings.selectedLightTheme))
+        mutableStateOf(AppAccent.fromKey(if (settings.selectedAccent.isNotBlank()) settings.selectedAccent else settings.themeMode))
     }
 
     val context = LocalContext.current
@@ -228,14 +228,16 @@ fun OnboardingScreen(
                             accent = selectedAccent
                         )
                         3 -> OnboardingThemeStep(
-                            isDark = isDarkSelected,
-                            onModeToggle = { isDark ->
-                                isDarkSelected = isDark
-                                SettingsRepository.updateAppearanceMode(if (isDark) "DARK" else "LIGHT")
+                            appearanceMode = appearanceMode,
+                            onModeChange = { mode ->
+                                appearanceMode = mode
+                                SettingsRepository.updateAppearanceMode(mode)
+                                SettingsRepository.updateIsDarkTheme(mode == "DARK")
                             },
                             selectedAccent = selectedAccent,
                             onAccentSelect = { accent ->
                                 selectedAccent = accent
+                                SettingsRepository.updateSelectedAccent(accent.name)
                                 SettingsRepository.updateThemeSelection(accent.name)
                             }
                         )
@@ -285,8 +287,8 @@ fun OnboardingScreen(
                                 currentStep++
                             } else {
                                 SettingsRepository.updateUserName(userName)
-                                SettingsRepository.updateIsDarkTheme(isDarkSelected)
-                                SettingsRepository.updateAppearanceMode(if (isDarkSelected) "DARK" else "LIGHT")
+                                SettingsRepository.updateAppearanceMode(appearanceMode)
+                                SettingsRepository.updateIsDarkTheme(appearanceMode == "DARK")
                                 SettingsRepository.updateSelectedAccent(selectedAccent.name)
                                 SettingsRepository.updateThemeSelection(selectedAccent.name)
                                 SettingsRepository.setOnboardingCompleted(true)
@@ -681,8 +683,8 @@ private fun DiagnosticCard(
 
 @Composable
 private fun OnboardingThemeStep(
-    isDark: Boolean,
-    onModeToggle: (Boolean) -> Unit,
+    appearanceMode: String,
+    onModeChange: (String) -> Unit,
     selectedAccent: AppAccent,
     onAccentSelect: (AppAccent) -> Unit
 ) {
@@ -704,7 +706,7 @@ private fun OnboardingThemeStep(
         Spacer(modifier = Modifier.height(4.dp))
 
         Text(
-            text = "Select your base mode and Android 17+ Pixel dynamic accent.",
+            text = "Select your appearance mode and Android 17+ Pixel dynamic accent.",
             fontSize = 13.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center
@@ -712,38 +714,63 @@ private fun OnboardingThemeStep(
 
         Spacer(modifier = Modifier.height(18.dp))
 
-        // Base Mode Pill Switcher (Light vs Dark)
+        // Base Mode 3-Way Pill Switcher (System vs Light vs Dark)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(18.dp))
                 .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
                 .padding(4.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            // Light Mode Pill
+            // System (Device Default) Pill
+            val isSystem = appearanceMode.equals("SYSTEM", ignoreCase = true)
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .clip(RoundedCornerShape(14.dp))
-                    .background(if (!isDark) MaterialTheme.colorScheme.surface else Color.Transparent)
+                    .background(if (isSystem) MaterialTheme.colorScheme.surface else Color.Transparent)
                     .border(
-                        if (!isDark) 0.8.dp else 0.dp,
-                        if (!isDark) MaterialTheme.colorScheme.outline.copy(alpha = 0.3f) else Color.Transparent,
+                        if (isSystem) 0.8.dp else 0.dp,
+                        if (isSystem) MaterialTheme.colorScheme.outline.copy(alpha = 0.3f) else Color.Transparent,
                         RoundedCornerShape(14.dp)
                     )
-                    .clickable { onModeToggle(false) }
+                    .clickable { onModeChange("SYSTEM") }
                     .padding(vertical = 10.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(imageVector = Icons.Default.LightMode, contentDescription = null, tint = if (!isDark) selectedAccent.primary else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Light Mode", fontSize = 13.sp, fontWeight = if (!isDark) FontWeight.Bold else FontWeight.Medium, color = if (!isDark) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
+                    Icon(imageVector = Icons.Default.SettingsBrightness, contentDescription = null, tint = if (isSystem) selectedAccent.primary else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(15.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Auto", fontSize = 12.sp, fontWeight = if (isSystem) FontWeight.Bold else FontWeight.Medium, color = if (isSystem) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+
+            // Light Mode Pill
+            val isLight = appearanceMode.equals("LIGHT", ignoreCase = true)
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(if (isLight) MaterialTheme.colorScheme.surface else Color.Transparent)
+                    .border(
+                        if (isLight) 0.8.dp else 0.dp,
+                        if (isLight) MaterialTheme.colorScheme.outline.copy(alpha = 0.3f) else Color.Transparent,
+                        RoundedCornerShape(14.dp)
+                    )
+                    .clickable { onModeChange("LIGHT") }
+                    .padding(vertical = 10.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(imageVector = Icons.Default.LightMode, contentDescription = null, tint = if (isLight) selectedAccent.primary else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(15.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Light", fontSize = 12.sp, fontWeight = if (isLight) FontWeight.Bold else FontWeight.Medium, color = if (isLight) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
 
             // Dark Mode Pill
+            val isDark = appearanceMode.equals("DARK", ignoreCase = true)
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -754,14 +781,14 @@ private fun OnboardingThemeStep(
                         if (isDark) MaterialTheme.colorScheme.outline.copy(alpha = 0.3f) else Color.Transparent,
                         RoundedCornerShape(14.dp)
                     )
-                    .clickable { onModeToggle(true) }
+                    .clickable { onModeChange("DARK") }
                     .padding(vertical = 10.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(imageVector = Icons.Default.DarkMode, contentDescription = null, tint = if (isDark) selectedAccent.primary else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Dark Mode", fontSize = 13.sp, fontWeight = if (isDark) FontWeight.Bold else FontWeight.Medium, color = if (isDark) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
+                    Icon(imageVector = Icons.Default.DarkMode, contentDescription = null, tint = if (isDark) selectedAccent.primary else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(15.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Dark", fontSize = 12.sp, fontWeight = if (isDark) FontWeight.Bold else FontWeight.Medium, color = if (isDark) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }

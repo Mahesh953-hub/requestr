@@ -84,10 +84,8 @@ fun AppNavigationDrawer(
     ModalNavigationDrawer(
         drawerState = drawerState,
         scrimColor = Color.Black.copy(alpha = 0.5f),
-        // B5: when disabled, the edge-swipe gesture that opens this drawer is turned off so it
-        // no longer fights with the system back-gesture nav; the drawer remains fully usable via
-        // the hamburger icon regardless of this setting.
-        gesturesEnabled = settings.gestureNavigationEnabled,
+        // Swipe to open gesture disabled completely per user requirement
+        gesturesEnabled = false,
         drawerContent = {
             ModalDrawerSheet(
                 drawerContainerColor = MaterialTheme.colorScheme.surface,
@@ -208,31 +206,68 @@ fun AppNavigationDrawer(
 
                     // Navigation Items
                     val navItems = listOf(
-                        DrawerNavItem("home", "All Dashboard", Icons.Default.Home),
-                        DrawerNavItem("intercept", "HTTP(S) Interceptor", Icons.Default.Radar),
-                        DrawerNavItem("apis", "API Testr Client", Icons.Default.Public),
-                        DrawerNavItem("tools", "Security & Dev Tools", Icons.Default.Tune),
-                        DrawerNavItem("notes", "Notes & Documentation", Icons.Default.Notes),
-                        DrawerNavItem("flow", "Flow Automation (n8n)", Icons.Default.Code),
-                        DrawerNavItem("chat", "AI Chat Assistant", Icons.Default.AutoAwesome),
-                        DrawerNavItem("music", "Synth LoFi Lounge", Icons.Default.MusicNote)
+                        DrawerNavItem("home", "Home", Icons.Default.Home),
+                        DrawerNavItem("intercept", "Interceptr", Icons.Default.Radar),
+                        DrawerNavItem("apis", "API Testr", Icons.Default.Public),
+                        DrawerNavItem("tools", "Tools", Icons.Default.Tune),
+                        DrawerNavItem("notes", "Notes", Icons.Default.Notes),
+                        DrawerNavItem("flow", "Flow", Icons.Default.Code),
+                        DrawerNavItem("chat", "Reqy Assistant", Icons.Default.AutoAwesome),
+                        DrawerNavItem("music", "Music", Icons.Default.MusicNote)
                     )
 
                     navItems.forEach { item ->
                         val isSelected = currentRoute == item.route
+                        val isInterceptItem = item.route == "intercept"
+                        val itemShape = if (isSelected) RoundedCornerShape(24.dp) else RoundedCornerShape(12.dp)
+
                         NavigationDrawerItem(
                             label = {
-                                Text(
-                                    text = item.title,
-                                    fontSize = 13.sp,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = item.title,
+                                        fontSize = 13.5.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                    )
+                                    if (isInterceptItem && isCapturing) {
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .background(InterceptorActiveGreen.copy(alpha = 0.18f))
+                                                .border(0.8.dp, InterceptorActiveGreen.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                        ) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(5.dp)
+                                                        .clip(CircleShape)
+                                                        .background(InterceptorActiveGreen)
+                                                )
+                                                Spacer(modifier = Modifier.width(4.dp))
+                                                Text(
+                                                    text = "LIVE",
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = InterceptorActiveGreen
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
                             },
                             icon = {
                                 Icon(
                                     imageVector = item.icon,
                                     contentDescription = item.title,
-                                    modifier = Modifier.size(18.dp)
+                                    modifier = Modifier.size(19.dp),
+                                    tint = if (isInterceptItem && isCapturing) InterceptorActiveGreen
+                                           else if (isSelected) MaterialTheme.colorScheme.primary
+                                           else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             },
                             selected = isSelected,
@@ -240,15 +275,15 @@ fun AppNavigationDrawer(
                                 coroutineScope.launch { drawerState.close() }
                                 onNavigate(item.route)
                             },
-                            shape = RoundedCornerShape(12.dp),
+                            shape = itemShape,
                             colors = NavigationDrawerItemDefaults.colors(
-                                selectedContainerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                                selectedContainerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f),
                                 selectedIconColor = MaterialTheme.colorScheme.primary,
-                                selectedTextColor = MaterialTheme.colorScheme.primary,
+                                selectedTextColor = MaterialTheme.colorScheme.onSurface,
                                 unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
                                 unselectedTextColor = MaterialTheme.colorScheme.onSurface
                             ),
-                            modifier = Modifier.padding(vertical = 2.dp)
+                            modifier = Modifier.padding(vertical = 2.5.dp)
                         )
                     }
 
@@ -273,36 +308,43 @@ fun AppNavigationDrawer(
                         // Light / Dark Quick Toggle
                         Row(
                             modifier = Modifier
-                                .clip(RoundedCornerShape(12.dp))
+                                .clip(RoundedCornerShape(20.dp))
                                 .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
-                                .padding(2.dp)
+                                .padding(3.dp),
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
                         ) {
-                            val isDark = settings.isDarkTheme
+                            val isDark = settings.isDarkTheme || settings.appearanceMode.equals("DARK", ignoreCase = true)
                             Box(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(10.dp))
+                                    .clip(if (!isDark) RoundedCornerShape(18.dp) else RoundedCornerShape(8.dp))
                                     .background(if (!isDark) MaterialTheme.colorScheme.primary else Color.Transparent)
-                                    .clickable { SettingsRepository.updateIsDarkTheme(false) }
-                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                                    .clickable {
+                                        SettingsRepository.updateIsDarkTheme(false)
+                                        SettingsRepository.updateAppearanceMode("LIGHT")
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 4.dp)
                             ) {
                                 Text(
                                     "Light",
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (!isDark) FontWeight.Bold else FontWeight.Medium,
                                     color = if (!isDark) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                             Box(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(10.dp))
+                                    .clip(if (isDark) RoundedCornerShape(18.dp) else RoundedCornerShape(8.dp))
                                     .background(if (isDark) MaterialTheme.colorScheme.primary else Color.Transparent)
-                                    .clickable { SettingsRepository.updateIsDarkTheme(true) }
-                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                                    .clickable {
+                                        SettingsRepository.updateIsDarkTheme(true)
+                                        SettingsRepository.updateAppearanceMode("DARK")
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 4.dp)
                             ) {
                                 Text(
                                     "Dark",
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (isDark) FontWeight.Bold else FontWeight.Medium,
                                     color = if (isDark) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
@@ -320,10 +362,16 @@ fun AppNavigationDrawer(
                         com.example.ui.theme.AppAccent.values().forEach { accent ->
                             val isAccentActive = settings.selectedAccent.equals(accent.name, ignoreCase = true) ||
                                     settings.themeMode.equals(accent.name, ignoreCase = true)
+                            val accentShape = if (isAccentActive) RoundedCornerShape(20.dp) else RoundedCornerShape(10.dp)
                             Box(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(if (isAccentActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                                    .clip(accentShape)
+                                    .background(if (isAccentActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                                    .border(
+                                        width = if (isAccentActive) 1.dp else 0.5.dp,
+                                        color = if (isAccentActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f),
+                                        shape = accentShape
+                                    )
                                     .clickable {
                                         SettingsRepository.updateSelectedAccent(accent.name)
                                         SettingsRepository.updateThemeSelection(accent.name)
@@ -342,7 +390,7 @@ fun AppNavigationDrawer(
                                         text = accent.displayName,
                                         color = if (isAccentActive) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
                                         fontSize = 11.sp,
-                                        fontWeight = FontWeight.Medium
+                                        fontWeight = if (isAccentActive) FontWeight.Bold else FontWeight.Medium
                                     )
                                 }
                             }
