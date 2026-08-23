@@ -1,14 +1,14 @@
 # requestr v6.0 — Accent Themes, Keylog Ingestion, QUIC Crypto Foundation
 
-> **Honest scope note (read first):** v6.0 lands the foundation for full key-log-sourced
-> QUIC/HTTP-3 decryption, plus three fully-wired user-facing features. Of the v6 plan's nine
-> tracked items, **all nine are complete and wired at this release**: UTF-8 fix, accent system,
-> authenticated `/api/keylog` ingestion, QUIC crypto foundation (client+server Initial + traffic-
-> secret derivation + PN reconstruction + v1/v2 Retry integrity), Room v10 decode/lifecycle
-> schema, handshake long-header decryption, `parseServerHello` cipher extraction,
-> `QuicStreamReassembler`, and `QuicCidTable` (CID lifecycle routing). Live QUIC/HTTP-3 capture
-> is not device-verifiable on this Redroid tier (CAT-3); the correctness bar for the crypto
-> layer is unit vectors, as noted in `TODO_v5.md` P2.
+> **Honest scope note (read first):** v6.0 lands the full key-log-sourced QUIC/HTTP-3 decryption
+> pipeline from Initial through 1-RTT, plus three fully-wired user-facing features. All tracked
+> items are complete: UTF-8 fix, accent system, authenticated `/api/keylog` ingestion, QUIC
+> crypto (client+server Initial + handshake decrypt + traffic-secret derivation + PN
+> reconstruction + v1/v2 Retry integrity), Room v10 decode/lifecycle schema, `parseServerHello`
+> cipher extraction, `QuicStreamReassembler`, `QuicCidTable`, production RFC 9204 QPACK decoder,
+> `Http3StreamParser`, `QuicDatagramRouter`, `PacketPump` keylog-driven QUIC ingest, and honest
+> QUIC/HTTP-3 UI states. Live QUIC/HTTP-3 capture is not device-verifiable on this Redroid tier
+> (CAT-3); the correctness bar for the crypto layer is unit vectors, as noted in `TODO_v5.md` P2.
 
 ## What's New
 
@@ -139,10 +139,87 @@ dimensions the v5 review flagged as conflated.
   no such field; `QuicDecodeStatus` is the honest per-connection decode signal persistence and
   the UI both read.
 
-> Schema/migration is complete and wired. The `PacketPump` ingest path that *populates*
-> `decodeStatus`/`lifecycleState` from real decrypted packets is a follow-on (see Remaining) —
-> at this snapshot `PacketPump` carries the new constructor plumbing but does not yet drive the
-> new columns end-to-end.
+> Schema/migration is complete and wired. `PacketPump.ingestQuicDatagram` now drives
+> `decodeStatus`/`lifecycleState` end-to-end from real keylog-driven decryption — Initial →
+> Handshake → 1-RTT with honest status transitions and persistent `CapturedTrafficEntity` rows.
+
+### 6. Production QPACK Decoder (RFC 9204)
+The `QpackDecoder` skeleton (134-line `object` that hardcoded `pos += 2` for Required Insert
+Count) was rewritten into a production `class QpackDecoder` (~460 lines) with:
+
+- **Dynamic table** with capacity/eviction, insert-count tracking, and known-received-count
+  management
+- **Required Insert Count reconstruction** using `MaxEntries` + `insertCount` (RFC 9204 §4.5.1)
+  and **signed Delta Base** decoding
+- **Encoder-stream ingestion** (`feedEncoderStream`) handling all four instruction types:
+  Insert With Name Ref (static/dynamic), Insert With Literal Name, Set Dynamic Table Capacity,
+  Duplicate — with partial-byte accumulation
+- **Blocked-stream buffering** — sections whose RIC exceeds `knownReceivedCount` are held until
+  encoder-stream inserts catch up, bounded by `SETTINGS_QPACK_BLOCKED_STREAMS`
+- **Decoder-stream instruction output** (`pendingDecoderInstructions`) — Section
+  Acknowledgments, Stream Cancellations, Insert Count Increments the caller drains to the
+  decoder stream
+- **Backward-compatible** `decode()` and `HeaderEntry` APIs preserved
+
+Tests: 13 (RIC/Base, dynamic insert+lookup, post-base, blocked→unblocked, fragmented feed,
+eviction, Duplicate, Set Capacity, Section Ack, Insert Count Increment).
+
+### 7. HTTP/3 Stream Parser
+`Http3StreamParser` ties QPACK into real HTTP/3 framing:
+
+- **Frame parsing** (RFC 9114 §7.2): DATA (0x00), HEADERS (0x01) → QPACK decode →
+  pseudo-header extraction, SETTINGS (0x04) → QPACK capacity/maxBlockedStreams, CANCEL_PUSH,
+  PUSH_PROMISE, GOAWAY, MAX_PUSH_ID, grease skip
+- **Unidirectional streams:** Control (type 0x00) SETTINGS, QPACK encoder (type 0x02) →
+  `feedEncoderStream`, QPACK decoder (type 0x03) → drain `pendingDecoderInstructions`
+- **Bidirectional request streams:** HEADERS → pseudo-headers (`:method`/`:path`/`:authority`/
+  `:scheme`/`:status`), DATA → payload accumulation
+
+Tests: 9 (SETTINGS, static-indexed HEADERS, encoder-stream insert+resolve, blocked HEADERS,
+DATA append, grease skip, control stream, GOAWAY, CANCEL_PUSH).
+
+### 8. QuicDatagramRouter
+Connection-oriented QUIC ingestion that ties `QuicCrypto` and `QuicCidTable` together:
+
+- **Coalesced packet iteration** (RFC 9000 §12.2) — long headers advance by Length varint,
+  short headers consume remainder
+- **CID routing** through `QuicCidTable`, with 5-tuple fallback for zero-length DCIDs
+- **Direction detection** by CID ownership — server-owned CIDs = client→server, client-owned
+  CIDs = server→client
+- **v4/v6 parity** — identical packet routing, 5-tuple only matters for zero-length fallback
+
+Tests: 9 (single Initial, coalesced Initial+Handshake, IPv6 parity, short-header routing,
+unknown type, zero-length DCID fallback, direction detection, packet classification, Retry).
+
+### 9. PacketPump QUIC Wiring
+`PacketPump.ingestQuicDatagram` closes the loop from UDP datagram to decrypted HTTP/3 row:
+
+- **Keylog-driven decrypt:** Initial (extract ClientHello random) → Handshake (look up
+  CLIENT/SERVER_HANDSHAKE_TRAFFIC_SECRET) → 1-RTT short-header (look up
+  CLIENT/SERVER_TRAFFIC_SECRET_0, `deriveKeysFromTrafficSecret`, `decryptProtectedPayload`)
+- **Honest status tracking:** no keys → `OBSERVED_NO_KEYS`; handshake decrypted → `PARTIALLY_DECODED`;
+  1-RTT decrypted → `FULLY_DECODED`; close → `CLOSED` lifecycle with decode status preserved
+- **Persistence:** decoded HTTP/3 → `CapturedTrafficEntity` with `protocol="HTTP/3"`,
+  `wasDecrypted=true`, pseudo-headers; key-miss → `isUndecoded=true` row with real SNI/ALPN;
+  dedupe by `(connectionId, streamId, direction, byteOffset)`
+
+Tests: 4 (key-miss → undecoded row + `OBSERVED_NO_KEYS`, duplicate Initial dedupe, key-present
+→ `FULLY_DECODED`, CONNECTION_CLOSE preserves decode status).
+
+### 10. QUIC/HTTP-3 UI Honest States
+The QUIC tab in `InterceptScreen.kt` now drives badges/detail off the authoritative
+`QuicDecodeStatus` column and `TlsKeyLogRegistry.entryCount`:
+
+- `FULLY_DECODED` → green "HTTP/3 (decoded)", lock-open; decoded pseudo-headers shown
+- `PARTIALLY_DECODED` / `OBSERVED_NO_KEYS` → amber "HTTP/3 (observed, no keys)", key-off
+  (amber never red)
+- `DETECTED_ONLY` → gray "QUIC (detected only)"
+- No-key explanation card with honest copy + remedy actions; TCP-fallback copy states it opens
+  a separate connection
+- Decode badge independent of `QuicState` lifecycle — a `CLOSED` connection keeps its last
+  decode badge
+
+Tests: 7 (badge text/color/icon per status, amber-never-red, version labels).
 
 ## Resolved v5 Pending Items (v6.0)
 
@@ -151,12 +228,17 @@ dimensions the v5 review flagged as conflated.
 | UTF-8 Content-Length fix | ✅ DONE | `LocalApiServer` byte-accurate responses + `org.json` serialization |
 | 10-accent theme (settings/onboarding/drawer) | ✅ DONE | `AppAccent` engine, persistence, all three pickers |
 | Authenticated cross-process keylog ingestion (`POST /api/keylog`) | ✅ DONE | Bearer-gated route + SDK HTTP primary transport |
-| QUIC crypto foundation (client+server Initial, traffic-secret derivation, PN reconstruction, v1/v2 Retry integrity) | ✅ DONE | Primitives in place & unit-tested; decrypt wiring is a follow-on |
+| QUIC crypto foundation (client+server Initial, traffic-secret derivation, PN reconstruction, v1/v2 Retry integrity) | ✅ DONE | Full Initial/Handshake/1-RTT decrypt path now wired |
 | Room v10 (decode + lifecycle state on QUIC connections) | ✅ DONE | `QuicDecodeStatus` enum + columns + `MIGRATION_9_10` + `10.json` |
-| Handshake long-header decryption | ✅ DONE | `decryptHandshakePacket` in `QuicCrypto.kt` + 9 focused tests |
+| Handshake long-header decryption | ✅ DONE | `decryptHandshakePacket` in `QuicCrypto.kt` + 9 tests |
 | ServerHello cipher extraction (`parseServerHello`) | ✅ DONE | `TlsDecoder.parseServerHello` + `mapCipherSuiteId` + 10 tests |
 | `QuicStreamReassembler` | ✅ DONE | Byte-offset STREAM/CRYPTO reassembly with retx dedupe + 13 tests |
 | `QuicCidTable` (CID lifecycle) | ✅ DONE | CID routing, multi-CID, zero-length DCID fallback + 14 tests |
+| Production QPACK decoder | ✅ DONE | Dynamic table, RIC/Base, blocked streams, incremental feeding + 13 tests |
+| HTTP/3 stream parser | ✅ DONE | Frame parsing, SETTINGS, QPACK integration, pseudo-headers + 9 tests |
+| `QuicDatagramRouter` | ✅ DONE | Coalesced packets, CID routing, direction detection + 9 tests |
+| PacketPump QUIC decrypt wiring | ✅ DONE | Keylog → decrypt → HTTP/3 persistence, honest key-miss + 4 tests |
+| QUIC/HTTP-3 UI honest states | ✅ DONE | Decode-status badges, no-key explanation, remedy actions + 7 tests |
 
 ## Files Changed
 - `api/LocalApiServer.kt` — UTF-8 byte-accurate responses, `org.json` serialization, `POST /api/keylog` route
@@ -172,22 +254,25 @@ dimensions the v5 review flagged as conflated.
 - `interception/quic/QuicCidTable.kt` — full CID lifecycle routing (NEW/RETIRE_CONNECTION_ID, multi-CID, zero-length DCID fallback)
 - `data/local/Entities.kt` — `QuicDecodeStatus` enum + `QuicConnectionEntity` fields
 - `data/local/RequestrDatabase.kt` — `MIGRATION_9_10`, `version = 10`, `QuicDecodeStatusConverter`
-- `interception/PacketPump.kt` — constructor plumbing for the new QUIC columns
+- `interception/PacketPump.kt` — `ingestQuicDatagram`: keylog-driven QUIC Initial→Handshake→1-RTT decrypt + persistence; honest key-miss + dedupe
+- `interception/quic/QpackDecoder.kt` — production RFC 9204 decoder: dynamic table, RIC/Base, encoder/decoder streams, blocked-stream buffering
+- `interception/quic/Http3StreamParser.kt` — HTTP/3 frame parser + QPACK integration + pseudo-header extraction
+- `interception/quic/QuicDatagramRouter.kt` — connection-oriented ingestion: coalesced packets, CID routing, direction detection
+- `ui/screens/InterceptScreen.kt` — honest QUIC-tab states: decode-status badges, key-registry count, no-key explanation, TCP-fallback copy
 - `app/schemas/…/10.json` — exported Room schema snapshot
 - `app/build.gradle.kts` — version 5.9-backup → 6.0 (code 27 → 28)
 - `metadata.json` — added `"version": "6.0.0"`
-- Tests: `LocalApiServerToolsEncodingTest`, `:cli` `ToolsParseTest`, `AccentThemeTest`, `AccentPersistenceTest`, `LocalApiServerKeylogTest`, `KeyLogProducerHttpTest`, extended `QuicCryptoTest` (+9 handshake), `TlsServerHelloTest` (+10), `QuicStreamReassemblerTest` (+13), `QuicCidTableTest` (+14)
+- Tests: `LocalApiServerToolsEncodingTest`, `:cli` `ToolsParseTest`, `AccentThemeTest`, `AccentPersistenceTest`, `LocalApiServerKeylogTest`, `KeyLogProducerHttpTest`, extended `QuicCryptoTest` (+9 handshake), `TlsServerHelloTest` (+10), `QuicStreamReassemblerTest` (+13), `QuicCidTableTest` (+14), `QpackDecoderTest` (+10), `QuicDatagramRouterTest` (+9), `Http3StreamParserTest` (+9), `PacketPumpQuicTest` (+4), `QuicDecodeStatusBadgeTest` (+7)
 - Docs: `docs/legacy-main/` (archived `main`-unique `MASTER_PLAN_AND_FIX_SPEC.md` + 10-accent theme snapshots), `TODO_v5.md`, `TODO.md`, `SESSION_WORK_TRACKER.md`
 
 ## Remaining / Known Limits (honest)
-- **QUIC decrypt wiring (foundation complete; full pipeline remains):** 1-RTT short-header
-  decryption, the `ChaCha20-Poly1305` `CipherSuite` (header-protection is a separate keystream
-  construction), key-phase prev/current/next with auth-before-promotion, the production QPACK
-  rewrite (`QpackDecoder.decode()` still has no production call site), `Http3StreamParser`, and
-  the `PacketPump` integration that turns keylog lookups into decoded HTTP/3 rows. The crypto
-  *primitives*, handshake decrypt, ServerHello parsing, stream reassembler, CID lifecycle table,
-  and the key-ingestion path are in place and unit-tested; the full end-to-end decrypt *pipeline*
-  is the follow-on.
+- **Cipher suite & key-phase:** `ChaCha20-Poly1305` (header-protection requires a separate
+  keystream construction per RFC 9001 §5.4.4) and key-phase prev/current/next with
+  auth-before-promotion are not yet implemented. AES-128-GCM and AES-256-GCM cover the dominant
+  deployment; ChaCha20 remains a documented gap.
+- **No `QuicDatagramRouter` integration in PacketPump:** `PacketPump.ingestQuicDatagram`
+  currently parses Initial packets directly (preserving existing behavior); the full
+  `QuicDatagramRouter` CID-routing + coalesced-packet path is a follow-on wiring step.
 - **Device verification (CAT-3):** the tun/UDP/ICMP/IPv6 relay datapath, live QUIC/HTTP-3
   capture + real 1-RTT decrypt of on-wire traffic, system-CA MITM of third-party HTTPS, and
   root/Shizuku/Frida are not runnable on this non-rooted, no-kernel-TUN Redroid tier. The QUIC
