@@ -62,7 +62,6 @@ import com.example.data.interception.InterceptionStatus
 import com.example.data.repository.SettingsRepository
 // TrafficInterceptorRepository import removed — capture state reads InterceptionStateRepository
 import com.example.ui.theme.AppAccent
-import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.InterceptorActiveGreen
 import com.example.ui.theme.InterceptorIdleAmber
 import com.example.ui.theme.InterceptorInactiveRed
