@@ -358,6 +358,163 @@ object QuicCrypto {
         }
     }
 
+    // ── Handshake long-header + 1-RTT short-header payload decryption (key-log sourced) ──
+
+    /**
+     * Decrypts a QUIC Handshake-level long-header packet (RFC 9000 §17.2.2 / RFC 9001 §5.2) keyed
+     * from a TLS 1.3 handshake traffic secret -- a `CLIENT_HANDSHAKE_TRAFFIC_SECRET` /
+     * `SERVER_HANDSHAKE_TRAFFIC_SECRET` obtained from
+     * [com.example.interception.tls.TlsKeyLogRegistry] (the same secret a key-log source such as
+     * Cronet's `ssl_key_log_file` emits). Unlike [decryptInitialPacket] -- whose keys come only
+     * from public DCID-derived material -- this keys the AEAD from the negotiated TLS handshake
+     * secret, so the server's Certificate/EncryptedExtensions/Finished CRYPTO frames become visible,
+     * exactly what a passive observer with a key log can recover (the model Wireshark's QUIC
+     * dissector uses under `SSLKEYLOGFILE`).
+     *
+     * [payload] is the full on-wire Handshake long-header packet starting at its first (form) byte:
+     * first byte(1) + version(4) + DCID-len(1) + DCID + SCID-len(1) + SCID + Length varint +
+     * packet number + protected payload. [dcid] is the connection's Destination Connection ID
+     * (carried forward from the Initial); it is validated against the packet's DCID field before
+     * any crypto is touched -- a mismatch means this packet does not belong to this connection and
+     * is rejected without attempting AEAD. [handshakeSecret] is the raw traffic secret;
+     * [cipherSuite] selects the HKDF hash and AEAD key size via [deriveKeysFromTrafficSecret].
+     *
+     * Header protection (RFC 9001 §5.4) is removed, the packet number is extracted (full RFC 9000
+     * §17.1 reconstruction across a packet-number space is the caller's per-space responsibility;
+     * this reads the on-wire truncated value with the no-prior-packet sentinel), and the remaining
+     * bytes are AEAD-decrypted with an **empty AAD** (this object's simplified payload contract --
+     * see [decryptProtectedPayload]). A wrong secret, corrupt packet, or DCID mismatch returns null,
+     * never throws. Returns the decrypted frame bytes (CRYPTO/ACK/etc.) or null on any failure.
+     */
+    fun decryptHandshakePacket(
+        version: Int,
+        cipherSuite: CipherSuite,
+        handshakeSecret: ByteArray,
+        dcid: ByteArray,
+        payload: ByteArray,
+    ): ByteArray? {
+        val keys = deriveKeysFromTrafficSecret(version, cipherSuite, handshakeSecret) ?: return null
+
+        // Locate the packet-number field in the Handshake long header (RFC 9000 §17.2.2):
+        // first byte(1) + version(4) + DCID-len(1) + DCID + SCID-len(1) + SCID + Length varint.
+        if (payload.size < 7) return null
+        if ((payload[0].toInt() and 0x80) == 0) return null // not a long header
+
+        var pos = 5 // skip first byte + 4-byte version
+        val dcidLen = payload[pos].toInt() and 0xFF
+        pos += 1
+        if (pos + dcidLen > payload.size) return null
+        if (dcid.isNotEmpty()) {
+            val packetDcid = payload.copyOfRange(pos, pos + dcidLen)
+            if (!packetDcid.contentEquals(dcid)) return null // wrong connection -- reject before AEAD
+        }
+        pos += dcidLen
+
+        if (pos >= payload.size) return null
+        val scidLen = payload[pos].toInt() and 0xFF
+        pos += 1
+        if (pos + scidLen > payload.size) return null
+        pos += scidLen
+
+        val (lengthValueLong, varintLen) = readVarint(payload, pos) ?: return null
+        pos += varintLen
+        val pnOffset = pos
+        // The Length varint spans only this packet's PN + ciphertext; bound it against the remaining
+        // bytes (also guards against a pathological >Int value before the toInt() below).
+        if (lengthValueLong > payload.size - pnOffset) return null
+        val lengthValue = lengthValueLong.toInt()
+        val packetEnd = pnOffset + lengthValue
+        if (packetEnd > payload.size || pnOffset >= packetEnd) return null
+
+        // Strip the variable long-header middle, keeping the first byte (which carries the
+        // packet-number-length bits) so the shared payload decryptor sees the uniform
+        // [firstByte, packetNumber, ciphertext] layout that [decryptProtectedPayload] expects.
+        val aligned = ByteArray(1 + (packetEnd - pnOffset))
+        aligned[0] = payload[0]
+        System.arraycopy(payload, pnOffset, aligned, 1, packetEnd - pnOffset)
+        return decryptProtectedPayload(keys, aligned)
+    }
+
+    /**
+     * AEAD-decrypts an already-header-stripped protected QUIC payload using already-derived [keys]
+     * (from [deriveKeysFromTrafficSecret]). [payload] is the packet's first byte (carrying the
+     * packet-number-length bits) immediately followed by the protected packet number and the AEAD
+     * ciphertext -- callers strip any bytes between the first byte and the packet number (the
+     * version, CIDs, and Length varint of a long header; the DCID of a short header) so this sees a
+     * uniform layout. This is the shared decryption primitive both Handshake long-header packets
+     * ([decryptHandshakePacket]) and 1-RTT short-header packets feed once their variable header has
+     * been located; the two share the same header-protection-removal + AEAD machinery (RFC 9001
+     * §5.4/§5.3), differing only in which bits of the first byte are protected. Returns the decrypted
+     * frame bytes or null on any failure (never throws).
+     */
+    fun decryptProtectedPayload(keys: PacketProtectionKeys, payload: ByteArray): ByteArray? =
+        decryptShortHeaderOrHandshakePayload(keys, payload)
+
+    /**
+     * Actual header-protection-removal + AEAD-decrypt implementation backing
+     * [decryptProtectedPayload]. [payload] starts at the packet's first byte (the form/flags byte
+     * whose low bits carry the packet-number length) followed **immediately** by the protected
+     * packet number and the AEAD ciphertext. The header-protection sample (RFC 9001 §5.4) is taken
+     * 4 bytes after the start of the packet-number field; the (unprotected) form bit selects whether
+     * the low 4 bits (long/Handshake) or low 5 bits (short/1-RTT) of the first byte are protected.
+     * The packet number is removed and the remaining bytes are AEAD-decrypted with an empty AAD.
+     * Returns the plaintext frame bytes or null on any failure.
+     */
+    private fun decryptShortHeaderOrHandshakePayload(keys: PacketProtectionKeys, payload: ByteArray): ByteArray? {
+        return try {
+            if (payload.size < 1) return null
+            val pnStart = 1 // packet-number field begins right after the first byte in this stripped layout
+            val sampleOffset = pnStart + 4 // RFC 9001 §5.4: sample = 4 bytes after the PN field start
+            if (sampleOffset + 16 > payload.size) return null
+            val sample = payload.copyOfRange(sampleOffset, sampleOffset + 16)
+            val mask = aesEcbEncryptBlock(keys.hp, sample)
+
+            val working = payload.copyOf()
+            // The form bit (high bit of the first byte) is not header-protected, so read it before
+            // unprotecting to pick the mask width: long header (Handshake) protects the low 4 bits
+            // (0x0f), short header (1-RTT) the low 5 bits (0x1f) -- RFC 9001 §5.4.1.
+            val firstMask = if ((working[0].toInt() and 0x80) != 0) 0x0f else 0x1f
+            working[0] = (working[0].toInt() xor (mask[0].toInt() and firstMask)).toByte()
+            val pnLength = (working[0].toInt() and 0x03) + 1
+
+            for (i in 0 until pnLength) {
+                working[pnStart + i] = (working[pnStart + i].toInt() xor (mask[1 + i].toInt() and 0xFF)).toByte()
+            }
+
+            // Reconstruct the full packet number from the truncated on-wire value. With no per-space
+            // largest-packet-number context threaded through this primitive yet, use the -1 sentinel
+            // (no prior packet), which returns the truncated value verbatim -- correct for a first
+            // Handshake/1-RTT packet and the same default [decryptInitialPacket] uses.
+            var truncatedPn = 0L
+            for (i in 0 until pnLength) {
+                truncatedPn = (truncatedPn shl 8) or (working[pnStart + i].toLong() and 0xFF)
+            }
+            val pn = decodePacketNumber(-1L, truncatedPn, pnLength)
+
+            val ciphertextStart = pnStart + pnLength
+            if (working.size - ciphertextStart < 16) return null // not even a full 16-byte AEAD tag
+            val ciphertext = working.copyOfRange(ciphertextStart, working.size)
+
+            // Nonce = iv XOR packet number (right-aligned, RFC 9001 §5.3).
+            val nonce = keys.iv.copyOf()
+            for (i in 0 until 8) {
+                val shift = i * 8
+                val pnByte = ((pn ushr shift) and 0xFF).toByte()
+                nonce[nonce.size - 1 - i] = (nonce[nonce.size - 1 - i].toInt() xor pnByte.toInt()).toByte()
+            }
+
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keys.key, "AES"), GCMParameterSpec(128, nonce))
+            // Empty AAD: this primitive authenticates only the ciphertext + packet number, not the
+            // stripped header (callers that need full-header authentication keep using
+            // [decryptInitialPacket], which AADs the whole long header).
+            cipher.doFinal(ciphertext)
+        } catch (e: Exception) {
+            Log.d(TAG, "Protected payload decrypt failed: ${e.message}")
+            null
+        }
+    }
+
     // ── HKDF (RFC 5869) + TLS 1.3 HKDF-Expand-Label (RFC 8446 §7.1) ────────────────────
     //
     // Both helpers take an explicit [hmacAlgorithm] (default "HmacSHA256") because HKDF's hash
@@ -413,6 +570,26 @@ object QuicCrypto {
         val cipher = Cipher.getInstance("AES/ECB/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"))
         return cipher.doFinal(block16)
+    }
+
+    /**
+     * Reads a QUIC variable-length integer (RFC 9000 §16) at [offset]: the top 2 bits of the first
+     * byte encode the byte length (00=1, 01=2, 10=4, 11=8), the remaining bits + trailing bytes are
+     * the big-endian value. Returns (value, byteCount) or null on truncation. Used by
+     * [decryptHandshakePacket] to walk the Handshake long header's Length field.
+     */
+    private fun readVarint(buf: ByteArray, offset: Int): Pair<Long, Int>? {
+        if (offset >= buf.size) return null
+        val first = buf[offset].toInt() and 0xFF
+        val len = when (first shr 6) {
+            0 -> 1; 1 -> 2; 2 -> 4; 3 -> 8; else -> return null
+        }
+        if (offset + len > buf.size) return null
+        var value = (first and 0x3f).toLong()
+        for (i in 1 until len) {
+            value = (value shl 8) or (buf[offset + i].toLong() and 0xFF)
+        }
+        return value to len
     }
 
     private fun hexToBytes(hex: String): ByteArray =

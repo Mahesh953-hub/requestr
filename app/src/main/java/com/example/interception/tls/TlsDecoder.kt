@@ -279,6 +279,63 @@ object TlsDecoder {
         )
     }
 
+    // ── ServerHello parse (negotiated cipher suite for QUIC 1-RTT) ───────────────────
+
+    /**
+     * Parses a TLS 1.3 ServerHello (handshake type 0x02, RFC 8446 §4.1.3) from [cryptoData]
+     * starting at [offset], spanning [length] bytes -- the plaintext recovered from the server's
+     * first Handshake CRYPTO frame via
+     * [com.example.interception.quic.QuicCrypto.decryptHandshakePacket]. Reads the handshake-type
+     * byte (must be 0x02), the 2-byte record version (must be 0x0304 = TLS 1.3), skips the 32-byte
+     * random, reads the `legacy_session_id` echo length, and extracts the single 2-byte selected
+     * cipher suite ID at the computed offset (version + random + session_id length + session_id).
+     * Returns a [TlsServerHello] with the suite name resolved by [mapCipherSuiteId], or null on any
+     * structural mismatch (wrong type, truncated buffer, non-TLS-1.3 version) -- mirroring
+     * [parseClientHello]'s defensive, never-throw contract.
+     */
+    fun parseServerHello(cryptoData: ByteArray, offset: Int, length: Int): TlsServerHello? {
+        val end = offset + length
+        // type(1) + len(3) + version(2) + random(32) + session_id_len(1) + cipher_suite(2)
+        if (length < 1 + 3 + 2 + 32 + 1 + 2) return null
+        if (end > cryptoData.size) return null
+
+        val handshakeType = cryptoData[offset].toInt() and 0xFF
+        if (handshakeType != 0x02) return null // not a ServerHello
+
+        // Skip the 3-byte handshake length (offset+1..3); the caller-supplied [length] bounds the body.
+        val versionOffset = offset + 4
+        val version = readU16(cryptoData, versionOffset)
+        if (version != 0x0304) return null // must be TLS 1.3
+
+        // random(32) at versionOffset+2; legacy_session_id echo length at versionOffset+2+32.
+        val sessionIdLenOffset = versionOffset + 2 + 32
+        if (sessionIdLenOffset >= end) return null
+        val sessionIdLen = cryptoData[sessionIdLenOffset].toInt() and 0xFF
+        val cipherSuiteOffset = sessionIdLenOffset + 1 + sessionIdLen
+        if (cipherSuiteOffset + 2 > end) return null
+
+        val cipherSuiteId = readU16(cryptoData, cipherSuiteOffset)
+        return TlsServerHello(
+            version = version,
+            cipherSuiteId = cipherSuiteId,
+            cipherSuiteName = mapCipherSuiteId(cipherSuiteId),
+        )
+    }
+
+    /**
+     * Maps a TLS 1.3 cipher suite identifier (RFC 8446 Appendix B.4) to its standard name. These are
+     * the three AEAD suites QUIC can negotiate (RFC 9001 §5.3); the name selects the AEAD + HKDF
+     * hash for [com.example.interception.quic.QuicCrypto.deriveKeysFromTrafficSecret]. Returns null
+     * for any other identifier (TLS 1.2 suites, GREASE values) so callers can detect an unsupported
+     * negotiation rather than guessing.
+     */
+    fun mapCipherSuiteId(id: Int): String? = when (id) {
+        0x1301 -> "TLS_AES_128_GCM_SHA256"
+        0x1302 -> "TLS_AES_256_GCM_SHA384"
+        0x1303 -> "TLS_CHACHA20_POLY1305_SHA256"
+        else -> null
+    }
+
     // ── alert records (making TlsHandshakeState.FAILED real) ────────────
 
     /**
@@ -388,3 +445,16 @@ object TlsDecoder {
 
     private const val TAG = "TlsDecoder"
 }
+
+/**
+ * A parsed TLS 1.3 ServerHello (RFC 8446 §4.1.3): the negotiated cipher suite that selects QUIC's
+ * 1-RTT AEAD/hash ([com.example.interception.quic.QuicCrypto.CipherSuite]) and the record version.
+ * Recovered by [TlsDecoder.parseServerHello] from the server's Handshake CRYPTO frame once
+ * [com.example.interception.quic.QuicCrypto.decryptHandshakePacket] makes it visible.
+ * [cipherSuiteName] is null for a suite [TlsDecoder.mapCipherSuiteId] does not recognize.
+ */
+data class TlsServerHello(
+    val version: Int,
+    val cipherSuiteId: Int,
+    val cipherSuiteName: String?,
+)

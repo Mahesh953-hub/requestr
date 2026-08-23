@@ -2,6 +2,9 @@ package com.example.interception.quic
 
 import org.junit.Assert.*
 import org.junit.Test
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 /**
  * Verifies [QuicCrypto] against official RFC test vectors: RFC 9001 Appendix A.1/A.2 (v1 client
@@ -470,5 +473,226 @@ class QuicCryptoTest {
         val shortTag = hex("04a265ba2eff4d") // 7 bytes, not 16
 
         assertFalse(QuicCrypto.validateRetryIntegrityTag(QuicCrypto.VERSION_1, odcid, withoutTag, shortTag))
+    }
+
+    // ── Handshake long-header decrypt + shared protected-payload decrypt (key-log sourced) ──
+
+    /** A reproducible 32-byte traffic secret: RFC 9001 Appendix A.1's published client_initial_secret. */
+    private val handshakeSecret = hex("c00cf151ca5be075ed0ebfb5c80323c42d6b7db67881289af4008f1f6c357aea")
+    private val handshakeDcid = hex("8394c8f03e515708")
+
+    /** A small CRYPTO-frame-shaped plaintext the round-trip tests encrypt and expect back. */
+    private val cryptoFramePlaintext: ByteArray =
+        byteArrayOf(0x06, 0x00, 0x0c) + "CRYPTO-HELLO".toByteArray(Charsets.US_ASCII)
+
+    /** Encodes a value as a QUIC varint (RFC 9000 §16); only the 1/2/4-byte forms are needed here. */
+    private fun encodeVarint(value: Long): ByteArray = when {
+        value < 64 -> byteArrayOf(value.toByte())
+        value < 16384 -> byteArrayOf((0x40 or (value shr 8).toInt()).toByte(), (value and 0xFF).toByte())
+        value < 1073741824 -> byteArrayOf(
+            (0x80 or (value shr 24).toInt()).toByte(),
+            ((value shr 16) and 0xFF).toInt().toByte(),
+            ((value shr 8) and 0xFF).toInt().toByte(),
+            (value and 0xFF).toInt().toByte(),
+        )
+        else -> throw IllegalArgumentException("varint too large for test: $value")
+    }
+
+    /** nonce = iv XOR packet number, right-aligned over the 12-byte IV (RFC 9001 §5.3). */
+    private fun nonceFor(keys: QuicCrypto.PacketProtectionKeys, pn: Long): ByteArray {
+        val nonce = keys.iv.copyOf()
+        for (i in 0 until 8) {
+            nonce[nonce.size - 1 - i] = (nonce[nonce.size - 1 - i].toInt() xor ((pn ushr (i * 8)) and 0xFF).toInt()).toByte()
+        }
+        return nonce
+    }
+
+    /**
+     * Builds a protected v1 Handshake long-header packet carrying [plaintext] as its AEAD payload,
+     * keyed from [keys], with packet number [pn] of [pnLen] bytes. AEAD uses an empty AAD (matching
+     * [QuicCrypto.decryptHandshakePacket]'s contract) and header protection is applied with the long
+     * header's low-4-bit mask. This is the encrypt side of the round-trip; the decrypt side under
+     * test must recover [plaintext] verbatim.
+     */
+    private fun buildProtectedHandshakePacket(
+        keys: QuicCrypto.PacketProtectionKeys,
+        pn: Long,
+        pnLen: Int,
+        plaintext: ByteArray,
+        dcid: ByteArray,
+    ): ByteArray {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(keys.key, "AES"), GCMParameterSpec(128, nonceFor(keys, pn)))
+        val ciphertext = cipher.doFinal(plaintext) // plaintext + 16-byte tag
+
+        val lengthValue = pnLen + ciphertext.size
+        val lengthVarint = encodeVarint(lengthValue.toLong())
+        val pnOffset = 1 + 4 + 1 + dcid.size + 1 + 0 + lengthVarint.size // first+ver+dcidLen+dcid+scidLen+length
+        val packet = ByteArray(pnOffset + pnLen + ciphertext.size)
+        var p = 0
+        packet[p++] = (0xE0 or (pnLen - 1)).toByte() // v1 Handshake: form=1 fixed=1 type=10, pn_len in bits 0-1
+        packet[p++] = 0x00; packet[p++] = 0x00; packet[p++] = 0x00; packet[p++] = 0x01 // version 1
+        packet[p++] = dcid.size.toByte()
+        System.arraycopy(dcid, 0, packet, p, dcid.size); p += dcid.size
+        packet[p++] = 0 // SCID length
+        System.arraycopy(lengthVarint, 0, packet, p, lengthVarint.size); p += lengthVarint.size
+        for (i in 0 until pnLen) packet[pnOffset + (pnLen - 1 - i)] = ((pn ushr (i * 8)) and 0xFF).toByte()
+        p += pnLen
+        System.arraycopy(ciphertext, 0, packet, p, ciphertext.size)
+
+        // header protection: long header protects the low 4 bits of byte 0 + the PN bytes.
+        val sample = packet.copyOfRange(pnOffset + 4, pnOffset + 4 + 16)
+        val hpCipher = Cipher.getInstance("AES/ECB/NoPadding")
+        hpCipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(keys.hp, "AES"))
+        val mask = hpCipher.doFinal(sample)
+        packet[0] = (packet[0].toInt() xor (mask[0].toInt() and 0x0f)).toByte()
+        for (i in 0 until pnLen) packet[pnOffset + i] = (packet[pnOffset + i].toInt() xor (mask[1 + i].toInt() and 0xFF)).toByte()
+        return packet
+    }
+
+    @Test
+    fun `decryptHandshakePacket round-trips an encrypted Handshake CRYPTO frame`() {
+        val keys = QuicCrypto.deriveKeysFromTrafficSecret(
+            QuicCrypto.VERSION_1, QuicCrypto.CipherSuite.TLS_AES_128_GCM_SHA256, handshakeSecret,
+        )!!
+        val packet = buildProtectedHandshakePacket(keys, 1L, 1, cryptoFramePlaintext, handshakeDcid)
+
+        val result = QuicCrypto.decryptHandshakePacket(
+            QuicCrypto.VERSION_1, QuicCrypto.CipherSuite.TLS_AES_128_GCM_SHA256, handshakeSecret, handshakeDcid, packet,
+        )
+        assertNotNull("handshake decrypt should succeed with the correct secret", result)
+        assertArrayEquals(cryptoFramePlaintext, result)
+    }
+
+    @Test
+    fun `decryptHandshakePacket round-trips with AES-256-GCM-SHA384 keys`() {
+        val secret = hex("c7bfee2fd77625391d210c6f07e8a3cd0d96ade9d3dab25759b2fb5e74433efb5a2d6be4f52a83175b439d75fe8f9ee8")
+        val keys = QuicCrypto.deriveKeysFromTrafficSecret(
+            QuicCrypto.VERSION_1, QuicCrypto.CipherSuite.TLS_AES_256_GCM_SHA384, secret,
+        )!!
+        assertEquals(32, keys.key.size) // AES-256
+        val packet = buildProtectedHandshakePacket(keys, 1L, 1, cryptoFramePlaintext, handshakeDcid)
+
+        val result = QuicCrypto.decryptHandshakePacket(
+            QuicCrypto.VERSION_1, QuicCrypto.CipherSuite.TLS_AES_256_GCM_SHA384, secret, handshakeDcid, packet,
+        )
+        assertNotNull(result)
+        assertArrayEquals(cryptoFramePlaintext, result)
+    }
+
+    @Test
+    fun `decryptHandshakePacket round-trips a multi-byte packet number`() {
+        val keys = QuicCrypto.deriveKeysFromTrafficSecret(
+            QuicCrypto.VERSION_1, QuicCrypto.CipherSuite.TLS_AES_128_GCM_SHA256, handshakeSecret,
+        )!!
+        val packet = buildProtectedHandshakePacket(keys, 0x01FFL, 2, cryptoFramePlaintext, handshakeDcid)
+
+        val result = QuicCrypto.decryptHandshakePacket(
+            QuicCrypto.VERSION_1, QuicCrypto.CipherSuite.TLS_AES_128_GCM_SHA256, handshakeSecret, handshakeDcid, packet,
+        )
+        assertNotNull(result)
+        assertArrayEquals(cryptoFramePlaintext, result)
+    }
+
+    @Test
+    fun `decryptHandshakePacket returns null for a wrong handshake secret`() {
+        val keys = QuicCrypto.deriveKeysFromTrafficSecret(
+            QuicCrypto.VERSION_1, QuicCrypto.CipherSuite.TLS_AES_128_GCM_SHA256, handshakeSecret,
+        )!!
+        val packet = buildProtectedHandshakePacket(keys, 1L, 1, cryptoFramePlaintext, handshakeDcid)
+
+        val wrongSecret = hex("1111111111111111111111111111111111111111111111111111111111111111")
+        val result = QuicCrypto.decryptHandshakePacket(
+            QuicCrypto.VERSION_1, QuicCrypto.CipherSuite.TLS_AES_128_GCM_SHA256, wrongSecret, handshakeDcid, packet,
+        )
+        assertNull("a wrong handshake secret must fail AEAD and return null", result)
+    }
+
+    @Test
+    fun `decryptHandshakePacket rejects a packet whose DCID does not match`() {
+        val keys = QuicCrypto.deriveKeysFromTrafficSecret(
+            QuicCrypto.VERSION_1, QuicCrypto.CipherSuite.TLS_AES_128_GCM_SHA256, handshakeSecret,
+        )!!
+        val packet = buildProtectedHandshakePacket(keys, 1L, 1, cryptoFramePlaintext, handshakeDcid)
+
+        val wrongDcid = hex("0000000000000000")
+        val result = QuicCrypto.decryptHandshakePacket(
+            QuicCrypto.VERSION_1, QuicCrypto.CipherSuite.TLS_AES_128_GCM_SHA256, handshakeSecret, wrongDcid, packet,
+        )
+        assertNull("a DCID mismatch must be rejected before AEAD", result)
+    }
+
+    @Test
+    fun `decryptHandshakePacket returns null for a truncated long header without throwing`() {
+        val result = QuicCrypto.decryptHandshakePacket(
+            QuicCrypto.VERSION_1, QuicCrypto.CipherSuite.TLS_AES_128_GCM_SHA256, handshakeSecret, handshakeDcid, ByteArray(3),
+        )
+        assertNull(result)
+    }
+
+    @Test
+    fun `decryptProtectedPayload round-trips an aligned long-header payload directly`() {
+        // Exercises the shared helper with the long-header (low-4-bit) first-byte mask, without the
+        // long-header parsing that decryptHandshakePacket does: aligned = [firstByte, pn, ciphertext].
+        val keys = QuicCrypto.deriveKeysFromTrafficSecret(
+            QuicCrypto.VERSION_1, QuicCrypto.CipherSuite.TLS_AES_128_GCM_SHA256, handshakeSecret,
+        )!!
+        val pn = 1L
+        val pnLen = 1
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(keys.key, "AES"), GCMParameterSpec(128, nonceFor(keys, pn)))
+        val ciphertext = cipher.doFinal(cryptoFramePlaintext)
+
+        val aligned = ByteArray(1 + pnLen + ciphertext.size)
+        aligned[0] = 0xE0.toByte() // long header, pn_len = 1
+        aligned[1] = pn.toByte()
+        System.arraycopy(ciphertext, 0, aligned, 2, ciphertext.size)
+        val sample = aligned.copyOfRange(5, 21) // 4 bytes after the PN field (at offset 1)
+        val hpCipher = Cipher.getInstance("AES/ECB/NoPadding")
+        hpCipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(keys.hp, "AES"))
+        val mask = hpCipher.doFinal(sample)
+        aligned[0] = (aligned[0].toInt() xor (mask[0].toInt() and 0x0f)).toByte()
+        for (i in 0 until pnLen) aligned[1 + i] = (aligned[1 + i].toInt() xor (mask[1 + i].toInt() and 0xFF)).toByte()
+
+        val result = QuicCrypto.decryptProtectedPayload(keys, aligned)
+        assertNotNull(result)
+        assertArrayEquals(cryptoFramePlaintext, result)
+    }
+
+    @Test
+    fun `decryptProtectedPayload handles a 1-RTT short header (low 5 bits protected)`() {
+        // Exercises the shared helper's short-header branch (form bit 0 -> 0x1f mask), the path a
+        // future 1-RTT decryptor feeds once it has stripped the DCID from a short header.
+        val keys = QuicCrypto.deriveKeysFromTrafficSecret(
+            QuicCrypto.VERSION_1, QuicCrypto.CipherSuite.TLS_AES_128_GCM_SHA256, handshakeSecret,
+        )!!
+        val plaintext = "1-rtt-payload".toByteArray(Charsets.US_ASCII)
+        val pn = 0L
+        val pnLen = 1
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(keys.key, "AES"), GCMParameterSpec(128, nonceFor(keys, pn)))
+        val ciphertext = cipher.doFinal(plaintext)
+
+        val aligned = ByteArray(1 + pnLen + ciphertext.size)
+        aligned[0] = 0x40.toByte() // short header: form=0 fixed=1 key_phase=0 reserved=0 pn_len=1
+        aligned[1] = pn.toByte()
+        System.arraycopy(ciphertext, 0, aligned, 2, ciphertext.size)
+        val sample = aligned.copyOfRange(5, 21)
+        val hpCipher = Cipher.getInstance("AES/ECB/NoPadding")
+        hpCipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(keys.hp, "AES"))
+        val mask = hpCipher.doFinal(sample)
+        aligned[0] = (aligned[0].toInt() xor (mask[0].toInt() and 0x1f)).toByte() // short header: low 5 bits
+        for (i in 0 until pnLen) aligned[1 + i] = (aligned[1 + i].toInt() xor (mask[1 + i].toInt() and 0xFF)).toByte()
+
+        val result = QuicCrypto.decryptProtectedPayload(keys, aligned)
+        assertNotNull(result)
+        assertArrayEquals(plaintext, result)
+    }
+
+    @Test
+    fun `decryptProtectedPayload returns null for a truncated payload without throwing`() {
+        val keys = QuicCrypto.PacketProtectionKeys(key = ByteArray(16), iv = ByteArray(12), hp = ByteArray(16))
+        assertNull(QuicCrypto.decryptProtectedPayload(keys, ByteArray(5))) // too short for the 16-byte sample
+        assertNull(QuicCrypto.decryptProtectedPayload(keys, ByteArray(0)))
     }
 }
