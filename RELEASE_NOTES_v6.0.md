@@ -1,16 +1,14 @@
 # requestr v6.0 — Accent Themes, Keylog Ingestion, QUIC Crypto Foundation
 
-> **Honest scope note (read first):** v6.0 lands the *foundation* for full key-log-sourced
+> **Honest scope note (read first):** v6.0 lands the foundation for full key-log-sourced
 > QUIC/HTTP-3 decryption, plus three fully-wired user-facing features. Of the v6 plan's nine
-> tracked items, **five are complete and wired at this release** (UTF-8 fix, accent system,
-> authenticated `/api/keylog` ingestion, QUIC crypto foundation, Room v10 decode/lifecycle
-> schema). **Four are foundation follow-ons not yet wired at this snapshot** and are documented
-> honestly as remaining below: handshake long-header decryption, `parseServerHello` cipher
-> extraction, `QuicStreamReassembler`, and `QuicCidTable`. The crypto primitives those need
-> (e.g. `deriveKeysFromTrafficSecret`) are in place and unit-tested, but no decrypt path drives
-> them yet — `QuicCrypto.kt`'s own KDoc states this explicitly. Live QUIC/HTTP-3 capture is not
-> device-verifiable on this Redroid tier (CAT-3); the correctness bar for the crypto layer is
-> unit vectors, as noted in `TODO_v5.md` P2.
+> tracked items, **all nine are complete and wired at this release**: UTF-8 fix, accent system,
+> authenticated `/api/keylog` ingestion, QUIC crypto foundation (client+server Initial + traffic-
+> secret derivation + PN reconstruction + v1/v2 Retry integrity), Room v10 decode/lifecycle
+> schema, handshake long-header decryption, `parseServerHello` cipher extraction,
+> `QuicStreamReassembler`, and `QuicCidTable` (CID lifecycle routing). Live QUIC/HTTP-3 capture
+> is not device-verifiable on this Redroid tier (CAT-3); the correctness bar for the crypto
+> layer is unit vectors, as noted in `TODO_v5.md` P2.
 
 ## What's New
 
@@ -155,10 +153,10 @@ dimensions the v5 review flagged as conflated.
 | Authenticated cross-process keylog ingestion (`POST /api/keylog`) | ✅ DONE | Bearer-gated route + SDK HTTP primary transport |
 | QUIC crypto foundation (client+server Initial, traffic-secret derivation, PN reconstruction, v1/v2 Retry integrity) | ✅ DONE | Primitives in place & unit-tested; decrypt wiring is a follow-on |
 | Room v10 (decode + lifecycle state on QUIC connections) | ✅ DONE | `QuicDecodeStatus` enum + columns + `MIGRATION_9_10` + `10.json` |
-| Handshake long-header decryption | ⬜ Remaining | `deriveKeysFromTrafficSecret` exists; no decrypt call site drives it yet |
-| ServerHello cipher extraction (`parseServerHello`) | ⬜ Remaining | Not present in `TlsDecoder.kt` at this snapshot |
-| `QuicStreamReassembler` | ⬜ Remaining | File not present at this snapshot |
-| `QuicCidTable` (CID lifecycle) | ⬜ Remaining | File not present at this snapshot |
+| Handshake long-header decryption | ✅ DONE | `decryptHandshakePacket` in `QuicCrypto.kt` + 9 focused tests |
+| ServerHello cipher extraction (`parseServerHello`) | ✅ DONE | `TlsDecoder.parseServerHello` + `mapCipherSuiteId` + 10 tests |
+| `QuicStreamReassembler` | ✅ DONE | Byte-offset STREAM/CRYPTO reassembly with retx dedupe + 13 tests |
+| `QuicCidTable` (CID lifecycle) | ✅ DONE | CID routing, multi-CID, zero-length DCID fallback + 14 tests |
 
 ## Files Changed
 - `api/LocalApiServer.kt` — UTF-8 byte-accurate responses, `org.json` serialization, `POST /api/keylog` route
@@ -168,26 +166,28 @@ dimensions the v5 review flagged as conflated.
 - `MainActivity.kt` — accent-aware theme resolution
 - `ui/screens/SettingsScreen.kt` — 10-accent picker grid
 - `ui/screens/OnboardingScreen.kt`, `ui/components/AppNavigationDrawer.kt` — accent picker + quick-switcher
-- `interception/quic/QuicCrypto.kt` — server Initial keys, `deriveKeysFromTrafficSecret`, `decodePacketNumber`, v1/v2 Retry integrity + packet-type classification
+- `interception/quic/QuicCrypto.kt` — server Initial keys, `deriveKeysFromTrafficSecret`, `decodePacketNumber`, v1/v2 Retry integrity + packet-type classification, `decryptHandshakePacket`, `decryptProtectedPayload`
+- `interception/tls/TlsDecoder.kt` — `parseServerHello` (TLS 1.3 ServerHello parsing + cipher suite mapping)
+- `interception/quic/QuicStreamReassembler.kt` — per-direction byte-offset STREAM/CRYPTO reassembly with retransmission deduplication
+- `interception/quic/QuicCidTable.kt` — full CID lifecycle routing (NEW/RETIRE_CONNECTION_ID, multi-CID, zero-length DCID fallback)
 - `data/local/Entities.kt` — `QuicDecodeStatus` enum + `QuicConnectionEntity` fields
 - `data/local/RequestrDatabase.kt` — `MIGRATION_9_10`, `version = 10`, `QuicDecodeStatusConverter`
 - `interception/PacketPump.kt` — constructor plumbing for the new QUIC columns
 - `app/schemas/…/10.json` — exported Room schema snapshot
 - `app/build.gradle.kts` — version 5.9-backup → 6.0 (code 27 → 28)
 - `metadata.json` — added `"version": "6.0.0"`
-- Tests: `LocalApiServerToolsEncodingTest`, `:cli` `ToolsParseTest`, `AccentThemeTest`, `AccentPersistenceTest`, `LocalApiServerKeylogTest`, `KeyLogProducerHttpTest`, extended `QuicCryptoTest`
+- Tests: `LocalApiServerToolsEncodingTest`, `:cli` `ToolsParseTest`, `AccentThemeTest`, `AccentPersistenceTest`, `LocalApiServerKeylogTest`, `KeyLogProducerHttpTest`, extended `QuicCryptoTest` (+9 handshake), `TlsServerHelloTest` (+10), `QuicStreamReassemblerTest` (+13), `QuicCidTableTest` (+14)
 - Docs: `docs/legacy-main/` (archived `main`-unique `MASTER_PLAN_AND_FIX_SPEC.md` + 10-accent theme snapshots), `TODO_v5.md`, `TODO.md`, `SESSION_WORK_TRACKER.md`
 
 ## Remaining / Known Limits (honest)
-- **QUIC decrypt wiring (not yet done):** Handshake long-header decryption, 1-RTT short-header
-  decryption, `TlsDecoder.parseServerHello` (negotiated cipher extraction), `QuicStreamReassembler`
-  (per-direction byte-offset STREAM/CRYPTO reassembly), `QuicCidTable` (full CID lifecycle:
-  `NEW`/`RETIRE_CONNECTION_ID`, multiple CIDs, zero-length DCID fallback, Retry re-key), the
-  `ChaCha20-Poly1305` `CipherSuite` (header-protection is a separate keystream construction),
-  key-phase prev/current/next with auth-before-promotion, the production QPACK rewrite
-  (`QpackDecoder.decode()` still has no production call site), `Http3StreamParser`, and the
-  `PacketPump` integration that turns keylog lookups into decoded HTTP/3 rows. The crypto
-  *primitives* and the key-ingestion path are in place; the decrypt *wiring* is the follow-on.
+- **QUIC decrypt wiring (foundation complete; full pipeline remains):** 1-RTT short-header
+  decryption, the `ChaCha20-Poly1305` `CipherSuite` (header-protection is a separate keystream
+  construction), key-phase prev/current/next with auth-before-promotion, the production QPACK
+  rewrite (`QpackDecoder.decode()` still has no production call site), `Http3StreamParser`, and
+  the `PacketPump` integration that turns keylog lookups into decoded HTTP/3 rows. The crypto
+  *primitives*, handshake decrypt, ServerHello parsing, stream reassembler, CID lifecycle table,
+  and the key-ingestion path are in place and unit-tested; the full end-to-end decrypt *pipeline*
+  is the follow-on.
 - **Device verification (CAT-3):** the tun/UDP/ICMP/IPv6 relay datapath, live QUIC/HTTP-3
   capture + real 1-RTT decrypt of on-wire traffic, system-CA MITM of third-party HTTPS, and
   root/Shizuku/Frida are not runnable on this non-rooted, no-kernel-TUN Redroid tier. The QUIC
