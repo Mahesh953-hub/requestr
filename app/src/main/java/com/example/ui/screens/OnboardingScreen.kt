@@ -205,6 +205,7 @@ fun OnboardingScreen(
                         selectedMode = appearanceMode,
                         lightAccent = selectedLightAccent,
                         darkAccent = selectedDarkAccent,
+                        selectedAccent = selectedAccent,
                         onModeSelected = { mode ->
                             appearanceMode = mode
                             com.example.data.repository.SettingsRepository.updateAppearanceMode(mode)
@@ -222,6 +223,10 @@ fun OnboardingScreen(
                             if (appearanceMode == "DARK") {
                                 com.example.data.repository.SettingsRepository.updateThemeSelection(name)
                             }
+                        },
+                        onAccentSelected = { name ->
+                            selectedAccent = name
+                            com.example.data.repository.SettingsRepository.updateAccent(name)
                         },
                         onFinish = {
                             // Persist everything

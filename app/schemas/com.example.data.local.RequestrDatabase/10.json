@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 10,
-    "identityHash": "da3fdb522db4672e1c8d642176efb691",
+    "identityHash": "beb1b02d3f1d673d2ee25400f279e5de",
     "entities": [
       {
         "tableName": "captured_traffic",
@@ -826,7 +826,7 @@
         ]
       },
       {
-        "tableName": "QuicConnectionEntity",
+        "tableName": "quic_connections",
         "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`connectionId` TEXT NOT NULL, `sessionId` INTEGER NOT NULL, `srcIp` TEXT NOT NULL, `destIp` TEXT NOT NULL, `srcPort` INTEGER NOT NULL, `destPort` INTEGER NOT NULL, `sniHost` TEXT, `alpn` TEXT, `quicVersion` INTEGER, `dstConnectionId` TEXT NOT NULL, `establishedAt` INTEGER NOT NULL, `decodeStatus` TEXT NOT NULL, `lifecycleState` TEXT NOT NULL, `updatedAt` INTEGER NOT NULL, `clientRandomHex` TEXT, `keylogLabels` TEXT, PRIMARY KEY(`connectionId`))",
         "fields": [
           {
@@ -926,7 +926,27 @@
           "columnNames": [
             "connectionId"
           ]
-        }
+        },
+        "indices": [
+          {
+            "name": "index_quic_connections_sessionId",
+            "unique": false,
+            "columnNames": [
+              "sessionId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_quic_connections_sessionId` ON `${TABLE_NAME}` (`sessionId`)"
+          },
+          {
+            "name": "index_quic_connections_sniHost",
+            "unique": false,
+            "columnNames": [
+              "sniHost"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_quic_connections_sniHost` ON `${TABLE_NAME}` (`sniHost`)"
+          }
+        ]
       },
       {
         "tableName": "tls_sessions",
@@ -1548,7 +1568,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'da3fdb522db4672e1c8d642176efb691')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'beb1b02d3f1d673d2ee25400f279e5de')"
     ]
   }
 }
