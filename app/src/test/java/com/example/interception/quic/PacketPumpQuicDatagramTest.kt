@@ -4,7 +4,7 @@ import android.os.Build
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.RequestrDatabase
 import com.example.interception.PacketPump
-import com.example.interception.QuicDecodeStatus
+import com.example.data.local.QuicDecodeStatus
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
