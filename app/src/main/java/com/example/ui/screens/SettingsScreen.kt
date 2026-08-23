@@ -93,7 +93,6 @@ import kotlinx.coroutines.launch
 import com.example.ui.components.GlassCard
 import com.example.ui.components.RequestrWordmark
 import com.example.ui.components.SectionHeader
-import com.example.ui.theme.AppAccent
 import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
@@ -271,9 +270,16 @@ fun SettingsScreen(
             // Accent Color Grid
             item {
                 AccentColorGrid(
-                    currentAccent = settings.selectedAccent,
+                    currentTheme = settings.themeMode,
                     appearanceMode = settings.appearanceMode,
-                    onAccentSelected = SettingsRepository::updateAccent
+                    onThemeSelected = { theme ->
+                        // v3.1 B1: route through the single unified write path instead of
+                        // separately calling updateTheme()+updateSelectedDarkTheme() — that
+                        // dual-write divergence (keyed off appearanceMode rather than the
+                        // theme's own light/dark identity) was the root cause of the
+                        // "theme selection collision" bug.
+                        SettingsRepository.updateThemeSelection(theme)
+                    }
                 )
             }
 
@@ -1985,9 +1991,9 @@ private fun AppearanceSelector(
 
 @Composable
 private fun AccentColorGrid(
-    currentAccent: String,
+    currentTheme: String,
     appearanceMode: String,
-    onAccentSelected: (String) -> Unit
+    onThemeSelected: (String) -> Unit
 ) {
     val displayName = when (appearanceMode) {
         "LIGHT" -> "Light"
@@ -1999,29 +2005,51 @@ private fun AccentColorGrid(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text("Accent Color", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
-        Text(displayName, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            "Accent Color",
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Text(
+            displayName,
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
     Spacer(modifier = Modifier.height(8.dp))
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        AppAccent.values().toList().chunked(5).forEach { rowAccents ->
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                rowAccents.forEach { accent ->
-                    val selected = currentAccent.equals(accent.name, ignoreCase = true)
-                    Box(
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .then(if (selected) Modifier.border(2.dp, MaterialTheme.colorScheme.onSurface, RoundedCornerShape(10.dp)).padding(4.dp) else Modifier.padding(4.dp))
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        AppThemeMode.values().forEach { mode ->
+            val isSelected = currentTheme.equals(mode.name, ignoreCase = true)
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(if (isSelected) RoundedCornerShape(4.dp) else CircleShape)
+                    .then(
+                        if (isSelected) Modifier
+                            // v3.1 B1: an explicit primary-color border (rather than relying
+                            // solely on a surfaceVariant background fill) is what actually
+                            // makes the selected-state indicator visible for light-background
+                            // themes like Editorial Light, where surfaceVariant (0xFFFAF8F3)
+                            // is nearly indistinguishable from the surrounding card surface —
+                            // this was the root cause of "Light shows no selection outline."
+                            .border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(4.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .padding(4.dp)
                             .clip(CircleShape)
-                            .background(accent.primary)
-                            .clickable { onAccentSelected(accent.name) }
+                            .background(mode.samplePrimary)
+                        else Modifier
+                            .clip(CircleShape)
+                            .background(mode.samplePrimary)
                     )
-                }
-            }
+                    .clickable { onThemeSelected(mode.name) }
+            )
         }
     }
-    Spacer(modifier = Modifier.height(8.dp))
+    Spacer(modifier = Modifier.height(12.dp))
 }
 
 // B3: TokenPlaceholders() (Typography/Surfaces/Borders/Icons/States inert label list)
