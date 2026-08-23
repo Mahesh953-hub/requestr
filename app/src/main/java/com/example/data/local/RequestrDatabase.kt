@@ -14,6 +14,18 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * Ships with NO seed data by design: a fresh install has an empty traffic log, so the UI
  * renders a genuine empty state instead of the fabricated sample rows that shipped in v2.1.
  */
+
+    class QuicDecodeStatusConverter {
+        @TypeConverter
+        fun fromStatus(status: QuicDecodeStatus): String = status.name
+        @TypeConverter
+        fun toStatus(name: String): QuicDecodeStatus = try {
+            QuicDecodeStatus.valueOf(name)
+        } catch (e: IllegalArgumentException) {
+            QuicDecodeStatus.DETECTED_ONLY
+        }
+    }
+
 @Database(
     entities = [
         CapturedTrafficEntity::class,
@@ -59,7 +71,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
     // below is a genuine ALTER/CREATE migration, and exportSchema is now true so future
     // migrations have a real prior-version JSON snapshot to validate against instead of trusting
     // hand-written SQL alone.
-    version = 9,
+    version = 10,
     exportSchema = true,
 )
 @TypeConverters(RequestrTypeConverters::class)
@@ -107,7 +119,7 @@ abstract class RequestrDatabase : RoomDatabase() {
                     // real, disclosed data loss (see AUDIT_REPORT.md/TODO_v5.md) -- but it is
                     // strictly better than a crash loop, and it does not touch the v8->v9 path,
                     // which stays a real, non-destructive migration.
-                    .addMigrations(MIGRATION_8_9)
+                    .addMigrations(MIGRATION_8_9, MIGRATION_9_10)
                     .fallbackToDestructiveMigrationFrom(/* dropAllTables = */ true, 1, 2, 3, 4, 5, 6, 7)
                     .build()
                     .also { INSTANCE = it }
@@ -131,6 +143,16 @@ abstract class RequestrDatabase : RoomDatabase() {
          * and this migration agree on schema instead of Room throwing
          * "Migration didn't properly handle ... connect_attempts" at database-open time.
          */
+        val MIGRATION_9_10: Migration = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE quic_connections ADD COLUMN decodeStatus TEXT NOT NULL DEFAULT 'DETECTED_ONLY'")
+                db.execSQL("ALTER TABLE quic_connections ADD COLUMN lifecycleState TEXT NOT NULL DEFAULT 'INITIALIZING'")
+                db.execSQL("ALTER TABLE quic_connections ADD COLUMN updatedAt INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE quic_connections ADD COLUMN clientRandomHex TEXT DEFAULT NULL")
+                db.execSQL("ALTER TABLE quic_connections ADD COLUMN keylogLabels TEXT DEFAULT NULL")
+            }
+        }
+
         val MIGRATION_8_9: Migration = object : Migration(8, 9) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 // ── Section A: transport/packet-core columns ──

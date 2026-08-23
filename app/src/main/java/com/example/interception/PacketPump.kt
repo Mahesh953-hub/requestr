@@ -397,6 +397,9 @@ class PacketPump(
             quicVersion = initial.version,
             dstConnectionId = connectionId,
             establishedAt = System.currentTimeMillis(),
+            decodeStatus = QuicDecodeStatus.DETECTED_ONLY,
+            lifecycleState = "INITIALIZING",
+            updatedAt = System.currentTimeMillis(),
         )
         runCatching {
             runBlocking { db.quicConnectionDao().upsert(entity) }

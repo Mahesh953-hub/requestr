@@ -61,6 +61,7 @@ import com.example.data.interception.InterceptionStateRepository
 import com.example.data.interception.InterceptionStatus
 import com.example.data.repository.SettingsRepository
 // TrafficInterceptorRepository import removed — capture state reads InterceptionStateRepository
+import com.example.ui.theme.AppAccent
 import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.InterceptorActiveGreen
 import com.example.ui.theme.InterceptorIdleAmber
@@ -270,34 +271,19 @@ fun AppNavigationDrawer(
                             .horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        AppThemeMode.values().forEach { mode ->
-                            val isModeActive = settings.themeMode.equals(mode.name, ignoreCase = true)
+                        AppAccent.values().forEach { accent ->
+                            val accentSelected = settings.selectedAccent.equals(accent.name, ignoreCase = true)
                             Box(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(if (isModeActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
-                                    // v3.1 B1: route through the unified write path (see
-                                    // AppRepositories.updateThemeSelection doc) so this quick
-                                    // switcher stays consistent with Settings' per-family memory.
-                                    .clickable { SettingsRepository.updateThemeSelection(mode) }
-                                    .padding(horizontal = 10.dp, vertical = 6.dp)
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(8.dp)
-                                            .clip(CircleShape)
-                                            .background(mode.samplePrimary)
+                                    .size(32.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(accent.primary)
+                                    .then(
+                                        if (accentSelected) Modifier.border(2.dp, MaterialTheme.colorScheme.onSurface, RoundedCornerShape(8.dp))
+                                        else Modifier
                                     )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = mode.displayName,
-                                        color = if (isModeActive) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Medium
-                                    )
-                                }
-                            }
+                                    .clickable { SettingsRepository.updateAccent(accent.name) }
+                            )
                         }
                     }
 
