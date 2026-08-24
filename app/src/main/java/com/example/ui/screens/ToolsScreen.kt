@@ -2,8 +2,8 @@ package com.example.ui.screens
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -33,6 +32,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -100,14 +100,14 @@ fun ToolsScreen(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
         )
 
-        // Category selector — Fix 07 redesign: text-only, accent underline
-        CategorySelector(
+        // v6.0 transplant (manifest §5.6): Category selector — 20dp capsule chips
+        ToolCategorySelector(
             selected = selectedCategory,
             onSelect = { selectedCategory = it },
             modifier = Modifier.padding(vertical = 4.dp)
         )
 
-        // Tool grid — 2 columns, icon + name
+        // Tool grid — 2 columns, icon + name + description
         LazyVerticalGrid(
             state = gridState,
             columns = GridCells.Fixed(2),
@@ -119,7 +119,7 @@ fun ToolsScreen(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             items(filteredTools, key = { it.id }) { tool ->
-                ToolCard(tool = tool, onClick = { onNavigateToTool(tool.id) })
+                RedesignedToolCard(tool = tool, onClick = { onNavigateToTool(tool.id) })
             }
 
             // "Create Custom Tool" card when Custom category (or "All") is selected.
@@ -255,10 +255,10 @@ fun ToolsScreen(
     }
 }
 
-// ─── Category Selector ──────────────────────────────────────────────
+// ─── Category Selector (v6.0 transplant §5.6: 20dp capsule chips) ───
 
 @Composable
-private fun CategorySelector(
+private fun ToolCategorySelector(
     selected: ToolCategory?,
     onSelect: (ToolCategory?) -> Unit,
     modifier: Modifier = Modifier
@@ -270,92 +270,101 @@ private fun CategorySelector(
             .fillMaxWidth()
             .horizontalScroll(rememberScrollState())
             .padding(horizontal = 16.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         categories.forEach { (cat, label) ->
             val isActive = cat == selected
-            val textColor by animateColorAsState(
-                if (isActive) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.onSurfaceVariant,
-                animationSpec = com.example.ui.theme.scaledTween(250),
-                label = "catTextColor"
+            val activeBg by animateColorAsState(
+                targetValue = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                animationSpec = tween(200),
+                label = "catBg"
             )
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
+            val activeText by animateColorAsState(
+                targetValue = if (isActive) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                animationSpec = tween(200),
+                label = "catText"
+            )
+
+            Box(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(2.dp))
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(activeBg)
                     .clickable { onSelect(cat) }
-                    .padding(vertical = 6.dp)
+                    .padding(horizontal = 14.dp, vertical = 7.dp),
+                contentAlignment = Alignment.Center
             ) {
                 Text(
                     text = label,
-                    color = textColor,
                     fontSize = 12.sp,
-                    fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal
+                    fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
+                    color = activeText
                 )
-                if (isActive) {
-                    Spacer(modifier = Modifier.height(3.dp))
-                    Box(
-                        modifier = Modifier
-                            .width(24.dp)
-                            .height(2.dp)
-                            .clip(RoundedCornerShape(1.dp))
-                            .background(MaterialTheme.colorScheme.primary)
-                    )
-                }
             }
         }
     }
 }
 
-// ─── Tool Card ──────────────────────────────────────────────────────
+// ─── Tool Card (v6.0 transplant §5.6: 16dp radius, 24dp icon tile, description) ───
 
 @Composable
-private fun ToolCard(
+private fun RedesignedToolCard(
     tool: ToolItem,
     onClick: () -> Unit
 ) {
-    Box(
+    Surface(
         modifier = Modifier
+            .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
-            .background(MaterialTheme.colorScheme.surface)
-            .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.3f), RoundedCornerShape(16.dp))
-            .clickable { onClick() }
-            .padding(vertical = 16.dp),
-        contentAlignment = Alignment.Center
+            .clickable { onClick() },
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
         Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Icon container
+            // Icon container with warm accent tint
             Box(
                 modifier = Modifier
-                    .size(44.dp)
+                    .size(46.dp)
                     .clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = tool.icon,
-                    contentDescription = null,
+                    contentDescription = tool.title,
                     tint = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.size(22.dp)
                 )
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             // Tool name
             Text(
                 text = tool.title,
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                fontSize = 13.5.sp,
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(horizontal = 6.dp)
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(modifier = Modifier.height(3.dp))
+
+            // Tool description
+            Text(
+                text = tool.description,
+                fontSize = 10.5.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center
             )
         }
     }
