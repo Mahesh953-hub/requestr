@@ -1,6 +1,11 @@
 package com.example.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -20,15 +25,20 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.RocketLaunch
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Star
@@ -50,6 +60,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.TabRowDefaults.SecondaryIndicator
@@ -68,10 +79,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.models.ApiRequestItem
@@ -88,17 +109,28 @@ import com.example.data.models.RequestBodyType
 import com.example.data.repository.ApiCollectionsRepository
 import com.example.data.repository.ApiTestrRepository
 import com.example.data.repository.AssertionRunner
+import com.example.data.repository.SettingsRepository
 import com.example.data.repository.ToolsRepository
+import com.example.data.repository.WebSocketSession
+import com.example.data.repository.WsConnectionStatus
 import com.example.ui.components.GlassCard
 import com.example.ui.components.MethodBadge
 import com.example.ui.components.ProtocolBadge
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.StatusCodeBadge
 import com.example.ui.components.rememberAppHapticFeedback
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import com.example.ui.theme.MethodDelete
+import com.example.ui.theme.MethodGet
+import com.example.ui.theme.MethodHead
+import com.example.ui.theme.MethodOptions
+import com.example.ui.theme.MethodPatch
+import com.example.ui.theme.MethodPost
+import com.example.ui.theme.MethodPut
+import com.example.ui.theme.MethodWs
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -117,7 +149,13 @@ fun ApiTestrScreen(
     var reqState by remember(currentRequest) { mutableStateOf(currentRequest) }
     var responseData by remember { mutableStateOf<ApiResponseData?>(null) }
     var isLoading by remember { mutableStateOf(false) }
-    var wsConnected by remember { mutableStateOf(false) }
+
+    // v6.0 transplant (manifest §5.5): WebSocket session state — backup had a bare
+    // `wsConnected` boolean that was never set to true; the WS method showed "Connect"
+    // but never connected. Now backed by the ported WebSocketSession/WsConnectionStatus.
+    var wsSession by remember { mutableStateOf<WebSocketSession?>(null) }
+    val disconnectedFlow = remember { MutableStateFlow(WsConnectionStatus.DISCONNECTED) }
+    val wsStatus by (wsSession?.status ?: disconnectedFlow).collectAsState()
 
     // v3.4 Part C — C3 (Test assertions / test runner): results of the last "Run Tests" pass
     // against `responseData`. Cleared whenever a fresh Send/Run happens so stale pass/fail
@@ -147,11 +185,32 @@ fun ApiTestrScreen(
     // settings.hapticFeedbackEnabled via the shared helper.
     val performHaptic = rememberAppHapticFeedback()
 
+    // v6.0 transplant (manifest §5.5): settings for SendFloatingBar spacing + snackbar offset
+    val settings by SettingsRepository.settings.collectAsState()
+
     // Task 5(c): send/new-request keyboard shortcuts. Previously MainActivity's key listener
     // called `sendBroadcast(Intent("com.example.requestr.SEND_REQUEST"))` / `.../NEW_REQUEST`
     // with no registered receiver anywhere, so Ctrl+Enter/Ctrl+Shift+N were silent no-ops.
     // com.example.AppShortcuts is an in-process SharedFlow this screen collects directly.
     fun sendCurrentRequest() {
+        // v6.0 transplant (manifest §5.5): WebSocket connect/disconnect — backup had
+        // a bare wsConnected boolean that was never set, so WS method was a dead button.
+        if (reqState.method == HttpMethod.WS) {
+            val session = wsSession
+            if (session != null && session.status.value == WsConnectionStatus.CONNECTED) {
+                session.close()
+                wsSession = null
+            } else if (session == null ||
+                session.status.value == WsConnectionStatus.DISCONNECTED ||
+                session.status.value == WsConnectionStatus.ERROR
+            ) {
+                session?.close()
+                val newSession = ApiTestrRepository.getOrCreateWsSession(reqState.url, reqState.headers)
+                newSession.connect()
+                wsSession = newSession
+            }
+            return
+        }
         isLoading = true
         coroutineScope.launch {
             // v3.2 Part C — C2 (Request chaining): substitute {{variableName}}
@@ -248,149 +307,18 @@ fun ApiTestrScreen(
             }
         )
 
-        // Request URL & Method Bar
-        GlassCard(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 4.dp),
-            backgroundColor = MaterialTheme.colorScheme.surface
-        ) {
-            Column(modifier = Modifier.padding(10.dp)) {
-                // Request Name inline editor
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    OutlinedTextField(
-                        value = reqState.name,
-                        onValueChange = { reqState = reqState.copy(name = it) },
-                        textStyle = TextStyle(
-                            fontWeight = FontWeight.Bold,
-                            color = TextPrimary,
-                            fontSize = 14.sp
-                        ),
-                        singleLine = true,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = Color.Transparent,
-                            unfocusedBorderColor = Color.Transparent,
-                            focusedContainerColor = Color.Transparent,
-                            unfocusedContainerColor = Color.Transparent
-                        ),
-                        modifier = Modifier.weight(1f)
-                    )
-
-                    Button(
-                        onClick = { sendCurrentRequest() },
-                        enabled = !isLoading,
-                        shape = RoundedCornerShape(10.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                    ) {
-                        if (isLoading) {
-                            CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
-                        } else if (reqState.method == HttpMethod.WS && wsConnected) {
-                            Icon(imageVector = Icons.Default.Close, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Disconnect", fontWeight = FontWeight.Bold)
-                        } else if (reqState.method == HttpMethod.WS) {
-                            Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Connect", fontWeight = FontWeight.Bold)
-                        } else {
-                            Icon(imageVector = Icons.Default.PlayArrow, contentDescription = "Play", modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Send", fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(4.dp))
-
-                // Method + URL Row
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Method Dropdown Pill
-                    Box {
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(MaterialTheme.colorScheme.surfaceVariant)
-                                .clickable { showMethodDropdown = true }
-                                .padding(horizontal = 10.dp, vertical = 10.dp)
-                        ) {
-                            MethodBadge(method = reqState.method, fontSize = 12)
-                        }
-
-                        // WS connection status indicator
-                        if (reqState.method == HttpMethod.WS) {
-                            val (wsLabel, wsColor) = when {
-                                wsConnected -> "Connected" to Color(0xFF10B981)
-                                isLoading -> "Connecting..." to Color(0xFFF59E0B)
-                                else -> "Disconnected" to MaterialTheme.colorScheme.onSurfaceVariant
-                            }
-                            Text(wsLabel, fontSize = 9.sp, fontWeight = FontWeight.Bold, color = wsColor,
-                                modifier = Modifier.padding(start = 6.dp).clip(RoundedCornerShape(4.dp))
-                                    .background(wsColor.copy(alpha = 0.12f)).padding(horizontal = 5.dp, vertical = 1.dp))
-                        }
-
-                        DropdownMenu(
-                            expanded = showMethodDropdown,
-                            onDismissRequest = { showMethodDropdown = false }
-                        ) {
-                            HttpMethod.values().forEach { m ->
-                                DropdownMenuItem(
-                                    text = { MethodBadge(method = m) },
-                                    onClick = {
-                                        reqState = reqState.copy(method = m)
-                                        showMethodDropdown = false
-                                    }
-                                )
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.width(8.dp))
-
-                    // URL Input
-                    OutlinedTextField(
-                        value = reqState.url,
-                        onValueChange = { reqState = reqState.copy(url = it) },
-                        textStyle = TextStyle(
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 12.sp,
-                            color = TextPrimary
-                        ),
-                        placeholder = { Text("https://api.example.com/v1/endpoint", color = TextMuted, fontSize = 12.sp) },
-                        singleLine = true,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = MaterialTheme.colorScheme.primary,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outline,
-                            focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant
-                        ),
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-            }
-        }
-
-        // Follow Redirects toggle — Fix 09
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 2.dp),
-            horizontalArrangement = Arrangement.End,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("Follow redirects", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(modifier = Modifier.width(6.dp))
-            androidx.compose.material3.Switch(
-                checked = followRedirects,
-                onCheckedChange = { followRedirects = it },
-                modifier = Modifier.height(24.dp)
+        // v6.0 transplant (manifest §5.5): TitleAndUrlCard replaces the inline GlassCard
+        // request bar + separate follow-redirects toggle with a single polished card
+        // featuring inline title edit, method menu, URL input, and rocket follow-redirect
+        // animation. The Send button moves to SendFloatingBar at the bottom.
+        Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+            TitleAndUrlCard(
+                reqState = reqState,
+                followRedirects = followRedirects,
+                onTitleChanged = { reqState = reqState.copy(name = it) },
+                onMethodChanged = { reqState = reqState.copy(method = it) },
+                onUrlChanged = { reqState = reqState.copy(url = it) },
+                onToggleRedirects = { followRedirects = !followRedirects }
             )
         }
 
@@ -1103,14 +1031,24 @@ fun ApiTestrScreen(
         )
     }
 
+    // v6.0 transplant (manifest §5.5): snackbar offset above SendFloatingBar
     SnackbarHost(
         hostState = snackbarHostState,
         modifier = Modifier
             .align(Alignment.BottomCenter)
-            .padding(bottom = 16.dp)
+            .padding(bottom = (settings.fabBottomSpacingDp + 54).dp)
     ) { data ->
         Snackbar(snackbarData = data)
     }
+
+    // v6.0 transplant (manifest §5.5): SendFloatingBar replaces inline send button
+    SendFloatingBar(
+        isLoading = isLoading,
+        isWs = reqState.method == HttpMethod.WS,
+        wsStatus = wsStatus,
+        modifier = Modifier.align(Alignment.BottomCenter),
+        onSend = { sendCurrentRequest() }
+    )
     }
 }
 
@@ -1579,4 +1517,392 @@ private fun RawTextEditor(
         shape = RoundedCornerShape(8.dp),
         modifier = Modifier.fillMaxWidth().height(120.dp)
     )
+}
+
+// ====================================================================
+// v6.0 transplant (manifest §5.5, Lane B) — ported from main's ApiTestrScreen
+// ====================================================================
+
+fun getMethodColor(method: HttpMethod): Color {
+    return when (method) {
+        HttpMethod.GET -> MethodGet
+        HttpMethod.POST -> MethodPost
+        HttpMethod.PUT -> MethodPut
+        HttpMethod.DELETE -> MethodDelete
+        HttpMethod.PATCH -> MethodPatch
+        HttpMethod.HEAD -> MethodHead
+        HttpMethod.OPTIONS -> MethodOptions
+        HttpMethod.WS -> MethodWs
+    }
+}
+
+@Composable
+private fun TitleAndUrlCard(
+    reqState: ApiRequestItem,
+    followRedirects: Boolean,
+    onTitleChanged: (String) -> Unit,
+    onMethodChanged: (HttpMethod) -> Unit,
+    onUrlChanged: (String) -> Unit,
+    onToggleRedirects: () -> Unit
+) {
+    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    var isEditingTitle by remember { mutableStateOf(false) }
+    var showMethodMenu by remember { mutableStateOf(false) }
+    val primaryColor = MaterialTheme.colorScheme.primary
+    val methodColor = getMethodColor(reqState.method)
+
+    val menuArrowRotation by animateFloatAsState(
+        targetValue = if (showMethodMenu) 180f else 0f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessLow
+        ),
+        label = "menuArrowRotation"
+    )
+
+    val rocketTilt by animateFloatAsState(
+        targetValue = if (followRedirects) -18f else 0f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessLow
+        ),
+        label = "rocketTilt"
+    )
+
+    val rocketScale by animateFloatAsState(
+        targetValue = if (followRedirects) 1.15f else 1.0f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "rocketScale"
+    )
+
+    val rocketBg by animateColorAsState(
+        targetValue = if (followRedirects) primaryColor.copy(alpha = if (isDark) 0.22f else 0.15f) else Color.Transparent,
+        animationSpec = tween(200),
+        label = "rocketBg"
+    )
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            // Title Row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (isEditingTitle) {
+                    BasicTextField(
+                        value = reqState.name,
+                        onValueChange = onTitleChanged,
+                        textStyle = TextStyle(
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        ),
+                        singleLine = true,
+                        cursorBrush = SolidColor(primaryColor),
+                        modifier = Modifier
+                            .weight(1f)
+                            .drawBehind {
+                                val strokeWidth = 2.dp.toPx()
+                                val y = size.height - strokeWidth / 2
+                                drawLine(
+                                    color = primaryColor,
+                                    start = Offset(0f, y),
+                                    end = Offset(size.width, y),
+                                    strokeWidth = strokeWidth,
+                                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 10f), 0f)
+                                )
+                            }
+                            .padding(bottom = 2.dp)
+                    )
+                } else {
+                    Text(
+                        text = reqState.name.ifBlank { "New Request" },
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { isEditingTitle = true }
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(primaryColor.copy(alpha = if (isEditingTitle) 0.2f else 0.08f))
+                        .clickable { isEditingTitle = !isEditingTitle },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (isEditingTitle) Icons.Default.Check else Icons.Default.Edit,
+                        contentDescription = "Edit title",
+                        tint = primaryColor,
+                        modifier = Modifier.size(15.dp)
+                    )
+                }
+            }
+
+            // Draft Note
+            Spacer(modifier = Modifier.height(3.dp))
+            Text(
+                text = "Autosaved as draft · unsaved changes",
+                style = TextStyle(
+                    fontSize = 9.5.sp,
+                    fontStyle = FontStyle.Italic,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
+                )
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // URL Bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(14.dp)),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Method Dropdown Trigger
+                Box {
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(topStart = 14.dp, bottomStart = 14.dp))
+                            .background(methodColor.copy(alpha = if (isDark) 0.22f else 0.14f))
+                            .clickable { showMethodMenu = true }
+                            .padding(horizontal = 11.dp, vertical = 11.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = reqState.method.name,
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            fontFamily = FontFamily.Monospace,
+                            color = methodColor
+                        )
+                        Spacer(modifier = Modifier.width(3.dp))
+                        Icon(
+                            imageVector = Icons.Default.KeyboardArrowDown,
+                            contentDescription = "Select method",
+                            tint = methodColor,
+                            modifier = Modifier
+                                .size(14.dp)
+                                .graphicsLayer { rotationZ = menuArrowRotation }
+                        )
+                    }
+
+                    // Method Menu Dropdown
+                    DropdownMenu(
+                        expanded = showMethodMenu,
+                        onDismissRequest = { showMethodMenu = false }
+                    ) {
+                        HttpMethod.values().forEach { m ->
+                            val mCol = getMethodColor(m)
+                            val isSelected = reqState.method == m
+                            DropdownMenuItem(
+                                text = {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(mCol.copy(alpha = 0.18f))
+                                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                        ) {
+                                            Text(
+                                                text = m.name,
+                                                fontSize = 11.5.sp,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                fontFamily = FontFamily.Monospace,
+                                                color = mCol
+                                            )
+                                        }
+                                        if (isSelected) {
+                                            Spacer(modifier = Modifier.width(16.dp))
+                                            Icon(
+                                                imageVector = Icons.Default.Check,
+                                                contentDescription = "Selected",
+                                                tint = primaryColor,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                },
+                                onClick = {
+                                    onMethodChanged(m)
+                                    showMethodMenu = false
+                                }
+                            )
+                        }
+                    }
+                }
+
+                // Editable URL Text Field
+                BasicTextField(
+                    value = reqState.url,
+                    onValueChange = onUrlChanged,
+                    textStyle = TextStyle(
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontWeight = FontWeight.Medium
+                    ),
+                    singleLine = true,
+                    cursorBrush = SolidColor(primaryColor),
+                    decorationBox = { innerTextField ->
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp),
+                            contentAlignment = Alignment.CenterStart
+                        ) {
+                            if (reqState.url.isEmpty()) {
+                                Text(
+                                    text = "https://api.example.com/v1/resource",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                                    fontSize = 12.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                            innerTextField()
+                        }
+                    },
+                    modifier = Modifier.weight(1f)
+                )
+
+                // Follow Redirects Rocket Toggle with Animated Pill
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(topEnd = 14.dp, bottomEnd = 14.dp))
+                        .background(rocketBg)
+                        .clickable { onToggleRedirects() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.RocketLaunch,
+                        contentDescription = "Follow redirects",
+                        tint = if (followRedirects) primaryColor else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                        modifier = Modifier
+                            .size(16.dp)
+                            .graphicsLayer {
+                                rotationZ = rocketTilt
+                                scaleX = rocketScale
+                                scaleY = rocketScale
+                            }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SendFloatingBar(
+    isLoading: Boolean,
+    isWs: Boolean,
+    wsStatus: WsConnectionStatus,
+    modifier: Modifier = Modifier,
+    onSend: () -> Unit
+) {
+    val gradientColor = MaterialTheme.colorScheme.background
+    val settings by SettingsRepository.settings.collectAsState()
+    val bottomPad = settings.fabBottomSpacingDp.dp
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        gradientColor.copy(alpha = 0f),
+                        gradientColor.copy(alpha = 0.85f),
+                        gradientColor
+                    )
+                )
+            )
+            .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = bottomPad),
+        contentAlignment = Alignment.CenterEnd
+    ) {
+        val containerColor = if (isWs && wsStatus == WsConnectionStatus.CONNECTED) {
+            Color(0xFFEF4444)
+        } else {
+            MaterialTheme.colorScheme.primary
+        }
+
+        Surface(
+            onClick = onSend,
+            enabled = !isLoading,
+            shape = RoundedCornerShape(16.dp),
+            color = containerColor,
+            shadowElevation = 8.dp,
+            modifier = Modifier.height(46.dp)
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
+                if (isLoading || (isWs && wsStatus == WsConnectionStatus.CONNECTING)) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = if (isWs) "Connecting..." else "Sending...",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.5.sp,
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
+                } else if (isWs && wsStatus == WsConnectionStatus.CONNECTED) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Disconnect",
+                        tint = Color.White,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Disconnect WS", fontWeight = FontWeight.Bold, fontSize = 13.5.sp, color = Color.White)
+                } else if (isWs) {
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = "Connect",
+                        tint = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Connect WS", fontWeight = FontWeight.Bold, fontSize = 13.5.sp, color = MaterialTheme.colorScheme.onPrimary)
+                } else {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.Send,
+                        contentDescription = "Send",
+                        tint = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Send", fontWeight = FontWeight.Bold, fontSize = 13.5.sp, color = MaterialTheme.colorScheme.onPrimary)
+                }
+            }
+        }
+    }
 }

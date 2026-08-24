@@ -5,17 +5,122 @@ import com.example.data.models.ApiRequestItem
 import com.example.data.models.ApiResponseData
 import com.example.data.models.AuthType
 import com.example.data.models.HttpMethod
+import com.example.data.models.KeyValueItem
 import com.example.data.models.RequestBodyType
 import com.example.interception.OkHttpProxyInterceptor
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
+import okio.ByteString
+
+// ====================================================================
+// WebSocket client (manifest §5.5 — ported from main, adapted to backup's
+// OkHttpProxyInterceptor-equipped client). Backup's Room-backed saved APIs,
+// chain extraction, and exports remain unchanged.
+// ====================================================================
+
+data class WsMessage(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val text: String,
+    val isIncoming: Boolean,
+    val timestamp: Long = System.currentTimeMillis(),
+    val isBinary: Boolean = false
+)
+
+enum class WsConnectionStatus {
+    DISCONNECTED,
+    CONNECTING,
+    CONNECTED,
+    ERROR
+}
+
+class WebSocketSession(
+    private val client: OkHttpClient,
+    val url: String,
+    val headers: List<KeyValueItem>
+) {
+    private var webSocket: WebSocket? = null
+
+    private val _messages = MutableStateFlow<List<WsMessage>>(emptyList())
+    val messages: StateFlow<List<WsMessage>> = _messages.asStateFlow()
+
+    private val _status = MutableStateFlow(WsConnectionStatus.DISCONNECTED)
+    val status: StateFlow<WsConnectionStatus> = _status.asStateFlow()
+
+    private val _error = MutableStateFlow<String?>(null)
+    val error: StateFlow<String?> = _error.asStateFlow()
+
+    fun connect() {
+        if (_status.value == WsConnectionStatus.CONNECTED || _status.value == WsConnectionStatus.CONNECTING) return
+        _status.value = WsConnectionStatus.CONNECTING
+        _error.value = null
+
+        val reqBuilder = Request.Builder().url(url)
+        headers.filter { it.isEnabled && it.key.isNotBlank() }.forEach {
+            reqBuilder.addHeader(it.key, it.value)
+        }
+
+        webSocket = client.newWebSocket(reqBuilder.build(), object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                _status.value = WsConnectionStatus.CONNECTED
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                _messages.value = _messages.value + WsMessage(text = text, isIncoming = true)
+            }
+
+            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                _messages.value = _messages.value + WsMessage(text = "[Binary frame: ${bytes.hex()}]", isIncoming = true, isBinary = true)
+            }
+
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                webSocket.close(code, reason)
+                _status.value = WsConnectionStatus.DISCONNECTED
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                _status.value = WsConnectionStatus.DISCONNECTED
+            }
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                _status.value = WsConnectionStatus.ERROR
+                _error.value = t.localizedMessage ?: "WebSocket connection failed"
+            }
+        })
+    }
+
+    fun send(text: String): Boolean {
+        val ws = webSocket ?: return false
+        val sent = ws.send(text)
+        if (sent) {
+            _messages.value = _messages.value + WsMessage(text = text, isIncoming = false)
+        }
+        return sent
+    }
+
+    fun close() {
+        try {
+            webSocket?.close(1000, "User disconnect")
+        } catch (_: Exception) {}
+        webSocket = null
+        _status.value = WsConnectionStatus.DISCONNECTED
+    }
+
+    fun clearMessages() {
+        _messages.value = emptyList()
+    }
+}
 
 object ApiTestrRepository {
 
@@ -47,6 +152,19 @@ object ApiTestrRepository {
             .followRedirects(true)
         appContext?.let { builder.addInterceptor(OkHttpProxyInterceptor(it)) }
         builder.build()
+    }
+
+    private var activeWsSession: WebSocketSession? = null
+
+    fun getOrCreateWsSession(url: String, headers: List<KeyValueItem>): WebSocketSession {
+        val current = activeWsSession
+        if (current != null && current.url == url) {
+            return current
+        }
+        current?.close()
+        val newSession = WebSocketSession(client, url, headers)
+        activeWsSession = newSession
+        return newSession
     }
 
     suspend fun executeRequest(requestItem: ApiRequestItem, followRedirects: Boolean = true): ApiResponseData = withContext(Dispatchers.IO) {
