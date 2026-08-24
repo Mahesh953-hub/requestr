@@ -41,6 +41,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -634,22 +635,169 @@ private fun IpCalculatorWorkspace() {
 // JWT Decoder
 // ═══════════════════════════════════════════════════════════════════
 
+// v6.0 lane B (manifest §tools-workspace): parsed JWT segments for the structured
+// header/payload/signature layout.
+private data class JwtParts(val header: String, val payload: String, val signature: String, val valid: Boolean)
+
 @Composable
 private fun JwtDecoderWorkspace() {
     var token by remember { mutableStateOf("") }
     val ctx = LocalContext.current
-    val result = remember(token) { if (token.isBlank()) "" else ToolsRepository.decodeJwt(token) }
+
+    // v6.0 lane B (manifest §tools-workspace): parse JWT segments locally for the
+    // header/payload/signature blocks. ToolsRepository.decodeJwt returns a flat
+    // string; we split the token here to render the structured layout with alg,
+    // iss, and exp tags matching the approved mockup.
+    val parts = remember(token) {
+        if (token.isBlank() || token.split(".").size != 3) {
+            JwtParts("", "", "", false)
+        } else {
+            runCatching {
+                val segs = token.split(".")
+                fun decode(s: String): String {
+                    val pad = s + "=".repeat((4 - s.length % 4) % 4)
+                    return String(java.util.Base64.getUrlDecoder().decode(pad), Charsets.UTF_8)
+                }
+                JwtParts(decode(segs[0]), decode(segs[1]), segs[2], true)
+            }.getOrDefault(JwtParts("", "", "", false))
+        }
+    }
+
+    // Extract alg and exp from the decoded JSON for the tag badges
+    val alg = remember(parts.header) {
+        Regex("\"alg\"\\s*:\\s*\"([^\"]+)\"").find(parts.header)?.groupValues?.getOrNull(1) ?: ""
+    }
+    val iss = remember(parts.payload) {
+        Regex("\"iss\"\\s*:\\s*\"([^\"]+)\"").find(parts.payload)?.groupValues?.getOrNull(1)
+    }
+    val expRaw = remember(parts.payload) {
+        Regex("\"exp\"\\s*:\\s*(\\d+)").find(parts.payload)?.groupValues?.getOrNull(1)?.toLongOrNull()
+    }
+    val expValid = remember(expRaw) {
+        expRaw != null && expRaw > System.currentTimeMillis() / 1000
+    }
+
+    val prettyHeader = remember(parts.header) {
+        if (parts.header.isBlank()) "" else ToolsRepository.formatJson(parts.header)
+    }
+    val prettyPayload = remember(parts.payload) {
+        if (parts.payload.isBlank()) "" else ToolsRepository.formatJson(parts.payload)
+    }
+
     Column {
         modeRow("JWT Decoder")
-        Text("Paste a JWT token to decode its header, payload, and signature.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            "Paste a JWT token to decode its header, payload, and signature.",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
         Spacer(modifier = Modifier.height(8.dp))
-        OutlinedTextField(value = token, onValueChange = { token = it },
-            modifier = Modifier.fillMaxWidth(), minLines = 3, maxLines = 6,
-            placeholder = { Text("eyJhbGciOiJIUzI1NiJ9.eyJzdWIi…") },
-            textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace, fontSize = 12.sp),
-            colors = fieldColors(), shape = RoundedCornerShape(12.dp))
-        Spacer(modifier = Modifier.height(12.dp))
-        outputBlock("Decoded", result, ctx)
+
+        // Input field with paste button (manifest §tools-workspace: InputBlock)
+        OutlinedTextField(
+            value = token,
+            onValueChange = { token = it },
+            modifier = Modifier.fillMaxWidth(),
+            minLines = 3,
+            maxLines = 6,
+            placeholder = { Text("eyJhbGciOiJIUzI1NiJ9.eyJzdWIi…", color = MaterialTheme.colorScheme.onSurfaceVariant) },
+            textStyle = androidx.compose.ui.text.TextStyle(
+                fontFamily = FontFamily.Monospace, fontSize = 11.5.sp,
+                color = MaterialTheme.colorScheme.onSurface
+            ),
+            trailingIcon = {
+                IconButton(onClick = {
+                    val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                    clipboard?.primaryClip?.getItemAt(0)?.text?.let { token = it.toString() }
+                }, modifier = Modifier.size(30.dp)) {
+                    Icon(
+                        Icons.Default.ContentCopy, "Paste",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(15.dp)
+                    )
+                }
+            },
+            colors = fieldColors(),
+            shape = RoundedCornerShape(12.dp)
+        )
+
+        if (!parts.valid && token.isNotBlank()) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "Invalid JWT — expected 3 dot-separated segments.",
+                fontSize = 11.sp,
+                color = Color(0xFFEF4444)
+            )
+        }
+
+        if (parts.valid) {
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Header block with alg badge (manifest §tools-workspace: JwtHeaderBlock)
+            JwtOutputBlock(
+                title = "Header",
+                content = prettyHeader,
+                tagText = if (alg.isNotEmpty()) alg else null,
+                tagColor = Color(0xFFA78BFA),
+                onCopy = { copyToClipboard(ctx, prettyHeader) }
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Payload block with iss/exp tags (manifest §tools-workspace: JwtPayloadBlock)
+            JwtOutputBlock(
+                title = "Payload · Claims",
+                content = prettyPayload,
+                issTag = iss,
+                expValid = expValid,
+                onCopy = { copyToClipboard(ctx, prettyPayload) }
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Signature hex bar (manifest §tools-workspace: SignatureBar)
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 13.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Signature",
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = parts.signature,
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "HMAC-SHA256",
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "3 segments detected · header & payload are Base64URL decoded · signature is HMAC of the first two segments.",
+                fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }
 
@@ -795,3 +943,117 @@ private fun fieldColors() = OutlinedTextFieldDefaults.colors(
 
 private fun randomHex(len: Int): String =
     (1..len).map { "0123456789abcdef".random() }.joinToString("")
+
+// ═══════════════════════════════════════════════════════════════════
+// v6.0 lane B (manifest §tools-workspace): JWT output block — surface card
+// with title row (badge tags) + pretty-printed JSON code + copy button.
+// ═══════════════════════════════════════════════════════════════════
+
+@Composable
+private fun JwtOutputBlock(
+    title: String,
+    content: String,
+    tagText: String? = null,
+    tagColor: Color = MaterialTheme.colorScheme.primary,
+    issTag: String? = null,
+    expValid: Boolean? = null,
+    onCopy: () -> Unit
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            // Title row with tag badges
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(title, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    if (tagText != null) {
+                        JwtTag(text = tagText, color = tagColor)
+                    }
+                    if (issTag != null) {
+                        JwtTag(text = "iss: $issTag", color = Color(0xFF06B6D4))
+                    }
+                    if (expValid != null) {
+                        JwtTag(
+                            text = if (expValid) "exp valid" else "exp expired",
+                            color = if (expValid) Color(0xFF10B981) else Color(0xFFEF4444)
+                        )
+                    }
+                }
+            }
+
+            // Code block
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(12.dp))
+                    .padding(12.dp)
+            ) {
+                Text(
+                    text = content,
+                    fontSize = 11.5.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    lineHeight = 18.sp
+                )
+            }
+
+            // Copy button
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+                horizontalArrangement = Arrangement.End
+            ) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(10.dp))
+                        .clickable { onCopy() }
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Default.ContentCopy, "Copy",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text(
+                            "Copy Payload",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun JwtTag(text: String, color: Color) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(color.copy(alpha = 0.16f))
+            .padding(horizontal = 8.dp, vertical = 3.dp)
+    ) {
+        Text(
+            text = text,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            color = color
+        )
+    }
+}
