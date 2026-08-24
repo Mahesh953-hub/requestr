@@ -7,6 +7,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -34,6 +36,7 @@ import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
@@ -365,23 +368,31 @@ fun SettingsScreen(
 
             // Card Corner Radius (moved from old Section 3)
             item { Spacer(modifier = Modifier.height(8.dp)) }
-            item { SubsectionTitle("Card Corner Radius") }
+            // v6.0 transplant (manifest §5.10): LiveRoundnessSettingCard replaces the
+            // basic corner-radius slider with presets, live preview, and themed slider.
+            item { Spacer(modifier = Modifier.height(8.dp)) }
+            item { SubsectionTitle("UI Roundness & Geometry") }
             item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("${settings.cornerRadiusDp} dp", color = MaterialTheme.colorScheme.primary, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
-                }
-                Slider(
-                    value = settings.cornerRadiusDp.toFloat(),
-                    onValueChange = { SettingsRepository.updateCornerRadius(it.toInt()) },
-                    valueRange = 8f..24f,
-                    steps = 8,
-                    colors = SliderDefaults.colors(
-                        thumbColor = MaterialTheme.colorScheme.primary,
-                        activeTrackColor = MaterialTheme.colorScheme.primary
-                    )
+                LiveRoundnessSettingCard(
+                    cornerRadiusDp = settings.cornerRadiusDp,
+                    onCornerRadiusChange = { SettingsRepository.updateCornerRadius(it) }
+                )
+            }
+
+            // v6.0 transplant (manifest §5.10): Navigation & Header glass modifiers
+            // (header top offset, header/nav opacity, blur styles, FAB spacing, hidden items)
+            item { Spacer(modifier = Modifier.height(8.dp)) }
+            item { SubsectionTitle("Navigation & Header Glass Modifiers") }
+            item {
+                NavigationAndHeaderModifiersCard(
+                    settings = settings,
+                    onUpdateNavOpacity = { SettingsRepository.updateNavBarOpacity(it) },
+                    onUpdateNavBlurStyle = { SettingsRepository.updateNavBarBlurEffect(it) },
+                    onToggleHiddenNavItem = { SettingsRepository.toggleNavHiddenItem(it) },
+                    onUpdateHeaderTopPadding = { SettingsRepository.updateHeaderTopPadding(it) },
+                    onUpdateHeaderOpacity = { SettingsRepository.updateHeaderOpacity(it) },
+                    onUpdateHeaderBlurStyle = { SettingsRepository.updateHeaderBlurStyle(it) },
+                    onUpdateFabBottomSpacing = { SettingsRepository.updateFabBottomSpacing(it) }
                 )
             }
 
@@ -2198,5 +2209,529 @@ private fun SettingRow(
             tint = MaterialTheme.colorScheme.primary,
             modifier = Modifier.size(20.dp)
         )
+    }
+}
+
+// ====================================================================
+// v6.0 transplant (manifest §5.10, Lane A) — ported from main's SettingsScreen
+// ====================================================================
+
+@Composable
+private fun LiveRoundnessSettingCard(
+    cornerRadiusDp: Int,
+    onCornerRadiusChange: (Int) -> Unit
+) {
+    val presets = listOf(
+        4 to "Sharp",
+        10 to "Crisp",
+        16 to "Modern",
+        22 to "Organic",
+        28 to "Pill"
+    )
+
+    GlassCard(
+        modifier = Modifier.fillMaxWidth(),
+        backgroundColor = MaterialTheme.colorScheme.surface
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            // Header with numeric indicator
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        "App Corner Curvature",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        "Live system-wide radius scale",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f))
+                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = "$cornerRadiusDp dp",
+                        color = MaterialTheme.colorScheme.primary,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp
+                    )
+                }
+            }
+
+            // Live Interactive Preview Block
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(cornerRadiusDp.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                    .border(
+                        1.5.dp,
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.4f),
+                        RoundedCornerShape(cornerRadiusDp.dp)
+                    )
+                    .padding(14.dp)
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(24.dp)
+                                    .clip(RoundedCornerShape(maxOf(2.dp, (cornerRadiusDp * 0.4).dp)))
+                                    .background(MaterialTheme.colorScheme.primary),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Tune,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onPrimary,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                "Live Preview Card",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(cornerRadiusDp.dp))
+                                .background(MaterialTheme.colorScheme.primary)
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
+                        ) {
+                            Text(
+                                "Active",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimary
+                            )
+                        }
+                    }
+
+                    Text(
+                        "Components, cards, and modal sheets dynamically adjust their geometry to this radius in real-time.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        lineHeight = 14.sp
+                    )
+                }
+            }
+
+            // Presets Chips
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                presets.forEach { (presetDp, label) ->
+                    val isSelected = cornerRadiusDp == presetDp
+                    val chipShape = if (isSelected) RoundedCornerShape(20.dp) else RoundedCornerShape(8.dp)
+                    Box(
+                        modifier = Modifier
+                            .clip(chipShape)
+                            .background(
+                                if (isSelected) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                            )
+                            .border(
+                                width = if (isSelected) 1.dp else 0.5.dp,
+                                color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f),
+                                shape = chipShape
+                            )
+                            .clickable { onCornerRadiusChange(presetDp) }
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = "$label ($presetDp)",
+                            fontSize = 11.sp,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                            color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            // Slider
+            Slider(
+                value = cornerRadiusDp.toFloat(),
+                onValueChange = { onCornerRadiusChange(it.toInt()) },
+                valueRange = 4f..32f,
+                steps = 27,
+                colors = SliderDefaults.colors(
+                    thumbColor = MaterialTheme.colorScheme.primary,
+                    activeTrackColor = MaterialTheme.colorScheme.primary,
+                    inactiveTrackColor = MaterialTheme.colorScheme.surfaceVariant
+                ),
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+    }
+}
+
+@Composable
+private fun NavigationAndHeaderModifiersCard(
+    settings: com.example.data.models.UserSettingsState,
+    onUpdateNavOpacity: (Float) -> Unit,
+    onUpdateNavBlurStyle: (String) -> Unit,
+    onToggleHiddenNavItem: (String) -> Unit,
+    onUpdateHeaderTopPadding: (Int) -> Unit,
+    onUpdateHeaderOpacity: (Float) -> Unit,
+    onUpdateHeaderBlurStyle: (String) -> Unit,
+    onUpdateFabBottomSpacing: (Int) -> Unit
+) {
+    GlassCard(
+        modifier = Modifier.fillMaxWidth(),
+        backgroundColor = MaterialTheme.colorScheme.surface
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // ── 1. Header Top Offset ──
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Header Top Offset (Status Bar Padding)",
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        "${settings.headerTopPaddingDp} dp",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Text(
+                    "Pulls top floating capsule headers downward so they don't collide with the notification panel.",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Slider(
+                    value = settings.headerTopPaddingDp.toFloat(),
+                    onValueChange = { onUpdateHeaderTopPadding(it.toInt()) },
+                    valueRange = 0f..40f,
+                    steps = 7,
+                    colors = SliderDefaults.colors(
+                        thumbColor = MaterialTheme.colorScheme.primary,
+                        activeTrackColor = MaterialTheme.colorScheme.primary
+                    )
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+            // ── 2. Header Background Opacity & Blur ──
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Header Glass Opacity",
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        "${(settings.headerBackgroundOpacity * 100).toInt()}%",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Slider(
+                    value = settings.headerBackgroundOpacity,
+                    onValueChange = { onUpdateHeaderOpacity(it) },
+                    valueRange = 0.1f..1.0f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = MaterialTheme.colorScheme.primary,
+                        activeTrackColor = MaterialTheme.colorScheme.primary
+                    )
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    "Header Glass Effect",
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    // DESIGN-RECORD §11: write canonical keys (not main's legacy keys)
+                    listOf(
+                        "FROSTED_GLASS" to "Frosted Glass",
+                        "SOLID_M3" to "Material 3",
+                        "TRANSLUCENT" to "Clear Tint",
+                        "OLED_BLACK" to "OLED Black"
+                    ).forEach { (styleKey, styleLabel) ->
+                        val isSel = settings.headerBlurStyle == styleKey
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(
+                                    if (isSel) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                                    else MaterialTheme.colorScheme.surfaceVariant
+                                )
+                                .border(
+                                    width = 1.dp,
+                                    color = if (isSel) MaterialTheme.colorScheme.primary else Color.Transparent,
+                                    shape = RoundedCornerShape(8.dp)
+                                )
+                                .clickable { onUpdateHeaderBlurStyle(styleKey) }
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = styleLabel,
+                                fontSize = 11.5.sp,
+                                fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
+                                color = if (isSel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                }
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+            // ── 3. Navigation Bar Opacity & Blur ──
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Bottom Nav Pill Opacity",
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        "${(settings.navBarBackgroundOpacity * 100).toInt()}%",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Text(
+                    "Fine-tune the iOS-style glassmorphism blur and transparency of the floating navigation pill.",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Slider(
+                    value = settings.navBarBackgroundOpacity,
+                    onValueChange = { onUpdateNavOpacity(it) },
+                    valueRange = 0.3f..1.0f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = MaterialTheme.colorScheme.primary,
+                        activeTrackColor = MaterialTheme.colorScheme.primary
+                    )
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    "Nav Pill Glass Blur Style",
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    // DESIGN-RECORD §11: write canonical keys (not main's legacy keys)
+                    listOf(
+                        "FROSTED_GLASS" to "Frosted Glass",
+                        "SOLID_M3" to "Material 3",
+                        "OLED_BLACK" to "OLED Black",
+                        "TRANSLUCENT" to "Translucent"
+                    ).forEach { (effectKey, effectLabel) ->
+                        val isSel = settings.navBarBlurEffect == effectKey
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(
+                                    if (isSel) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                                    else MaterialTheme.colorScheme.surfaceVariant
+                                )
+                                .border(
+                                    width = 1.dp,
+                                    color = if (isSel) MaterialTheme.colorScheme.primary else Color.Transparent,
+                                    shape = RoundedCornerShape(8.dp)
+                                )
+                                .clickable { onUpdateNavBlurStyle(effectKey) }
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = effectLabel,
+                                fontSize = 11.5.sp,
+                                fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
+                                color = if (isSel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                }
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+            // ── 4. FAB & Action Spacing from Bottom ──
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "FAB & Bottom Elevation Spacing",
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        "${settings.fabBottomSpacingDp} dp",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Text(
+                    "Ensures action buttons & FABs float comfortably above the bottom navigation pill and screen bezels.",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Slider(
+                    value = settings.fabBottomSpacingDp.toFloat(),
+                    onValueChange = { onUpdateFabBottomSpacing(it.toInt()) },
+                    valueRange = 48f..140f,
+                    steps = 11,
+                    colors = SliderDefaults.colors(
+                        thumbColor = MaterialTheme.colorScheme.primary,
+                        activeTrackColor = MaterialTheme.colorScheme.primary
+                    )
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+            // ── 5. Hidden Navigation Items ──
+            Column {
+                Text(
+                    "Customize Visible Navigation Items",
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    "Tap to toggle visibility of tools in the bottom navigation pill and side drawer.",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+
+                val allNavItems = listOf(
+                    "home" to "Home",
+                    "intercept" to "Interceptr",
+                    "apis" to "API Testr",
+                    "tools" to "Tools",
+                    "notes" to "Notes",
+                    "flow" to "Flow",
+                    "music" to "Music",
+                    "chat" to "Reqy Assistant"
+                )
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    allNavItems.forEach { (itemKey, itemLabel) ->
+                        val isHidden = settings.navBarHiddenItems.contains(itemKey)
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(
+                                    if (!isHidden) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                                    else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                                )
+                                .border(
+                                    width = 1.dp,
+                                    color = if (!isHidden) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
+                                    shape = RoundedCornerShape(8.dp)
+                                )
+                                .clickable { onToggleHiddenNavItem(itemKey) }
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (!isHidden) {
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(13.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                }
+                                Text(
+                                    text = itemLabel,
+                                    fontSize = 11.5.sp,
+                                    fontWeight = if (!isHidden) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (!isHidden) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
