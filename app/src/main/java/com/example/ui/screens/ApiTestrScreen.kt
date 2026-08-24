@@ -6,6 +6,11 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -18,6 +23,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -26,9 +32,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
@@ -88,11 +96,17 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.models.ApiRequestItem
@@ -113,6 +127,7 @@ import com.example.data.repository.SettingsRepository
 import com.example.data.repository.ToolsRepository
 import com.example.data.repository.WebSocketSession
 import com.example.data.repository.WsConnectionStatus
+import com.example.data.repository.WsMessage
 import com.example.ui.components.GlassCard
 import com.example.ui.components.MethodBadge
 import com.example.ui.components.ProtocolBadge
@@ -156,6 +171,11 @@ fun ApiTestrScreen(
     var wsSession by remember { mutableStateOf<WebSocketSession?>(null) }
     val disconnectedFlow = remember { MutableStateFlow(WsConnectionStatus.DISCONNECTED) }
     val wsStatus by (wsSession?.status ?: disconnectedFlow).collectAsState()
+    // v6.0 transplant (manifest §5.5): WS message stream + draft for WsConsoleTabContent
+    val emptyMsgFlow = remember { MutableStateFlow<List<WsMessage>>(emptyList()) }
+    val wsMessages by (wsSession?.messages ?: emptyMsgFlow).collectAsState()
+    val wsError by (wsSession?.error ?: remember { MutableStateFlow<String?>(null) }).collectAsState()
+    var wsDraftMessage by remember { mutableStateOf("{\"type\":\"ping\"}") }
 
     // v3.4 Part C — C3 (Test assertions / test runner): results of the last "Run Tests" pass
     // against `responseData`. Cleared whenever a fresh Send/Run happens so stale pass/fail
@@ -187,6 +207,7 @@ fun ApiTestrScreen(
 
     // v6.0 transplant (manifest §5.5): settings for SendFloatingBar spacing + snackbar offset
     val settings by SettingsRepository.settings.collectAsState()
+    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
 
     // Task 5(c): send/new-request keyboard shortcuts. Previously MainActivity's key listener
     // called `sendBroadcast(Intent("com.example.requestr.SEND_REQUEST"))` / `.../NEW_REQUEST`
@@ -361,15 +382,28 @@ fun ApiTestrScreen(
             // ==========================================
             // REQUEST EDITOR VIEW
             // ==========================================
-            val reqTabs = listOf(
-                "Query (${reqState.queryParams.count { it.isEnabled }})",
-                "Headers (${reqState.headers.count { it.isEnabled }})",
-                "Body",
-                "Auth",
-                "Scripts",
-                "Chain (${reqState.chainExtractions.count { it.enabled }})",
-                "Tests (${reqState.assertions.count { it.enabled }})",
-            )
+            // v6.0 transplant (manifest §5.5): WS-specific tab set when method is WS
+            val reqTabs = if (reqState.method == HttpMethod.WS) {
+                listOf(
+                    "Query (${reqState.queryParams.count { it.isEnabled }})",
+                    "Headers (${reqState.headers.count { it.isEnabled }})",
+                    "WS Payload",
+                    "Auth",
+                    "Scripts",
+                )
+            } else {
+                listOf(
+                    "Query (${reqState.queryParams.count { it.isEnabled }})",
+                    "Headers (${reqState.headers.count { it.isEnabled }})",
+                    "Body",
+                    "Auth",
+                    "Scripts",
+                    "Chain (${reqState.chainExtractions.count { it.enabled }})",
+                    "Tests (${reqState.assertions.count { it.enabled }})",
+                )
+            }
+            // Clamp tab index when switching between WS and HTTP tab sets
+            if (requestTab >= reqTabs.size) requestTab = 0
 
             TabRow(
                 selectedTabIndex = requestTab,
@@ -439,171 +473,61 @@ fun ApiTestrScreen(
                         }
                     }
                     2 -> {
-                        // Request Body
-                        Column(modifier = Modifier.fillMaxSize()) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                RequestBodyType.values().forEach { bt ->
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(if (reqState.bodyType == bt) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
-                                            .clickable { reqState = reqState.copy(bodyType = bt) }
-                                            .padding(horizontal = 10.dp, vertical = 6.dp)
-                                    ) {
-                                        Text(bt.name, color = if (reqState.bodyType == bt) Color.White else TextSecondary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        // v6.0 transplant (manifest §5.5): WS Payload tab or HTTP Body tab
+                        if (reqState.method == HttpMethod.WS) {
+                            WsStreamComposerTab(
+                                draftMessage = wsDraftMessage,
+                                wsStatus = wsStatus,
+                                isDark = isDark,
+                                onDraftChanged = { wsDraftMessage = it },
+                                onSend = {
+                                    if (wsStatus == WsConnectionStatus.CONNECTED && wsDraftMessage.isNotBlank()) {
+                                        wsSession?.send(wsDraftMessage)
+                                        performHaptic(HapticFeedbackType.TextHandleMove)
+                                        showSavedSnackbar("Sent WS frame")
+                                    } else {
+                                        showSavedSnackbar("Connect WebSocket first")
                                     }
                                 }
-                            }
-
-                            Spacer(modifier = Modifier.height(10.dp))
-
-                            if (reqState.bodyType == RequestBodyType.NONE) {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .padding(40.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text("This request does not have a body", color = TextMuted)
+                            )
+                        } else {
+                            HttpRequestBodyTab(
+                                bodyType = reqState.bodyType,
+                                bodyContent = reqState.bodyContent,
+                                isDark = isDark,
+                                onBodyTypeChanged = { reqState = reqState.copy(bodyType = it) },
+                                onBodyContentChanged = { reqState = reqState.copy(bodyContent = it) },
+                                onBeautify = {
+                                    reqState = reqState.copy(bodyContent = ToolsRepository.formatJson(reqState.bodyContent))
+                                    performHaptic(HapticFeedbackType.TextHandleMove)
+                                    showSavedSnackbar("Beautified JSON Body")
                                 }
-                            } else {
-                                OutlinedTextField(
-                                    value = reqState.bodyContent,
-                                    onValueChange = { reqState = reqState.copy(bodyContent = it) },
-                                    textStyle = TextStyle(
-                                        fontFamily = FontFamily.Monospace,
-                                        fontSize = 12.sp,
-                                        color = TextPrimary
-                                    ),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .weight(1f),
-                                    colors = OutlinedTextFieldDefaults.colors(
-                                        focusedBorderColor = MaterialTheme.colorScheme.primary,
-                                        unfocusedBorderColor = MaterialTheme.colorScheme.outline,
-                                        focusedContainerColor = MaterialTheme.colorScheme.surface,
-                                        unfocusedContainerColor = MaterialTheme.colorScheme.surface
-                                    ),
-                                    shape = RoundedCornerShape(12.dp)
-                                )
-
-                                Spacer(modifier = Modifier.height(8.dp))
-
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.End
-                                ) {
-                                    Button(
-                                        onClick = {
-                                            reqState = reqState.copy(bodyContent = ToolsRepository.formatJson(reqState.bodyContent))
-                                        },
-                                        shape = RoundedCornerShape(8.dp),
-                                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-                                    ) {
-                                        Text("✨ Beautify JSON", color = TextPrimary, fontSize = 11.sp)
-                                    }
-                                }
-                            }
+                            )
                         }
                     }
                     3 -> {
-                        // Auth Tab
-                        Column(modifier = Modifier.fillMaxSize()) {
-                            Text("Authorization Type:", color = TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                            Spacer(modifier = Modifier.height(8.dp))
-
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                AuthType.values().forEach { at ->
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(if (reqState.authType == at) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
-                                            .clickable { reqState = reqState.copy(authType = at) }
-                                            .padding(horizontal = 10.dp, vertical = 6.dp)
-                                    ) {
-                                        Text(at.name, color = if (reqState.authType == at) Color.White else TextSecondary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                                    }
-                                }
-                            }
-
-                            Spacer(modifier = Modifier.height(16.dp))
-
-                            when (reqState.authType) {
-                                AuthType.BEARER -> {
-                                    OutlinedTextField(
-                                        value = reqState.bearerToken,
-                                        onValueChange = { reqState = reqState.copy(bearerToken = it) },
-                                        label = { Text("Bearer Token") },
-                                        modifier = Modifier.fillMaxWidth(),
-                                        shape = RoundedCornerShape(10.dp)
-                                    )
-                                }
-                                AuthType.BASIC -> {
-                                    OutlinedTextField(
-                                        value = reqState.basicUsername,
-                                        onValueChange = { reqState = reqState.copy(basicUsername = it) },
-                                        label = { Text("Username") },
-                                        modifier = Modifier.fillMaxWidth(),
-                                        shape = RoundedCornerShape(10.dp)
-                                    )
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                    OutlinedTextField(
-                                        value = reqState.basicPassword,
-                                        onValueChange = { reqState = reqState.copy(basicPassword = it) },
-                                        label = { Text("Password") },
-                                        modifier = Modifier.fillMaxWidth(),
-                                        shape = RoundedCornerShape(10.dp)
-                                    )
-                                }
-                                AuthType.API_KEY -> {
-                                    OutlinedTextField(
-                                        value = reqState.apiKeyHeader,
-                                        onValueChange = { reqState = reqState.copy(apiKeyHeader = it) },
-                                        label = { Text("Header Key (e.g. X-API-Key)") },
-                                        modifier = Modifier.fillMaxWidth(),
-                                        shape = RoundedCornerShape(10.dp)
-                                    )
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                    OutlinedTextField(
-                                        value = reqState.apiKeyValue,
-                                        onValueChange = { reqState = reqState.copy(apiKeyValue = it) },
-                                        label = { Text("API Key Value") },
-                                        modifier = Modifier.fillMaxWidth(),
-                                        shape = RoundedCornerShape(10.dp)
-                                    )
-                                }
-                                else -> {
-                                    Text("No authentication configured for this request.", color = TextMuted, fontSize = 12.sp)
-                                }
-                            }
-                        }
+                        // v6.0 transplant (manifest §5.5): Auth tab extracted into AuthSettingsTab
+                        AuthSettingsTab(
+                            authType = reqState.authType,
+                            bearerToken = reqState.bearerToken,
+                            basicUsername = reqState.basicUsername,
+                            basicPassword = reqState.basicPassword,
+                            apiKeyHeader = reqState.apiKeyHeader,
+                            apiKeyValue = reqState.apiKeyValue,
+                            onAuthTypeChanged = { reqState = reqState.copy(authType = it) },
+                            onBearerChanged = { reqState = reqState.copy(bearerToken = it) },
+                            onBasicUsernameChanged = { reqState = reqState.copy(basicUsername = it) },
+                            onBasicPasswordChanged = { reqState = reqState.copy(basicPassword = it) },
+                            onApiKeyHeaderChanged = { reqState = reqState.copy(apiKeyHeader = it) },
+                            onApiKeyValueChanged = { reqState = reqState.copy(apiKeyValue = it) }
+                        )
                     }
                     4 -> {
-                        // Scripts
-                        Column(modifier = Modifier.fillMaxSize()) {
-                            Text("Pre-request & Post-response JS Sandbox:", color = TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                            Spacer(modifier = Modifier.height(8.dp))
-                            OutlinedTextField(
-                                value = reqState.preScript,
-                                onValueChange = { reqState = reqState.copy(preScript = it) },
-                                label = { Text("Pre-request Script") },
-                                textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = TextPrimary),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .weight(1f),
-                                shape = RoundedCornerShape(10.dp)
-                            )
-                        }
+                        // v6.0 transplant (manifest §5.5): Scripts tab extracted into ScriptsTabContent
+                        ScriptsTabContent(
+                            preScript = reqState.preScript,
+                            onPreScriptChanged = { reqState = reqState.copy(preScript = it) }
+                        )
                     }
                     5 -> {
                         // v3.2 Part C — C2: Request chaining — extraction rules run against this
@@ -629,7 +553,26 @@ fun ApiTestrScreen(
             // ==========================================
             // RESPONSE VIEW
             // ==========================================
-            if (responseData == null) {
+            // v6.0 transplant (manifest §5.5): WS console view when method is WS
+            if (reqState.method == HttpMethod.WS) {
+                WsConsoleTabContent(
+                    wsStatus = wsStatus,
+                    wsMessages = wsMessages,
+                    wsError = wsError,
+                    wsDraftMessage = wsDraftMessage,
+                    onDraftChanged = { wsDraftMessage = it },
+                    onSend = {
+                        if (wsStatus == WsConnectionStatus.CONNECTED && wsDraftMessage.isNotBlank()) {
+                            wsSession?.send(wsDraftMessage)
+                            performHaptic(HapticFeedbackType.TextHandleMove)
+                        }
+                    },
+                    onClear = {
+                        wsSession?.clearMessages()
+                        performHaptic(HapticFeedbackType.TextHandleMove)
+                    }
+                )
+            } else if (responseData == null) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -1901,6 +1844,867 @@ private fun SendFloatingBar(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("Send", fontWeight = FontWeight.Bold, fontSize = 13.5.sp, color = MaterialTheme.colorScheme.onPrimary)
+                }
+            }
+        }
+    }
+}
+
+// ====================================================================
+// v6.0 transplant (manifest §5.5): Enhanced key-value row with animated
+// checkbox, colored monospace fields, zero-lag local state, delete button.
+// ====================================================================
+
+@Composable
+private fun KeyValueTableRow(
+    item: KeyValueItem,
+    isDark: Boolean,
+    onToggle: (Boolean) -> Unit,
+    onKeyChange: (String) -> Unit,
+    onValueChange: (String) -> Unit,
+    onDelete: () -> Unit
+) {
+    val primaryColor = MaterialTheme.colorScheme.primary
+    val valueColor = if (isDark) Color(0xFF4ADE80) else Color(0xFF16A34A)
+
+    var localKey by remember(item.id) { mutableStateOf(item.key) }
+    var localValue by remember(item.id) { mutableStateOf(item.value) }
+
+    LaunchedEffect(item.key) {
+        if (localKey != item.key) localKey = item.key
+    }
+    LaunchedEffect(item.value) {
+        if (localValue != item.value) localValue = item.value
+    }
+
+    val checkboxScale by animateFloatAsState(
+        targetValue = if (item.isEnabled) 1.0f else 0.92f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "checkboxScale"
+    )
+
+    val checkboxBg by animateColorAsState(
+        targetValue = if (item.isEnabled) primaryColor else Color.Transparent,
+        label = "checkboxBg"
+    )
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // Custom Animated Checkbox
+        Box(
+            modifier = Modifier
+                .size(20.dp)
+                .graphicsLayer {
+                    scaleX = checkboxScale
+                    scaleY = checkboxScale
+                }
+                .clip(RoundedCornerShape(6.dp))
+                .background(checkboxBg)
+                .border(
+                    1.5.dp,
+                    if (item.isEnabled) primaryColor else MaterialTheme.colorScheme.outlineVariant,
+                    RoundedCornerShape(6.dp)
+                )
+                .clickable { onToggle(!item.isEnabled) },
+            contentAlignment = Alignment.Center
+        ) {
+            if (item.isEnabled) {
+                Icon(
+                    imageVector = Icons.Default.Check,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onPrimary,
+                    modifier = Modifier.size(13.dp)
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.width(8.dp))
+
+        // Key Input with zero lag
+        BasicTextField(
+            value = localKey,
+            onValueChange = {
+                localKey = it
+                onKeyChange(it)
+            },
+            textStyle = TextStyle(
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.5.sp,
+                color = if (item.isEnabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                textDecoration = if (!item.isEnabled) TextDecoration.LineThrough else TextDecoration.None
+            ),
+            singleLine = true,
+            cursorBrush = SolidColor(primaryColor),
+            decorationBox = { innerTextField ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 8.dp, vertical = 7.dp),
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    if (localKey.isEmpty()) {
+                        Text("Key", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                    }
+                    innerTextField()
+                }
+            },
+            modifier = Modifier.weight(1f)
+        )
+
+        Spacer(modifier = Modifier.width(6.dp))
+
+        // Value Input with zero lag
+        BasicTextField(
+            value = localValue,
+            onValueChange = {
+                localValue = it
+                onValueChange(it)
+            },
+            textStyle = TextStyle(
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.5.sp,
+                color = if (item.isEnabled) valueColor else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                textDecoration = if (!item.isEnabled) TextDecoration.LineThrough else TextDecoration.None
+            ),
+            singleLine = true,
+            cursorBrush = SolidColor(primaryColor),
+            decorationBox = { innerTextField ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 8.dp, vertical = 7.dp),
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    if (localValue.isEmpty()) {
+                        Text("Value", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                    }
+                    innerTextField()
+                }
+            },
+            modifier = Modifier.weight(1f)
+        )
+
+        Spacer(modifier = Modifier.width(4.dp))
+
+        // Delete Row Action
+        Box(
+            modifier = Modifier
+                .size(28.dp)
+                .clip(RoundedCornerShape(7.dp))
+                .clickable { onDelete() },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.Delete,
+                contentDescription = "Delete row",
+                tint = Color(0xFFEF4444).copy(alpha = 0.7f),
+                modifier = Modifier.size(15.dp)
+            )
+        }
+    }
+}
+
+// ====================================================================
+// v6.0 transplant (manifest §5.5): HTTP Request Body tab with Surface
+// styling, content-type selector pills, beautify button.
+// ====================================================================
+
+@Composable
+private fun HttpRequestBodyTab(
+    bodyType: RequestBodyType,
+    bodyContent: String,
+    isDark: Boolean,
+    onBodyTypeChanged: (RequestBodyType) -> Unit,
+    onBodyContentChanged: (String) -> Unit,
+    onBeautify: () -> Unit
+) {
+    val primaryColor = MaterialTheme.colorScheme.primary
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        // Content-Type Selector Pills
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            RequestBodyType.values().forEach { bt ->
+                val isSel = bodyType == bt
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (isSel) primaryColor else MaterialTheme.colorScheme.surfaceVariant)
+                        .clickable { onBodyTypeChanged(bt) }
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = bt.name,
+                        color = if (isSel) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        if (bodyType == RequestBodyType.NONE) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 20.dp),
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            ) {
+                Box(
+                    modifier = Modifier.padding(24.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "This request does not send a body payload.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        } else {
+            // Body Editor Surface
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                color = if (isDark) Color(0xFF060911) else MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    BasicTextField(
+                        value = bodyContent,
+                        onValueChange = onBodyContentChanged,
+                        textStyle = TextStyle(
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            lineHeight = 18.sp
+                        ),
+                        cursorBrush = SolidColor(primaryColor),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 140.dp, max = 240.dp)
+                            .verticalScroll(rememberScrollState())
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        Button(
+                            onClick = onBeautify,
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                        ) {
+                            Icon(imageVector = Icons.Default.AutoAwesome, contentDescription = "Beautify", modifier = Modifier.size(13.dp), tint = MaterialTheme.colorScheme.onSurface)
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Beautify JSON", color = MaterialTheme.colorScheme.onSurface, fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ====================================================================
+// v6.0 transplant (manifest §5.5): Auth settings tab with styled fields.
+// ====================================================================
+
+@Composable
+private fun AuthSettingsTab(
+    authType: AuthType,
+    bearerToken: String,
+    basicUsername: String,
+    basicPassword: String,
+    apiKeyHeader: String,
+    apiKeyValue: String,
+    onAuthTypeChanged: (AuthType) -> Unit,
+    onBearerChanged: (String) -> Unit,
+    onBasicUsernameChanged: (String) -> Unit,
+    onBasicPasswordChanged: (String) -> Unit,
+    onApiKeyHeaderChanged: (String) -> Unit,
+    onApiKeyValueChanged: (String) -> Unit
+) {
+    val primaryColor = MaterialTheme.colorScheme.primary
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        Text("Authorization Method", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            AuthType.values().forEach { at ->
+                val isSel = authType == at
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (isSel) primaryColor else MaterialTheme.colorScheme.surfaceVariant)
+                        .clickable { onAuthTypeChanged(at) }
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = at.name.replace('_', ' '),
+                        color = if (isSel) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        when (authType) {
+            AuthType.BEARER -> {
+                OutlinedTextField(
+                    value = bearerToken,
+                    onValueChange = onBearerChanged,
+                    label = { Text("Bearer Token") },
+                    placeholder = { Text("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)) },
+                    textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface),
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = primaryColor,
+                        unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
+                        focusedContainerColor = MaterialTheme.colorScheme.surface,
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surface
+                    )
+                )
+            }
+            AuthType.BASIC -> {
+                OutlinedTextField(
+                    value = basicUsername,
+                    onValueChange = onBasicUsernameChanged,
+                    label = { Text("Username") },
+                    textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface),
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = basicPassword,
+                    onValueChange = onBasicPasswordChanged,
+                    label = { Text("Password") },
+                    textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface),
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
+                )
+            }
+            AuthType.API_KEY -> {
+                OutlinedTextField(
+                    value = apiKeyHeader,
+                    onValueChange = onApiKeyHeaderChanged,
+                    label = { Text("Header / Param Key (e.g. X-API-Key)") },
+                    textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface),
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = apiKeyValue,
+                    onValueChange = onApiKeyValueChanged,
+                    label = { Text("API Key Value") },
+                    textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface),
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
+                )
+            }
+            else -> {
+                Text("No authentication headers will be added to this request.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+            }
+        }
+    }
+}
+
+// ====================================================================
+// v6.0 transplant (manifest §5.5): Scripts tab with styled editor.
+// ====================================================================
+
+@Composable
+private fun ScriptsTabContent(
+    preScript: String,
+    onPreScriptChanged: (String) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        Text("Pre-request & Sandbox Scripts", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedTextField(
+            value = preScript,
+            onValueChange = onPreScriptChanged,
+            placeholder = { Text("// JavaScript sandbox (e.g. request.headers['X-Timestamp'] = Date.now())", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)) },
+            textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.5.sp, color = MaterialTheme.colorScheme.onSurface),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(160.dp),
+            shape = RoundedCornerShape(12.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
+                focusedContainerColor = MaterialTheme.colorScheme.surface,
+                unfocusedContainerColor = MaterialTheme.colorScheme.surface
+            )
+        )
+    }
+}
+
+// ====================================================================
+// v6.0 transplant (manifest §5.5): WebSocket message composer tab.
+// ====================================================================
+
+@Composable
+private fun WsStreamComposerTab(
+    draftMessage: String,
+    wsStatus: WsConnectionStatus,
+    isDark: Boolean,
+    onDraftChanged: (String) -> Unit,
+    onSend: () -> Unit
+) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        Text("WebSocket Frame Payload", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp),
+            color = if (isDark) Color(0xFF060911) else MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        ) {
+            BasicTextField(
+                value = draftMessage,
+                onValueChange = onDraftChanged,
+                textStyle = TextStyle(
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface
+                ),
+                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 100.dp)
+                    .padding(12.dp)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End
+        ) {
+            Button(
+                onClick = onSend,
+                enabled = wsStatus == WsConnectionStatus.CONNECTED && draftMessage.isNotBlank(),
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+            ) {
+                Icon(imageVector = Icons.AutoMirrored.Filled.Send, contentDescription = "Send", modifier = Modifier.size(14.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Send Frame", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+// ====================================================================
+// v6.0 transplant (manifest §5.5): WebSocket live console with message
+// stream, status indicator, error display, draft input, and clear.
+// ====================================================================
+
+@Composable
+private fun WsConsoleTabContent(
+    wsStatus: WsConnectionStatus,
+    wsMessages: List<WsMessage>,
+    wsError: String?,
+    wsDraftMessage: String,
+    onDraftChanged: (String) -> Unit,
+    onSend: () -> Unit,
+    onClear: () -> Unit
+) {
+    val (dotColor, statusText) = when (wsStatus) {
+        WsConnectionStatus.CONNECTED -> Color(0xFF10B981) to "CONNECTED"
+        WsConnectionStatus.CONNECTING -> Color(0xFFF59E0B) to "CONNECTING"
+        WsConnectionStatus.ERROR -> Color(0xFFEF4444) to "ERROR"
+        WsConnectionStatus.DISCONNECTED -> MaterialTheme.colorScheme.onSurfaceVariant to "DISCONNECTED"
+    }
+
+    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(9.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(dotColor)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(statusText, fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = dotColor)
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("${wsMessages.size} frames", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(modifier = Modifier.width(6.dp))
+                IconButton(onClick = onClear, modifier = Modifier.size(26.dp)) {
+                    Icon(imageVector = Icons.Default.Delete, contentDescription = "Clear", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(15.dp))
+                }
+            }
+        }
+
+        if (wsError != null) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "Error: $wsError",
+                color = Color(0xFFEF4444),
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color(0xFFEF4444).copy(alpha = 0.1f))
+                    .padding(8.dp)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        ) {
+            if (wsMessages.isEmpty()) {
+                Box(modifier = Modifier.fillMaxSize().padding(20.dp), contentAlignment = Alignment.Center) {
+                    Text(
+                        if (wsStatus == WsConnectionStatus.CONNECTED) "Connected! Waiting for frames..." else "Connect WebSocket above to stream live frames",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp
+                    )
+                }
+            } else {
+                val timeFormat = remember { java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US) }
+                LazyColumn(modifier = Modifier.fillMaxSize().padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    items(wsMessages) { msg ->
+                        val isOut = !msg.isIncoming
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (isOut) MaterialTheme.colorScheme.primary.copy(alpha = 0.08f) else MaterialTheme.colorScheme.surfaceVariant)
+                                .padding(8.dp)
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(4.dp))
+                                            .background(if (isOut) Color(0xFF3B82F6).copy(alpha = 0.2f) else Color(0xFF10B981).copy(alpha = 0.2f))
+                                            .padding(horizontal = 4.dp, vertical = 1.dp)
+                                    ) {
+                                        Text(if (isOut) "OUT" else "IN", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = if (isOut) Color(0xFF3B82F6) else Color(0xFF10B981))
+                                    }
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(timeFormat.format(java.util.Date(msg.timestamp)), fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, fontFamily = FontFamily.Monospace)
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(msg.text, fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurface)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Draft input + send button
+        Spacer(modifier = Modifier.height(10.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedTextField(
+                value = wsDraftMessage,
+                onValueChange = onDraftChanged,
+                textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface),
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(10.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = MaterialTheme.colorScheme.primary,
+                    unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant
+                )
+            )
+            Button(
+                onClick = onSend,
+                enabled = wsStatus == WsConnectionStatus.CONNECTED && wsDraftMessage.isNotBlank(),
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+            ) {
+                Icon(imageVector = Icons.AutoMirrored.Filled.Send, contentDescription = "Send", modifier = Modifier.size(14.dp))
+            }
+        }
+    }
+}
+
+// ====================================================================
+// v6.0 transplant (manifest §5.5): Live JSON preview with syntax
+// highlighting, toolbar actions, and expandable raw text editor.
+// ====================================================================
+
+@Composable
+private fun CodeToolbarAction(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    description: String,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .size(28.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = description,
+            tint = Color(0xFF8B95A6),
+            modifier = Modifier.size(14.dp)
+        )
+    }
+}
+
+/**
+ * Builds syntax highlighted AnnotatedString for JSON lines.
+ */
+private fun highlightJsonLine(line: String): AnnotatedString {
+    return buildAnnotatedString {
+        val parts = line.split(":", limit = 2)
+        if (parts.size == 2 && parts[0].trim().startsWith("\"")) {
+            val colonIdx = line.indexOf(':')
+            val beforeColon = line.substring(0, colonIdx)
+            val afterColon = line.substring(colonIdx)
+
+            // Key in cyan/blue
+            withStyle(SpanStyle(color = Color(0xFF7EC8E3))) {
+                append(beforeColon)
+            }
+            // Colon in punctuation color
+            withStyle(SpanStyle(color = Color(0xFF8B95A6))) {
+                append(":")
+            }
+            // Value in green
+            withStyle(SpanStyle(color = Color(0xFF8CE3A0))) {
+                append(afterColon.removePrefix(":"))
+            }
+        } else {
+            // Generic braces / brackets
+            withStyle(SpanStyle(color = Color(0xFFC9D3E8))) {
+                append(line)
+            }
+        }
+    }
+}
+
+@Composable
+private fun LiveJsonAndRawBlock(
+    formattedJson: String,
+    rawText: String,
+    showRawEditor: Boolean,
+    isDark: Boolean,
+    onToggleRawEditor: () -> Unit,
+    onBeautify: () -> Unit,
+    onCopyJson: () -> Unit,
+    onCopyFlat: () -> Unit,
+    onClear: () -> Unit,
+    onRawTextChanged: (String) -> Unit
+) {
+    val codeBg = if (isDark) Color(0xFF04060C) else Color(0xFF141720)
+    val toolbarBg = if (isDark) Color(0xFF0A0E18) else Color(0xFF1B202C)
+    val primaryColor = MaterialTheme.colorScheme.primary
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        color = codeBg,
+        border = BorderStroke(1.dp, Color(0xFF1E2838))
+    ) {
+        Column {
+            // JSON Toolbar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(toolbarBg)
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "JSON",
+                    fontSize = 10.5.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    fontFamily = FontFamily.Monospace,
+                    color = Color(0xFF8B95A6),
+                    letterSpacing = 1.sp
+                )
+
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CodeToolbarAction(
+                        icon = Icons.Default.AutoAwesome,
+                        description = "Beautify JSON",
+                        onClick = onBeautify
+                    )
+                    CodeToolbarAction(
+                        icon = Icons.Default.ContentCopy,
+                        description = "Copy as JSON",
+                        onClick = onCopyJson
+                    )
+                    CodeToolbarAction(
+                        icon = Icons.Default.Delete,
+                        description = "Clear all",
+                        onClick = onClear
+                    )
+
+                    // Toggle Raw Text Editor
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (showRawEditor) primaryColor else Color.Transparent)
+                            .clickable { onToggleRawEditor() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Edit,
+                            contentDescription = "Toggle Raw Editor",
+                            tint = if (showRawEditor) MaterialTheme.colorScheme.onPrimary else Color(0xFF8B95A6),
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
+                }
+            }
+
+            // Syntax Highlighted JSON Preview
+            val lines = formattedJson.split("\n")
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 180.dp)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+            ) {
+                lines.forEachIndexed { index, line ->
+                    Row(modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            text = "${index + 1}",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                            color = Color(0xFF3B4862),
+                            textAlign = TextAlign.End,
+                            modifier = Modifier.width(22.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = highlightJsonLine(line),
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                            modifier = Modifier.horizontalScroll(rememberScrollState())
+                        )
+                    }
+                }
+            }
+
+            // Expandable Raw Text Editor Drawer
+            AnimatedVisibility(
+                visible = showRawEditor,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(if (isDark) Color(0xFF030408) else Color(0xFF10131B))
+                        .drawBehind {
+                            drawLine(
+                                color = Color(0xFF1E2838),
+                                start = Offset(0f, 0f),
+                                end = Offset(size.width, 0f),
+                                strokeWidth = 1.dp.toPx()
+                            )
+                        }
+                        .padding(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Editor",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 9.5.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF5B6B85),
+                            letterSpacing = 1.sp
+                        )
+                        Text(
+                            text = "key: value · // to disable a row",
+                            fontSize = 9.5.sp,
+                            color = Color(0xFF4A556B)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    BasicTextField(
+                        value = rawText,
+                        onValueChange = onRawTextChanged,
+                        textStyle = TextStyle(
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.5.sp,
+                            color = Color(0xFFC9D3E8),
+                            lineHeight = 16.sp
+                        ),
+                        cursorBrush = SolidColor(primaryColor),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 70.dp, max = 150.dp)
+                            .verticalScroll(rememberScrollState())
+                    )
                 }
             }
         }
