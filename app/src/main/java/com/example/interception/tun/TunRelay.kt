@@ -55,6 +55,17 @@ class TunRelay(
         val activeTcpV6: Int = 0,
         val activeUdpV4: Int = 0,
         val activeUdpV6: Int = 0,
+        // Task 14 / Lane D: per-reason drop breakdown for the relay-health detail sheet.
+        // Each counter below is incremented at the same call site that already bumps the
+        // aggregate relayErrors / unrelayableCount fields above, so the breakdown is an
+        // honest partition of those totals -- never a separate invented stream. The fifth
+        // mockup category (tun-MTU over-length) has no drop site in this relay today, so it
+        // is deliberately absent rather than shown as a fabricated zero.
+        val evictionCount: Int = 0,
+        val dropProtectFail: Int = 0,
+        val dropUpstreamOpen: Int = 0,
+        val dropUpstreamWrite: Int = 0,
+        val dropUnrelayableProto: Int = 0,
     )
 
     private val _stats = MutableStateFlow(RelayStats())
@@ -86,10 +97,10 @@ class TunRelay(
                 if (handler != null) {
                     handler(datagram, header)
                 } else {
-                    updateStats { it.copy(unrelayableCount = it.unrelayableCount + 1) }
+                    updateStats { it.copy(unrelayableCount = it.unrelayableCount + 1, dropUnrelayableProto = it.dropUnrelayableProto + 1) }
                 }
             }
-            else -> updateStats { it.copy(unrelayableCount = it.unrelayableCount + 1) }
+            else -> updateStats { it.copy(unrelayableCount = it.unrelayableCount + 1, dropUnrelayableProto = it.dropUnrelayableProto + 1) }
         }
         selector.wakeup()
     }
@@ -204,7 +215,7 @@ class TunRelay(
             val protected = protectHook.protectSocket(channel.socket())
             if (!protected) {
                 Log.w(TAG, "Failed to protect TCP upstream socket; refusing to relay to avoid a tun loop")
-                updateStats { it.copy(relayErrors = it.relayErrors + 1) }
+                updateStats { it.copy(relayErrors = it.relayErrors + 1, dropProtectFail = it.dropProtectFail + 1) }
                 tcpFlows.remove(flow.mapKey)
                 return
             }
@@ -218,7 +229,7 @@ class TunRelay(
             }
         } catch (e: Exception) {
             Log.w(TAG, "TCP upstream open failed: ${e.message}")
-            updateStats { it.copy(relayErrors = it.relayErrors + 1) }
+            updateStats { it.copy(relayErrors = it.relayErrors + 1, dropUpstreamOpen = it.dropUpstreamOpen + 1) }
             tcpFlows.remove(flow.mapKey)
         }
     }
@@ -363,7 +374,7 @@ class TunRelay(
                 flow.channel?.write(ByteBuffer.wrap(payload))
             } catch (e: Exception) {
                 Log.w(TAG, "UDP upstream write failed: ${e.message}")
-                updateStats { it.copy(relayErrors = it.relayErrors + 1) }
+                updateStats { it.copy(relayErrors = it.relayErrors + 1, dropUpstreamWrite = it.dropUpstreamWrite + 1) }
             }
         }
     }
@@ -375,7 +386,7 @@ class TunRelay(
             val protected = protectHook.protectDatagramSocket(channel.socket())
             if (!protected) {
                 Log.w(TAG, "Failed to protect UDP upstream socket; refusing to relay to avoid a tun loop")
-                updateStats { it.copy(relayErrors = it.relayErrors + 1) }
+                updateStats { it.copy(relayErrors = it.relayErrors + 1, dropProtectFail = it.dropProtectFail + 1) }
                 return false
             }
             val dstAddr = InetSocketAddress(IpAddressCodec.toInetAddress(addrString(flow.family, flow.dstIp), flow.family), flow.dstPort)
@@ -387,7 +398,7 @@ class TunRelay(
             true
         } catch (e: Exception) {
             Log.w(TAG, "UDP upstream open failed: ${e.message}")
-            updateStats { it.copy(relayErrors = it.relayErrors + 1) }
+            updateStats { it.copy(relayErrors = it.relayErrors + 1, dropUpstreamOpen = it.dropUpstreamOpen + 1) }
             false
         }
     }
@@ -471,7 +482,7 @@ class TunRelay(
                             onTcpConnected(attachment)
                         } else {
                             synchronized(flowLock) { closeTcpFlow(attachment.mapKey, attachment, sendFinToGuest = false) }
-                            updateStats { it.copy(relayErrors = it.relayErrors + 1) }
+                            updateStats { it.copy(relayErrors = it.relayErrors + 1, dropUpstreamOpen = it.dropUpstreamOpen + 1) }
                         }
                         return
                     }
@@ -515,11 +526,13 @@ class TunRelay(
     private fun evictOldestTcp() {
         val oldest = tcpFlows.entries.minByOrNull { it.value.lastActivityAt } ?: return
         closeTcpFlow(oldest.key, oldest.value, sendFinToGuest = false)
+        updateStats { it.copy(evictionCount = it.evictionCount + 1) }
     }
 
     private fun evictOldestUdp() {
         val oldest = udpFlows.entries.minByOrNull { it.value.lastActivityAt } ?: return
         udpFlows.remove(oldest.key)?.let { runCatching { it.channel?.close() } }
+        updateStats { it.copy(evictionCount = it.evictionCount + 1) }
     }
 
     private fun bumpFamilyCount() {

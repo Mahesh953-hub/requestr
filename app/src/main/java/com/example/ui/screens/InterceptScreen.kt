@@ -127,6 +127,7 @@ import com.example.data.interception.RootState
 import com.example.data.interception.ShizukuState
 import com.example.data.interception.TrafficExporter
 import com.example.data.local.ConnectAttemptEntity
+import com.example.data.local.TlsSessionEntity
 import com.example.data.local.RuleAction as PersistedRuleAction
 import com.example.data.prefs.AppFilterMode
 import com.example.data.prefs.SettingsDataStore
@@ -147,11 +148,18 @@ import com.example.ui.components.ContextualActionMenuDialog
 import com.example.ui.components.ConfirmActionDialog
 import com.example.ui.components.BadgePill
 import com.example.ui.components.GlassCard
+import com.example.ui.components.Http3DetailSheet
+import com.example.ui.components.Http3RowIndicator
+import com.example.ui.components.Http3RowSubtitle
 import com.example.ui.components.MethodBadge
 import com.example.ui.components.ProtocolBadge
+import com.example.ui.components.RelayHealthCard
+import com.example.ui.components.RelayHealthDetailSheet
 import com.example.ui.components.SearchInputField
+import com.example.ui.components.TlsFailureDetailSheet
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.StatusCodeBadge
+import com.example.ui.components.http3RowState
 import com.example.ui.components.formatByteCount
 import com.example.ui.components.rememberAppHapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -207,6 +215,19 @@ fun InterceptScreen(
             ?: kotlinx.coroutines.flow.MutableStateFlow(com.example.interception.tun.IcmpRelay.LastPathUsed.NONE_YET)
     }.collectAsStateWithLifecycle()
     var showRelayHealthSheet by remember { mutableStateOf(false) }
+
+    // Task 14 / Lane D: derive the three-state RelayHealthState (healthy / degraded / down) from the
+    // live counters so the extracted RelayHealthCard / RelayHealthDetailSheet can switch exhaustively.
+    val relayHealthState by remember(relayHealthStats, activePumpForHealth, icmpUnrelayableCount, icmpLastPathUsed) {
+        mutableStateOf(
+            com.example.data.models.toRelayHealthState(
+                pumpRunning = activePumpForHealth != null,
+                stats = relayHealthStats,
+                icmpUnrelayableCount = icmpUnrelayableCount,
+                icmpLastPathUsed = icmpLastPathUsed,
+            )
+        )
+    }
 
     // The traffic log now comes exclusively from Room, written only by the real capture engine.
     // v2.1 read an in-memory list that was seeded with fake rows and topped up by a Random
@@ -412,11 +433,8 @@ fun InterceptScreen(
             // relay this describes doesn't exist for PROXY/GATEWAY/MITM), and only relevant if
             // this build's own honesty disclosure is read alongside it: implemented but NOT
             // device-verified end-to-end (Redroid has no kernel TUN datapath -- see AUDIT_REPORT.md).
-            RelayHealthCompactCard(
-                pumpRunning = activePumpForHealth != null,
-                stats = relayHealthStats,
-                icmpUnrelayableCount = icmpUnrelayableCount,
-                icmpLastPathUsed = icmpLastPathUsed,
+            RelayHealthCard(
+                state = relayHealthState,
                 onExpand = { showRelayHealthSheet = true },
             )
 
@@ -780,11 +798,10 @@ fun InterceptScreen(
     // Task 14, surface 1 detail: expanded relay-health bottom sheet.
     if (showRelayHealthSheet) {
         RelayHealthDetailSheet(
-            pumpRunning = activePumpForHealth != null,
-            stats = relayHealthStats,
-            icmpUnrelayableCount = icmpUnrelayableCount,
-            icmpLastPathUsed = icmpLastPathUsed,
+            state = relayHealthState,
             onDismiss = { showRelayHealthSheet = false },
+            onStartCapture = { captureController.requestStart() },
+            onCaptureSetup = { showCaptureSetupSheet = true },
         )
     }
 
@@ -1484,6 +1501,8 @@ fun TrafficItemCard(
     // B4: long-press context menus get a tactile confirmation too.
     val performHaptic = rememberAppHapticFeedback()
     val shape = RoundedCornerShape(14.dp)
+    // Task 14 / Lane D: H3 row indicator state for HTTP/3 / QUIC rows (null for H2/H1.1/etc.).
+    val h3State = http3RowState(item.protocolHint, item.statusCode)
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -1529,6 +1548,10 @@ fun TrafficItemCard(
                         Spacer(modifier = Modifier.width(6.dp))
                     }
                     ProtocolBadge(protocol = item.protocol)
+                    if (h3State != null) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Http3RowIndicator(state = h3State)
+                    }
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = "${item.latencyMs}ms",
@@ -1556,169 +1579,21 @@ fun TrafficItemCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1
             )
+
+            if (h3State != null) {
+                Http3RowSubtitle(state = h3State, alpn = item.alpnProtocol)
+            }
         }
     }
 }
 
 
 /**
- * Task 14, surface 1: compact VPN relay health card shown on the Intercept screen, collapsed by
- * default, tapping expands to [RelayHealthDetailSheet]. Bound entirely to real counters --
- * [com.example.interception.tun.TunRelay.RelayStats] fields are all genuinely mutated at their
- * call sites (see the class doc), never simulated. When [pumpRunning] is false there is no
- * PacketPump instance at all (no capture active), which is a distinct, honest "not active"
- * state from "capture active but relay has zero flows so far".
- *
- * Following the mockups' status-color set (green healthy, amber degraded, gray inactive) --
- * "healthy" here is a simplified proxy for the mockup's richer health classification (no
- * flow-table-pressure/eviction-count fields exist on RelayStats to compute DEGRADED from
- * precisely, see task 14's own scope note) -- amber is shown only when relayErrors or
- * unrelayableCount are non-zero, which is real signal, just coarser than the mockup's threshold.
+ * Task 14 / Lane D: RelayHealthCompactCard + RelayHealthDetailSheet were extracted to
+ * [com.example.ui.components.RelayHealthCard] and [com.example.ui.components.RelayHealthDetailSheet]
+ * and augmented with the full healthy / degraded / down mockup grid (per-reason drop bars, flow-table
+ * pressure, down-state Start-capture CTA). They are consumed above via those public composables.
  */
-@Composable
-private fun RelayHealthCompactCard(
-    pumpRunning: Boolean,
-    stats: com.example.interception.tun.TunRelay.RelayStats,
-    icmpUnrelayableCount: Int,
-    icmpLastPathUsed: com.example.interception.tun.IcmpRelay.LastPathUsed,
-    onExpand: () -> Unit,
-) {
-    val hasIssues = stats.relayErrors > 0 || stats.unrelayableCount > 0 || icmpUnrelayableCount > 0
-    val statusColor = when {
-        !pumpRunning -> TextMuted
-        hasIssues -> InterceptorIdleAmber
-        else -> InterceptorActiveGreen
-    }
-    val statusLabel = when {
-        !pumpRunning -> "NOT ACTIVE"
-        hasIssues -> "DEGRADED"
-        else -> "HEALTHY"
-    }
-    val totalActive = stats.activeTcpV4 + stats.activeTcpV6 + stats.activeUdpV4 + stats.activeUdpV6
-    GlassCard(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 2.dp),
-        backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
-        onClick = onExpand,
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 10.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(7.dp)
-                        .clip(CircleShape)
-                        .background(statusColor)
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = "RELAY $statusLabel",
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "$totalActive flows",
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 9.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Text(
-                text = "↓${formatByteCount(stats.relayBytesDown)} ↑${formatByteCount(stats.relayBytesUp)}",
-                fontFamily = FontFamily.Monospace,
-                fontSize = 9.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-/**
- * Task 14, surface 1 detail: expanded relay health readout. Faithful to the healthy/degraded/
- * down states from the mockups but deliberately narrower in scope than the mockup's full
- * per-reason drop-attribution and NAT-mapping tables -- those need structured counters
- * ([com.example.interception.tun.TunRelay.RelayStats] has no per-reason breakdown or NAT-mapping
- * count fields today, see task 14's own investigation note) that do not exist in the codebase,
- * and adding them here would mean inventing data this pass did not actually instrument.
- * Every number shown below is one that already existed as a real counter before this task.
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun RelayHealthDetailSheet(
-    pumpRunning: Boolean,
-    stats: com.example.interception.tun.TunRelay.RelayStats,
-    icmpUnrelayableCount: Int,
-    icmpLastPathUsed: com.example.interception.tun.IcmpRelay.LastPathUsed,
-    onDismiss: () -> Unit,
-) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
-    ) {
-        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("VPN relay health", fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                IconButton(onClick = onDismiss) {
-                    Icon(imageVector = Icons.Default.Close, contentDescription = "Close", tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-            Text(
-                "Live per-flow relay counters from the running tun pump (task 4/6/9). Implemented but " +
-                    "NOT verified end-to-end on a real device -- see AUDIT_REPORT.md.",
-                fontSize = 10.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(modifier = Modifier.height(10.dp))
-
-            if (!pumpRunning) {
-                Text(
-                    "⚠ Nothing is being relayed because nothing is capturing. Start a VPN_TUN capture to bring the relay up.",
-                    fontSize = 11.sp,
-                    color = InterceptorIdleAmber,
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-            }
-
-            DetailRow("Active TCP flows (v4/v6)", "${stats.activeTcpV4} / ${stats.activeTcpV6}")
-            DetailRow("Active UDP flows (v4/v6)", "${stats.activeUdpV4} / ${stats.activeUdpV6}")
-            DetailRow("Relayed flows (lifetime)", "${stats.relayedFlows}")
-            DetailRow("Bytes up / down", "${formatByteCount(stats.relayBytesUp)} / ${formatByteCount(stats.relayBytesDown)}")
-            DetailRow("Relay errors", "${stats.relayErrors}")
-            DetailRow("Unrelayable packets (TCP/UDP)", "${stats.unrelayableCount}")
-
-            Spacer(modifier = Modifier.height(10.dp))
-            Text("ICMP ECHO RELAY (task 6)", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(modifier = Modifier.height(4.dp))
-            DetailRow(
-                "Path in use (last successful)",
-                when (icmpLastPathUsed) {
-                    com.example.interception.tun.IcmpRelay.LastPathUsed.PING_SOCKET -> "unprivileged ping socket"
-                    com.example.interception.tun.IcmpRelay.LastPathUsed.TCP_FALLBACK -> "TCP reachability fallback"
-                    com.example.interception.tun.IcmpRelay.LastPathUsed.NONE_YET -> "none yet"
-                },
-            )
-            DetailRow("Unrelayable ICMP echoes", "$icmpUnrelayableCount")
-
-            Spacer(modifier = Modifier.height(16.dp))
-        }
-    }
-}
 
 /**
  * M1: Connections sheet.
@@ -1740,6 +1615,11 @@ fun ConnectionsBottomSheet(
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var selectedTab by remember { mutableIntStateOf(0) }
+    // Task 14 / Lane D: the FAILED TLS row the user tapped, opening TlsFailureDetailSheet; and the
+    // QUIC row the user tapped, opening Http3DetailSheet. Both are local to this sheet because the
+    // rows that surface them live here.
+    var selectedTlsFailure by remember { mutableStateOf<TlsSessionEntity?>(null) }
+    var selectedHttp3Connection by remember { mutableStateOf<com.example.data.local.QuicConnectionEntity?>(null) }
 
     // Task 14: the cross-instance StateFlow bridge -- see RequestrVpnService.activePump's doc.
     // collectAsStateWithLifecycle (not the plain collectAsState() used elsewhere in this file)
@@ -1959,7 +1839,11 @@ fun ConnectionsBottomSheet(
                                         keysMissing -> 0xFFEF4444
                                         else -> 0xFF64748B
                                     }
-                                    GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)) {
+                                    GlassCard(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                                        onClick = { selectedHttp3Connection = conn },
+                                    ) {
                                         Column(modifier = Modifier.padding(10.dp)) {
                                             Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
                                                 Text(conn.sniHost ?: "${conn.destIp}:${conn.destPort}", fontSize = 11.sp, fontFamily = FontFamily.Monospace)
@@ -2032,6 +1916,7 @@ fun ConnectionsBottomSheet(
                                     GlassCard(
                                         modifier = Modifier.fillMaxWidth(),
                                         backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                                        onClick = if (failed) { { selectedTlsFailure = tls } } else null,
                                     ) {
                                         Row(modifier = Modifier.fillMaxWidth()) {
                                             if (failed) {
@@ -2232,6 +2117,36 @@ fun ConnectionsBottomSheet(
         ConnectAttemptDetailSheet(
             item = attempt,
             onDismiss = { selectedConnectAttempt = null },
+        )
+    }
+
+    // Task 14 / Lane D: FAILED TLS row → TlsFailureDetailSheet with the inferred handshake-stage
+    // rail and remedy block. The remedy buttons surface the guidance and dismiss; deeper action
+    // wiring (CA-install flow, bypass-rule creation) is deliberately deferred so this UI lane does
+    // not invent new controller/rule APIs against the frozen shared data files.
+    selectedTlsFailure?.let { entity ->
+        val detail = com.example.data.models.toTlsFailureDetail(entity)
+        if (detail != null) {
+            TlsFailureDetailSheet(
+                detail = detail,
+                onDismiss = { selectedTlsFailure = null },
+                onPrimaryAction = { selectedTlsFailure = null },
+                onSecondaryAction = { selectedTlsFailure = null },
+            )
+        }
+    }
+
+    // Task 14 / Lane D: QUIC row → Http3DetailSheet. The detail state is derived from the persisted
+    // QuicConnectionEntity + the live summary snapshot; the action buttons surface the mockup remedy
+    // and dismiss (deeper wiring — force-TCP rule, CA install — is deferred to avoid inventing new
+    // controller APIs against frozen shared files in this UI lane).
+    selectedHttp3Connection?.let { conn ->
+        val h3State = com.example.data.models.toHttp3DetailState(conn, quicLiveMap[conn.connectionId])
+        Http3DetailSheet(
+            state = h3State,
+            onDismiss = { selectedHttp3Connection = null },
+            onPrimaryAction = { selectedHttp3Connection = null },
+            onSecondaryAction = { selectedHttp3Connection = null },
         )
     }
 }
