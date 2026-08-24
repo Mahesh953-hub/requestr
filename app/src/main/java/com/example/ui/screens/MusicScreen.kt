@@ -1,5 +1,12 @@
 package com.example.ui.screens
 
+import android.Manifest
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
@@ -38,8 +45,10 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RemoveRedEye
 import androidx.compose.material.icons.filled.Shuffle
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -71,12 +80,15 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import com.example.data.models.MusicTrackItem
 import com.example.data.repository.MusicRepository
 import com.example.ui.components.ConfirmActionDialog
@@ -104,6 +116,39 @@ fun MusicScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     var isScanning by remember { mutableStateOf(false) }
 
+    // v6.0 (plan task 13, music-permission mockup): the music library needs READ_MEDIA_AUDIO
+    // (API 33+) or READ_EXTERNAL_STORAGE (below). When the permission is not granted we render
+    // the approved permission-denied state instead of attempting a scan that would silently
+    // return nothing. Follows the OnboardingScreen permission pattern.
+    val musicPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        Manifest.permission.READ_MEDIA_AUDIO
+    } else {
+        Manifest.permission.READ_EXTERNAL_STORAGE
+    }
+    fun hasMusicPermission(): Boolean =
+        ContextCompat.checkSelfPermission(context, musicPerm) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+    var permissionGranted by remember { mutableStateOf(hasMusicPermission()) }
+    var permissionRequested by remember { mutableStateOf(false) }
+
+    val musicPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        permissionGranted = granted
+        permissionRequested = true
+        if (granted) {
+            scope.launch { MusicRepository.loadLocalLibrary(context) }
+        }
+    }
+
+    fun openAppSettings() {
+        context.startActivity(
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.fromParts("package", context.packageName, null)
+            }
+        )
+    }
+
     fun rescanLibrary() {
         if (isScanning) return
         isScanning = true
@@ -120,9 +165,10 @@ fun MusicScreen(
 
     // BUG FIX: Actually trigger the MediaStore scan when the screen is first composed.
     // Previously, nobody ever called loadLocalLibrary — the track list stayed empty forever
-    // even after READ_MEDIA_AUDIO was granted. Now we scan once on first composition.
-    LaunchedEffect(Unit) {
-        if (tracks.isEmpty()) {
+    // even after READ_MEDIA_AUDIO was granted. Now we scan once on first composition, but
+    // only when the permission is already granted (otherwise we show the permission state).
+    LaunchedEffect(permissionGranted) {
+        if (permissionGranted && tracks.isEmpty()) {
             MusicRepository.loadLocalLibrary(context)
         }
     }
@@ -140,6 +186,22 @@ fun MusicScreen(
                 .fillMaxSize()
                 .padding(top = 58.dp) // Space for top floating SectionHeader
         ) {
+            if (!permissionGranted) {
+                // ─── PERMISSION-DENIED STATE (music-permission mockup) ──────────────
+                PermissionDeniedState(
+                    requestedBefore = permissionRequested,
+                    onOpenSettings = { openAppSettings() },
+                    onGrant = { musicPermLauncher.launch(musicPerm) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            } else if (tracks.isEmpty()) {
+                // ─── EMPTY STATE (music-empty mockup) ───────────────────────────────
+                EmptyTracksPlaceholder(
+                    onScan = { rescanLibrary() }
+                )
+            } else {
             // ─── 1. LOCKED BIG HERO PLAYER ──────────────────────────────────────
             LockedBigPlayerCard(
                 track = currentTrack,
@@ -192,26 +254,19 @@ fun MusicScreen(
                 contentPadding = PaddingValues(top = 2.dp, bottom = 96.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                if (tracks.isEmpty()) {
-                    item {
-                        EmptyTracksPlaceholder(
-                            onScan = { rescanLibrary() }
-                        )
-                    }
-                } else {
-                    itemsIndexed(tracks, key = { _, track -> track.id }) { index, track ->
-                        val isCurrent = track.id == currentTrack.id
+                itemsIndexed(tracks, key = { _, track -> track.id }) { index, track ->
+                    val isCurrent = track.id == currentTrack.id
 
-                        // Swipe-to-remove asks for confirmation before deleting instead of
-                        // destroying the row on a stray swipe (backup Fix #35).
-                        val dismissState = rememberSwipeToDismissBoxState(
-                            confirmValueChange = { value ->
-                                if (value == SwipeToDismissBoxValue.EndToStart) {
-                                    pendingDeleteTrack = track
-                                }
-                                false
+                    // Swipe-to-remove asks for confirmation before deleting instead of
+                    // destroying the row on a stray swipe (backup Fix #35).
+                    val dismissState = rememberSwipeToDismissBoxState(
+                        confirmValueChange = { value ->
+                            if (value == SwipeToDismissBoxValue.EndToStart) {
+                                pendingDeleteTrack = track
                             }
-                        )
+                            false
+                        }
+                    )
 
                         SwipeToDismissBox(
                             state = dismissState,
@@ -245,7 +300,7 @@ fun MusicScreen(
                             )
                         }
                     }
-                }
+            }
             }
         }
 
@@ -946,6 +1001,133 @@ private fun EmptyTracksPlaceholder(onScan: () -> Unit) {
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold
                 )
+            }
+        }
+    }
+}
+
+// ─── PERMISSION-DENIED STATE (music-permission mockup, DESIGN-SYSTEM §15) ─────
+
+@Composable
+private fun PermissionDeniedState(
+    requestedBefore: Boolean,
+    onOpenSettings: () -> Unit,
+    onGrant: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val errorColor = MaterialTheme.colorScheme.error
+    GlassCard(
+        modifier = modifier,
+        backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // 72dp red-tinted warning icon tile.
+            Box(
+                modifier = Modifier
+                    .size(72.dp)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(errorColor.copy(alpha = 0.1f))
+                    .border(1.dp, errorColor.copy(alpha = 0.25f), RoundedCornerShape(20.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = errorColor,
+                    modifier = Modifier.size(36.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text(
+                text = "Music access permission required",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface,
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Text(
+                text = "requestr needs storage access to scan and play your local audio files.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+
+            // Only show the "previously denied" hint after the system prompt has been
+            // shown at least once (requestedBefore), matching the mockup's hint.
+            if (requestedBefore) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "You previously denied this permission. Open Settings to grant access manually.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                    textAlign = TextAlign.Center
+                )
+            }
+
+            Spacer(modifier = Modifier.height(18.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally)
+            ) {
+                // Open Settings — primary (gear icon).
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(44.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(MaterialTheme.colorScheme.primary)
+                        .clickable(onClick = onOpenSettings)
+                        .padding(horizontal = 12.dp)
+                        .semantics { contentDescription = "Open system settings" },
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Settings,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Text(
+                        text = "Open Settings",
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1
+                    )
+                }
+
+                // Grant Permission — secondary.
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(44.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(14.dp))
+                        .clickable(onClick = onGrant)
+                        .semantics { contentDescription = "Grant permission" },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "Grant Permission",
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1
+                    )
+                }
             }
         }
     }
