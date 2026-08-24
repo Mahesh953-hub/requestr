@@ -80,6 +80,17 @@ data class TlsClientHello(
     val signatureAlgorithms: List<Int>,
     val alpn: String?,
     val sni: String?,
+    /**
+     * The ClientHello's 32-byte `random` (RFC 8446 §4.1.2), retained because it is the key a TLS key
+     * log is indexed by: `CLIENT_HANDSHAKE_TRAFFIC_SECRET <client_random> <secret>` and friends. It
+     * is what lets [TlsKeyLogRegistry.lookup] resolve the traffic secrets for the connection this
+     * ClientHello opened — without it, a registry full of real secrets cannot be matched to the
+     * connection observing them. Null only when the buffer was too short to contain it.
+     *
+     * Deliberately excluded from [ja3Hash]: JA3 fingerprints the *offered capabilities*, which are
+     * stable per client build, while the random is per-connection by definition.
+     */
+    val clientRandom: ByteArray? = null,
 ) {
     /** Compute JA3 fingerprint hash */
     fun ja3Hash(): String {

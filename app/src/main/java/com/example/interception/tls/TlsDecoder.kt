@@ -162,6 +162,9 @@ object TlsDecoder {
 
         var pos = handshakeStart + 4
         val clientVersion = readU16(bytes, pos)
+        // The 32-byte `random` immediately follows client_version and is the TLS-key-log identity
+        // for this connection (see [TlsClientHello.clientRandom]), so it is captured rather than skipped.
+        val clientRandom = if (pos + 2 + 32 <= bytes.size) bytes.copyOfRange(pos + 2, pos + 2 + 32) else null
         pos += 2 + 32 // client version + random
         if (pos >= bytes.size) return null
         val sessionIdLen = bytes[pos].toInt() and 0xFF
@@ -276,6 +279,7 @@ object TlsDecoder {
             signatureAlgorithms = signatureAlgorithms,
             alpn = alpn,
             sni = sni,
+            clientRandom = clientRandom,
         )
     }
 
@@ -320,6 +324,33 @@ object TlsDecoder {
             cipherSuiteId = cipherSuiteId,
             cipherSuiteName = mapCipherSuiteId(cipherSuiteId),
         )
+    }
+
+    /**
+     * Finds and parses the ServerHello inside a reassembled TLS handshake byte stream — the
+     * plaintext of a QUIC connection's Initial-level (or Handshake-level) CRYPTO stream, which is a
+     * concatenation of `HandshakeMessage = type(1) || length(3) || body` records with no TLS record
+     * headers (RFC 9001 §4.1.3: QUIC carries the TLS handshake in CRYPTO frames, not TLS records).
+     *
+     * Walks each complete message, hands the first `server_hello` (type 0x02) to [parseServerHello],
+     * and returns it. Returns null when the stream holds no complete ServerHello yet (a partially
+     * reassembled crypto stream is a normal state, not an error) or when the message is malformed --
+     * so a caller can safely re-invoke this on every drain until it returns non-null.
+     */
+    fun findServerHello(handshakeStream: ByteArray): TlsServerHello? {
+        var pos = 0
+        while (pos + 4 <= handshakeStream.size) {
+            val type = handshakeStream[pos].toInt() and 0xFF
+            val bodyLen = readU24(handshakeStream, pos + 1)
+            if (bodyLen < 0) return null
+            val messageEnd = pos + 4 + bodyLen
+            if (messageEnd > handshakeStream.size) return null // incomplete trailing message
+            if (type == 0x02) {
+                return parseServerHello(handshakeStream, pos, 4 + bodyLen)
+            }
+            pos = messageEnd
+        }
+        return null
     }
 
     /**
