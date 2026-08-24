@@ -43,10 +43,10 @@ enum class AppAccent(
     val containerDark: Color
 ) {
     INDIGO("INDIGO", "Electric Indigo", AccentIndigo, AccentIndigoBright, AccentIndigoContainerLight, AccentIndigoContainerDark),
-    CYAN("CYAN", "Cyber Cyan", AccentCyan, AccentCyanBright, AccentCyanContainerLight, AccentCyanContainerDark),
+    CYAN("CYAN", "Dynamic Cyan", AccentCyan, AccentCyanBright, AccentCyanContainerLight, AccentCyanContainerDark),
     EMERALD("EMERALD", "Emerald Mint", AccentEmerald, AccentEmeraldBright, AccentEmeraldContainerLight, AccentEmeraldContainerDark),
     ORANGE("ORANGE", "Sunset Orange", AccentOrange, AccentOrangeBright, AccentOrangeContainerLight, AccentOrangeContainerDark),
-    LIME("LIME", "Cyber Lime", AccentLime, AccentLimeBright, AccentLimeContainerLight, AccentLimeContainerDark),
+    LIME("LIME", "Dynamic Lime", AccentLime, AccentLimeBright, AccentLimeContainerLight, AccentLimeContainerDark),
     VIOLET("VIOLET", "Royal Violet", AccentViolet, AccentVioletBright, AccentVioletContainerLight, AccentVioletContainerDark),
     ROSE("ROSE", "Crimson Rose", AccentRose, AccentRoseBright, AccentRoseContainerLight, AccentRoseContainerDark),
     AMBER("AMBER", "Solar Amber", AccentAmber, AccentAmberBright, AccentAmberContainerLight, AccentAmberContainerDark),
@@ -62,6 +62,7 @@ enum class AppAccent(
                     "MIDNIGHT_SAPPHIRE" -> SAPPHIRE
                     "KYOTO_MATCHA" -> EMERALD
                     "CYBER_TERMINAL" -> LIME
+                    "DYNAMIC_LIME" -> LIME
                     "DUSK_TERRACOTTA" -> ORANGE
                     "SOLAR_AMBER" -> AMBER
                     else -> INDIGO

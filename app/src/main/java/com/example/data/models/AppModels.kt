@@ -447,7 +447,19 @@ data class UserSettingsState(
     val musicPermissionStatus: String = "NOT_REQUESTED",
     val musicBarDismissed: Boolean = false,
     val musicLibraryScanned: Boolean = false,
-    val selectedLocalTrackId: String? = null
+    val selectedLocalTrackId: String? = null,
+    // v6.0 transplant (plan task 6, manifest §5.11) — Navigation and Header Modifiers.
+    // These back the glass nav-pill / floating-header visual modifiers semantically
+    // recreated from main. Backup's appearanceMode/selectedAccent semantics are unchanged;
+    // these are purely additive visual-preference fields with safe defaults. Canonical
+    // glass-style keys are FROSTED_GLASS / SOLID_M3 / OLED_BLACK / TRANSLUCENT (DESIGN-RECORD §11).
+    val navBarBackgroundOpacity: Float = 0.92f,
+    val navBarBlurEffect: String = "FROSTED_GLASS",
+    val navBarHiddenItems: Set<String> = emptySet(),
+    val headerTopPaddingDp: Int = 8,
+    val headerBackgroundOpacity: Float = 0.90f,
+    val headerBlurStyle: String = "FROSTED_GLASS",
+    val fabBottomSpacingDp: Int = 84
 )
 
 /** Chat message for the Chats section (#44). */

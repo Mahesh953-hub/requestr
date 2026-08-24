@@ -5,6 +5,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -119,6 +120,18 @@ object AppSettingsKeys {
     // false it 403s. Auto-disabled by SettingsScreen after 5 minutes (PAIRING_TOKEN_REVEAL_UNTIL).
     val SHOW_PAIRING_TOKEN = booleanPreferencesKey("show_pairing_token")
     val PAIRING_TOKEN_REVEAL_UNTIL = longPreferencesKey("pairing_token_reveal_until")
+
+    // v6.0 transplant (plan task 6, manifest §5.11) — Navigation and Header Modifier keys.
+    // Back the glass nav-pill / floating-header visual modifiers semantically recreated
+    // from main. Canonical glass-style values are FROSTED_GLASS / SOLID_M3 / OLED_BLACK /
+    // TRANSLUCENT (DESIGN-RECORD §11); legacy values are mapped to canonical at read time.
+    val NAV_BAR_OPACITY = floatPreferencesKey("nav_bar_opacity")
+    val NAV_BAR_BLUR_EFFECT = stringPreferencesKey("nav_bar_blur_effect")
+    val NAV_BAR_HIDDEN_ITEMS = androidx.datastore.preferences.core.stringSetPreferencesKey("nav_bar_hidden_items")
+    val HEADER_TOP_PADDING = intPreferencesKey("header_top_padding")
+    val HEADER_OPACITY = floatPreferencesKey("header_opacity")
+    val HEADER_BLUR_STYLE = stringPreferencesKey("header_blur_style")
+    val FAB_BOTTOM_SPACING = intPreferencesKey("fab_bottom_spacing")
 }
 
 /**
@@ -237,4 +250,23 @@ object LegacyDataMigration {
         legacy[booleanPreferencesKey("remember_last_app_filter")]?.let { prefs[AppSettingsKeys.REMEMBER_LAST_APP_FILTER] = it }
         legacy[booleanPreferencesKey("ca_installed_hint")]?.let { prefs[AppSettingsKeys.CA_INSTALLED_HINT] = it }
     }
+}
+
+/**
+ * v6.0 transplant (DESIGN-RECORD §11) — canonicalizes legacy glass-style key values that
+ * main's Settings screen wrote into the single canonical set the glass components read:
+ * `FROSTED_GLASS` / `SOLID_M3` / `OLED_BLACK` / `TRANSLUCENT`. Without this, OLED and M3
+ * settings silently fell through the component `else → FROSTED_GLASS` branch.
+ *
+ * Legacy mappings (per §11):
+ *  - Header: `FROSTED→FROSTED_GLASS`, `M3_MINIMAL→SOLID_M3`, `CLEAR_GLASS→TRANSLUCENT`, `DEEP_DARK→OLED_BLACK`
+ *  - Nav:    `FROSTED→FROSTED_GLASS`, `M3→SOLID_M3`, `OLED→OLED_BLACK`, `TRANSLUCENT→TRANSLUCENT`
+ *  - Unknown/blank → `FROSTED_GLASS`
+ */
+fun canonicalGlassStyle(raw: String?): String = when (raw?.uppercase()?.trim()) {
+    "FROSTED_GLASS", "FROSTED" -> "FROSTED_GLASS"
+    "SOLID_M3", "M3_MINIMAL", "M3" -> "SOLID_M3"
+    "OLED_BLACK", "DEEP_DARK", "OLED" -> "OLED_BLACK"
+    "TRANSLUCENT", "CLEAR_GLASS" -> "TRANSLUCENT"
+    else -> "FROSTED_GLASS"
 }

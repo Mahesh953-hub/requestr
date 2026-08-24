@@ -891,6 +891,13 @@ object SettingsRepository {
                     musicBarDismissed = p[K.MUSIC_BAR_DISMISSED] ?: _settings.value.musicBarDismissed,
                     musicLibraryScanned = p[K.MUSIC_LIBRARY_SCANNED] ?: _settings.value.musicLibraryScanned,
                     selectedLocalTrackId = p[K.SELECTED_LOCAL_TRACK_ID] ?: _settings.value.selectedLocalTrackId,
+                    navBarBackgroundOpacity = p[K.NAV_BAR_OPACITY] ?: _settings.value.navBarBackgroundOpacity,
+                    navBarBlurEffect = com.example.data.prefs.canonicalGlassStyle(p[K.NAV_BAR_BLUR_EFFECT] ?: _settings.value.navBarBlurEffect),
+                    navBarHiddenItems = p[K.NAV_BAR_HIDDEN_ITEMS] ?: _settings.value.navBarHiddenItems,
+                    headerTopPaddingDp = p[K.HEADER_TOP_PADDING] ?: _settings.value.headerTopPaddingDp,
+                    headerBackgroundOpacity = p[K.HEADER_OPACITY] ?: _settings.value.headerBackgroundOpacity,
+                    headerBlurStyle = com.example.data.prefs.canonicalGlassStyle(p[K.HEADER_BLUR_STYLE] ?: _settings.value.headerBlurStyle),
+                    fabBottomSpacingDp = p[K.FAB_BOTTOM_SPACING] ?: _settings.value.fabBottomSpacingDp,
                 )
             }
         }
@@ -1090,6 +1097,45 @@ object SettingsRepository {
         if (id != null) persist(K.SELECTED_LOCAL_TRACK_ID, id)
     }
 
+    // v6.0 transplant (manifest §5.11) — Navigation and Header Modifier update functions.
+    // Backup behavior wins: these are purely additive visual preferences; they never touch
+    // appearanceMode/selectedAccent/selectedDarkTheme/selectedLightTheme.
+    fun updateNavBarOpacity(opacity: Float) {
+        _settings.value = _settings.value.copy(navBarBackgroundOpacity = opacity)
+        persist(K.NAV_BAR_OPACITY, opacity)
+    }
+    fun updateNavBarBlurEffect(effect: String) {
+        val canonical = com.example.data.prefs.canonicalGlassStyle(effect)
+        _settings.value = _settings.value.copy(navBarBlurEffect = canonical)
+        persist(K.NAV_BAR_BLUR_EFFECT, canonical)
+    }
+    fun setNavBarHiddenItems(items: Set<String>) {
+        _settings.value = _settings.value.copy(navBarHiddenItems = items)
+        persist(K.NAV_BAR_HIDDEN_ITEMS, items)
+    }
+    fun toggleNavHiddenItem(item: String) {
+        val current = _settings.value.navBarHiddenItems
+        val updated = if (current.contains(item)) current - item else current + item
+        setNavBarHiddenItems(updated)
+    }
+    fun updateHeaderTopPadding(paddingDp: Int) {
+        _settings.value = _settings.value.copy(headerTopPaddingDp = paddingDp)
+        persist(K.HEADER_TOP_PADDING, paddingDp)
+    }
+    fun updateHeaderOpacity(opacity: Float) {
+        _settings.value = _settings.value.copy(headerBackgroundOpacity = opacity)
+        persist(K.HEADER_OPACITY, opacity)
+    }
+    fun updateHeaderBlurStyle(style: String) {
+        val canonical = com.example.data.prefs.canonicalGlassStyle(style)
+        _settings.value = _settings.value.copy(headerBlurStyle = canonical)
+        persist(K.HEADER_BLUR_STYLE, canonical)
+    }
+    fun updateFabBottomSpacing(spacingDp: Int) {
+        _settings.value = _settings.value.copy(fabBottomSpacingDp = spacingDp)
+        persist(K.FAB_BOTTOM_SPACING, spacingDp)
+    }
+
     fun updateSettings(newSettings: UserSettingsState) {
         _settings.value = newSettings
         val ctx = appContext ?: return
@@ -1128,6 +1174,13 @@ object SettingsRepository {
                 prefs[K.MUSIC_BAR_DISMISSED] = newSettings.musicBarDismissed
                 prefs[K.MUSIC_LIBRARY_SCANNED] = newSettings.musicLibraryScanned
                 if (newSettings.selectedLocalTrackId != null) prefs[K.SELECTED_LOCAL_TRACK_ID] = newSettings.selectedLocalTrackId
+                prefs[K.NAV_BAR_OPACITY] = newSettings.navBarBackgroundOpacity
+                prefs[K.NAV_BAR_BLUR_EFFECT] = newSettings.navBarBlurEffect
+                prefs[K.NAV_BAR_HIDDEN_ITEMS] = newSettings.navBarHiddenItems
+                prefs[K.HEADER_TOP_PADDING] = newSettings.headerTopPaddingDp
+                prefs[K.HEADER_OPACITY] = newSettings.headerBackgroundOpacity
+                prefs[K.HEADER_BLUR_STYLE] = newSettings.headerBlurStyle
+                prefs[K.FAB_BOTTOM_SPACING] = newSettings.fabBottomSpacingDp
             }
         }
     }
@@ -1143,6 +1196,16 @@ object SettingsRepository {
     }
 
     private fun persist(key: androidx.datastore.preferences.core.Preferences.Key<Boolean>, value: Boolean) {
+        val ctx = appContext ?: return
+        repoScope.launch { ctx.unifiedDataStore.edit { it[key] = value } }
+    }
+
+    private fun persist(key: androidx.datastore.preferences.core.Preferences.Key<Float>, value: Float) {
+        val ctx = appContext ?: return
+        repoScope.launch { ctx.unifiedDataStore.edit { it[key] = value } }
+    }
+
+    private fun persist(key: androidx.datastore.preferences.core.Preferences.Key<Set<String>>, value: Set<String>) {
         val ctx = appContext ?: return
         repoScope.launch { ctx.unifiedDataStore.edit { it[key] = value } }
     }

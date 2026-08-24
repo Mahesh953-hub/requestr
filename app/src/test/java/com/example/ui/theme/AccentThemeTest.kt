@@ -46,6 +46,20 @@ class AccentThemeTest {
     }
 
     @Test
+    fun `fromKey maps legacy DYNAMIC_LIME alias to LIME`() {
+        // v6.0 transplant (manifest §5.1) — main added this extra legacy-key mapping.
+        assertEquals(AppAccent.LIME, AppAccent.fromKey("DYNAMIC_LIME"))
+        assertEquals(AppAccent.LIME, AppAccent.fromKey("dynamic_lime"))
+    }
+
+    @Test
+    fun `CYAN and LIME display names match the accepted main-lineage naming`() {
+        // v6.0 transplant (manifest §5.1, DESIGN-RECORD §4.2) — "Dynamic Cyan" / "Dynamic Lime".
+        assertEquals("Dynamic Cyan", AppAccent.CYAN.displayName)
+        assertEquals("Dynamic Lime", AppAccent.LIME.displayName)
+    }
+
+    @Test
     fun `every legacy AppThemeMode entry maps to a sensible accent via the compatibility bridge`() {
         assertEquals(AppAccent.ORANGE, AppThemeMode.EDITORIAL_LIGHT.accent)
         assertEquals(AppAccent.OBSIDIAN, AppThemeMode.MONOCHROME_DARK.accent)
