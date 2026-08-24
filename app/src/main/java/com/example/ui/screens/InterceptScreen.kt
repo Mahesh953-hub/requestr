@@ -1929,27 +1929,34 @@ fun ConnectionsBottomSheet(
                     2 -> {
                         if (quicConnections.isEmpty()) {
                             EmptyConnectionsState(
-                                "No QUIC connections recorded yet. QUIC session identity is extracted from " +
-                                    "the Initial packet's SNI. Task 13 (QUIC 1-RTT decryption) is not implemented " +
-                                    "in this build, so HTTP/3 frames are never decoded -- rows below distinguish " +
-                                    "detected/observed/decoded, and decoded never actually fires yet."
+                                "No QUIC connections recorded yet. Identity comes from the Initial packet's " +
+                                    "ClientHello; HTTP/3 decoding additionally needs this connection's TLS traffic " +
+                                    "secrets in the key-log registry. Rows below report the authoritative decode " +
+                                    "status -- detected only, observed without keys, partially decoded, or fully " +
+                                    "decoded -- and say which key material was missing when it was."
                             )
                         } else {
                             LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 items(quicConnections) { conn ->
-                                    // Task 14: real com.example.interception.quic.QuicState (live, in-memory
-                                    // only -- see PacketPump.quicLiveStateSnapshot's doc for why this isn't a
-                                    // Room column) plus a genuine decoded-vs-Initial-only badge. decodedFrames
-                                    // is always false today: task 13 (QUIC 1-RTT/QPACK decode) is explicitly
-                                    // descoped from this release, so "decoded" is reachable in code but never
-                                    // actually observed -- this is disclosed, not hidden.
+                                    // Task 14 / gap closure: the badge is driven by the authoritative,
+                                    // Room-persisted QuicDecodeStatus column that PacketPump writes from the
+                                    // live QuicConnectionDecoder -- so it survives process death and is never
+                                    // an inference from ALPN. The live snapshot only adds strictly-live detail
+                                    // (transport state, which traffic secrets resolved vs. missed).
                                     val live = quicLiveMap[conn.connectionId]
-                                    val decoded = live?.decodedFrames == true
-                                    val observedHttp3 = !decoded && conn.alpn == "h3"
-                                    val badgeText = if (decoded || observedHttp3) "HTTP/3" else "QUIC"
+                                    val decoded = conn.decodeStatus == com.example.data.local.QuicDecodeStatus.FULLY_DECODED
+                                    val partiallyDecoded = conn.decodeStatus == com.example.data.local.QuicDecodeStatus.PARTIALLY_DECODED
+                                    val keysMissing = conn.decodeStatus == com.example.data.local.QuicDecodeStatus.OBSERVED_NO_KEYS
+                                    val badgeText = when {
+                                        decoded -> "HTTP/3"
+                                        partiallyDecoded -> "HANDSHAKE"
+                                        keysMissing -> "NO KEYS"
+                                        else -> "QUIC"
+                                    }
                                     val badgeColor = when {
                                         decoded -> 0xFF10B981
-                                        observedHttp3 -> 0xFFF59E0B
+                                        partiallyDecoded -> 0xFFF59E0B
+                                        keysMissing -> 0xFFEF4444
                                         else -> 0xFF64748B
                                     }
                                     GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)) {
@@ -1969,19 +1976,39 @@ fun ConnectionsBottomSheet(
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             )
                                             Text(
-                                                when {
-                                                    decoded -> "state=${live?.state?.name ?: "?"} · HTTP/3 frames decoded"
-                                                    observedHttp3 -> "state=${live?.state?.name ?: "?"} · alpn=h3, no HTTP/3 frames decoded (task 13 not implemented)"
-                                                    live != null -> "state=${live.state.name} · Initial only, alpn=${conn.alpn ?: "unknown"}"
-                                                    else -> "no live state (session ended or capture not running)"
+                                                buildString {
+                                                    append("state=")
+                                                    append(live?.state?.name ?: conn.lifecycleState)
+                                                    append(" · ")
+                                                    append(conn.decodeStatus.name)
+                                                    live?.cipherSuite?.let { append(" · ").append(it) }
+                                                    if (decoded) {
+                                                        append(" · ")
+                                                        append(live?.decodedHttp3Exchanges ?: 0)
+                                                        append(" HTTP/3 exchange(s) decoded")
+                                                    }
+                                                    if (live?.keyUpdatesPromoted?.let { it > 0 } == true) {
+                                                        append(" · key updates ").append(live.keyUpdatesPromoted)
+                                                    }
                                                 },
                                                 fontSize = 9.sp,
                                                 fontFamily = FontFamily.Monospace,
-                                                color = if (observedHttp3) Color(0xFFF59E0B) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                color = if (keysMissing) Color(0xFFEF4444) else MaterialTheme.colorScheme.onSurfaceVariant,
                                             )
                                             Text(
-                                                "TLS key material in registry: $keyLogEntryCount entries" +
-                                                    if (keyLogEntryCount == 0) " (none -- decoding is impossible without keys)" else "",
+                                                buildString {
+                                                    val resolved = conn.keylogLabels
+                                                    if (!resolved.isNullOrBlank()) {
+                                                        append("keys resolved: ").append(resolved)
+                                                    } else {
+                                                        append("no traffic secrets resolved for this connection")
+                                                    }
+                                                    val missing = live?.missingKeyLabels.orEmpty()
+                                                    if (missing.isNotEmpty()) append(" · missing: ").append(missing.joinToString(","))
+                                                    if (live?.cipherSuiteUnavailable == true) append(" · no ServerHello observed")
+                                                    append(" · registry holds $keyLogEntryCount entr")
+                                                    append(if (keyLogEntryCount == 1) "y" else "ies")
+                                                },
                                                 fontSize = 9.sp,
                                                 fontFamily = FontFamily.Monospace,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
