@@ -200,6 +200,8 @@ dependencies {
   implementation(libs.androidx.compose.ui)
   implementation(libs.androidx.compose.ui.graphics)
   implementation(libs.androidx.compose.ui.tooling.preview)
+  // v6.0 transplant (manifest §5.8) — Coil for TrackArtworkView album-art loading.
+  implementation(libs.coil.compose)
   implementation(libs.androidx.core.ktx)
   implementation(libs.androidx.datastore.preferences)
   implementation(libs.libsu.core)

@@ -203,33 +203,72 @@ fun AppNavigationDrawer(
 
                     Spacer(modifier = Modifier.height(6.dp))
 
-                    // Navigation Items
+                    // Navigation Items — v6.0 transplant labels (manifest §5.2)
                     val navItems = listOf(
-                        DrawerNavItem("home", "All Dashboard", Icons.Default.Home),
-                        DrawerNavItem("intercept", "HTTP(S) Interceptor", Icons.Default.Radar),
-                        DrawerNavItem("apis", "API Testr Client", Icons.Default.Public),
-                        DrawerNavItem("tools", "Security & Dev Tools", Icons.Default.Tune),
-                        DrawerNavItem("notes", "Notes & Documentation", Icons.Default.Notes),
-                        DrawerNavItem("flow", "Flow Automation (n8n)", Icons.Default.Code),
-                        DrawerNavItem("chat", "AI Chat Assistant", Icons.Default.AutoAwesome),
-                        DrawerNavItem("music", "Synth LoFi Lounge", Icons.Default.MusicNote)
+                        DrawerNavItem("home", "Home", Icons.Default.Home),
+                        DrawerNavItem("intercept", "Interceptr", Icons.Default.Radar),
+                        DrawerNavItem("apis", "API Testr", Icons.Default.Public),
+                        DrawerNavItem("tools", "Tools", Icons.Default.Tune),
+                        DrawerNavItem("notes", "Notes", Icons.Default.Notes),
+                        DrawerNavItem("flow", "Flow", Icons.Default.Code),
+                        DrawerNavItem("chat", "Reqy Assistant", Icons.Default.AutoAwesome),
+                        DrawerNavItem("music", "Music", Icons.Default.MusicNote)
                     )
 
                     navItems.forEach { item ->
                         val isSelected = currentRoute == item.route
+                        val isInterceptItem = item.route == "intercept"
+                        // v6.0 transplant: selected 24dp / unselected 12dp (manifest §5.2, DESIGN-RECORD §8.4)
+                        val itemShape = if (isSelected) RoundedCornerShape(24.dp) else RoundedCornerShape(12.dp)
+
                         NavigationDrawerItem(
                             label = {
-                                Text(
-                                    text = item.title,
-                                    fontSize = 13.sp,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = item.title,
+                                        fontSize = 13.5.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                    )
+                                    // v6.0 transplant: LIVE capture badge pill on Intercept item (manifest §5.2)
+                                    if (isInterceptItem && isCapturing) {
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .background(InterceptorActiveGreen.copy(alpha = 0.18f))
+                                                .border(0.8.dp, InterceptorActiveGreen.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                        ) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(5.dp)
+                                                        .clip(CircleShape)
+                                                        .background(InterceptorActiveGreen)
+                                                )
+                                                Spacer(modifier = Modifier.width(4.dp))
+                                                Text(
+                                                    text = "LIVE",
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = InterceptorActiveGreen
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
                             },
                             icon = {
                                 Icon(
                                     imageVector = item.icon,
                                     contentDescription = item.title,
-                                    modifier = Modifier.size(18.dp)
+                                    modifier = Modifier.size(19.dp),
+                                    tint = if (isInterceptItem && isCapturing) InterceptorActiveGreen
+                                           else if (isSelected) MaterialTheme.colorScheme.primary
+                                           else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             },
                             selected = isSelected,
@@ -237,15 +276,16 @@ fun AppNavigationDrawer(
                                 coroutineScope.launch { drawerState.close() }
                                 onNavigate(item.route)
                             },
-                            shape = RoundedCornerShape(12.dp),
+                            shape = itemShape,
                             colors = NavigationDrawerItemDefaults.colors(
-                                selectedContainerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                                // v6.0 transplant: selectedContainer 0.65 (manifest §5.2, DESIGN-RECORD §8.4)
+                                selectedContainerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f),
                                 selectedIconColor = MaterialTheme.colorScheme.primary,
-                                selectedTextColor = MaterialTheme.colorScheme.primary,
+                                selectedTextColor = MaterialTheme.colorScheme.onSurface,
                                 unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
                                 unselectedTextColor = MaterialTheme.colorScheme.onSurface
                             ),
-                            modifier = Modifier.padding(vertical = 2.dp)
+                            modifier = Modifier.padding(vertical = 2.5.dp)
                         )
                     }
 
@@ -253,14 +293,65 @@ fun AppNavigationDrawer(
                     HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
                     Spacer(modifier = Modifier.height(14.dp))
 
-                    // 7-Theme Quick Switcher
-                    Text(
-                        text = "ATMOSPHERE & PALETTE",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        letterSpacing = 1.sp
-                    )
+                    // v6.0 transplant: Theme & Accent quick switcher (manifest §5.2, DESIGN-RECORD §8.4)
+                    // Light/Dark capsule toggle + named accent chips. Adapted to backup settings:
+                    // updateAppearanceMode (SYSTEM/LIGHT/DARK) + updateAccent (orthogonal accent axis).
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "THEME & ACCENT",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            letterSpacing = 1.sp
+                        )
+
+                        // Light / Dark Quick Toggle
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
+                                .padding(3.dp),
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            val isDark = !settings.appearanceMode.equals("LIGHT", ignoreCase = true)
+                            Box(
+                                modifier = Modifier
+                                    .clip(if (!isDark) RoundedCornerShape(18.dp) else RoundedCornerShape(8.dp))
+                                    .background(if (!isDark) MaterialTheme.colorScheme.primary else Color.Transparent)
+                                    .clickable {
+                                        SettingsRepository.updateAppearanceMode("LIGHT")
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    "Light",
+                                    fontSize = 11.sp,
+                                    fontWeight = if (!isDark) FontWeight.Bold else FontWeight.Medium,
+                                    color = if (!isDark) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .clip(if (isDark) RoundedCornerShape(18.dp) else RoundedCornerShape(8.dp))
+                                    .background(if (isDark) MaterialTheme.colorScheme.primary else Color.Transparent)
+                                    .clickable {
+                                        SettingsRepository.updateAppearanceMode("DARK")
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    "Dark",
+                                    fontSize = 11.sp,
+                                    fontWeight = if (isDark) FontWeight.Bold else FontWeight.Medium,
+                                    color = if (isDark) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
 
                     Spacer(modifier = Modifier.height(8.dp))
 
@@ -271,18 +362,38 @@ fun AppNavigationDrawer(
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         AppAccent.values().forEach { accent ->
-                            val accentSelected = settings.selectedAccent.equals(accent.name, ignoreCase = true)
+                            val isAccentActive = settings.selectedAccent.equals(accent.name, ignoreCase = true)
+                            val accentShape = if (isAccentActive) RoundedCornerShape(20.dp) else RoundedCornerShape(10.dp)
                             Box(
                                 modifier = Modifier
-                                    .size(32.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(accent.primary)
-                                    .then(
-                                        if (accentSelected) Modifier.border(2.dp, MaterialTheme.colorScheme.onSurface, RoundedCornerShape(8.dp))
-                                        else Modifier
+                                    .clip(accentShape)
+                                    .background(if (isAccentActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                                    .border(
+                                        width = if (isAccentActive) 1.dp else 0.5.dp,
+                                        color = if (isAccentActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f),
+                                        shape = accentShape
                                     )
-                                    .clickable { SettingsRepository.updateAccent(accent.name) }
-                            )
+                                    .clickable {
+                                        SettingsRepository.updateAccent(accent.name)
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(8.dp)
+                                            .clip(CircleShape)
+                                            .background(accent.primary)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = accent.displayName,
+                                        color = if (isAccentActive) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
+                                        fontSize = 11.sp,
+                                        fontWeight = if (isAccentActive) FontWeight.Bold else FontWeight.Medium
+                                    )
+                                }
+                            }
                         }
                     }
 

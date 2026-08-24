@@ -1,9 +1,14 @@
 package com.example.ui.components
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
@@ -14,6 +19,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -24,6 +30,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -79,8 +86,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.SpanStyle
@@ -88,6 +98,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -968,6 +979,547 @@ fun InPageMiniSettingsSheet(
             }
 
             Spacer(modifier = Modifier.height(24.dp))
+        }
+    }
+}
+
+// ============================================================================
+// v6.0 transplant (plan task 6, manifest §5.2/§5.3, DESIGN-RECORD §6/§7/§8) —
+// Accepted shared glass components semantically recreated from main against backup
+// settings/models. Animation-gated per DESIGN-RECORD §3; glass-style keys read the
+// canonical set (FROSTED_GLASS/SOLID_M3/OLED_BLACK/TRANSLUCENT) per §11.
+// ============================================================================
+
+/**
+ * Composition local providing a drawer-open callback to descendants. Provided by
+ * MainActivity's app shell so headers/nav-pills can open the drawer without explicit wiring.
+ */
+val LocalAppDrawerController = androidx.compose.runtime.compositionLocalOf<(() -> Unit)?> { null }
+
+/**
+ * Canvas-drawn 3-line "Lucide"-style menu icon (Icons-free). Used as the glass drawer button.
+ * DESIGN-RECORD §7.5.
+ */
+@Composable
+fun LucideMenuIcon(
+    modifier: Modifier = Modifier,
+    tint: Color = MaterialTheme.colorScheme.onSurface,
+    strokeWidthDp: Dp = 2.dp
+) {
+    androidx.compose.foundation.Canvas(modifier = modifier.size(20.dp)) {
+        val stroke = strokeWidthDp.toPx()
+        val w = size.width
+        val h = size.height
+        val startX = 2.dp.toPx()
+        val endX = w - 2.dp.toPx()
+
+        drawLine(color = tint, start = Offset(startX, h * 0.25f), end = Offset(endX, h * 0.25f), strokeWidth = stroke, cap = StrokeCap.Round)
+        drawLine(color = tint, start = Offset(startX, h * 0.50f), end = Offset(endX - 3.dp.toPx(), h * 0.50f), strokeWidth = stroke, cap = StrokeCap.Round)
+        drawLine(color = tint, start = Offset(startX, h * 0.75f), end = Offset(endX, h * 0.75f), strokeWidth = stroke, cap = StrokeCap.Round)
+    }
+}
+
+/**
+ * Glass action pill — 38dp frosted-glass icon button with spring press-scale, badge dot,
+ * and haptic. DESIGN-RECORD §7.2.
+ */
+@Composable
+fun GlassActionPill(
+    icon: ImageVector? = null,
+    contentDescription: String? = null,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    tint: Color = MaterialTheme.colorScheme.onSurface,
+    badgeCount: Int? = null,
+    size: Dp = 38.dp,
+    iconSize: Dp = 18.dp,
+    customIcon: (@Composable () -> Unit)? = null
+) {
+    val haptics = rememberAppHapticFeedback()
+    val settings by SettingsRepository.settings.collectAsState()
+    val opacity = settings.headerBackgroundOpacity.coerceIn(0.2f, 1f)
+    val blurStyle = settings.headerBlurStyle
+
+    var isPressed by remember { mutableStateOf(false) }
+    val scale by animateFloatAsState(
+        targetValue = if (isPressed) 0.90f else 1.0f,
+        animationSpec = scaledSpring(dampingRatio = 0.6f, stiffness = 600f),
+        label = "glassPillScale"
+    )
+
+    val bgBrush = when (blurStyle) {
+        "SOLID_M3" -> Brush.verticalGradient(
+            listOf(MaterialTheme.colorScheme.surface, MaterialTheme.colorScheme.surfaceVariant)
+        )
+        "OLED_BLACK" -> Brush.verticalGradient(
+            listOf(Color.Black.copy(alpha = opacity), Color(0xFF0F172A).copy(alpha = opacity))
+        )
+        "TRANSLUCENT" -> Brush.verticalGradient(
+            listOf(
+                MaterialTheme.colorScheme.surface.copy(alpha = (opacity * 0.65f).coerceIn(0.2f, 1f)),
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = (opacity * 0.45f).coerceIn(0.2f, 1f))
+            )
+        )
+        else -> Brush.verticalGradient( // FROSTED_GLASS
+            listOf(
+                MaterialTheme.colorScheme.surface.copy(alpha = opacity),
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = (opacity * 0.95f).coerceIn(0.2f, 1f))
+            )
+        )
+    }
+
+    val borderColor = when (blurStyle) {
+        "SOLID_M3" -> MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+        "OLED_BLACK" -> Color.White.copy(alpha = 0.15f)
+        else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.30f)
+    }
+
+    Box(
+        modifier = modifier
+            .size(size)
+            .scale(scale)
+            .shadow(
+                elevation = 6.dp,
+                shape = RoundedCornerShape(14.dp),
+                ambientColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f),
+                spotColor = Color.Black.copy(alpha = 0.15f)
+            )
+            .clip(RoundedCornerShape(14.dp))
+            .background(bgBrush)
+            .border(0.8.dp, borderColor, RoundedCornerShape(14.dp))
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onPress = {
+                        isPressed = true
+                        tryAwaitRelease()
+                        isPressed = false
+                    },
+                    onTap = {
+                        haptics(HapticFeedbackType.LongPress)
+                        onClick()
+                    }
+                )
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        if (customIcon != null) {
+            customIcon()
+        } else if (icon != null) {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                tint = tint,
+                modifier = Modifier.size(iconSize)
+            )
+        }
+
+        if (badgeCount != null && badgeCount > 0) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(3.dp)
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary)
+            )
+        }
+    }
+}
+
+/**
+ * Floating Capsule Header — detached overlay of independent floating rounded controls:
+ * leading nav capsule + left-aligned title capsule + trailing action capsules.
+ * Configurable top offset, opacity, and glass blur styling. DESIGN-RECORD §7.3.
+ */
+@Composable
+fun FloatingCapsuleHeader(
+    title: String,
+    modifier: Modifier = Modifier,
+    icon: ImageVector? = null,
+    onOpenDrawer: (() -> Unit)? = null,
+    onBack: (() -> Unit)? = null,
+    leadingContent: (@Composable () -> Unit)? = null,
+    showWordmarkDot: Boolean = true,
+    statusDotColor: Color? = null,
+    trailingContent: @Composable (RowScope.() -> Unit)? = null
+) {
+    val settings by SettingsRepository.settings.collectAsState()
+    val topPadding = (6 + settings.headerTopPaddingDp).dp
+    val opacity = settings.headerBackgroundOpacity.coerceIn(0.2f, 1f)
+    val blurStyle = settings.headerBlurStyle
+
+    val bgBrush = when (blurStyle) {
+        "SOLID_M3" -> Brush.verticalGradient(
+            listOf(MaterialTheme.colorScheme.surface, MaterialTheme.colorScheme.surfaceVariant)
+        )
+        "OLED_BLACK" -> Brush.verticalGradient(
+            listOf(Color.Black.copy(alpha = opacity), Color(0xFF0F172A).copy(alpha = opacity))
+        )
+        "TRANSLUCENT" -> Brush.verticalGradient(
+            listOf(
+                MaterialTheme.colorScheme.surface.copy(alpha = (opacity * 0.65f).coerceIn(0.2f, 1f)),
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = (opacity * 0.45f).coerceIn(0.2f, 1f))
+            )
+        )
+        else -> Brush.verticalGradient( // FROSTED_GLASS
+            listOf(
+                MaterialTheme.colorScheme.surface.copy(alpha = opacity),
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = (opacity * 0.95f).coerceIn(0.2f, 1f))
+            )
+        )
+    }
+
+    val borderColor = when (blurStyle) {
+        "SOLID_M3" -> MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+        "OLED_BLACK" -> Color.White.copy(alpha = 0.15f)
+        else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.30f)
+    }
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 16.dp, top = topPadding, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        // Left-Aligned: Leading Navigation Capsule + Left-Aligned Title Capsule
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.weight(1f, fill = false)
+        ) {
+            if (leadingContent != null) {
+                leadingContent()
+            } else if (onBack != null) {
+                GlassActionPill(
+                    icon = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    onClick = onBack
+                )
+            } else if (onOpenDrawer != null) {
+                GlassActionPill(
+                    contentDescription = "Open Navigation Menu",
+                    onClick = onOpenDrawer,
+                    customIcon = {
+                        LucideMenuIcon(tint = MaterialTheme.colorScheme.onSurface)
+                    }
+                )
+            }
+
+            // Dynamically Sized Left-Aligned Identity Capsule: ( icon title • )
+            Box(
+                modifier = Modifier
+                    .shadow(
+                        elevation = 6.dp,
+                        shape = RoundedCornerShape(18.dp),
+                        ambientColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f),
+                        spotColor = Color.Black.copy(alpha = 0.12f)
+                    )
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(bgBrush)
+                    .border(0.8.dp, borderColor, RoundedCornerShape(18.dp))
+                    .animateContentSize(
+                        animationSpec = scaledSpring(
+                            dampingRatio = Spring.DampingRatioMediumBouncy,
+                            stiffness = Spring.StiffnessMediumLow
+                        )
+                    )
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Start
+                ) {
+                    if (icon != null) {
+                        Icon(
+                            imageVector = icon,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                    }
+
+                    AnimatedContent(
+                        targetState = title,
+                        transitionSpec = {
+                            fadeIn(animationSpec = tween(durationMillis = 180, delayMillis = 60))
+                                .togetherWith(fadeOut(animationSpec = tween(durationMillis = 100)))
+                        },
+                        label = "titleTextFade"
+                    ) { targetTitle ->
+                        if (targetTitle.equals("requestr", ignoreCase = true)) {
+                            RequestrWordmark(fontSize = 17)
+                        } else {
+                            Text(
+                                text = targetTitle.lowercase(),
+                                fontFamily = FontFamily.SansSerif,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.5.sp,
+                                letterSpacing = (-0.2).sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+
+                    if (showWordmarkDot && !title.equals("requestr", ignoreCase = true)) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Box(
+                            modifier = Modifier
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(statusDotColor ?: MaterialTheme.colorScheme.primary)
+                        )
+                    }
+                }
+            }
+        }
+
+        // Trailing Independent Action Capsules
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            if (trailingContent != null) {
+                trailingContent()
+            }
+        }
+    }
+}
+
+/**
+ * Dynamic Frosted Glass Header — alias for [FloatingCapsuleHeader]. DESIGN-RECORD §7.3.
+ */
+@Composable
+fun DynamicGlassHeader(
+    title: String,
+    modifier: Modifier = Modifier,
+    icon: ImageVector? = null,
+    onOpenDrawer: (() -> Unit)? = null,
+    onBack: (() -> Unit)? = null,
+    showWordmarkDot: Boolean = true,
+    statusDotColor: Color? = null,
+    trailingContent: @Composable (RowScope.() -> Unit)? = null
+) {
+    FloatingCapsuleHeader(
+        title = title,
+        icon = icon,
+        modifier = modifier,
+        onOpenDrawer = onOpenDrawer,
+        onBack = onBack,
+        showWordmarkDot = showWordmarkDot,
+        statusDotColor = statusDotColor,
+        trailingContent = trailingContent
+    )
+}
+
+/**
+ * Dynamic glass switch — 46×26dp track, spring-animated thumb, haptic. DESIGN-RECORD §7.4.
+ */
+@Composable
+fun DynamicGlassSwitch(
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
+    val haptics = rememberAppHapticFeedback()
+    val thumbOffset by animateDpAsState(
+        targetValue = if (checked) 22.dp else 2.dp,
+        animationSpec = scaledSpring(dampingRatio = 0.7f, stiffness = 500f),
+        label = "switchThumbOffset"
+    )
+
+    val trackColor = if (checked) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.surfaceVariant
+    }
+
+    val borderColor = if (checked) {
+        MaterialTheme.colorScheme.primary.copy(alpha = 0.8f)
+    } else {
+        MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)
+    }
+
+    Box(
+        modifier = modifier
+            .size(width = 46.dp, height = 26.dp)
+            .clip(RoundedCornerShape(13.dp))
+            .background(trackColor.copy(alpha = if (checked) 0.95f else 0.65f))
+            .border(0.6.dp, borderColor, RoundedCornerShape(13.dp))
+            .clickable(enabled = enabled) {
+                haptics(HapticFeedbackType.LongPress)
+                onCheckedChange(!checked)
+            }
+            .padding(vertical = 3.dp),
+        contentAlignment = Alignment.CenterStart
+    ) {
+        Box(
+            modifier = Modifier
+                .padding(start = thumbOffset)
+                .size(20.dp)
+                .clip(CircleShape)
+                .background(Color.White)
+                .border(0.5.dp, Color.Black.copy(alpha = 0.12f), CircleShape)
+        )
+    }
+}
+
+/**
+ * Segmented tabs — 26dp container, animated pill shape/color/border. DESIGN-RECORD §8.1.
+ */
+@Composable
+fun <T> RequestrSegmentedTabs(
+    items: List<T>,
+    selectedItem: T,
+    onItemSelected: (T) -> Unit,
+    label: (T) -> String,
+    modifier: Modifier = Modifier,
+    badge: @Composable ((T) -> Unit)? = null,
+    icon: ((T) -> ImageVector?)? = null,
+    equalWeight: Boolean = false,
+    horizontalPadding: Dp = 4.dp,
+    verticalPadding: Dp = 4.dp
+) {
+    val haptics = rememberAppHapticFeedback()
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(26.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+            .border(0.8.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f), RoundedCornerShape(26.dp))
+            .padding(horizontal = horizontalPadding, vertical = verticalPadding),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        items.forEach { item ->
+            val isSelected = item == selectedItem
+            val targetBg = if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent
+            val targetFg = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+            val targetBorder = if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.5f) else Color.Transparent
+
+            val bgAnim by animateColorAsState(targetValue = targetBg, animationSpec = scaledTween(200), label = "tabBg")
+            val fgAnim by animateColorAsState(targetValue = targetFg, animationSpec = scaledTween(200), label = "tabFg")
+            val shapeAnim by animateDpAsState(targetValue = if (isSelected) 24.dp else 10.dp, animationSpec = scaledTween(200), label = "tabShape")
+
+            val itemModifier = if (equalWeight) Modifier.weight(1f) else Modifier
+            Box(
+                modifier = itemModifier
+                    .clip(RoundedCornerShape(shapeAnim))
+                    .background(bgAnim)
+                    .border(
+                        width = if (isSelected) 1.dp else 0.dp,
+                        color = targetBorder,
+                        shape = RoundedCornerShape(shapeAnim)
+                    )
+                    .clickable {
+                        if (!isSelected) {
+                            haptics(HapticFeedbackType.TextHandleMove)
+                            onItemSelected(item)
+                        }
+                    }
+                    .padding(horizontal = 12.dp, vertical = 7.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    val ic = icon?.invoke(item)
+                    if (ic != null) {
+                        Icon(
+                            imageVector = ic,
+                            contentDescription = null,
+                            tint = fgAnim,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                    }
+                    Text(
+                        text = label(item),
+                        fontSize = 12.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                        color = fgAnim,
+                        maxLines = 1
+                    )
+                    if (badge != null) {
+                        badge(item)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Standardized filter chip — selected: full pill 24dp, unselected: 10dp, with count badge.
+ * DESIGN-RECORD §8.2.
+ */
+@Composable
+fun RequestrFilterChip(
+    selected: Boolean,
+    onClick: () -> Unit,
+    label: String,
+    modifier: Modifier = Modifier,
+    count: Int? = null,
+    icon: ImageVector? = null
+) {
+    val haptics = rememberAppHapticFeedback()
+    val shape = if (selected) RoundedCornerShape(24.dp) else RoundedCornerShape(10.dp)
+    val bg = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+    val fg = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+    val border = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)
+
+    Box(
+        modifier = modifier
+            .clip(shape)
+            .background(bg)
+            .border(0.8.dp, border, shape)
+            .clickable {
+                haptics(HapticFeedbackType.TextHandleMove)
+                onClick()
+            }
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            if (icon != null) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = fg,
+                    modifier = Modifier.size(14.dp)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+            }
+            Text(
+                text = label,
+                fontSize = 11.sp,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                color = fg
+            )
+            if (count != null && count > 0) {
+                Spacer(modifier = Modifier.width(4.dp))
+                Box(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(if (selected) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.25f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.15f))
+                        .padding(horizontal = 5.dp, vertical = 1.dp)
+                ) {
+                    Text(
+                        text = "$count",
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
         }
     }
 }
