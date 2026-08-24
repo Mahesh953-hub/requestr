@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -229,7 +230,7 @@ fun FlowScreen(
                             isRunning = false
                         }
                     },
-                    enabled = !isRunning,
+                    enabled = !isRunning && nodes.isNotEmpty(),
                     shape = RoundedCornerShape(10.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
                 ) {
@@ -294,6 +295,46 @@ fun FlowScreen(
             }
         }
 
+        // Execution progress indicator (v6.0 plan task 13): while a flow is
+        // running, show an indeterminate progress banner. The frozen
+        // FlowRepository.executeFlow() returns a single FlowRunSummary with no
+        // per-node callbacks, so an honest indeterminate indicator is used
+        // rather than fabricating deterministic per-node progress.
+        if (isRunning) {
+            GlassCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                backgroundColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                borderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            color = MaterialTheme.colorScheme.primary,
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Running flow…",
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    LinearProgressIndicator(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(4.dp)),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                    )
+                }
+            }
+        }
+
         // Execution status banner -- colour and icon now reflect the real outcome (task 2c),
         // instead of always rendering green + CheckCircle regardless of success/failure.
         if (executionMessage != null) {
@@ -333,16 +374,22 @@ fun FlowScreen(
                     FlowRepository.removeNode(id)
                 },
                 onNodeEdit = { nodeForEdit = it },
-                onConnectionCreated = { fromId, toId ->
+                onConnectionCreated = { fromId, fromPort, toId ->
                     val fromNode = nodes.find { it.id == fromId }
                     val toNode = nodes.find { it.id == toId }
                     if (fromNode != null && toNode != null) {
+                        // v6.0 (plan task 13): preserve the dragged source port so CONDITION
+                        // nodes record true/false branches the executor follows; non-CONDITION
+                        // nodes keep the "out" port. Backup behavior wins — connection id and
+                        // toPort stay deterministic via flowConnectionId.
+                        val resolvedPort = if (fromNode.type == FlowNodeType.CONDITION &&
+                            (fromPort == "true" || fromPort == "false")) fromPort else "out"
                         FlowRepository.addConnection(
                             com.example.data.models.FlowConnectionItem(
-                                id = com.example.data.models.flowConnectionId(fromId, "out", toId, "in"),
+                                id = com.example.data.models.flowConnectionId(fromId, resolvedPort, toId, "in"),
                                 fromNodeId = fromId,
                                 toNodeId = toId,
-                                fromPort = "out",
+                                fromPort = resolvedPort,
                                 toPort = "in",
                             )
                         )
@@ -362,7 +409,8 @@ fun FlowScreen(
                 onNodeDisconnected = { nodeId ->
                     connections.filter { it.fromNodeId == nodeId || it.toNodeId == nodeId }
                         .forEach { FlowRepository.removeConnection(it.id) }
-                }
+                },
+                onAddNode = { showAddNodeSheet = true }
             )
         } else {
             // Sequence List Mode
@@ -516,9 +564,10 @@ fun FlowCanvas(
     onNodeMoved: (String, Float, Float) -> Unit,
     onNodeDeleted: (String) -> Unit,
     onNodeEdit: (FlowNodeItem) -> Unit,
-    onConnectionCreated: (String, String) -> Unit,
+    onConnectionCreated: (String, String, String) -> Unit, // fromId, fromPort, toId
     onNodeDuplicated: (FlowNodeItem) -> Unit,
     onNodeDisconnected: (String) -> Unit,
+    onAddNode: () -> Unit,
 ) {
     // Pan/zoom state
     var scale by remember { mutableStateOf(1f) }
@@ -534,6 +583,16 @@ fun FlowCanvas(
     var dragFromNodeId by remember { mutableStateOf<String?>(null) }
     var dragEndX by remember { mutableStateOf(0f) }
     var dragEndY by remember { mutableStateOf(0f) }
+    // v6.0 (plan task 13): which output port a drag started from, so CONDITION nodes can
+    // record true/false branches. Defaults to "out" for non-CONDITION nodes.
+    var dragFromPort by remember { mutableStateOf("out") }
+
+    // Density captured at composition so the ConditionOutputPort drag lambdas
+    // (defined in this @Composable scope, not inside a PointerInputScope) can
+    // convert node dp coordinates to pixels. The single output port computes
+    // toPx() inside its own pointerInput block (a Density); these extracted
+    // lambdas run outside that scope, so they need an explicit Density.
+    val density = androidx.compose.ui.platform.LocalDensity.current
 
     // Long-press context menu state
     var contextMenuNode by remember { mutableStateOf<FlowNodeItem?>(null) }
@@ -620,7 +679,11 @@ fun FlowCanvas(
                 val to = nodes.find { it.id == conn.toNodeId }
                 if (from != null && to != null) {
                     val startX = from.x.dp.toPx() + 180.dp.toPx()
-                    val startY = from.y.dp.toPx() + 35.dp.toPx()
+                    // v6.0 (plan task 13): CONDITION nodes branch on true/false output ports.
+                    // Offset the curve's origin to the matching port so the two branches are
+                    // visually distinct (true = upper, false = lower), reflecting the executor's
+                    // real CONDITION→true/false branching instead of a single merged origin.
+                    val startY = from.y.dp.toPx() + conditionPortYOffset(from, conn.fromPort).dp.toPx()
                     val endX = to.x.dp.toPx()
                     val endY = to.y.dp.toPx() + 35.dp.toPx()
 
@@ -645,7 +708,8 @@ fun FlowCanvas(
                 val fromNode = nodes.find { it.id == dragFromNodeId }
                 if (fromNode != null) {
                     val startX = fromNode.x.dp.toPx() + 180.dp.toPx()
-                    val startY = fromNode.y.dp.toPx() + 35.dp.toPx()
+                    val startY = fromNode.y.dp.toPx() +
+                        conditionPortYOffset(fromNode, dragFromPort).dp.toPx()
                     val path = Path().apply {
                         moveTo(startX, startY)
                         cubicTo(
@@ -663,18 +727,69 @@ fun FlowCanvas(
             }
         }
 
+        // Empty state (flow-empty mockup): centered prompt + Add Node CTA when
+        // the graph has no nodes. Rendered above the dotted-grid Canvas so the
+        // grid texture stays visible behind it, matching the design spec.
+        if (nodes.isEmpty()) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Icon(
+                    imageVector = Icons.Default.GridView,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .graphicsLayer { alpha = 0.4f }
+                )
+                Spacer(modifier = Modifier.height(18.dp))
+                Text(
+                    text = "No automation steps yet",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 15.sp,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Tap + to add your first node and start building your pipeline.",
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+                Spacer(modifier = Modifier.height(22.dp))
+                Button(
+                    onClick = onAddNode,
+                    shape = RoundedCornerShape(20.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary
+                    )
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = "Add first node",
+                        tint = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.size(17.dp)
+                    )
+                    Spacer(modifier = Modifier.width(7.dp))
+                    Text(
+                        text = "Add Node",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
+                }
+            }
+        }
+
         // Node boxes (positioned in transformed space)
         nodes.forEach { node ->
-            val nodeColor = when (node.type) {
-                FlowNodeType.INTERCEPT_TRIGGER -> Color(0xFFF59E0B)
-                FlowNodeType.API -> Color(0xFF38BDF8)
-                FlowNodeType.TRANSFORM -> Color(0xFF8B5CF6)
-                FlowNodeType.OUTPUT -> Color(0xFFEC4899)
-                FlowNodeType.TOOL -> Color(0xFFF97316)
-                FlowNodeType.CONDITION -> Color(0xFFA855F7)
-                FlowNodeType.TEXT -> Color(0xFF64748B)
-                FlowNodeType.DELAY -> Color(0xFF8B5CF6)
-            }
+            // v6.0 (plan task 13): node color from the frozen FlowNodeType.colorHex token,
+            // matching the design-to-code manifest flow_node_type_colors (single source of
+            // truth in AppModels) instead of a divergent hardcoded palette.
+            val nodeColor = Color(node.type.colorHex)
 
             // Long-press context menu for this node
             if (contextMenuNode?.id == node.id) {
@@ -781,7 +896,82 @@ fun FlowCanvas(
                                 .background(nodeColor.copy(alpha = 0.4f))
                                 .border(1.dp, nodeColor, CircleShape)
                         )
-                        // Output port (right) — draggable to create connection
+                        // Output ports (right) — draggable to create connection(s).
+                        // v6.0 (plan task 13): CONDITION nodes expose two labelled output
+                        // ports (true / false) matching the executor's real branching; every
+                        // other node type keeps a single "out" port.
+                        if (node.type == FlowNodeType.CONDITION) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                ConditionOutputPort(
+                                    label = "true",
+                                    color = nodeColor,
+                                    onDragStart = {
+                                        dragFromNodeId = node.id
+                                        dragFromPort = "true"
+                                        with(density) {
+                                            dragEndX = node.x.dp.toPx() + 180.dp.toPx()
+                                            dragEndY = node.y.dp.toPx() +
+                                                conditionPortYOffset(node, "true").dp.toPx()
+                                        }
+                                    },
+                                    onDrag = { change, dragAmount ->
+                                        change.consume()
+                                        dragEndX += dragAmount.x / scale
+                                        dragEndY += dragAmount.y / scale
+                                    },
+                                    onDragEnd = {
+                                        val dropNode = with(density) {
+                                            nodes.find { n ->
+                                                n.id != node.id &&
+                                                    kotlin.math.abs(dragEndX - n.x.dp.toPx()) < 30f &&
+                                                    kotlin.math.abs(dragEndY - (n.y.dp.toPx() + 35.dp.toPx())) < 30f
+                                            }
+                                        }
+                                        if (dropNode != null) {
+                                            onConnectionCreated(node.id, "true", dropNode.id)
+                                        }
+                                        dragFromNodeId = null
+                                    },
+                                    scale = scale
+                                )
+                                ConditionOutputPort(
+                                    label = "false",
+                                    color = nodeColor,
+                                    onDragStart = {
+                                        dragFromNodeId = node.id
+                                        dragFromPort = "false"
+                                        with(density) {
+                                            dragEndX = node.x.dp.toPx() + 180.dp.toPx()
+                                            dragEndY = node.y.dp.toPx() +
+                                                conditionPortYOffset(node, "false").dp.toPx()
+                                        }
+                                    },
+                                    onDrag = { change, dragAmount ->
+                                        change.consume()
+                                        dragEndX += dragAmount.x / scale
+                                        dragEndY += dragAmount.y / scale
+                                    },
+                                    onDragEnd = {
+                                        val dropNode = with(density) {
+                                            nodes.find { n ->
+                                                n.id != node.id &&
+                                                    kotlin.math.abs(dragEndX - n.x.dp.toPx()) < 30f &&
+                                                    kotlin.math.abs(dragEndY - (n.y.dp.toPx() + 35.dp.toPx())) < 30f
+                                            }
+                                        }
+                                        if (dropNode != null) {
+                                            onConnectionCreated(node.id, "false", dropNode.id)
+                                        }
+                                        dragFromNodeId = null
+                                    },
+                                    scale = scale
+                                )
+                            }
+                        } else {
+                        // Single output port — draggable to create connection
                         Box(
                             modifier = Modifier
                                 .size(10.dp)
@@ -791,6 +981,7 @@ fun FlowCanvas(
                                     detectDragGestures(
                                         onDragStart = {
                                             dragFromNodeId = node.id
+                                            dragFromPort = "out"
                                             dragEndX = node.x.dp.toPx() + 180.dp.toPx()
                                             dragEndY = node.y.dp.toPx() + 35.dp.toPx()
                                         },
@@ -807,13 +998,14 @@ fun FlowCanvas(
                                                 kotlin.math.abs(dragEndY - (n.y.dp.toPx() + 35.dp.toPx())) < 30f
                                             }
                                             if (dropNode != null) {
-                                                onConnectionCreated(node.id, dropNode.id)
+                                                onConnectionCreated(node.id, "out", dropNode.id)
                                             }
                                             dragFromNodeId = null
                                         }
                                     )
                                 }
                         )
+                        }
                     }
                 }
             }
@@ -1092,5 +1284,58 @@ fun PipelinePillItem(
                 color = pillText.copy(alpha = 0.8f)
             )
         }
+    }
+}
+
+/**
+ * Y offset (in dp) of a node's output port, relative to the node's top-left
+ * origin. CONDITION nodes expose two ports — "true" sits higher and "false"
+ * lower so the two branches render distinctly — while every other type keeps
+ * the single "out" port at the baseline 35dp used by the existing connection
+ * geometry. Pure function; presentation-only (does not alter executor logic).
+ */
+fun conditionPortYOffset(node: FlowNodeItem, port: String): Float =
+    if (node.type == FlowNodeType.CONDITION && port == "true") 22f
+    else if (node.type == FlowNodeType.CONDITION && port == "false") 48f
+    else 35f
+
+/**
+ * A labelled, draggable output port for CONDITION nodes (v6.0 plan task 13).
+ * Renders the port label ("true"/"false") next to a draggable connector dot,
+ * mirroring the single output port's drag-to-connect behaviour so each branch
+ * records its own [FlowConnectionItem.fromPort] that the executor follows.
+ */
+@Composable
+fun ConditionOutputPort(
+    label: String,
+    color: Color,
+    onDragStart: (Offset) -> Unit,
+    onDrag: (androidx.compose.ui.input.pointer.PointerInputChange, Offset) -> Unit,
+    onDragEnd: () -> Unit,
+    scale: Float
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text(
+            text = label,
+            fontSize = (8.sp.value * scale).sp,
+            color = color,
+            fontWeight = FontWeight.Bold
+        )
+        Box(
+            modifier = Modifier
+                .size(10.dp)
+                .clip(CircleShape)
+                .background(color)
+                .pointerInput(label) {
+                    detectDragGestures(
+                        onDragStart = onDragStart,
+                        onDrag = onDrag,
+                        onDragEnd = onDragEnd
+                    )
+                }
+        )
     }
 }
