@@ -1,57 +1,51 @@
 # Process vs Honest Gaps vs Pending — requestr v6.0
 
-> **Generated:** 2026-08-24 | **Source branch:** `origin/backup` (HEAD `95bdb03`)  
-> **Plan:** `/code/.plans/v1-complete-v5-pending.md` (Tasks 1-18, 3b, 7b)  
+> **Generated:** 2026-08-24 | **Source branch:** `vorflux/v6-final-release` (HEAD `a500210`)  
+> **Plan:** `/code/.plans/v3-requestr-unified-release.md` (Tasks 1-17)  
 > **Design plan:** `/code/Mahesh953-hub/requestr/docs/designs/implementation-plan.md` (4 domains + Task 0)
 
-> **Reconciliation (v3 plan task 4, 2026-08-24):** The body below was written at the
-> gap-fix merge state (`62329d3` / `95bdb03`) and predates the gap-closure PR (v3 task 3,
-> branch `vorflux/v6-gap-closure` @ `4bfcb4f`, verified but not yet merged into
-> `vorflux/v6-integration`). The gap-closure PR **wires the end-to-end QUIC/HTTP-3 decode
-> pipeline** that §1/§3 below mark partial/pending, so those rows are now superseded. This
-> banner records the reconciled, reproducible state; the inline rows are corrected where
-> noted and the historical "partial" wording is retained for audit trail only.
+> **Final release reconciliation (v3 plan tasks 16-17, 2026-08-24):** All four ownership-locked
+> UI lanes (A/D/B/C) are integrated into `vorflux/v6-final-release` from the design-freeze base
+> (`4808678`). The gap-closure PR, tracker baseline, main transplant, design system freeze, and
+> all UI implementations are merged. Final APKs are committed to `release-artifacts/v6.0/`.
+> `main` is replaced with the tested integration SHA. This banner records the final, reproducible
+> state; the inline rows below are the historical audit trail, corrected where noted.
 >
-> **Reconciled test counts (reproducible, JDK 17 / Android SDK 36 / Build-Tools 36.0.0,
-> at gap-closure head `4bfcb4f` + the test-only `app/src/test/resources/robolectric.properties`
-> pin that lets Robolectric run under JDK 17):**
+> **Final test counts (reproducible, JDK 17 / Android SDK 36 / Build-Tools 36.0.0,
+> at release head `a500210`):**
 >
 > | Module | Command | Classes | Tests | Skipped | Failed | Errors |
 > |--------|---------|---------|-------|---------|--------|--------|
-> | `:app` | `./gradlew :app:testDebugUnitTest` | 80 | 547 | 0 | 0 | 0 |
+> | `:app` | `./gradlew :app:testDebugUnitTest --rerun-tasks` | 89 | 634 | 0 | 0 | 0 |
 > | `:sdk` | `./gradlew :sdk:testDebugUnitTest` | 9 | 37 | 0 | 0 | 0 |
 > | `:cli` | `./gradlew :cli:test` | 1 | 4 | 0 | 0 | 0 |
-> | browser-extension | `node test/unit/{utils,enforcer,queue}.test.mjs` | 3 files | 31 | 0 | 0 | 0 |
+> | browser-extension | `node test/run-all.mjs` | 3 files | 31 | 0 | 0 | 0 |
 >
-> Totals: **588** Gradle JVM tests (547 + 37 + 4); **619** including the 31 browser-extension
-> tests. App has 82 `*Test.kt` source files = 80 test classes + 2 shared helpers
+> Totals: **675** Gradle JVM tests (634 + 37 + 4); **706** including the 31 browser-extension
+> tests. App has 91 `*Test.kt` source files = 89 test classes + 2 shared helpers
 > (`QuicConnectionScenario.kt`, `QuicWireFixtures.kt`, 0 `@Test` each).
+> 0 Robolectric sandbox failures — the previously known 18-class initialization failures
+> are resolved by `robolectric.properties` pinning `sdk=29`.
 >
 > **What the retired numbers meant:** `403` was the `:app:testDebugUnitTest` count at the
-> gap-fix state (`4b25e76`, 64 classes) — real for that SHA but superseded by the 144 tests
-> the gap-closure PR added. `446` was an undocumented aggregate in `TODO.md`'s v6.0-gapfix
-> row; it does not reconcile with any clean per-module sum (`403 + 37 + 4 = 444`, not 446)
-> and has no recorded command or SHA, so it is retired as unsupported. Both are replaced by
-> the reproducible per-module table above.
+> gap-fix state (`4b25e76`, 64 classes) — real for that SHA but superseded. `446` was an
+> undocumented aggregate in `TODO.md`'s v6.0-gapfix row; it does not reconcile with any clean
+> per-module sum (`403 + 37 + 4 = 444`, not 446) and has no recorded command or SHA, so it is
+> retired as unsupported. Both are replaced by the reproducible per-module table above.
 >
-> **Gap-closure resolved (verified against merged code on `4bfcb4f`):** 1-RTT decrypt wiring
-> (Task 7), `QuicDecodeStatus` drive beyond `DETECTED_ONLY` (Task 8/12),
-> `Http3StreamParser` instantiation + reassembled-STREAM feed (Tasks 9/10/11), HTTP/3
-> `CapturedTrafficEntity` persistence with `protocol = "HTTP/3"` (Task 12), `parseServerHello`
-> → `lockCipherSuite` (the §Summary "intermediate gap"), Room-driven QUIC decode badges in
-> `InterceptScreen.kt` (Task 14, partial — badges now read `conn.decodeStatus`), and
-> deterministic end-to-end fixtures incl. `Http3EndToEndFixtureTest` (Task 17). The driving
-> class is the new `QuicConnectionDecoder.kt` (per-connection decode state machine) wired
-> from `PacketPump`.
+> **All design-plan UI domains now implemented (v3 plan tasks 7-15, verified at `a500210`):**
+> Task 0 `BadgePill` extraction ✅, Domain A (shared shell/Home/Onboarding/Settings) ✅,
+> Domain B (API Testr/Tools) ✅, Domain C (Flow/Music/Reqy) ✅, Domain D (interception HTTP/3
+> rows + detail sheets, TLS failure detail, relay health) ✅. All 36 approved HTML mockups are
+> implemented with light/dark variants. The QUIC UI badges, `Http3DetailSheet`,
+> `Http3RowIndicator`, `TlsFailureDetailSheet`, and `RelayHealthCard` are all wired into
+> `InterceptScreen.kt` with Room-driven honest decode status.
 >
-> **Real known limits kept open (NOT resolved by gap-closure):** the approved design-plan UI
-> domains (Task 0 `BadgePill` extraction + Domains A–D, incl. `Http3DetailSheet` /
-> `Http3RowIndicator` detail sheets) remain zero implementation — those are v3 plan tasks
-> 7–14, not v1 Task 14; live on-wire QUIC/HTTP-3 device capture (CAT-3) is not runnable on
-> this non-rooted, no-kernel-TUN Redroid tier (correctness bar = unit vectors + fixtures); and
-> API-36-specific runtime behavior is unvalidated because Android 16 `system_server` requires
-> `/dev/ashmem`, unavailable on kernel `7.0.0-1010-aws` (build/toolchain gates remain SDK 36;
-> runtime validation used Android 15 / API 35).
+> **Real known limits kept open (NOT resolved):** live on-wire QUIC/HTTP-3 device capture
+> (CAT-3) is not runnable on this non-rooted, no-kernel-TUN Redroid tier (correctness bar =
+> unit vectors + fixtures); and API-36-specific runtime behavior is unvalidated because Android
+> 16 `system_server` requires `/dev/ashmem`, unavailable on kernel `7.0.0-1010-aws`
+> (build/toolchain gates remain SDK 36; runtime validation used Android 15 / API 35).
 
 ---
 
@@ -76,7 +70,7 @@ Every task from the v6.0 execution plan (`v1-complete-v5-pending.md`), its claim
 | **11** | `Http3StreamParser` — control/unidirectional + request streams | ✅ Done | `1bffb00` (gap-fix): full implementation with QPACK integration, stream-type varint demux, blocked-stream handling. `Http3StreamParserTest`. **Now instantiated** by gap-closure (`4bfcb4f`) inside `QuicConnectionDecoder` (wired from `PacketPump`), with reassembled STREAM data fed in and decoded HTTP/3 events handled. |
 | **12** | `PacketPump` wiring — keylog lookup → Handshake+1-RTT decrypt → HTTP/3 rows + honest key-miss | ✅ Done | Gap-fix (`62329d3`): `QuicDatagramRouter` + `QuicCidTable` wired in, `lockCipherSuite`/`lockedCipherSuite`, CID routing + coalesced splitting. **Gap-closure (`4bfcb4f`) completes the pipeline:** `PacketPump` drives `QuicConnectionDecoder`, which does keylog lookup → Handshake+1-RTT decrypt → `Http3StreamParser` → `CapturedTrafficEntity` persistence with `protocol = "HTTP/3"`, and raises `QuicDecodeStatus` honestly (key-miss → `OBSERVED_NO_KEYS`). `PacketPumpQuicDatagramTest` + new `Http3PersistenceDurabilityTest`/`Http3EndToEndFixtureTest`. |
 | **13** | Key producers — authenticated `/api/keylog` PRIMARY + NSS import (CAT-2d) | ✅ Done | Commits `5a50d3c`; `LocalApiServerKeylogTest`, `KeyLogProducerHttpTest` — end-to-end SDK→registry proof |
-| **14** | QUIC/HTTP-3 UI honest state (QuicDecodeStatus-driven badges) | 🟡 Partial | Badges now **driven by the Room `QuicDecodeStatus` column** by gap-closure (`9919aa8`): `InterceptScreen.kt` reads `conn.decodeStatus` (`FULLY_DECODED`/`PARTIALLY_DECODED`/`OBSERVED_NO_KEYS`) rather than in-memory `decodedFrames`. **Still pending (design-plan Domain A):** no `Http3DetailSheet`, no `Http3RowIndicator`, no detail bottom sheet — those are v3 plan UI tasks, not this baseline. |
+| **14** | QUIC/HTTP-3 UI honest state (QuicDecodeStatus-driven badges + detail sheets) | ✅ Done | Lane D (`7fe59ae`) implemented `Http3RowIndicator`, `Http3DetailSheet`, `TlsFailureDetailSheet`, `RelayHealthCard`/`RelayHealthDetailSheet`, all wired into `InterceptScreen.kt` with Room-driven honest decode status. Tests: `Http3StateTest`, `RelayHealthStateTest`, `TlsFailureDetailProviderTest`. |
 | **15** | Docs + unconditional v6.0 bump + `RELEASE_NOTES_v6.0.md` (CAT-5) | ✅ Done | `a3a6190`: `versionCode 28`, `versionName "6.0"`, `RELEASE_NOTES_v6.0.md`; stale-doc banners added (`4b25e76`) |
 | **16** | Host build + unit-test gate | ✅ Done | Reconciled counts above (547 `:app` / 37 `:sdk` / 4 `:cli` / 31 browser-extension at `4bfcb4f`); historical `403`/`446` retired. compile/assemble all green |
 | **17** | Redroid device gate + deterministic per-suite E2E fixtures | 🟡 Partial | **Deterministic E2E fixtures now exist** by gap-closure (`ca1de13`): `Http3EndToEndFixtureTest` + `QuicOneRttSuiteTest`/`QuicRetryTest`/`QuicStatePoisoningTest` cover AES-128/256-GCM + ChaCha20 key-miss/lock/update/coalesced/malformed/out-of-order paths (JVM fixtures, not Redroid egress). **Still pending (CAT-3):** live on-wire device capture/decrypt not runnable on this non-rooted, no-kernel-TUN Redroid tier. |

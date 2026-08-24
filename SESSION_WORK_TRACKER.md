@@ -1,32 +1,26 @@
 # Session Work Tracker — requestr v6.0 (Complete v5 Pending)
 
 **Session:** `461393c6-d9ac-4b7f-a4e8-ecff2e213696`  
-**Canonical branch:** `origin/backup` (HEAD `76ef7bc`)  
-**Updated:** 2026-08-24 (post-gap-fix merge + branch consolidation)
+**Canonical branch:** `vorflux/v6-final-release` (HEAD `a500210`)  
+**Updated:** 2026-08-24 (final release — all UI lanes integrated, APKs built, main replaced)
 
-> This tracker reflects the v6.0 scope as of the gap-fix merge (`62329d3`) and branch
-> consolidation, **reconciled by v3 plan task 4 (2026-08-24)** against the gap-closure PR
-> (`vorflux/v6-gap-closure` @ `4bfcb4f`, verified, not yet merged into `vorflux/v6-integration`).
-> v6.0 lands the **foundation** for full key-log-sourced QUIC/HTTP-3 decryption plus three
-> fully-wired user-facing features (UTF-8 fix, 10-accent theme, authenticated `/api/keylog`)
-> and five independently tested pipeline components (ChaCha20-Poly1305, key-phase rotation,
-> production QPACK decoder, Http3StreamParser, QuicDatagramRouter, QuicFrameWalker).
+> This tracker reflects the **final v6.0 release** state. All four ownership-locked UI lanes
+> (A/D/B/C) are integrated from the design-freeze base (`4808678`), all 36 approved design
+> mockups are implemented, final APKs are committed to `release-artifacts/v6.0/`, and `main`
+> is replaced with the tested integration SHA.
 >
-> **Reconciled by task 4:** the gap-closure PR **wired the end-to-end decrypt pipeline**
-> (keylog lookup → 1-RTT decrypt → `Http3StreamParser` → HTTP/3 `CapturedTrafficEntity`
-> persistence) from `PacketPump` through the new `QuicConnectionDecoder`, with honest
-> `QuicDecodeStatus` transitions and Room-driven UI badges — so the prior "is not yet wired"
-> wording is superseded. **Reconciled test counts** (JDK 17 / SDK 36 / Build-Tools 36.0.0,
-> at `4bfcb4f`): `:app` 547 / `:sdk` 37 / `:cli` 4 / browser-extension 31 (0 failures); the
-> historical `403` (`:app` count at `4b25e76`) and `446` (unsupported aggregate) are retired.
+> **Final test counts** (JDK 17 / SDK 36 / Build-Tools 36.0.0, at release head `a500210`):
+> `:app` 89 classes / 634 tests / 0 failures; `:sdk` 37; `:cli` 4; browser-extension 31
+> (enforcer 13 / queue 8 / utils 10). **706 total, 0 failures.** 0 Robolectric sandbox
+> failures (previously known 18-class issue resolved by `robolectric.properties` `sdk=29` pin).
+> The historical `403` (`:app` count at `4b25e76`) and `446` (unsupported aggregate) are retired.
 > **Designs:** exactly **36** approved HTML mockups (HTTP/3 8, runtime/CDP 12, relay 10, TLS 6)
-> — the prior "38" wording is corrected.
+> — all implemented with light/dark variants.
 >
-> **Real known limits kept open:** the approved design-plan UI (Task 0 `BadgePill` extraction
-> + Domains A-D, incl. HTTP/3 detail sheets) is zero implementation (v3 plan tasks 7-14); live
-> on-wire device capture (CAT-3) is not runnable on this non-rooted, no-kernel-TUN Redroid tier;
-> API-36 runtime behavior is unvalidated (Android 16 `system_server` needs `/dev/ashmem`,
-> unavailable on kernel `7.0.0-1010-aws`). See `PROCESS_VS_GAPS.md` and `BUILD_LOG.md`.
+> **Real known limits kept open:** live on-wire device capture (CAT-3) is not runnable on this
+> non-rooted, no-kernel-TUN Redroid tier; API-36 runtime behavior is unvalidated (Android 16
+> `system_server` needs `/dev/ashmem`, unavailable on kernel `7.0.0-1010-aws`). See
+> `PROCESS_VS_GAPS.md` and `release-artifacts/v6.0/BUILD-PROVENANCE.md`.
 
 ---
 
@@ -65,15 +59,18 @@
 
 Historical (verified on `vorflux/v6-build-verify` @ `4b25e76`): `:app` 64 classes / 403 tests.
 
-✅ **Reconciled at gap-closure head `4bfcb4f` (JDK 17 / SDK 36 / Build-Tools 36.0.0; see `BUILD_LOG.md`):**
-- `:app:testDebugUnitTest` — **80 test classes, 547 tests, 0 failures**
+✅ **Final release at `a500210` (JDK 17 / SDK 36 / Build-Tools 36.0.0; see `release-artifacts/v6.0/BUILD-PROVENANCE.md`):**
+- `:app:testDebugUnitTest --rerun-tasks` — **89 test classes, 634 tests, 0 failures**
 - `:sdk:testDebugUnitTest` — 9 classes, 37 tests PASS
 - `:cli:test` — 1 class, 4 tests PASS
 - browser-extension — 31 tests PASS (utils 10 / enforcer 13 / queue 8)
-- `:app:assembleDebug` + `:app:assembleRelease` — SUCCESS; release signed with locked key (alias `upload`, cert SHA-256 `CB:08:8B:DE:…:6E:D8`), R8 minified, `:app:verifyReleaseSigning` OK
-- Totals: 588 Gradle JVM tests; 619 incl. browser-extension. The `403`/`446` numbers are retired (see `PROCESS_VS_GAPS.md`).
-- Version bump verified: `versionCode = 28`, `versionName = "6.0"`, `metadata.json` `"version": "6.0.0"`
-- Room schema exported: `app/schemas/…/10.json`, `@Database(version = 10)`
+- `:app:compileReleaseKotlin` + `:app:assembleRelease` — SUCCESS; release signed with locked key (alias `upload`, cert SHA-256 `CB:08:8B:DE:…:6E:D8`), R8 minified, `:app:verifyReleaseSigning` OK
+- `:app:assembleDebug` — SUCCESS; debug signed with regenerated local keystore (non-preserved)
+- Totals: 675 Gradle JVM tests; 706 incl. browser-extension. The `403`/`446` numbers are retired (see `PROCESS_VS_GAPS.md`).
+- Version verified: `versionCode = 28`, `versionName = "6.0"`, `applicationId = "com.kailashhh.requestr"`, `minSdk = 24`, `targetSdk = 36`
+- Release APK: 40,538,933 bytes, SHA-256 `d6f1d8ae1c2b2e736d0f3c77f7f2701bb7718ee9956514ffe69487c05fbd6891`
+- Debug APK: 54,960,777 bytes, SHA-256 `72b4550a99f81607cb627b825cd1a4643065ba1c183c12868bbfd3c590b62782`
+- Device smoke tests: 12/12 journeys passed on Redroid Android 15/API 35 (see BUILD-PROVENANCE.md)
 
 ---
 

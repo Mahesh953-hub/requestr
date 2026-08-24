@@ -1,15 +1,18 @@
-# requestr v6.0 — Accent Themes, Keylog Ingestion, QUIC Crypto Foundation
+# requestr v6.0 — Unified Release
 
-> **Honest scope note (read first):** v6.0 lands the QUIC/HTTP-3 crypto foundation, three
-> fully-wired user-facing features (UTF-8 fix, accent themes, authenticated keylog ingestion),
-> and five pipeline components (ChaCha20-Poly1305, key-phase rotation, production QPACK decoder,
-> Http3StreamParser, QuicDatagramRouter, QuicFrameWalker) — all independently tested and
-> merged into the codebase. **Reconciled by v3 plan task 4:** the gap-closure PR (`4bfcb4f`)
-> wired the end-to-end PacketPump pipeline (keylog lookup → 1-RTT decrypt → `Http3StreamParser`
-> → HTTP/3 `CapturedTrafficEntity` persistence) via `QuicConnectionDecoder`, drives honest
-> `QuicDecodeStatus`, and the QUIC UI badges now read the Room `QuicDecodeStatus` column.
-> Remaining limits (kept open): the approved design-plan UI detail sheets, and live on-wire
-> device capture (CAT-3). See `PROCESS_VS_GAPS.md` and `BUILD_LOG.md`.
+> **Final release (2026-08-24):** Built from `vorflux/v6-final-release` @ `a500210` with JDK 17,
+> Android SDK 36, Build-Tools 36.0.0. All four ownership-locked UI lanes (A/D/B/C) integrated
+> from the design-freeze base (`4808678`). All 36 approved HTML design mockups are implemented
+> with light/dark variants. **706 tests pass with 0 failures** (app 634, SDK 37, CLI 4,
+> browser-extension 31). Release APK signed with locked backup key (alias `upload`, cert
+> SHA-256 `CB:08:8B:DE:…:6E:D8`). 12/12 device smoke journeys passed on Redroid Android 15/API 35.
+>
+> **Known limits (kept open):** live on-wire QUIC/HTTP-3 device capture (CAT-3) is not runnable
+> on this non-rooted, no-kernel-TUN Redroid tier; API-36-specific runtime behavior is unvalidated
+> because Android 16 `system_server` requires `/dev/ashmem`, unavailable on kernel
+> `7.0.0-1010-aws` (build/toolchain gates remain SDK 36; runtime validation used Android 15/API 35).
+> See `release-artifacts/v6.0/BUILD-PROVENANCE.md` for full provenance and `PROCESS_VS_GAPS.md`
+> for the complete honest status.
 
 ## What's New
 

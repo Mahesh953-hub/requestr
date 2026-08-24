@@ -6,15 +6,15 @@
 
 ---
 
-## v6.0 — Completion Snapshot (2026-08-24)
+## v6.0 — Completion Snapshot (2026-08-24, final release)
 
 > All 50 numbered TODO items below remain ✅ complete (unchanged since v4.0). v6.0 closes v5
-> *pending* work + a CLI defect and adds five independently tested QUIC/HTTP-3 pipeline
-> components. **Reconciled by v3 plan task 4:** the gap-closure PR (`4bfcb4f`) wired the
-> end-to-end decrypt pipeline (keylog lookup → 1-RTT decrypt → `Http3StreamParser` → HTTP/3
-> persistence) via `QuicConnectionDecoder`; reconciled test counts are `:app` 547 / `:sdk` 37 /
-> `:cli` 4 / browser-extension 31 (0 failures) and exactly **36** approved design mockups.
-> See `PROCESS_VS_GAPS.md` and `BUILD_LOG.md` for complete honest status.
+> *pending* work + a CLI defect, adds five independently tested QUIC/HTTP-3 pipeline
+> components, and **implements all 36 approved design mockups** across four ownership-locked
+> UI lanes (A/D/B/C) integrated into `vorflux/v6-final-release` @ `a500210`.
+> **Final test counts:** `:app` 634 / `:sdk` 37 / `:cli` 4 / browser-extension 31 = **706 total,
+> 0 failures**. Exactly **36** approved design mockups, all implemented. See
+> `PROCESS_VS_GAPS.md` and `release-artifacts/v6.0/BUILD-PROVENANCE.md`.
 
 ### ✅ Resolved in v6.0 (foundation — wired at this snapshot)
 - [x] **UTF-8 Content-Length fix** — `LocalApiServer` byte-accurate responses + `org.json` serialization; fixes the CLI `tools` `↔`-truncation crash.
@@ -41,8 +41,14 @@
 - [x] **PacketPump end-to-end:** `QuicConnectionDecoder` (driven from `PacketPump`) does `TlsKeyLogRegistry` lookup, 1-RTT `decryptProtectedPayload`, `Http3StreamParser` instantiation, and HTTP/3 `CapturedTrafficEntity` persistence (`protocol = "HTTP/3"`); `decodeStatus` is raised honestly beyond `DETECTED_ONLY`.
 - [x] **parseServerHello → lockCipherSuite:** `QuicConnectionDecoder` feeds the parsed ServerHello cipher suite into `lockCipherSuiteFromIana(...)` during live capture.
 
+### ✅ Resolved by final release (`a500210`, tasks 16-17)
+- [x] **QUIC/HTTP-3 UI:** `Http3RowIndicator`, `Http3DetailSheet`, `TlsFailureDetailSheet`, `RelayHealthCard`/`RelayHealthDetailSheet` all implemented (Lane D) and wired into `InterceptScreen.kt` with Room-driven honest decode status. All 36 approved design mockups implemented across lanes A/D/B/C.
+- [x] **Final APKs:** release (R8, v2 signed, alias `upload`) and debug (regenerated key) built, verified, and committed to `release-artifacts/v6.0/`.
+- [x] **Device smoke tests:** 12/12 journeys passed on Redroid Android 15/API 35.
+
 ### 🟡 Still pending (kept open)
-- [ ] **QUIC/HTTP-3 UI:** Badges now read the Room `QuicDecodeStatus` column (`9919aa8`), but detail sheets (`Http3DetailSheet`, `Http3RowIndicator`) are not built. Design plan (36 mockups) not started — v3 plan UI tasks.
+- [ ] **Live on-wire QUIC/HTTP-3 device capture (CAT-3):** not runnable on this non-rooted, no-kernel-TUN Redroid tier (correctness bar = unit vectors + fixtures).
+- [ ] **API-36 runtime validation:** unvalidated because Android 16 `system_server` requires `/dev/ashmem`, unavailable on kernel `7.0.0-1010-aws` (build/toolchain gates remain SDK 36).
 
 ---
 

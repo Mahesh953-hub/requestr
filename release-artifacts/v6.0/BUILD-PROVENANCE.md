@@ -121,8 +121,8 @@ Sizes: release 40,538,933 bytes (R8 minified), debug 54,960,777 bytes.
 | app | 89 | 634 | 634 | 0 | 0 |
 | sdk | 9 | 37 | 37 | 0 | 0 |
 | cli | 1 | 4 | 4 | 0 | 0 |
-| browser-extension | 3 | 29 | 29 | 0 | 0 |
-| **Total** | **102** | **704** | **704** | **0** | **0** |
+| browser-extension | 3 | 31 | 31 | 0 | 0 |
+| **Total** | **102** | **706** | **706** | **0** | **0** |
 
 - 0 Robolectric sandbox failures — the previously known 18-class initialization
   failures (`Android SDK 36 requires Java 21`) are resolved by a
@@ -130,7 +130,7 @@ Sizes: release 40,538,933 bytes (R8 minified), debug 54,960,777 bytes.
   annotations on Robolectric test classes. No failures to exclude.
 - R8 minification and lintVital passed on the release build.
 - Retired unsupported historical 403/446 test-count claims; the single reproducible
-  definition is 704 discovered = 704 executed, 0 skipped, 0 failed.
+  definition is 706 discovered = 706 executed, 0 skipped, 0 failed.
 
 ## Design artifacts
 
