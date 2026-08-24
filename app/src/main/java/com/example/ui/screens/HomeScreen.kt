@@ -1,5 +1,16 @@
 package com.example.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -7,6 +18,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -20,14 +32,20 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.AccountTree
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Code
-import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.FilterList
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Notes
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Radar
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -42,15 +60,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.models.ApiRequestItem
 import com.example.data.models.CapturedTrafficItem
-import com.example.data.models.HttpMethod
 import com.example.data.models.NoteItem
 import com.example.data.repository.ApiCollectionsRepository
 import com.example.data.repository.FlowRepository
@@ -62,12 +81,11 @@ import com.example.data.search.GlobalSearchHit
 import com.example.data.interception.CaptureLogRepository
 import com.example.data.interception.InterceptionStateRepository
 import com.example.data.interception.InterceptionStatus
-import com.example.data.repository.TrafficInterceptorRepository
 import com.example.ui.components.GlassCard
-import com.example.ui.components.MethodBadge
 import com.example.ui.components.RequestrWordmark
 import com.example.ui.components.SearchInputField
 import com.example.ui.components.ThemeToggleButton
+import com.example.ui.theme.LocalAnimationsEnabled
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
@@ -100,6 +118,7 @@ fun HomeScreen(
     val toolsCatalog = remember { ToolsRepository.getToolsCatalog() }
 
     var searchQuery by remember { mutableStateOf("") }
+    var isRecentsExpanded by remember { mutableStateOf(true) }
     val searchHits = remember(searchQuery, savedApis, notes, toolsCatalog, flows) {
         GlobalSearch.search(searchQuery, apis = savedApis, notes = notes, tools = toolsCatalog, flows = flows)
     }
@@ -121,6 +140,7 @@ fun HomeScreen(
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
             .padding(horizontal = 16.dp),
+        contentPadding = PaddingValues(bottom = (settings.fabBottomSpacingDp + 16).dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         item {
@@ -255,7 +275,7 @@ fun HomeScreen(
             }
         } else {
 
-        // Quick Action Chips Row
+        // Quick Action Pills Row
         item {
             Row(
                 modifier = Modifier
@@ -263,34 +283,40 @@ fun HomeScreen(
                     .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                QuickActionChip(
+                HomeQuickActionPill(
                     label = "+ New API",
                     icon = Icons.Default.Public,
+                    iconTint = Color(0xFF10B981),
                     onClick = { onNavigateToSection("apis") }
                 )
-                QuickActionChip(
+                HomeQuickActionPill(
                     label = "+ Intercept",
                     icon = Icons.Default.Radar,
+                    iconTint = Color(0xFFF97316),
                     onClick = { onNavigateToSection("intercept") }
                 )
-                QuickActionChip(
+                HomeQuickActionPill(
                     label = "+ New Tool",
                     icon = Icons.Default.Tune,
+                    iconTint = Color(0xFFF59E0B),
                     onClick = { onNavigateToSection("tools") }
                 )
-                QuickActionChip(
+                HomeQuickActionPill(
                     label = "+ New Note",
                     icon = Icons.Default.Notes,
+                    iconTint = Color(0xFF6366F1),
                     onClick = { onNavigateToSection("notes") }
                 )
-                QuickActionChip(
+                HomeQuickActionPill(
                     label = "+ New Flow",
                     icon = Icons.Default.Code,
+                    iconTint = Color(0xFF4F46E5),
                     onClick = { onNavigateToSection("flow") }
                 )
-                QuickActionChip(
+                HomeQuickActionPill(
                     label = "🎵 Music",
                     icon = Icons.Default.MusicNote,
+                    iconTint = Color(0xFFDB2777),
                     onClick = { onNavigateToSection("music") }
                 )
             }
@@ -300,35 +326,35 @@ fun HomeScreen(
         item {
             GlassCard(
                 modifier = Modifier.fillMaxWidth(),
-                backgroundColor = if (isInterceptionActive) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f) else MaterialTheme.colorScheme.surface,
-                borderColor = if (isInterceptionActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                backgroundColor = if (isInterceptionActive) {
+                    Color(0xFF10B981).copy(alpha = 0.12f)
+                } else {
+                    MaterialTheme.colorScheme.surface
+                },
+                borderColor = if (isInterceptionActive) {
+                    Color(0xFF10B981).copy(alpha = 0.6f)
+                } else {
+                    MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+                },
                 onClick = { onNavigateToSection("intercept") }
             ) {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                        .padding(16.dp)
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        // Green only when genuinely capturing; muted when never configured.
-                        Box(
-                            modifier = Modifier
-                                .size(12.dp)
-                                .clip(CircleShape)
-                                .background(
-                                    when (interceptionState.status) {
-                                        InterceptionStatus.ACTIVE -> Color(0xFF22C55E)
-                                        InterceptionStatus.ARMED -> Color(0xFFEAB308)
-                                        InterceptionStatus.ERROR -> Color(0xFFEF4444)
-                                        InterceptionStatus.CONFIGURED_IDLE -> TextMuted
-                                        InterceptionStatus.NEVER_CONFIGURED -> TextMuted
-                                    }
-                                )
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column {
+                    // Header Row
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            // Pulsing Radar Indicator
+                            PulsingInterceptionIndicator(isActive = isInterceptionActive)
+
+                            Spacer(modifier = Modifier.width(10.dp))
+
                             Text(
                                 text = when (interceptionState.status) {
                                     InterceptionStatus.ACTIVE -> "Interception: ACTIVE"
@@ -338,161 +364,244 @@ fun HomeScreen(
                                     InterceptionStatus.NEVER_CONFIGURED -> "Set up Interception"
                                 },
                                 fontWeight = FontWeight.Bold,
-                                color = TextPrimary,
+                                color = MaterialTheme.colorScheme.onSurface,
                                 fontSize = 15.sp
                             )
-                            // Real port, method, and packet count from the live session only.
-                            Text(
-                                text = when (interceptionState.status) {
-                                    InterceptionStatus.ACTIVE ->
-                                        "${interceptionState.methodLabel} · " +
-                                            "${interceptionState.packetCount} packets"
-                                    InterceptionStatus.ARMED -> "Pre-flight passed · tap to confirm"
-                                    InterceptionStatus.ERROR ->
-                                        interceptionState.errorText ?: "Capture failed"
-                                    InterceptionStatus.CONFIGURED_IDLE -> "Tap to start capturing"
-                                    InterceptionStatus.NEVER_CONFIGURED ->
-                                        "Install the CA certificate to begin"
-                                },
-                                color = TextSecondary,
-                                fontSize = 12.sp
+
+                            if (isInterceptionActive) {
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(Color(0xFF10B981).copy(alpha = 0.2f))
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                ) {
+                                    Text(
+                                        text = "Live",
+                                        color = Color(0xFF10B981),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(6.dp))
+                                LiveWaveformGraphic()
+                            }
+                        }
+
+                        // Circular Navigation Arrow
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.8f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                                contentDescription = "Open Interceptor",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(16.dp)
                             )
                         }
                     }
 
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Detail Line 1: Real method, port & packet count from the live session only.
                     Text(
                         text = when (interceptionState.status) {
-                            InterceptionStatus.ACTIVE -> "Live →"
-                            InterceptionStatus.NEVER_CONFIGURED -> "Set up →"
-                            else -> "Start →"
+                            InterceptionStatus.ACTIVE ->
+                                "${interceptionState.methodLabel} · Port ${interceptionState.port} · ${interceptionState.packetCount} packets"
+                            InterceptionStatus.ARMED ->
+                                "${interceptionState.methodLabel} · Port ${interceptionState.port} · Awaiting confirmation"
+                            InterceptionStatus.ERROR ->
+                                interceptionState.errorText ?: "Capture service encountered an error"
+                            InterceptionStatus.CONFIGURED_IDLE ->
+                                "Tap to start live session"
+                            InterceptionStatus.NEVER_CONFIGURED ->
+                                "Install the CA certificate to begin"
                         },
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 13.sp
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.5.sp,
+                        fontFamily = FontFamily.SansSerif
                     )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Detail Line 2: Real features & connected devices
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Lock,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "HTTPS Decryption",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        Text("·", color = MaterialTheme.colorScheme.outline)
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.FilterList,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "Filtering On",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        Text("·", color = MaterialTheme.colorScheme.outline)
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Person,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "${interceptionState.activeConnections} Connected",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 }
             }
         }
 
-        // Recents Section
+        // Recents Section (Real Data, Collapsible)
         item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "Recently opened",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
-                    color = TextPrimary
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.clickable { isRecentsExpanded = !isRecentsExpanded }
+                ) {
+                    Text(
+                        text = "Recently opened",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onBackground
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Icon(
+                        imageVector = if (isRecentsExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                        contentDescription = if (isRecentsExpanded) "Collapse" else "Expand",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
                 Text(
                     text = "See all →",
                     style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.clickable { onNavigateToSection("apis") }
                 )
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            AnimatedVisibility(
+                visible = isRecentsExpanded,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
             ) {
-                // API Recents
-                savedApis.take(3).forEach { api ->
-                    GlassCard(
-                        modifier = Modifier
-                            .width(170.dp)
-                            .height(115.dp),
-                        backgroundColor = MaterialTheme.colorScheme.surfaceVariant,
-                        onClick = {
-                            ApiCollectionsRepository.setActiveRequest(api)
-                            onOpenApiRequest(api)
-                        }
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(12.dp),
-                            verticalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                MethodBadge(method = api.method)
-                                Text("API", color = TextMuted, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                            }
-                            Text(
-                                text = api.name,
-                                color = TextPrimary,
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 13.sp,
-                                maxLines = 1
-                            )
-                            Text(
-                                text = api.url.removePrefix("https://").removePrefix("http://"),
-                                color = TextSecondary,
-                                fontSize = 10.sp,
-                                fontFamily = FontFamily.Monospace,
-                                maxLines = 1
+                Column(
+                    modifier = Modifier.padding(top = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val recentItems = remember(savedApis, notes) {
+                        val list = mutableListOf<RecentRowModel>()
+                        savedApis.take(2).forEach { api ->
+                            list.add(
+                                RecentRowModel(
+                                    id = api.id,
+                                    type = "API",
+                                    subtype = api.method.name,
+                                    title = api.name,
+                                    preview = api.url.removePrefix("https://").removePrefix("http://"),
+                                    timestamp = "Recent",
+                                    icon = Icons.Default.Public,
+                                    iconColor = Color(0xFF10B981),
+                                    onClick = {
+                                        ApiCollectionsRepository.setActiveRequest(api)
+                                        onOpenApiRequest(api)
+                                    }
+                                )
                             )
                         }
+                        notes.take(2).forEach { note ->
+                            list.add(
+                                RecentRowModel(
+                                    id = note.id,
+                                    type = "Note",
+                                    subtype = note.format.name,
+                                    title = note.title,
+                                    preview = note.content.take(40).replace("\n", " "),
+                                    timestamp = "Saved",
+                                    icon = Icons.Default.Notes,
+                                    iconColor = Color(0xFF6366F1),
+                                    onClick = { onOpenNote(note) }
+                                )
+                            )
+                        }
+                        list.take(4)
                     }
-                }
 
-                // Note Recents
-                notes.take(2).forEach { note ->
-                    GlassCard(
-                        modifier = Modifier
-                            .width(170.dp)
-                            .height(115.dp),
-                        backgroundColor = MaterialTheme.colorScheme.surfaceVariant,
-                        onClick = { onOpenNote(note) }
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(12.dp),
-                            verticalArrangement = Arrangement.SpaceBetween
+                    if (recentItems.isEmpty()) {
+                        GlassCard(
+                            modifier = Modifier.fillMaxWidth(),
+                            backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
                         ) {
-                            Text(
-                                text = "📝 Note · ${note.format.name}",
-                                color = Color(note.folderColorHex),
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = note.title,
-                                color = TextPrimary,
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 13.sp,
-                                maxLines = 1
-                            )
-                            Text(
-                                text = note.content.take(40).replace("\n", " "),
-                                color = TextMuted,
-                                fontSize = 10.sp,
-                                maxLines = 2
-                            )
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "No recent items yet. Create an API or Note to get started.",
+                                    fontSize = 12.5.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    } else {
+                        recentItems.forEach { item ->
+                            RecentItemCard(model = item)
                         }
                     }
                 }
             }
         }
 
-        // Main Navigation Cards Grid (2-column layout)
+        // Power Modules Grid (2-column layout + Flow full width)
         item {
             Text(
                 text = "Power Modules",
-                style = MaterialTheme.typography.titleLarge,
+                style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
-                color = TextPrimary
+                color = MaterialTheme.colorScheme.onBackground
             )
 
             Spacer(modifier = Modifier.height(10.dp))
@@ -503,74 +612,70 @@ fun HomeScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    MainSectionCard(
+                    PowerModuleCard(
                         title = "Intercept",
                         subtitle = "MITM VPN, Frida & Rules",
-                        badge = if (capturedCount == 0) "Not set up" else "$capturedCount captured",
-                        icon = "📡",
-                        gradient = listOf(Color(0xFF1E3A8A), Color(0xFF0F172A)),
+                        badge = if (capturedCount == 0 && !isInterceptionActive) "Not set up" else if (isInterceptionActive) "Live" else "$capturedCount captured",
+                        icon = Icons.Default.Radar,
+                        accentColor = Color(0xFF6366F1),
+                        chips = listOf("Live Traffic", "Rules Engine", "Breakpoints", "SSL Decrypt"),
                         modifier = Modifier.weight(1f),
                         onClick = { onNavigateToSection("intercept") }
                     )
-                    MainSectionCard(
+                    PowerModuleCard(
                         title = "APIs",
                         subtitle = "Test & organize endpoints",
                         badge = "${savedApis.size} saved",
-                        icon = "🌐",
-                        gradient = listOf(Color(0xFF065F46), Color(0xFF0F172A)),
+                        icon = Icons.Default.Public,
+                        accentColor = Color(0xFF0D9488),
+                        chips = listOf("Collections", "Environments", "History", "Import"),
                         modifier = Modifier.weight(1f),
                         onClick = { onNavigateToSection("apis") }
                     )
                 }
 
-                // Row 2: Tools & Chats
+                // Row 2: Tools & Notes
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    MainSectionCard(
+                    PowerModuleCard(
                         title = "Tools",
                         subtitle = "Decoders, ciphers & hashes",
-                        badge = "${toolsCatalog.size} tools",
-                        icon = "🔧",
-                        gradient = listOf(Color(0xFF78350F), Color(0xFF0F172A)),
+                        badge = "${toolsCatalog.size}+ tools",
+                        icon = Icons.Default.Build,
+                        accentColor = Color(0xFFD97706),
+                        chips = listOf("Decoders", "Ciphers", "Hashes", "Formatters"),
                         modifier = Modifier.weight(1f),
                         onClick = { onNavigateToSection("tools") }
                     )
-                }
-
-                // Row 3: Notes & Flow
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    MainSectionCard(
+                    PowerModuleCard(
                         title = "Notes",
                         subtitle = "Markdown, HTML & checklists",
                         badge = "${notes.size} docs",
-                        icon = "📝",
-                        gradient = listOf(Color(0xFF312E81), Color(0xFF0F172A)),
+                        icon = Icons.Default.Notes,
+                        accentColor = Color(0xFFDB2777),
+                        chips = listOf("Markdown", "HTML", "Checklists", "Folders"),
                         modifier = Modifier.weight(1f),
                         onClick = { onNavigateToSection("notes") }
                     )
-                    MainSectionCard(
-                        title = "Flow",
-                        subtitle = "Node-based automation",
-                        badge = "Graph active",
-                        icon = "🗺️",
-                        gradient = listOf(Color(0xFF831843), Color(0xFF0F172A)),
-                        modifier = Modifier.weight(1f),
-                        onClick = { onNavigateToSection("flow") }
-                    )
                 }
+
+                // Row 3: Flow (Full-Width Card)
+                PowerModuleCard(
+                    title = "Flow",
+                    subtitle = "Node-based automation",
+                    badge = if (flows.isNotEmpty()) "Graph active" else "0 nodes",
+                    icon = Icons.Default.AccountTree,
+                    accentColor = Color(0xFF4F46E5),
+                    chips = listOf("Node Graph", "JSON Logic", "Webhooks", "Auto Run"),
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = { onNavigateToSection("flow") }
+                )
             }
         }
 
         } // end normal-mode else branch
-
-        item {
-            Spacer(modifier = Modifier.height(80.dp))
-        }
     }
 }
 
@@ -696,6 +801,321 @@ private fun SearchResultRow(hit: com.example.data.search.GlobalSearchHit, onClic
                     fontSize = 12.sp,
                     maxLines = 1
                 )
+            }
+        }
+    }
+}
+
+private data class RecentRowModel(
+    val id: String,
+    val type: String,
+    val subtype: String,
+    val title: String,
+    val preview: String,
+    val timestamp: String,
+    val icon: ImageVector,
+    val iconColor: Color,
+    val onClick: () -> Unit
+)
+
+@Composable
+private fun RecentItemCard(model: RecentRowModel) {
+    GlassCard(
+        modifier = Modifier.fillMaxWidth(),
+        backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        borderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f),
+        onClick = model.onClick
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
+                // Category Icon Tile
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(model.iconColor.copy(alpha = 0.15f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = model.icon,
+                        contentDescription = null,
+                        tint = model.iconColor,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Column {
+                    Text(
+                        text = "${model.type} • ${model.subtype.uppercase()}",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 10.5.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = model.title,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontSize = 13.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1
+                    )
+                    Text(
+                        text = model.preview,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 11.sp,
+                        maxLines = 1
+                    )
+                }
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        text = model.timestamp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+                Spacer(modifier = Modifier.width(6.dp))
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = "Open",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun HomeQuickActionPill(
+    label: String,
+    icon: ImageVector,
+    iconTint: Color,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(20.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f))
+            .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f), RoundedCornerShape(20.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 9.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = iconTint,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = label,
+                color = MaterialTheme.colorScheme.onSurface,
+                fontSize = 12.5.sp,
+                fontWeight = FontWeight.Medium
+            )
+        }
+    }
+}
+
+@Composable
+private fun PulsingInterceptionIndicator(isActive: Boolean) {
+    val animationsEnabled = LocalAnimationsEnabled.current
+    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+    val animatedScale by infiniteTransition.animateFloat(
+        initialValue = 0.85f,
+        targetValue = 1.25f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(900, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "radarPulse"
+    )
+    val scale = if (animationsEnabled && isActive) animatedScale else 1.0f
+
+    Box(
+        modifier = Modifier
+            .size(14.dp)
+            .scale(scale)
+            .clip(CircleShape)
+            .background(if (isActive) Color(0xFF10B981) else TextMuted)
+    )
+}
+
+@Composable
+private fun LiveWaveformGraphic() {
+    val animationsEnabled = LocalAnimationsEnabled.current
+    val infiniteTransition = rememberInfiniteTransition(label = "waveform")
+    val animatedBar1 by infiniteTransition.animateFloat(
+        initialValue = 4f,
+        targetValue = 12f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(600, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "w1"
+    )
+    val animatedBar2 by infiniteTransition.animateFloat(
+        initialValue = 10f,
+        targetValue = 5f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(450, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "w2"
+    )
+    val animatedBar3 by infiniteTransition.animateFloat(
+        initialValue = 6f,
+        targetValue = 14f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(700, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "w3"
+    )
+    val bar1 = if (animationsEnabled) animatedBar1 else 8f
+    val bar2 = if (animationsEnabled) animatedBar2 else 8f
+    val bar3 = if (animationsEnabled) animatedBar3 else 8f
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        Box(modifier = Modifier.size(width = 2.5.dp, height = bar1.dp).clip(RoundedCornerShape(1.dp)).background(Color(0xFF10B981)))
+        Box(modifier = Modifier.size(width = 2.5.dp, height = bar2.dp).clip(RoundedCornerShape(1.dp)).background(Color(0xFF10B981)))
+        Box(modifier = Modifier.size(width = 2.5.dp, height = bar3.dp).clip(RoundedCornerShape(1.dp)).background(Color(0xFF10B981)))
+    }
+}
+
+@Composable
+private fun PowerModuleCard(
+    title: String,
+    subtitle: String,
+    badge: String,
+    icon: ImageVector,
+    accentColor: Color,
+    chips: List<String>,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    GlassCard(
+        modifier = modifier,
+        backgroundColor = MaterialTheme.colorScheme.surface,
+        borderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f),
+        onClick = onClick
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            accentColor.copy(alpha = 0.16f),
+                            MaterialTheme.colorScheme.surface.copy(alpha = 0.95f)
+                        )
+                    )
+                )
+                .padding(14.dp),
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            // Header Row: Icon Tile & Status Badge
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(accentColor.copy(alpha = 0.20f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = accentColor,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.8f))
+                        .padding(horizontal = 7.dp, vertical = 2.5.dp)
+                ) {
+                    Text(
+                        text = badge,
+                        color = if (badge == "Not set up") Color(0xFFF97316) else MaterialTheme.colorScheme.primary,
+                        fontSize = 10.5.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Title & Subtitle
+            Column {
+                Text(
+                    text = title,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontSize = 15.5.sp
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = subtitle,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 11.sp,
+                    maxLines = 1
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Bottom Capability Chips Row
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                chips.forEach { chipText ->
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
+                            .padding(horizontal = 5.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = chipText,
+                            fontSize = 9.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
             }
         }
     }
