@@ -46,8 +46,11 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RocketLaunch
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
@@ -74,6 +77,7 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.TabRowDefaults.SecondaryIndicator
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -131,6 +135,7 @@ import com.example.data.repository.WsMessage
 import com.example.ui.components.GlassCard
 import com.example.ui.components.MethodBadge
 import com.example.ui.components.ProtocolBadge
+import com.example.ui.components.RequestrSegmentedTabs
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.StatusCodeBadge
 import com.example.ui.components.rememberAppHapticFeedback
@@ -177,6 +182,12 @@ fun ApiTestrScreen(
     val wsError by (wsSession?.error ?: remember { MutableStateFlow<String?>(null) }).collectAsState()
     var wsDraftMessage by remember { mutableStateOf("{\"type\":\"ping\"}") }
 
+    // v6.0 lane B (manifest §api-testr-ws): Disconnect WS confirmation dialog — the
+    // SendFloatingBar turns red and reads "Disconnect WS" when connected; tapping it
+    // opens an M3 confirmation dialog (Cancel + Disconnect) instead of closing the
+    // socket immediately, so an accidental tap does not drop a live session.
+    var showDisconnectWsDialog by remember { mutableStateOf(false) }
+
     // v3.4 Part C — C3 (Test assertions / test runner): results of the last "Run Tests" pass
     // against `responseData`. Cleared whenever a fresh Send/Run happens so stale pass/fail
     // results are never shown next to a response they didn't evaluate.
@@ -219,8 +230,10 @@ fun ApiTestrScreen(
         if (reqState.method == HttpMethod.WS) {
             val session = wsSession
             if (session != null && session.status.value == WsConnectionStatus.CONNECTED) {
-                session.close()
-                wsSession = null
+                // v6.0 lane B (manifest §api-testr-ws): confirm before closing a live
+                // WebSocket session — the SendFloatingBar already reads "Disconnect WS",
+                // and the dialog gives the user a chance to cancel.
+                showDisconnectWsDialog = true
             } else if (session == null ||
                 session.status.value == WsConnectionStatus.DISCONNECTED ||
                 session.status.value == WsConnectionStatus.ERROR
@@ -336,6 +349,7 @@ fun ApiTestrScreen(
             TitleAndUrlCard(
                 reqState = reqState,
                 followRedirects = followRedirects,
+                wsStatus = if (reqState.method == HttpMethod.WS) wsStatus else null,
                 onTitleChanged = { reqState = reqState.copy(name = it) },
                 onMethodChanged = { reqState = reqState.copy(method = it) },
                 onUrlChanged = { reqState = reqState.copy(url = it) },
@@ -343,39 +357,20 @@ fun ApiTestrScreen(
             )
         }
 
-        // View Mode Segmented Bar — Fix 09: clean labels, no counts
-        Row(
+        // View Mode Segmented Bar — v6.0 lane B (manifest §api-testr-request/response):
+        // frozen RequestrSegmentedTabs (radius 26dp container, selected radius 24dp
+        // primary) replaces the old plain Button toggle for visual parity with the
+        // approved mockups. Labels stay clean with no counts.
+        RequestrSegmentedTabs(
+            items = listOf(0, 1),
+            selectedItem = selectedViewMode,
+            onItemSelected = { selectedViewMode = it },
+            label = { if (it == 0) "Request" else "Response" },
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Button(
-                onClick = { selectedViewMode = 0 },
-                shape = RoundedCornerShape(10.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (selectedViewMode == 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
-                ),
-                modifier = Modifier.weight(1f),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 10.dp)
-            ) {
-                Text("Request", fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                    color = if (selectedViewMode == 0) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-
-            Button(
-                onClick = { selectedViewMode = 1 },
-                shape = RoundedCornerShape(10.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (selectedViewMode == 1) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
-                ),
-                modifier = Modifier.weight(1f),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 10.dp)
-            ) {
-                Text("Response", fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                    color = if (selectedViewMode == 1) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
+            equalWeight = true
+        )
 
         // Main View Content
         if (selectedViewMode == 0) {
@@ -588,28 +583,94 @@ fun ApiTestrScreen(
                 }
             } else {
                 val resp = responseData!!
+
+                // v6.0 lane B (manifest §api-testr-response/error/timeout): classify the
+                // response for the summary badge + dedicated error/timeout card. A
+                // SocketTimeoutException surfaces as statusCode 0 with "timeout" in the
+                // error message; a 5xx is a server error; anything else with statusCode 0
+                // is a generic network failure. Honest response data is always shown —
+                // these cards supplement, never replace, the raw body/headers/timeline.
+                val isTimeout = resp.statusCode == 0 &&
+                    (resp.error?.contains("timeout", ignoreCase = true) == true ||
+                        resp.statusMessage.contains("timeout", ignoreCase = true))
+                val isServerError = resp.statusCode >= 500
+                val isNetworkError = resp.statusCode == 0 && !isTimeout
+                val errorColor = when {
+                    isTimeout -> Color(0xFFF59E0B)
+                    isServerError -> Color(0xFFEF4444)
+                    isNetworkError -> Color(0xFFEF4444)
+                    else -> Color(0xFF10B981)
+                }
+
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(16.dp)
                 ) {
-                    // Status Badge Bar
-                    Row(
+                    // v6.0 lane B (manifest §api-testr-response): ApiResponseSummary —
+                    // bordered card (radius 14dp, surface bg) holding the status badge,
+                    // protocol, latency, and size in one row, matching the mockup layout.
+                    Surface(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            StatusCodeBadge(statusCode = resp.statusCode, statusMessage = resp.statusMessage)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            ProtocolBadge(protocol = resp.protocol)
-                        }
-
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            if (isTimeout) {
+                                // Amber "Connection Timeout" badge (manifest §api-testr-timeout)
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(Color(0xFFF59E0B).copy(alpha = 0.15f))
+                                        .border(1.dp, Color(0xFFF59E0B).copy(alpha = 0.5f), RoundedCornerShape(6.dp))
+                                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                                ) {
+                                    Text(
+                                        text = "Connection Timeout",
+                                        color = Color(0xFFF59E0B),
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                            } else if (isNetworkError) {
+                                StatusCodeBadge(statusCode = resp.statusCode, statusMessage = "Network Failure")
+                            } else {
+                                StatusCodeBadge(statusCode = resp.statusCode, statusMessage = resp.statusMessage)
+                            }
+                            Spacer(modifier = Modifier.width(6.dp))
+                            if (!isTimeout && !isNetworkError) {
+                                ProtocolBadge(protocol = resp.protocol)
+                                Spacer(modifier = Modifier.width(6.dp))
+                            } else {
+                                Text("—", color = TextMuted, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                                Spacer(modifier = Modifier.width(6.dp))
+                            }
                             Text("${resp.latencyMs} ms", color = TextSecondary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("${resp.sizeBytes} B", color = TextMuted, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(formatBytes(resp.sizeBytes), color = TextMuted, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
                         }
+                    }
+
+                    // v6.0 lane B (manifest §api-testr-response/timeout): 4 compact timing
+                    // tiles (DNS/TCP/TLS/Total). On timeout they read "—" at half opacity.
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        TimingTile("DNS", if (isTimeout || isNetworkError) "—" else "${resp.dnsTimeMs}", isTimeout || isNetworkError, Modifier.weight(1f))
+                        TimingTile("TCP", if (isTimeout || isNetworkError) "—" else "${resp.connectTimeMs}", isTimeout || isNetworkError, Modifier.weight(1f))
+                        TimingTile("TLS", if (isTimeout || isNetworkError) "—" else "${resp.tlsTimeMs}", isTimeout || isNetworkError, Modifier.weight(1f))
+                        TimingTile("Total", if (isTimeout || isNetworkError) "—" else "${resp.latencyMs}", isTimeout || isNetworkError, Modifier.weight(1f))
                     }
 
                     // v3.4 Part C — C3: "Run Tests" — re-evaluate this request's assertions
@@ -767,6 +828,39 @@ fun ApiTestrScreen(
                                 }
                             }
                         }
+                    }
+
+                    // v6.0 lane B (manifest §api-testr-error/timeout): dedicated error or
+                    // timeout card with a RetryActionPill, shown after the honest body/
+                    // headers/timeline content so the raw response is never hidden.
+                    if (isServerError || isTimeout || isNetworkError) {
+                        val cardTitle: String
+                        val cardMessage: String
+                        val cardIcon: androidx.compose.ui.graphics.vector.ImageVector
+                        when {
+                            isTimeout -> {
+                                cardTitle = "Connection timed out"
+                                cardMessage = "The request exceeded the timeout. Check your network connection and server availability, then retry."
+                                cardIcon = Icons.Default.Schedule
+                            }
+                            isServerError -> {
+                                cardTitle = "Server returned ${resp.statusCode}"
+                                cardMessage = "The server encountered an internal error. Check the endpoint or try again later."
+                                cardIcon = Icons.Default.Warning
+                            }
+                            else -> {
+                                cardTitle = "Network failure"
+                                cardMessage = resp.error ?: "Failed to reach the server. Check your network connection and retry."
+                                cardIcon = Icons.Default.Warning
+                            }
+                        }
+                        ErrorStateCard(
+                            title = cardTitle,
+                            message = cardMessage,
+                            icon = cardIcon,
+                            color = errorColor
+                        )
+                        RetryActionPill(onRetry = { sendCurrentRequest() })
                     }
                 }
             }
@@ -992,6 +1086,65 @@ fun ApiTestrScreen(
         modifier = Modifier.align(Alignment.BottomCenter),
         onSend = { sendCurrentRequest() }
     )
+
+    // v6.0 lane B (manifest §api-testr-ws): Disconnect WebSocket confirmation dialog.
+    // The SendFloatingBar reads "Disconnect WS" (red) when a session is live; tapping
+    // it sets showDisconnectWsDialog so the user can cancel before the socket closes.
+    if (showDisconnectWsDialog) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showDisconnectWsDialog = false },
+            icon = {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color(0xFFEF4444).copy(alpha = 0.12f))
+                        .border(1.dp, Color(0xFFEF4444).copy(alpha = 0.25f), RoundedCornerShape(14.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = null,
+                        tint = Color(0xFFEF4444),
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+            },
+            title = {
+                Text(
+                    text = "Disconnect WebSocket?",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 17.sp,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            },
+            text = {
+                Text(
+                    text = "The active WebSocket session to ${reqState.url.take(40)}${if (reqState.url.length > 40) "…" else ""} will be closed. Pending messages will be lost.",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        wsSession?.close()
+                        wsSession = null
+                        showDisconnectWsDialog = false
+                    }
+                ) {
+                    Text("Disconnect", color = Color(0xFFEF4444), fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDisconnectWsDialog = false }) {
+                    Text("Cancel", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            },
+            containerColor = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(20.dp)
+        )
+    }
     }
 }
 
@@ -1483,6 +1636,7 @@ fun getMethodColor(method: HttpMethod): Color {
 private fun TitleAndUrlCard(
     reqState: ApiRequestItem,
     followRedirects: Boolean,
+    wsStatus: WsConnectionStatus? = null,
     onTitleChanged: (String) -> Unit,
     onMethodChanged: (HttpMethod) -> Unit,
     onUrlChanged: (String) -> Unit,
@@ -1596,6 +1750,34 @@ private fun TitleAndUrlCard(
                         tint = primaryColor,
                         modifier = Modifier.size(15.dp)
                     )
+                }
+
+                // v6.0 lane B (manifest §api-testr-ws): CONNECTED badge with green dot
+                // shown inside the URL card when a WebSocket session is live.
+                if (wsStatus == WsConnectionStatus.CONNECTED) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF10B981).copy(alpha = 0.15f))
+                            .border(1.dp, Color(0xFF10B981).copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(RoundedCornerShape(50))
+                                .background(Color(0xFF10B981))
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "CONNECTED",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF10B981)
+                        )
+                    }
                 }
             }
 
@@ -2415,64 +2597,112 @@ private fun WsConsoleTabContent(
                     )
                 }
             } else {
-                val timeFormat = remember { java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US) }
-                LazyColumn(modifier = Modifier.fillMaxSize().padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    items(wsMessages) { msg ->
+                val timeFormat = remember { java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US) }
+                LazyColumn(modifier = Modifier.fillMaxSize().padding(10.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    // v6.0 lane B (manifest §api-testr-ws): synthetic SYSTEM frame at the
+                    // top of the console when connected — the session model has no system
+                    // message type, so this is a UI-only banner matching the mockup.
+                    if (wsStatus == WsConnectionStatus.CONNECTED) {
+                        item(key = "sys-connection") {
+                            WsMessageRow(
+                                tag = "SYSTEM",
+                                tagColor = Color(0xFF10B981),
+                                bodyColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                bodyItalic = true,
+                                timestamp = null,
+                                body = "WebSocket connection established · handshake complete"
+                            )
+                        }
+                    }
+                    items(wsMessages, key = { it.id }) { msg ->
                         val isOut = !msg.isIncoming
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(if (isOut) MaterialTheme.colorScheme.primary.copy(alpha = 0.08f) else MaterialTheme.colorScheme.surfaceVariant)
-                                .padding(8.dp)
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(4.dp))
-                                            .background(if (isOut) Color(0xFF3B82F6).copy(alpha = 0.2f) else Color(0xFF10B981).copy(alpha = 0.2f))
-                                            .padding(horizontal = 4.dp, vertical = 1.dp)
-                                    ) {
-                                        Text(if (isOut) "OUT" else "IN", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = if (isOut) Color(0xFF3B82F6) else Color(0xFF10B981))
-                                    }
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(timeFormat.format(java.util.Date(msg.timestamp)), fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, fontFamily = FontFamily.Monospace)
-                                }
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(msg.text, fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurface)
-                            }
+                        if (isOut) {
+                            WsMessageRow(
+                                tag = "SEND",
+                                tagColor = Color(0xFF818CF8),
+                                bodyColor = Color(0xFFC7D2FE),
+                                bodyItalic = false,
+                                timestamp = timeFormat.format(java.util.Date(msg.timestamp)),
+                                body = msg.text
+                            )
+                        } else {
+                            WsMessageRow(
+                                tag = "RECV",
+                                tagColor = Color(0xFF06B6D4),
+                                bodyColor = Color(0xFF67E8F9),
+                                bodyItalic = false,
+                                timestamp = timeFormat.format(java.util.Date(msg.timestamp)),
+                                body = msg.text
+                            )
                         }
                     }
                 }
             }
         }
 
-        // Draft input + send button
+        // v6.0 lane B (manifest §api-testr-ws): Composer bar — rounded surface input
+        // with mail icon and inline send, matching the mockup's WsComposerBar.
         Spacer(modifier = Modifier.height(10.dp))
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(MaterialTheme.colorScheme.surface)
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(14.dp))
+                .padding(horizontal = 11.dp, vertical = 9.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            OutlinedTextField(
+            Icon(
+                imageVector = Icons.Default.AutoAwesome,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(16.dp)
+            )
+            BasicTextField(
                 value = wsDraftMessage,
                 onValueChange = onDraftChanged,
-                textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface),
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(10.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = MaterialTheme.colorScheme.primary,
-                    unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant
-                )
+                textStyle = TextStyle(
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface
+                ),
+                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                singleLine = true,
+                decorationBox = { innerTextField ->
+                    Box(modifier = Modifier.weight(1f)) {
+                        if (wsDraftMessage.isEmpty()) {
+                            Text(
+                                "Type a message to send...",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                                fontSize = 12.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                        innerTextField()
+                    }
+                }
             )
-            Button(
-                onClick = onSend,
-                enabled = wsStatus == WsConnectionStatus.CONNECTED && wsDraftMessage.isNotBlank(),
-                shape = RoundedCornerShape(10.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+            Box(
+                modifier = Modifier
+                    .size(30.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(
+                        if (wsStatus == WsConnectionStatus.CONNECTED && wsDraftMessage.isNotBlank())
+                            MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.surfaceVariant
+                    )
+                    .clickable(enabled = wsStatus == WsConnectionStatus.CONNECTED && wsDraftMessage.isNotBlank()) { onSend() },
+                contentAlignment = Alignment.Center
             ) {
-                Icon(imageVector = Icons.AutoMirrored.Filled.Send, contentDescription = "Send", modifier = Modifier.size(14.dp))
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.Send,
+                    contentDescription = "Send",
+                    tint = if (wsStatus == WsConnectionStatus.CONNECTED && wsDraftMessage.isNotBlank())
+                        MaterialTheme.colorScheme.onPrimary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(15.dp)
+                )
             }
         }
     }
@@ -2708,5 +2938,188 @@ private fun LiveJsonAndRawBlock(
                 }
             }
         }
+    }
+}
+
+// ====================================================================
+// v6.0 lane B (manifest §api-testr-response/error/timeout/ws): lane-local
+// helper composables for the redesigned response viewer and WS console.
+// ====================================================================
+
+/** Formats a byte count as a human-readable string (e.g. "1.0 KB", "842 B"). */
+private fun formatBytes(bytes: Long): String {
+    if (bytes < 1024) return "$bytes B"
+    val kb = bytes / 1024.0
+    return if (kb < 1024) String.format("%.1f KB", kb) else String.format("%.1f MB", kb / 1024.0)
+}
+
+/**
+ * Compact timing tile (manifest §api-testr-response): radius 12dp, flat bg, border,
+ * label 9sp uppercase + value 16sp bold monospace. When [muted] the tile dims to
+ * half opacity with muted text — used for the timeout state where no timing exists.
+ */
+@Composable
+private fun TimingTile(label: String, value: String, muted: Boolean, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(horizontal = 9.dp, vertical = 8.dp)
+                .graphicsLayer { alpha = if (muted) 0.5f else 1f },
+            horizontalAlignment = Alignment.Start
+        ) {
+            Text(
+                text = label,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (muted) TextMuted else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = value,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace,
+                color = if (muted) TextMuted else MaterialTheme.colorScheme.onSurface
+            )
+        }
+    }
+}
+
+/**
+ * Error/timeout state card (manifest §api-testr-error/timeout): tinted bg, border,
+ * warning/clock icon + title + message. Supplemental to the honest raw body display.
+ */
+@Composable
+private fun ErrorStateCard(
+    title: String,
+    message: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    color: Color
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 12.dp),
+        shape = RoundedCornerShape(14.dp),
+        color = color.copy(alpha = 0.08f),
+        border = BorderStroke(1.dp, color.copy(alpha = 0.3f))
+    ) {
+        Row(
+            modifier = Modifier.padding(14.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = color,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Column {
+                Text(
+                    text = title,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = color
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = message,
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Retry action pill (manifest §api-testr-error/timeout): radius 20dp, surface bg,
+ * primary-bright border/text, refresh icon, shadow. Re-sends the current request.
+ */
+@Composable
+private fun RetryActionPill(onRetry: () -> Unit) {
+    val primaryBright = MaterialTheme.colorScheme.primary
+    Surface(
+        onClick = onRetry,
+        modifier = Modifier
+            .padding(top = 14.dp),
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, primaryBright.copy(alpha = 0.5f)),
+        shadowElevation = 4.dp
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.Refresh,
+                contentDescription = "Retry",
+                tint = primaryBright,
+                modifier = Modifier.size(17.dp)
+            )
+            Spacer(modifier = Modifier.width(7.dp))
+            Text(
+                text = "Retry Request",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                color = primaryBright
+            )
+        }
+    }
+}
+
+/**
+ * Single WebSocket message row (manifest §api-testr-ws): tagged frame with RECV/SEND/
+ * SYSTEM label, optional timestamp, and monospace body in the tag's accent color.
+ */
+@Composable
+private fun WsMessageRow(
+    tag: String,
+    tagColor: Color,
+    bodyColor: Color,
+    bodyItalic: Boolean,
+    timestamp: String?,
+    body: String
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(tagColor.copy(alpha = 0.16f))
+                    .padding(horizontal = 5.dp, vertical = 1.dp)
+            ) {
+                Text(
+                    text = tag,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = tagColor
+                )
+            }
+            if (timestamp != null) {
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = timestamp,
+                    fontSize = 9.sp,
+                    color = TextMuted,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(
+            text = body,
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+            color = bodyColor,
+            fontStyle = if (bodyItalic) FontStyle.Italic else FontStyle.Normal
+        )
     }
 }
