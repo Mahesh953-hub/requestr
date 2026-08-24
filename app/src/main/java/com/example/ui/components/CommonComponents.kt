@@ -366,6 +366,47 @@ fun ProtocolBadge(protocol: String, modifier: Modifier = Modifier) {
     }
 }
 
+/**
+ * Generic colored status pill — a lightweight label with a translucent tinted
+ * background and bold colored text. The canonical small status badge for all
+ * lanes (connection states, protocols, capability markers, traffic sources).
+ *
+ * Ownership (plan task 7): after this PR merges, [BadgePill] belongs exclusively
+ * to the shared-shell lane (Lane A). All other lanes consume it without editing
+ * it. Lane-specific badge variants ([MethodBadge], [StatusCodeBadge],
+ * [ProtocolBadge]) remain in this file alongside it.
+ *
+ * Accessibility: text is rendered with [FontWeight.Bold] for legibility; pass a
+ * [modifier] with `Modifier.semantics { }` / `clearAndSetSemantics` when a
+ * content description is needed for icon-adjacent pills. Keep font-scale-safe by
+ * not wrapping this in a fixed-height container.
+ *
+ * @param text label displayed inside the pill.
+ * @param color ARGB color (e.g. `0xFF10B981`) used for both the 15% translucent
+ *   background and the bold foreground text.
+ * @param modifier optional [Modifier] for layout/positioning.
+ */
+@Composable
+fun BadgePill(
+    text: String,
+    color: Long,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier,
+        color = Color(color).copy(alpha = 0.15f),
+        shape = RoundedCornerShape(6.dp),
+    ) {
+        Text(
+            text = text,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            color = Color(color),
+        )
+    }
+}
+
 @Composable
 fun SectionHeader(
     title: String,

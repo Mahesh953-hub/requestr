@@ -79,7 +79,6 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Switch
-import androidx.compose.material3.Surface
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
@@ -146,6 +145,7 @@ import com.example.data.repository.TrafficInterceptorRepository
 import com.example.ui.components.ContextActionItem
 import com.example.ui.components.ContextualActionMenuDialog
 import com.example.ui.components.ConfirmActionDialog
+import com.example.ui.components.BadgePill
 import com.example.ui.components.GlassCard
 import com.example.ui.components.MethodBadge
 import com.example.ui.components.ProtocolBadge
@@ -3465,22 +3465,7 @@ fun CapturedDetailBottomSheet(
 }
 
 // ── Detail sheet helpers ──────────────────────────────────────────────
-
-@Composable
-private fun BadgePill(text: String, color: Long) {
-    Surface(
-        color = Color(color).copy(alpha = 0.15f),
-        shape = RoundedCornerShape(6.dp),
-    ) {
-        Text(
-            text = text,
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-            fontSize = 10.sp,
-            fontWeight = FontWeight.Bold,
-            color = Color(color),
-        )
-    }
-}
+// BadgePill extracted to CommonComponents.kt (shared, owned by Lane A after task 7).
 
 @Composable
 private fun DetailRow(label: String, value: String) {
