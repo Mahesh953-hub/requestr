@@ -68,6 +68,14 @@ interface CapturedTrafficDao {
      * decode and calls this to keep it truthful, rather than either withholding the row until FIN
      * (which never arrives for an aborted stream) or inserting a second, duplicate row per update.
      *
+     * **Idempotent and monotonic, so a re-write can never shrink what was recorded.** A body is replaced
+     * only when the incoming observed size is at least the stored size, and sizes only ever grow, so the
+     * body and the size it belongs to stay a consistent pair. That matters because an exchange can be
+     * dropped by the decoder's in-flight bound and then recreated when its stream speaks again: the
+     * recreated instance holds fewer buffered body bytes than the row already contains, and without this
+     * guard the row's body would be replaced by the shorter one while its size stayed large. Re-applying
+     * the same write repeatedly is a no-op.
+     *
      * **Every column here only ever moves from less-known to more-known.** A response can decode before
      * its request HEADERS do (a capture that started mid-stream, or reordering), in which case the row
      * is first written with empty request metadata; this fills `method`/`url`/`host`/`path`/
@@ -85,8 +93,10 @@ interface CapturedTrafficDao {
             "requestHeaders = CASE WHEN :hasRequestHeaders THEN :requestHeaders ELSE requestHeaders END, " +
             "statusCode = COALESCE(:statusCode, statusCode), " +
             "responseHeaders = CASE WHEN :hasResponseHeaders THEN :responseHeaders ELSE responseHeaders END, " +
-            "requestBody = COALESCE(:requestBody, requestBody), " +
-            "responseBody = COALESCE(:responseBody, responseBody), " +
+            "requestBody = CASE WHEN :requestBody IS NOT NULL AND :requestSizeBytes >= requestSizeBytes " +
+            "  THEN :requestBody ELSE requestBody END, " +
+            "responseBody = CASE WHEN :responseBody IS NOT NULL AND :responseSizeBytes >= responseSizeBytes " +
+            "  THEN :responseBody ELSE responseBody END, " +
             "requestSizeBytes = MAX(requestSizeBytes, :requestSizeBytes), " +
             "responseSizeBytes = MAX(responseSizeBytes, :responseSizeBytes), " +
             "latencyMs = CASE WHEN :latencyMs > 0 THEN :latencyMs ELSE latencyMs END " +

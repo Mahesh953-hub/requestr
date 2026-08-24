@@ -158,6 +158,65 @@ class QuicRetryTest {
     }
 
     @Test
+    fun `a Retry whose tag validates but carries no new connection ID is counted as rejected`() {
+        // The tag authenticates, so this is not a spoof -- but a Retry with no Source Connection ID cannot
+        // be acted on (there is nothing to re-key to). It must be counted, not silently discarded, or the
+        // surfaced counters would under-report Retries that never took effect.
+        val scenario = QuicConnectionScenario()
+        scenario.feedOutbound(scenario.clientInitial())
+        val odcid = requireNotNull(scenario.decoder.originalDcid)
+
+        val results = scenario.feedInbound(scenario.serverRetry(scid = ByteArray(0)))
+
+        assertFalse(results.single().decrypted)
+        assertEquals(0, scenario.decoder.retriesAccepted)
+        assertEquals("a structurally unusable Retry is accounted for", 1, scenario.decoder.retriesRejected)
+        assertArrayEquals(odcid, scenario.decoder.originalDcid)
+        assertFalse(scenario.decoder.originalDcidConfirmed)
+    }
+
+    @Test
+    fun `a truncated Retry too short to hold a tag is counted as rejected`() {
+        val scenario = QuicConnectionScenario()
+        scenario.feedOutbound(scenario.clientInitial())
+
+        // A long header with the Retry type bits but fewer bytes than a 16-byte tag.
+        scenario.feedInbound(QuicWireFixtures.bytes(0xF0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00) + ByteArray(4))
+
+        assertEquals(1, scenario.decoder.retriesRejected)
+        assertEquals(0, scenario.decoder.retriesAccepted)
+    }
+
+    @Test
+    fun `a genuine Retry still validates after an injected Initial supplied a bogus original DCID`() {
+        // An attacker injects an Initial into the connection's 5-tuple before the real client Initial is
+        // seen, putting a bogus DCID in front of the real one. Retry tags are computed over the *real*
+        // original DCID, so keeping every observed candidate is what lets the genuine Retry authenticate.
+        val scenario = QuicConnectionScenario()
+        scenario.registerSecrets()
+        val injectedDcid = QuicWireFixtures.hex("bbbbbbbbbbbbbbbb")
+        val injectedKeys = requireNotNull(QuicCrypto.deriveClientInitialKeys(scenario.version, injectedDcid))
+        scenario.feedOutbound(
+            QuicWireFixtures.initialPacket(
+                version = scenario.version,
+                dcid = injectedDcid,
+                scid = QuicWireFixtures.hex("99887766"),
+                packetNumber = 0,
+                frames = QuicWireFixtures.padding(32),
+                keys = injectedKeys,
+            ),
+        )
+        scenario.feedOutbound(scenario.clientInitial())
+
+        scenario.feedInbound(scenario.serverRetry())
+
+        assertEquals("the genuine Retry authenticated against the real candidate", 1, scenario.decoder.retriesAccepted)
+        assertEquals(0, scenario.decoder.retriesRejected)
+        assertArrayEquals(scenario.retryScid, scenario.decoder.originalDcid)
+        assertTrue(scenario.decoder.originalDcidConfirmed)
+    }
+
+    @Test
     fun `packet number spaces are not reset by a Retry`() {
         // RFC 9000 §17.2.5.3: a client must not restart a packet number space after processing a Retry.
         val scenario = QuicConnectionScenario()

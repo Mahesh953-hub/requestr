@@ -369,6 +369,136 @@ class Http3PersistenceDurabilityTest {
         )
     }
 
+    @Test
+    fun `more in-flight exchanges than the bound never shrink a persisted body or size`() {
+        // 70 concurrent request streams against a 64-exchange in-flight bound, so the decoder evicts and
+        // later recreates exchanges. A recreated exchange holds fewer buffered body bytes than its row
+        // already contains, which is exactly the case that could rewrite a long body with a short one (or
+        // leave a large size next to a short body). Persistence must be monotonic and idempotent instead.
+        val sessionId = 9110L
+        val scenario = QuicConnectionScenario()
+        scenario.registerSecrets()
+        val pump = newPump(sessionId)
+        val streamCount = 70
+        val body = "0123456789ABCDEF" // 16 bytes per stream
+
+        pump.outbound(scenario.clientInitial())
+        pump.inbound(scenario.serverInitial() + scenario.serverHandshake())
+
+        var packetNumber = 0L
+        for (i in 0 until streamCount) {
+            val streamId = (i * 4).toLong()
+            pump.outbound(
+                scenario.clientOneRtt(
+                    packetNumber++,
+                    QuicWireFixtures.streamFrame(streamId, 0, QuicWireFixtures.requestHeadersFrame("GET", "/s$i", scenario.sni), fin = true),
+                ),
+            )
+            pump.inbound(
+                scenario.serverOneRtt(
+                    packetNumber,
+                    QuicWireFixtures.streamFrame(
+                        streamId = streamId,
+                        offset = 0,
+                        data = QuicWireFixtures.responseHeadersFrame("200") + QuicWireFixtures.dataFrame(body.toByteArray()),
+                    ),
+                ),
+            )
+            packetNumber++
+        }
+        pump.flushHttp3WritesForTest()
+
+        val afterFirstPass = runBlocking { db.capturedTrafficDao().getBySession(sessionId) }
+        assertEquals("every decoded exchange has exactly one row", streamCount, afterFirstPass.size)
+        val stream0Before = afterFirstPass.single { it.path == "/s0" }
+        assertEquals(body, stream0Before.responseBody)
+        assertEquals(body.length.toLong(), stream0Before.responseSizeBytes)
+
+        // Stream 0's exchange was evicted long ago. It speaks again: the recreated exchange carries the
+        // real cumulative observed size but only the newly buffered bytes.
+        val tail = "-TAIL"
+        pump.inbound(
+            scenario.serverOneRtt(
+                packetNumber++,
+                QuicWireFixtures.streamFrame(
+                    streamId = 0,
+                    offset = (QuicWireFixtures.responseHeadersFrame("200").size + QuicWireFixtures.dataFrame(body.toByteArray()).size).toLong(),
+                    data = QuicWireFixtures.dataFrame(tail.toByteArray()),
+                    fin = true,
+                ),
+            ),
+        )
+        pump.flushHttp3WritesForTest()
+        // Flushing twice proves idempotence: re-applying the same state must change nothing.
+        pump.flushHttp3WritesForTest()
+
+        val rows = runBlocking { db.capturedTrafficDao().getBySession(sessionId) }
+        assertEquals("a recreated exchange must not add a duplicate row", streamCount, rows.size)
+        val stream0After = rows.single { it.id == stream0Before.id }
+        assertTrue(
+            "the recorded size must never shrink: was ${stream0Before.responseSizeBytes}, now ${stream0After.responseSizeBytes}",
+            stream0After.responseSizeBytes >= stream0Before.responseSizeBytes,
+        )
+        assertTrue(
+            "the stored body must never be replaced by a shorter one",
+            (stream0After.responseBody?.length ?: 0) >= body.length,
+        )
+        assertEquals("the earlier decoded body is still intact", body, stream0After.responseBody)
+
+        // Every row in the whole set stays internally consistent: no row claims a size smaller than the
+        // body bytes it actually holds.
+        for (row in rows) {
+            val stored = row.responseBody ?: ""
+            val storedBytes = stored.substringBefore("\n<truncated>").toByteArray().size.toLong()
+            assertTrue(
+                "row ${row.path} has body $storedBytes bytes but size ${row.responseSizeBytes}",
+                row.responseSizeBytes >= storedBytes,
+            )
+        }
+    }
+
+    @Test
+    fun `a recreated exchange's later decode still reaches its row`() {
+        // The queue holds a reference to the exchange it was created for. When the in-flight bound evicts
+        // and recreates an exchange, the queue must follow the live object, or everything the recreated
+        // exchange decodes would silently never be written.
+        val sessionId = 9111L
+        val scenario = QuicConnectionScenario()
+        scenario.registerSecrets()
+        val pump = newPump(sessionId)
+
+        pump.outbound(scenario.clientInitial())
+        pump.inbound(scenario.serverInitial() + scenario.serverHandshake())
+
+        // Fill past the in-flight bound without flushing, so the queue holds now-evicted exchanges.
+        var packetNumber = 0L
+        for (i in 0 until 70) {
+            pump.outbound(
+                scenario.clientOneRtt(
+                    packetNumber++,
+                    QuicWireFixtures.streamFrame((i * 4).toLong(), 0, QuicWireFixtures.requestHeadersFrame("GET", "/q$i", scenario.sni)),
+                ),
+            )
+        }
+        // Stream 0's exchange is gone from the decoder; a response on it recreates the exchange.
+        pump.inbound(
+            scenario.serverOneRtt(
+                packetNumber++,
+                QuicWireFixtures.streamFrame(0, 0, QuicWireFixtures.responseHeadersFrame("418")),
+            ),
+        )
+        pump.flushHttp3WritesForTest()
+
+        val rows = runBlocking { db.capturedTrafficDao().getBySession(sessionId) }
+        val stream0 = rows.filter { it.path == "/q0" || it.statusCode == 418 }
+        assertEquals("stream 0 owns exactly one row", 1, stream0.size)
+        assertEquals(
+            "the recreated exchange's decoded status reached the row",
+            418,
+            stream0.single().statusCode,
+        )
+    }
+
     private companion object {
         const val CLIENT_IP = "10.0.0.7"
         const val SERVER_IP = "93.184.216.34"

@@ -232,6 +232,52 @@ class QuicConnectionDecoderBoundsTest {
     }
 
     @Test
+    fun `a recreated exchange continues the observed byte totals of the evicted one`() {
+        // Only the exchange bound is exceeded here (stream reassembly is left untouched), which isolates
+        // what eviction does to an exchange: the bytes counted before it was dropped were genuinely
+        // observed, so the recreated instance must continue those totals and declare itself truncated
+        // rather than restarting at zero -- otherwise a persisted row's recorded size appears to shrink.
+        val scenario = QuicConnectionScenario(maxTrackedExchanges = 2, maxTrackedStreams = 32)
+        scenario.registerSecrets()
+        scenario.completeHandshake()
+
+        val firstResponse = QuicWireFixtures.responseHeadersFrame("200") +
+            QuicWireFixtures.dataFrame("twelve-bytes".toByteArray())
+        scenario.feedInbound(scenario.serverOneRtt(0, QuicWireFixtures.streamFrame(0, 0, firstResponse)))
+        val original = scenario.decoder.exchanges.single { it.streamId == 0L }
+        assertEquals(12L, original.responseBodyBytes)
+        assertFalse(original.responseBodyTruncated)
+
+        // Two more request streams push stream 0's exchange out of the bounded in-flight set.
+        scenario.feedOutbound(
+            scenario.clientOneRtt(0, QuicWireFixtures.streamFrame(4, 0, QuicWireFixtures.requestHeadersFrame("GET", "/b", "quic.test"))),
+        )
+        scenario.feedOutbound(
+            scenario.clientOneRtt(1, QuicWireFixtures.streamFrame(8, 0, QuicWireFixtures.requestHeadersFrame("GET", "/c", "quic.test"))),
+        )
+        assertTrue(
+            "stream 0's exchange was evicted by the bound",
+            scenario.decoder.exchanges.none { it.streamId == 0L },
+        )
+
+        // Stream 0 continues on its surviving reassembler, which recreates the exchange.
+        scenario.feedInbound(
+            scenario.serverOneRtt(
+                1,
+                QuicWireFixtures.streamFrame(0, firstResponse.size.toLong(), QuicWireFixtures.dataFrame("more".toByteArray())),
+            ),
+        )
+
+        val recreated = scenario.decoder.exchanges.single { it.streamId == 0L }
+        assertEquals("observed totals continue across the eviction", 16L, recreated.responseBodyBytes)
+        assertTrue("the dropped bytes are disclosed, not silently forgotten", recreated.responseBodyTruncated)
+        assertTrue(
+            "the size it reports is never smaller than the body it can still produce",
+            recreated.responseBodyBytes >= recreated.responseBody().size.toLong(),
+        )
+    }
+
+    @Test
     fun `release makes a closed connection reclaim all decode memory`() {
         val scenario = QuicConnectionScenario()
         scenario.registerSecrets()

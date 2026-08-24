@@ -149,6 +149,18 @@ class QuicConnectionDecoder(
             revision += 1
         }
 
+        /**
+         * Continues the observed byte totals of a previous, evicted instance for this same stream. The
+         * bytes counted here were really observed; they are just no longer buffered, which is exactly what
+         * the truncation flags say.
+         */
+        internal fun seedFromEvicted(totals: EvictedExchangeTotals) {
+            requestBodyBytes = totals.requestBodyBytes
+            responseBodyBytes = totals.responseBodyBytes
+            requestBodyTruncated = totals.requestBodyTruncated
+            responseBodyTruncated = totals.responseBodyTruncated
+        }
+
         /** Latency from decoded request HEADERS to decoded response HEADERS, or 0 when unknown. */
         val latencyMs: Long
             get() {
@@ -219,6 +231,15 @@ class QuicConnectionDecoder(
     var version: Int = initialVersion
         private set
 
+    /**
+     * True once [version] has been *proven* by an AEAD that authenticated under it. Until then the
+     * value is only what an unauthenticated header claimed, so it may still be adopted from a later
+     * long header; afterwards it is immutable, because any packet claiming a different version is
+     * either a spoof or a different connection and must not be allowed to discard proven key material.
+     */
+    var versionConfirmed: Boolean = false
+        private set
+
     var lifecycle: QuicState = QuicState.INITIALIZING
         private set
 
@@ -282,6 +303,14 @@ class QuicConnectionDecoder(
     var versionCorrections: Int = 0
         private set
 
+    /**
+     * Count of long headers whose claimed version disagreed with an already-proven [version] and was
+     * therefore ignored. A non-zero value means something injected or misrouted packets into this
+     * connection's 5-tuple; the connection's key material was left intact.
+     */
+    var versionMismatchesIgnored: Int = 0
+        private set
+
     /** Wall-clock time of the last packet ingested, for the owner's idle-based eviction. */
     var lastActivityAt: Long = clock()
         private set
@@ -324,8 +353,53 @@ class QuicConnectionDecoder(
     private val http3Parsers = mutableMapOf<QuicDatagramRouter.Direction, Http3StreamParser>()
     private val exchangeMap = LinkedHashMap<Long, Http3Exchange>()
 
-    /** Destination-Connection-ID length to assume for a short header in each direction. */
-    private val shortHeaderDcidLength = mutableMapOf<QuicDatagramRouter.Direction, Int>()
+    /**
+     * Observed body totals of exchanges dropped by the [maxTrackedExchanges] bound, keyed by stream, so a
+     * stream that speaks again after its exchange was evicted resumes its real cumulative counters rather
+     * than restarting at zero (which would make a persisted row's recorded size appear to shrink).
+     * Bounded to the same size as the exchange map.
+     */
+    private val evictedExchanges = LinkedHashMap<Long, EvictedExchangeTotals>()
+
+    /** Body totals carried across an exchange eviction (see [evictedExchanges]). */
+    internal class EvictedExchangeTotals(
+        val requestBodyBytes: Long,
+        val responseBodyBytes: Long,
+        val requestBodyTruncated: Boolean,
+        val responseBodyTruncated: Boolean,
+    )
+
+    /**
+     * Destination-Connection-ID length *proven* for a short header in each direction, i.e. the length at
+     * which an AEAD actually authenticated. Once proven it is tried first for every later packet.
+     */
+    private val confirmedDcidLength = mutableMapOf<QuicDatagramRouter.Direction, Int>()
+
+    /**
+     * Candidate short-header DCID lengths merely *observed* in a long header's Source Connection ID.
+     * A long header is unauthenticated at the point its CIDs are read, so an injected packet can put a
+     * wrong length in here; keeping every observation as a candidate (newest first, bounded) means such
+     * an injection can at worst cost extra decrypt attempts, never permanently break decryption of a
+     * connection whose real length is still in the set.
+     */
+    private val observedDcidLengths = mutableMapOf<QuicDatagramRouter.Direction, LinkedHashSet<Int>>()
+
+    /**
+     * Candidate values for the client's original Destination Connection ID, newest first and bounded.
+     * Both directions' Initial secrets derive from this CID (RFC 9001 §5.2) and it is read from an
+     * unauthenticated Initial header, so an injected Initial arriving before the genuine one would
+     * otherwise permanently prevent the server's Initial — and therefore the ServerHello, and therefore
+     * every later level — from decrypting. Each candidate is tried until one authenticates.
+     */
+    private val originalDcidCandidates = mutableListOf<ByteArray>()
+
+    /**
+     * True once [originalDcid] has been proven: a server Initial decrypted under it, or a Retry
+     * Integrity Tag authenticated against it. A proven value is never replaced by an unauthenticated
+     * observation.
+     */
+    var originalDcidConfirmed: Boolean = false
+        private set
 
     /** Decoded HTTP/3 exchanges on this connection, in first-seen order. */
     val exchanges: Collection<Http3Exchange> get() = exchangeMap.values
@@ -404,10 +478,25 @@ class QuicConnectionDecoder(
         if (routed.packetType == null) return // short header / version negotiation: no version to trust
         val observed = routed.version
         if (observed == 0 || observed == version) return
+        if (versionConfirmed) {
+            // The current version is proven by an AEAD that authenticated under it. A header claiming a
+            // different one is an injected or misrouted packet, and adopting it would discard working
+            // keys and re-derive them under the wrong `quic`/`quicv2` labels -- a decode denial that
+            // costs an attacker one spoofed datagram. Ignore it and record that it happened.
+            versionMismatchesIgnored += 1
+            return
+        }
         version = observed
         versionCorrections += 1
+        // Only unproven key material is discarded here: nothing has authenticated under the previous
+        // value, so nothing of value is lost.
         levelKeys.clear()
         keyPhaseManagers.clear()
+    }
+
+    /** Marks [version] proven after an AEAD authenticated under it. */
+    private fun confirmVersion() {
+        versionConfirmed = true
     }
 
     /**
@@ -432,29 +521,51 @@ class QuicConnectionDecoder(
      */
     private fun handleRetry(routed: QuicDatagramRouter.RoutedPacket): Boolean {
         advanceLifecycle(QuicState.HANDSHAKE_IN_PROGRESS)
-        val odcid = originalDcid ?: return false // no observed client Initial: nothing to verify against
+        val candidates = originalDcidCandidatesInOrder()
+        if (candidates.isEmpty()) return false // no observed client Initial: nothing to verify against
         val packet = routed.payloadBytes
-        if (packet.size <= RETRY_INTEGRITY_TAG_LEN) return false
-        val withoutTag = packet.copyOfRange(0, packet.size - RETRY_INTEGRITY_TAG_LEN)
-        val tag = packet.copyOfRange(packet.size - RETRY_INTEGRITY_TAG_LEN, packet.size)
-        if (!QuicCrypto.validateRetryIntegrityTag(version, odcid, withoutTag, tag)) {
+        if (packet.size <= RETRY_INTEGRITY_TAG_LEN) {
             retriesRejected += 1
             return false
         }
-        if (routed.scid.isEmpty()) return false // a Retry must carry the new CID it re-keys to
+        val withoutTag = packet.copyOfRange(0, packet.size - RETRY_INTEGRITY_TAG_LEN)
+        val tag = packet.copyOfRange(packet.size - RETRY_INTEGRITY_TAG_LEN, packet.size)
+        // Every candidate original DCID is tried, so an injected Initial that supplied a bogus candidate
+        // cannot stop a genuine Retry from validating against the real one.
+        val authenticated = candidates.firstOrNull { candidate ->
+            QuicCrypto.validateRetryIntegrityTag(version, candidate, withoutTag, tag)
+        }
+        if (authenticated == null) {
+            retriesRejected += 1
+            return false
+        }
+        if (routed.scid.isEmpty() || routed.scid.size > MAX_CONNECTION_ID_LEN) {
+            // The tag authenticated, but the packet cannot be acted on: a Retry must carry the new
+            // connection ID it re-keys to. Counted as rejected rather than silently ignored, so the
+            // surfaced counters account for every Retry that did not take effect.
+            retriesRejected += 1
+            return false
+        }
+        val odcid = authenticated
 
         retriesAccepted += 1
+        // The tag is proof of authenticity for this CID (RFC 9001 §5.8), so both it and the version it
+        // was computed under are now proven.
+        confirmVersion()
         // Re-key through the CID table so the Retry's SCID routes to this connection and the superseded
         // CID is retired. If the table never held the original CID (it was evicted, or this observer
         // attached mid-handshake), register the new CID directly rather than silently not routing it.
         if (cidTable.rekeyAfterRetry(odcid, routed.scid) == null) {
             cidTable.addCid(connectionId, routed.scid)
         }
-        originalDcid = routed.scid.copyOf()
+        confirmOriginalDcid(routed.scid)
         // The retried ClientHello carries a new random, so the old identity and anything resolved
         // against it no longer describe this connection.
         clientRandom = null
         clientRandomHex = null
+        // The retried exchange uses only the new CID; stale candidates from the superseded exchange must
+        // not be tried against it.
+        originalDcidCandidates.clear()
         resolvedLabels.clear()
         missingLabels.clear()
         levelKeys.clear()
@@ -481,16 +592,60 @@ class QuicConnectionDecoder(
         when (routed.direction) {
             QuicDatagramRouter.Direction.OUTBOUND -> {
                 // The client's SCID is what the server addresses its 1-RTT packets to.
-                if (routed.scid.isNotEmpty()) shortHeaderDcidLength[QuicDatagramRouter.Direction.INBOUND] = routed.scid.size
-                if (routed.packetType == QuicCrypto.LongHeaderPacketType.INITIAL && originalDcid == null) {
-                    originalDcid = routed.dcid.copyOf()
+                if (routed.scid.isNotEmpty()) observeDcidLength(QuicDatagramRouter.Direction.INBOUND, routed.scid.size)
+                if (routed.packetType == QuicCrypto.LongHeaderPacketType.INITIAL) {
+                    observeOriginalDcid(routed.dcid, decrypted = routed.decrypted)
                 }
             }
             QuicDatagramRouter.Direction.INBOUND -> {
                 // The server's SCID is what the client addresses its 1-RTT packets to.
-                if (routed.scid.isNotEmpty()) shortHeaderDcidLength[QuicDatagramRouter.Direction.OUTBOUND] = routed.scid.size
+                if (routed.scid.isNotEmpty()) observeDcidLength(QuicDatagramRouter.Direction.OUTBOUND, routed.scid.size)
             }
         }
+    }
+
+    /** Records an unauthenticated short-header DCID-length observation as a bounded candidate. */
+    private fun observeDcidLength(direction: QuicDatagramRouter.Direction, length: Int) {
+        if (length < 0 || length > MAX_CONNECTION_ID_LEN) return
+        val candidates = observedDcidLengths.getOrPut(direction) { LinkedHashSet() }
+        candidates.remove(length)
+        candidates.add(length) // newest last; tried newest-first below
+        while (candidates.size > MAX_DCID_LENGTH_CANDIDATES) {
+            val oldest = candidates.firstOrNull() ?: break
+            candidates.remove(oldest)
+        }
+    }
+
+    /**
+     * Records a candidate original DCID from an Initial header. [decrypted] is true when that Initial's
+     * ClientHello really AEAD-decrypted under keys derived from this very CID, which is meaningful
+     * evidence (though Initial keys are public, so it is not proof of authenticity) and therefore
+     * promotes the candidate to the working value. A CID already proven by a server-Initial decrypt or a
+     * Retry tag is never displaced.
+     */
+    private fun observeOriginalDcid(dcid: ByteArray, decrypted: Boolean) {
+        if (dcid.isEmpty() || dcid.size > MAX_CONNECTION_ID_LEN) return
+        if (originalDcidCandidates.none { it.contentEquals(dcid) }) {
+            originalDcidCandidates.add(0, dcid.copyOf())
+            while (originalDcidCandidates.size > MAX_ORIGINAL_DCID_CANDIDATES) {
+                originalDcidCandidates.removeAt(originalDcidCandidates.size - 1)
+            }
+        }
+        if (originalDcidConfirmed) return
+        if (originalDcid == null || decrypted) originalDcid = dcid.copyOf()
+    }
+
+    /** Promotes [dcid] to the proven original DCID after it authenticated something. */
+    private fun confirmOriginalDcid(dcid: ByteArray) {
+        originalDcid = dcid.copyOf()
+        originalDcidConfirmed = true
+    }
+
+    /** Original-DCID candidates in try order: the current working value first, then the rest. */
+    private fun originalDcidCandidatesInOrder(): List<ByteArray> {
+        val working = originalDcid
+        if (working == null) return originalDcidCandidates.toList()
+        return listOf(working) + originalDcidCandidates.filterNot { it.contentEquals(working) }
     }
 
     /**
@@ -511,30 +666,38 @@ class QuicConnectionDecoder(
                 }
             }
             if (routed.decrypted) {
+                // The ClientHello AEAD authenticated under keys derived from this version's salt, so the
+                // version is no longer merely claimed by an unauthenticated header.
+                confirmVersion()
                 raiseStatus(QuicDecodeStatus.PARTIALLY_DECODED)
                 return true
             }
             return false
         }
 
-        // Inbound (server) Initial: derive the server-direction Initial keys from the client's
-        // original DCID and decrypt for real.
-        val dcid = originalDcid ?: return false
-        val keys = QuicCrypto.deriveServerInitialKeys(version, dcid) ?: return false
+        // Inbound (server) Initial: derive the server-direction Initial keys from the client's original
+        // DCID and decrypt for real. Every candidate CID is tried, because the working value was read from
+        // an unauthenticated Initial header and an injected packet may have supplied it; whichever
+        // candidate authenticates becomes the proven one.
         val spaceKey = SpaceKey(PacketNumberSpace.INITIAL, routed.direction)
-        val decryptedInitial = QuicCrypto.decryptInitialPacketAt(
-            packet = routed.payloadBytes,
-            keys = keys,
-            largestPn = largestPacketNumbers[spaceKey] ?: -1L,
-        ) ?: run {
-            decryptFailures++
-            return false
+        val largestPn = largestPacketNumbers[spaceKey] ?: -1L
+        for (candidate in originalDcidCandidatesInOrder()) {
+            val keys = QuicCrypto.deriveServerInitialKeys(version, candidate) ?: continue
+            val decryptedInitial = QuicCrypto.decryptInitialPacketAt(
+                packet = routed.payloadBytes,
+                keys = keys,
+                largestPn = largestPn,
+            ) ?: continue
+            confirmOriginalDcid(candidate)
+            confirmVersion()
+            recordLargestPacketNumber(spaceKey, decryptedInitial.packetNumber)
+            packetsDecrypted++
+            raiseStatus(QuicDecodeStatus.PARTIALLY_DECODED)
+            processFrames(decryptedInitial.cryptoData, Level.INITIAL, routed.direction)
+            return true
         }
-        recordLargestPacketNumber(spaceKey, decryptedInitial.packetNumber)
-        packetsDecrypted++
-        raiseStatus(QuicDecodeStatus.PARTIALLY_DECODED)
-        processFrames(decryptedInitial.cryptoData, Level.INITIAL, routed.direction)
-        return true
+        if (originalDcidCandidates.isNotEmpty()) decryptFailures++
+        return false
     }
 
     /**
@@ -564,6 +727,7 @@ class QuicConnectionDecoder(
         }
         recordLargestPacketNumber(spaceKey, result.packetNumber)
         packetsDecrypted++
+        confirmVersion()
         raiseStatus(QuicDecodeStatus.PARTIALLY_DECODED)
         processFrames(result.plaintext, level, routed.direction)
         return true
@@ -633,9 +797,10 @@ class QuicConnectionDecoder(
                 ciphertext = unprotected.ciphertext,
             ) ?: continue
 
-            // The length that actually authenticated is the connection's real one — remember it so
-            // later packets in this direction skip the candidate loop entirely.
-            shortHeaderDcidLength[routed.direction] = dcidLen
+            // The length that actually authenticated is the connection's real one -- remember it as proven
+            // so later packets in this direction try it first.
+            confirmedDcidLength[routed.direction] = dcidLen
+            confirmVersion()
             if (decryptResult.promoted) keyUpdatesPromoted++
             recordLargestPacketNumber(spaceKey, unprotected.packetNumber)
             packetsDecrypted++
@@ -648,10 +813,20 @@ class QuicConnectionDecoder(
         return false
     }
 
-    /** Known DCID length for [direction] first, then the lengths real deployments use. */
+    /**
+     * Short-header DCID lengths to try, in order: the proven one, then every unauthenticated observation
+     * newest-first, then the lengths real deployments use. A wrong length simply fails AEAD, so keeping
+     * fallbacks means neither an injected long header nor a peer rotating to a CID of a different length
+     * can permanently prevent this connection from decrypting.
+     */
     private fun candidateDcidLengths(direction: QuicDatagramRouter.Direction): List<Int> {
-        val known = shortHeaderDcidLength[direction]
-        return if (known != null) listOf(known) else FALLBACK_DCID_LENGTHS
+        val ordered = LinkedHashSet<Int>()
+        confirmedDcidLength[direction]?.let(ordered::add)
+        // `toList().asReversed()` on purpose: LinkedHashSet.reversed() is Java 21's SequencedCollection
+        // API, which resolves at compile time but does not exist on the JDK 17 runtime this project targets.
+        observedDcidLengths[direction]?.toList()?.asReversed()?.forEach(ordered::add)
+        ordered.addAll(FALLBACK_DCID_LENGTHS)
+        return ordered.toList()
     }
 
     /**
@@ -841,11 +1016,33 @@ class QuicConnectionDecoder(
             // a long-lived connection can never grow this map without limit.
             val victim = exchangeMap.entries.firstOrNull { it.value.requestComplete && it.value.responseComplete }
                 ?: exchangeMap.entries.firstOrNull()
-            victim?.let { exchangeMap.remove(it.key) }
+            victim?.let {
+                rememberEvictedExchange(it.key, it.value)
+                exchangeMap.remove(it.key)
+            }
         }
         val created = Http3Exchange(streamId, clock())
+        // A stream whose exchange was evicted and then spoke again must not look like it started from
+        // zero bytes: the earlier bytes were genuinely observed, they are simply no longer buffered. The
+        // recreated exchange therefore continues the observed byte counters and is marked truncated,
+        // which keeps the size it reports consistent with the (shorter) body it can still produce.
+        evictedExchanges.remove(streamId)?.let(created::seedFromEvicted)
         exchangeMap[streamId] = created
         return created
+    }
+
+    /** Records an evicted exchange's observed byte totals so a later recreation continues from them. */
+    private fun rememberEvictedExchange(streamId: Long, exchange: Http3Exchange) {
+        evictedExchanges[streamId] = EvictedExchangeTotals(
+            requestBodyBytes = exchange.requestBodyBytes,
+            responseBodyBytes = exchange.responseBodyBytes,
+            requestBodyTruncated = exchange.requestBodyTruncated || exchange.requestBodyBuffered > 0,
+            responseBodyTruncated = exchange.responseBodyTruncated || exchange.responseBodyBuffered > 0,
+        )
+        while (evictedExchanges.size > maxTrackedExchanges) {
+            val oldest = evictedExchanges.keys.firstOrNull() ?: break
+            evictedExchanges.remove(oldest)
+        }
     }
 
     private fun touch(exchange: Http3Exchange) {
@@ -966,12 +1163,15 @@ class QuicConnectionDecoder(
     fun release() {
         streamReassemblers.clear()
         completedStreams.clear()
+        observedDcidLengths.clear()
+        originalDcidCandidates.clear()
         http3Parsers.clear()
         cryptoReassemblers.clear()
         cryptoStreams.clear()
         levelKeys.clear()
         keyPhaseManagers.clear()
         exchangeMap.clear()
+        evictedExchanges.clear()
         touchedExchanges.clear()
     }
 
@@ -989,6 +1189,15 @@ class QuicConnectionDecoder(
 
         /** RFC 9001 §5.8: a Retry packet's trailing Retry Integrity Tag is always 128 bits. */
         private const val RETRY_INTEGRITY_TAG_LEN = 16
+
+        /** RFC 9000 §17.2: a connection ID is at most 20 bytes. */
+        private const val MAX_CONNECTION_ID_LEN = 20
+
+        /** Bound on unauthenticated short-header DCID-length candidates retained per direction. */
+        private const val MAX_DCID_LENGTH_CANDIDATES = 4
+
+        /** Bound on unauthenticated original-DCID candidates retained for a connection. */
+        private const val MAX_ORIGINAL_DCID_CANDIDATES = 4
 
         /** Short-header DCID lengths to try when the peer's SCID length was never observed. */
         private val FALLBACK_DCID_LENGTHS = listOf(8, 0)

@@ -751,7 +751,11 @@ class PacketPump(
         if (!exchange.hasRequestHeaders && !exchange.hasResponseHeaders) return
         val rowKey = "$connectionId#${generationOf(connectionId)}#${exchange.streamId}"
         val existing = pendingHttp3Writes[rowKey]
-        if (existing != null) return // already queued; the flush reads the exchange's latest state
+        // Already queued for this exact exchange instance: the flush reads its latest state, so there is
+        // nothing to re-queue. A *different* instance for the same stream means the decoder's in-flight
+        // bound evicted the old exchange and recreated it; the queue must then follow the live object,
+        // otherwise everything the recreated exchange decodes would never be written.
+        if (existing != null && existing.exchange === exchange) return
         pendingHttp3Writes[rowKey] = PendingHttp3Write(
             rowKey = rowKey,
             connectionId = connectionId,
