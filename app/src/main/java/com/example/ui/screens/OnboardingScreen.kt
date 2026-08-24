@@ -11,8 +11,13 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -70,6 +75,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -83,6 +89,7 @@ import androidx.core.content.ContextCompat
 import com.example.ui.components.RequestrWordmark
 import com.example.ui.theme.AppAccent
 import com.example.ui.theme.AppThemeMode
+import com.example.ui.theme.LocalAnimationsEnabled
 
 // ─── Onboarding entry ─────────────────────────────────────────────
 
@@ -149,9 +156,13 @@ fun OnboardingScreen(
         Column(
             modifier = Modifier.fillMaxSize()
         ) {
-            // ── Progress indicator ──────────────────────────────
+            // ── v6.0 transplant (manifest §5.10): Dynamic Island progress pill ──
             Spacer(modifier = Modifier.height(48.dp))
-            AnimatedProgress(currentStep, totalSteps)
+            DynamicIslandProgressPill(
+                currentStep = currentStep,
+                totalSteps = totalSteps,
+                accentColor = MaterialTheme.colorScheme.primary
+            )
             Spacer(modifier = Modifier.height(8.dp))
 
             // ── Step label ─────────────────────────────────────
@@ -249,32 +260,75 @@ fun OnboardingScreen(
 
 private enum class PermState { NOT_REQUESTED, GRANTED, SKIPPED, DENIED }
 
-// ─── Animated progress bar ───────────────────────────────────────
+// ─── v6.0 transplant (manifest §5.10): Dynamic Island progress pill ───
 
 @Composable
-private fun AnimatedProgress(current: Int, total: Int) {
-    val fraction = current.toFloat() / total.toFloat()
-    val animatedFraction by animateFloatAsState(fraction, tween(400), label = "progress")
-    Row(
+private fun DynamicIslandProgressPill(
+    currentStep: Int,
+    totalSteps: Int,
+    accentColor: Color
+) {
+    val animationsEnabled = LocalAnimationsEnabled.current
+    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+    val animatedPulseAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.4f,
+        targetValue = 1.0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(900, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "dotPulse"
+    )
+    val pulseAlpha = if (animationsEnabled) animatedPulseAlpha else 0.7f
+
+    Box(
         modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 24.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .shadow(12.dp, RoundedCornerShape(22.dp), spotColor = Color.Black.copy(alpha = 0.3f))
+            .clip(RoundedCornerShape(22.dp))
+            .background(Color(0xFF0F172A).copy(alpha = 0.92f))
+            .border(0.8.dp, accentColor.copy(alpha = 0.45f), RoundedCornerShape(22.dp))
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center
     ) {
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .height(3.dp)
-                .clip(RoundedCornerShape(2.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
+            // Glowing Live Pulse Dot
             Box(
                 modifier = Modifier
-                    .fillMaxWidth(animatedFraction)
-                    .height(3.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(MaterialTheme.colorScheme.primary)
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(accentColor.copy(alpha = pulseAlpha))
             )
+
+            // Step Label
+            Text(
+                text = "Setup Phase 0$currentStep",
+                color = Color.White,
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.SemiBold
+            )
+
+            // Capsule Mini-Bars
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                for (i in 1..totalSteps) {
+                    val isActive = i <= currentStep
+                    val barWidth by animateDpAsState(
+                        targetValue = if (i == currentStep) 20.dp else 8.dp,
+                        animationSpec = spring(dampingRatio = 0.7f),
+                        label = "pillWidth"
+                    )
+                    Box(
+                        modifier = Modifier
+                            .height(5.dp)
+                            .width(barWidth)
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(if (isActive) accentColor else Color.White.copy(alpha = 0.2f))
+                    )
+                }
+            }
         }
     }
 }
