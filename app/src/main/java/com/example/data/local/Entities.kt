@@ -221,6 +221,23 @@ data class FlowConnectionEntity(
     val createdAt: Long = System.currentTimeMillis(),
 )
 
+/**
+ * Persisted Flow pipeline (multi-flow support, transplant slice 11).
+ * Each pipeline owns a set of [FlowNodeEntity]/[FlowConnectionEntity] rows
+ * keyed by the same `flowId` as this pipeline's `id`.
+ */
+@Entity(tableName = "flow_pipelines")
+data class FlowPipelineEntity(
+    @PrimaryKey val id: String,
+    val name: String = "",
+    val description: String = "",
+    val triggerType: String = "Manual",
+    val status: String = "DRAFT", // "RUNNING", "PAUSED", "DRAFT"
+    val lastRunText: String = "Never",
+    val runsCount: Int = 0,
+    val createdAt: Long = System.currentTimeMillis(),
+)
+
 // ═══════════════════════════════════════════════════════════════════
 // v5 Connection model entities
 // ═══════════════════════════════════════════════════════════════════

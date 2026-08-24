@@ -275,6 +275,30 @@ interface FlowConnectionDao {
     suspend fun clearFlow(flowId: String = "default")
 }
 
+@Dao
+interface FlowPipelineDao {
+    @Query("SELECT * FROM flow_pipelines ORDER BY createdAt ASC")
+    fun observeAll(): Flow<List<FlowPipelineEntity>>
+
+    @Query("SELECT * FROM flow_pipelines ORDER BY createdAt ASC")
+    suspend fun getAll(): List<FlowPipelineEntity>
+
+    @Query("SELECT * FROM flow_pipelines WHERE id = :id")
+    suspend fun getById(id: String): FlowPipelineEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(pipeline: FlowPipelineEntity)
+
+    @Query("UPDATE flow_pipelines SET status = :status WHERE id = :id")
+    suspend fun updateStatus(id: String, status: String)
+
+    @Query("DELETE FROM flow_pipelines WHERE id = :id")
+    suspend fun deleteById(id: String)
+
+    @Query("SELECT COUNT(*) FROM flow_nodes WHERE flowId = :flowId")
+    suspend fun nodeCountForFlow(flowId: String): Int
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // v5 Connection model DAOs (M1) — TCP/UDP/QUIC connection tracking
 // ═══════════════════════════════════════════════════════════════════

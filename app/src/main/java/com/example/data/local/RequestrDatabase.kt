@@ -24,6 +24,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         SavedApiRequestEntity::class,
         FlowNodeEntity::class,
         FlowConnectionEntity::class,
+        FlowPipelineEntity::class,
         TcpConnectionEntity::class,
         UdpFlowEntity::class,
         QuicConnectionEntity::class,
@@ -61,7 +62,8 @@ import androidx.sqlite.db.SupportSQLiteDatabase
     // below is a genuine ALTER/CREATE migration, and exportSchema is now true so future
     // migrations have a real prior-version JSON snapshot to validate against instead of trusting
     // hand-written SQL alone.
-    version = 10,
+    // v6.0 transplant: bumped 10 -> 11 to add FlowPipelineEntity (multi-flow persistence).
+    version = 11,
     exportSchema = true,
 )
 @TypeConverters(RequestrTypeConverters::class)
@@ -73,6 +75,7 @@ abstract class RequestrDatabase : RoomDatabase() {
     abstract fun savedApiRequestDao(): SavedApiRequestDao
     abstract fun flowNodeDao(): FlowNodeDao
     abstract fun flowConnectionDao(): FlowConnectionDao
+    abstract fun flowPipelineDao(): FlowPipelineDao
     abstract fun tcpConnectionDao(): TcpConnectionDao
     abstract fun udpFlowDao(): UdpFlowDao
     abstract fun quicConnectionDao(): QuicConnectionDao
@@ -109,7 +112,7 @@ abstract class RequestrDatabase : RoomDatabase() {
                     // real, disclosed data loss (see AUDIT_REPORT.md/TODO_v5.md) -- but it is
                     // strictly better than a crash loop, and it does not touch the v8->v9 path,
                     // which stays a real, non-destructive migration.
-                    .addMigrations(MIGRATION_8_9, MIGRATION_9_10)
+                    .addMigrations(MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
                     .fallbackToDestructiveMigrationFrom(/* dropAllTables = */ true, 1, 2, 3, 4, 5, 6, 7)
                     .build()
                     .also { INSTANCE = it }
@@ -133,6 +136,25 @@ abstract class RequestrDatabase : RoomDatabase() {
          * and this migration agree on schema instead of Room throwing
          * "Migration didn't properly handle ... connect_attempts" at database-open time.
          */
+        /**
+         * v10 -> v11 (transplant slice 11). Adds the `flow_pipelines` table for
+         * multi-flow persistence. Existing `flow_nodes`/`flow_connections` rows
+         * keep their `flowId` column (already present since v5) — they are
+         * associated with the default pipeline seeded on first post-migration
+         * launch by [FlowRepository.init].
+         */
+        val MIGRATION_10_11: Migration = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS flow_pipelines (" +
+                        "id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, " +
+                        "description TEXT NOT NULL, triggerType TEXT NOT NULL, " +
+                        "status TEXT NOT NULL, lastRunText TEXT NOT NULL, " +
+                        "runsCount INTEGER NOT NULL, createdAt INTEGER NOT NULL)"
+                )
+            }
+        }
+
         val MIGRATION_9_10: Migration = object : Migration(9, 10) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE quic_connections ADD COLUMN decodeStatus TEXT NOT NULL DEFAULT 'DETECTED_ONLY'")

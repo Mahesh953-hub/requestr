@@ -9,6 +9,7 @@ import com.example.data.models.ApiRequestItem
 import com.example.data.models.FlowConnectionItem
 import com.example.data.models.FlowNodeItem
 import com.example.data.models.FlowNodeType
+import com.example.data.models.FlowPipelineItem
 import com.example.data.models.flowConnectionId
 import com.example.data.models.HttpMethod
 import com.example.data.models.MusicSourceType
@@ -170,6 +171,15 @@ object FlowRepository {
 
     private var appContext: Context? = null
     private val repoScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var nodeObserverJob: kotlinx.coroutines.Job? = null
+    private var connectionObserverJob: kotlinx.coroutines.Job? = null
+
+    // ── Multi-flow pipeline state (transplant slice 11) ──────────────
+    private val _allFlows = MutableStateFlow<List<FlowPipelineItem>>(emptyList())
+    val allFlows: StateFlow<List<FlowPipelineItem>> = _allFlows.asStateFlow()
+
+    private val _activeFlowId = MutableStateFlow<String>("default")
+    val activeFlowId: StateFlow<String> = _activeFlowId.asStateFlow()
 
     // Default seed data — used only on first init when DB is empty
     private val defaultNodes = listOf(
@@ -220,28 +230,136 @@ object FlowRepository {
         appContext = context.applicationContext
         val db = com.example.data.local.RequestrDatabase.get(context.applicationContext)
 
-        // Observe nodes from Room
+        // Observe pipelines from Room (transplant slice 11)
         repoScope.launch {
-            db.flowNodeDao().observeAll().collect { entities ->
-                if (entities.isEmpty() && _nodes.value == defaultNodes) {
-                    // First launch — seed defaults into Room
-                    defaultNodes.forEach { node ->
-                        db.flowNodeDao().upsert(node.toEntity())
+            db.flowPipelineDao().observeAll().collect { pipelines ->
+                if (pipelines.isEmpty()) {
+                    // First launch or post-migration — seed a default pipeline
+                    val defaultPipeline = com.example.data.local.FlowPipelineEntity(
+                        id = "default",
+                        name = "Auth Login Guard",
+                        description = "4 nodes · trigger: Intercept",
+                        triggerType = "Intercept",
+                        status = "DRAFT",
+                        lastRunText = "Never",
+                        runsCount = 0,
+                    )
+                    db.flowPipelineDao().upsert(defaultPipeline)
+                    // Seed default nodes/connections if flow_nodes is empty
+                    val existingNodes = db.flowNodeDao().getAll("default")
+                    if (existingNodes.isEmpty()) {
+                        defaultNodes.forEach { node ->
+                            db.flowNodeDao().upsert(node.toEntity("default"))
+                        }
+                        defaultConnections.forEach { conn ->
+                            db.flowConnectionDao().upsert(conn.toEntity("default"))
+                        }
                     }
-                    defaultConnections.forEach { conn ->
-                        db.flowConnectionDao().upsert(conn.toEntity())
+                } else {
+                    // Update allFlows with live node counts
+                    _allFlows.value = pipelines.map { entity ->
+                        val count = db.flowPipelineDao().nodeCountForFlow(entity.id)
+                        entity.toFlowPipelineItem(count)
                     }
-                } else if (entities.isNotEmpty()) {
-                    _nodes.value = entities.map { it.toFlowNodeItem() }
+                    // Ensure active flowId is valid
+                    val flowIds = pipelines.map { it.id }
+                    if (_activeFlowId.value !in flowIds) {
+                        _activeFlowId.value = flowIds.first()
+                        restartNodeObservers(db)
+                    }
                 }
             }
         }
-        repoScope.launch {
-            db.flowConnectionDao().observeAll().collect { entities ->
-                if (entities.isNotEmpty()) {
-                    _connections.value = entities.map { it.toFlowConnectionItem() }
-                }
+
+        // Start observing nodes/connections for the active flow
+        restartNodeObservers(db)
+    }
+
+    /**
+     * Cancels existing node/connection observers and starts fresh ones for the
+     * currently active [activeFlowId]. Called from [init] and [setActiveFlow].
+     */
+    private fun restartNodeObservers(db: com.example.data.local.RequestrDatabase) {
+        nodeObserverJob?.cancel()
+        connectionObserverJob?.cancel()
+        val flowId = _activeFlowId.value
+        nodeObserverJob = repoScope.launch {
+            db.flowNodeDao().observeAll(flowId).collect { entities ->
+                _nodes.value = entities.map { it.toFlowNodeItem() }
             }
+        }
+        connectionObserverJob = repoScope.launch {
+            db.flowConnectionDao().observeAll(flowId).collect { entities ->
+                _connections.value = entities.map { it.toFlowConnectionItem() }
+            }
+        }
+    }
+
+    fun setActiveFlow(flowId: String) {
+        val ctx = appContext ?: return
+        val db = com.example.data.local.RequestrDatabase.get(ctx)
+        _activeFlowId.value = flowId
+        restartNodeObservers(db)
+    }
+
+    fun setFlowStatus(flowId: String, newStatus: String) {
+        val ctx = appContext ?: return
+        repoScope.launch {
+            com.example.data.local.RequestrDatabase.get(ctx).flowPipelineDao().updateStatus(flowId, newStatus)
+        }
+    }
+
+    fun createNewFlow(name: String, triggerType: String): FlowPipelineItem {
+        val flowId = "flow-${UUID.randomUUID().toString().take(6)}"
+        val newPipeline = com.example.data.local.FlowPipelineEntity(
+            id = flowId,
+            name = name.ifBlank { "Untitled Flow" },
+            description = "1 node · trigger: $triggerType",
+            triggerType = triggerType,
+            status = "DRAFT",
+            lastRunText = "Never",
+            runsCount = 0,
+        )
+        val item = newPipeline.toFlowPipelineItem(0)
+        // Add to in-memory list immediately for responsiveness
+        _allFlows.value = _allFlows.value + item
+        val ctx = appContext
+        if (ctx != null) {
+            repoScope.launch {
+                val db = com.example.data.local.RequestrDatabase.get(ctx)
+                db.flowPipelineDao().upsert(newPipeline)
+                // Seed a trigger node for the new flow
+                val triggerNode = FlowNodeItem(
+                    id = "node-${UUID.randomUUID().toString().take(4)}",
+                    title = "$triggerType Trigger",
+                    type = FlowNodeType.INTERCEPT_TRIGGER,
+                    x = 80f, y = 80f,
+                    configData = "Pattern: .*"
+                )
+                db.flowNodeDao().upsert(triggerNode.toEntity(flowId))
+            }
+        }
+        setActiveFlow(flowId)
+        return item
+    }
+
+    fun createPipeline(name: String): FlowPipelineItem {
+        return createNewFlow(name, "Manual")
+    }
+
+    fun deleteFlow(flowId: String) {
+        if (_allFlows.value.size <= 1) return
+        _allFlows.value = _allFlows.value.filter { it.id != flowId }
+        val ctx = appContext ?: return
+        repoScope.launch {
+            val db = com.example.data.local.RequestrDatabase.get(ctx)
+            db.flowNodeDao().clearFlow(flowId)
+            db.flowConnectionDao().clearFlow(flowId)
+            db.flowPipelineDao().deleteById(flowId)
+        }
+        if (_activeFlowId.value == flowId) {
+            val next = _allFlows.value.firstOrNull() ?: return
+            setActiveFlow(next.id)
         }
     }
 
@@ -302,10 +420,11 @@ object FlowRepository {
         val ctx = appContext ?: return
         repoScope.launch {
             val db = com.example.data.local.RequestrDatabase.get(ctx)
-            db.flowNodeDao().clearFlow()
-            db.flowConnectionDao().clearFlow()
-            nodes.forEach { db.flowNodeDao().upsert(it.toEntity()) }
-            connections.forEach { db.flowConnectionDao().upsert(it.toEntity()) }
+            val flowId = _activeFlowId.value
+            db.flowNodeDao().clearFlow(flowId)
+            db.flowConnectionDao().clearFlow(flowId)
+            nodes.forEach { db.flowNodeDao().upsert(it.toEntity(flowId)) }
+            connections.forEach { db.flowConnectionDao().upsert(it.toEntity(flowId)) }
         }
     }
 
@@ -325,8 +444,8 @@ object FlowRepository {
 
     // ── Entity mappers ──────────────────────────────────────────────
 
-    internal fun FlowNodeItem.toEntity() = com.example.data.local.FlowNodeEntity(
-        id = id, type = type.name, label = title,
+    internal fun FlowNodeItem.toEntity(flowId: String = _activeFlowId.value) = com.example.data.local.FlowNodeEntity(
+        id = id, flowId = flowId, type = type.name, label = title,
         positionX = x, positionY = y, configData = configData
     )
 
@@ -349,9 +468,9 @@ object FlowRepository {
         )
     }
 
-    internal fun FlowConnectionItem.toEntity() = com.example.data.local.FlowConnectionEntity(
+    internal fun FlowConnectionItem.toEntity(flowId: String = _activeFlowId.value) = com.example.data.local.FlowConnectionEntity(
         id = flowConnectionId(fromNodeId, fromPort, toNodeId, toPort),
-        fromNodeId = fromNodeId, fromPort = fromPort,
+        flowId = flowId, fromNodeId = fromNodeId, fromPort = fromPort,
         toNodeId = toNodeId, toPort = toPort
     )
 
@@ -362,6 +481,13 @@ object FlowRepository {
         id = id,
         fromNodeId = fromNodeId, fromPort = fromPort,
         toNodeId = toNodeId, toPort = toPort
+    )
+
+    internal fun com.example.data.local.FlowPipelineEntity.toFlowPipelineItem(nodeCount: Int) = FlowPipelineItem(
+        id = id, name = name, description = description,
+        triggerType = triggerType, status = status,
+        lastRunText = lastRunText, runsCount = runsCount,
+        nodeCount = nodeCount
     )
 
     /** Real success/failure signal so [FlowScreen] can colour its run banner honestly. */

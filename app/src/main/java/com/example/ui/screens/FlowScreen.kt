@@ -1,9 +1,11 @@
 package com.example.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -57,6 +59,7 @@ import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Surface
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -84,6 +87,7 @@ import androidx.compose.ui.unit.sp
 import com.example.data.models.FlowConnectionItem
 import com.example.data.models.FlowNodeItem
 import com.example.data.models.FlowNodeType
+import com.example.data.models.FlowPipelineItem
 import com.example.data.repository.FlowRepository
 import com.example.ui.components.GlassCard
 import com.example.ui.components.SectionHeader
@@ -110,6 +114,8 @@ fun FlowScreen(
     val coroutineScope = rememberCoroutineScope()
     val nodes by FlowRepository.nodes.collectAsState()
     val connections by FlowRepository.connections.collectAsState()
+    val allPipelines by FlowRepository.allFlows.collectAsState()
+    val activeFlowId by FlowRepository.activeFlowId.collectAsState()
 
     // B4: real tactile confirmation for node drag/delete, gated once behind
     // settings.hapticFeedbackEnabled via the shared helper.
@@ -120,6 +126,7 @@ fun FlowScreen(
     var executionMessage by remember { mutableStateOf<String?>(null) }
     var viewMode by remember { mutableIntStateOf(0) } // 0 = Canvas, 1 = Node Sequence List
     var showAddNodeSheet by remember { mutableStateOf(false) }
+    var showNewPipelineSheet by remember { mutableStateOf(false) }
     var nodeForEdit by remember { mutableStateOf<FlowNodeItem?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
     fun notify(message: String) {
@@ -236,6 +243,56 @@ fun FlowScreen(
                 }
             }
         )
+
+        // Pipeline Selector Strip (transplant slice 11)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            allPipelines.forEach { pipeline ->
+                PipelinePillItem(
+                    pipeline = pipeline,
+                    isActive = pipeline.id == activeFlowId,
+                    onClick = {
+                        performHaptic(HapticFeedbackType.TextHandleMove)
+                        FlowRepository.setActiveFlow(pipeline.id)
+                    }
+                )
+            }
+
+            // Add Pipeline Pill
+            Surface(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(20.dp))
+                    .clickable { showNewPipelineSheet = true },
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = "New Pipeline",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Text(
+                        text = "New Pipeline",
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+        }
 
         // Execution status banner -- colour and icon now reflect the real outcome (task 2c),
         // instead of always rendering green + CheckCircle regardless of success/failure.
@@ -387,6 +444,54 @@ fun FlowScreen(
                 nodeForEdit = null
             }
         )
+    }
+
+    // Create New Pipeline Bottom Sheet (transplant slice 11)
+    if (showNewPipelineSheet) {
+        var pipelineName by remember { mutableStateOf("") }
+
+        ModalBottomSheet(
+            onDismissRequest = { showNewPipelineSheet = false },
+            containerColor = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    "Create New Pipeline",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+
+                OutlinedTextField(
+                    value = pipelineName,
+                    onValueChange = { pipelineName = it },
+                    label = { Text("Pipeline Name (e.g. Auth & Token Refresh Flow)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
+                )
+
+                Button(
+                    onClick = {
+                        FlowRepository.createPipeline(pipelineName)
+                        showNewPipelineSheet = false
+                    },
+                    enabled = pipelineName.isNotBlank(),
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                ) {
+                    Text("Create Pipeline")
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+        }
     }
 
     SnackbarHost(
@@ -942,6 +1047,50 @@ fun EditFlowNodeBottomSheet(
             }
 
             Spacer(modifier = Modifier.height(20.dp))
+        }
+    }
+}
+
+// ─── PIPELINE PILL ITEM (transplant slice 11) ────────────────────────────────
+
+@Composable
+fun PipelinePillItem(
+    pipeline: FlowPipelineItem,
+    isActive: Boolean,
+    onClick: () -> Unit
+) {
+    val pillBg by animateColorAsState(
+        targetValue = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+        label = "pillBg"
+    )
+    val pillText by animateColorAsState(
+        targetValue = if (isActive) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+        label = "pillText"
+    )
+
+    Surface(
+        modifier = Modifier
+            .clip(RoundedCornerShape(20.dp))
+            .clickable { onClick() },
+        shape = RoundedCornerShape(20.dp),
+        color = pillBg
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                text = pipeline.name,
+                fontSize = 12.sp,
+                fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
+                color = pillText
+            )
+            Text(
+                text = "(${pipeline.nodeCount})",
+                fontSize = 10.sp,
+                color = pillText.copy(alpha = 0.8f)
+            )
         }
     }
 }

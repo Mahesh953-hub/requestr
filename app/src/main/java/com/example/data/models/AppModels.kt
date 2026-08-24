@@ -372,6 +372,24 @@ data class FlowConnectionItem(
 fun flowConnectionId(fromNodeId: String, fromPort: String, toNodeId: String, toPort: String): String =
     "${fromNodeId}_${fromPort}_${toNodeId}_${toPort}"
 
+/**
+ * A persisted flow pipeline (transplant slice 11). Backed by [FlowPipelineEntity]
+ * in Room; the node/connection graph for each pipeline lives in the existing
+ * `flow_nodes`/`flow_connections` tables keyed by `flowId == pipeline.id`.
+ * `nodeCount` is queried at load time rather than embedded so we don't pull
+ * every node of every pipeline into memory.
+ */
+data class FlowPipelineItem(
+    val id: String = UUID.randomUUID().toString(),
+    val name: String = "Untitled Flow",
+    val description: String = "",
+    val triggerType: String = "Manual",
+    val status: String = "DRAFT", // "RUNNING", "PAUSED", "DRAFT"
+    val lastRunText: String = "Never",
+    val runsCount: Int = 0,
+    val nodeCount: Int = 0,
+)
+
 // F3: SYNTH_LOFI/AMBIENT_CYBER/CHILL_CODING were fabricated sources with no producer anywhere
 // in the codebase (only data/music/LocalMusicScanner.kt ever produces a MusicTrackItem, and it
 // always sets LOCAL) — deleted so the enum can't misrepresent where a track came from.
