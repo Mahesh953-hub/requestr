@@ -4,10 +4,12 @@
 > fully-wired user-facing features (UTF-8 fix, accent themes, authenticated keylog ingestion),
 > and five pipeline components (ChaCha20-Poly1305, key-phase rotation, production QPACK decoder,
 > Http3StreamParser, QuicDatagramRouter, QuicFrameWalker) — all independently tested and
-> merged into the codebase. However, the end-to-end PacketPump wiring (keylog lookup → decrypt
-> → HTTP/3 CapturedTrafficEntity persistence) is not yet driven, and the QUIC UI badges are
-> in-memory only, not yet reading the Room `QuicDecodeStatus` column. See `PROCESS_VS_GAPS.md`
-> for the complete honest status.
+> merged into the codebase. **Reconciled by v3 plan task 4:** the gap-closure PR (`4bfcb4f`)
+> wired the end-to-end PacketPump pipeline (keylog lookup → 1-RTT decrypt → `Http3StreamParser`
+> → HTTP/3 `CapturedTrafficEntity` persistence) via `QuicConnectionDecoder`, drives honest
+> `QuicDecodeStatus`, and the QUIC UI badges now read the Room `QuicDecodeStatus` column.
+> Remaining limits (kept open): the approved design-plan UI detail sheets, and live on-wire
+> device capture (CAT-3). See `PROCESS_VS_GAPS.md` and `BUILD_LOG.md`.
 
 ## What's New
 
@@ -191,37 +193,37 @@ Connection-oriented QUIC ingestion that ties `QuicCrypto` and `QuicCidTable` tog
 Tests: 9 (single Initial, coalesced Initial+Handshake, IPv6 parity, short-header routing,
 unknown type, zero-length DCID fallback, direction detection, packet classification, Retry).
 
-### 9. PacketPump QUIC Wiring (foundation — end-to-end decrypt not yet driven)
-`PacketPump.ingestQuicDatagram` currently routes UDP through `QuicDatagramRouter` for CID routing
-and coalesced-packet splitting, then persists the connection via `QuicConnectionEntity` with
-`decodeStatus` hardcoded to `DETECTED_ONLY`. The following components exist and are tested but
-are **not yet instantiated or driven from PacketPump**:
+### 9. PacketPump QUIC Wiring (end-to-end pipeline wired by gap-closure)
+`PacketPump.ingestQuicDatagram` routes UDP through `QuicDatagramRouter` for CID routing and
+coalesced-packet splitting, then drives the new `QuicConnectionDecoder` — the per-connection
+QUIC/HTTP-3 decode state machine — which completes the end-to-end pipeline:
 
-- **Not wired:** No `TlsKeyLogRegistry` lookup for 1-RTT traffic secrets, no
-  `deriveKeysFromTrafficSecret`/`decryptShortHeaderPacket` call site, no `Http3StreamParser`
-  instantiation, no `CapturedTrafficEntity` persistence for decoded HTTP/3 rows.
-- **What IS wired:** `QuicDatagramRouter` CID routing + direction detection, `QuicCidTable`
-  lookup, `lockCipherSuite`/`lockedCipherSuite` for suite negotiation tracking,
-  `persistQuicConnection` with SNI/ALPN metadata.
-- **Tests (3):** `PacketPumpQuicDatagramTest` — asserts `decodeStatus == DETECTED_ONLY`, SNI
-  persistence, duplicate Initial deduplication.
+- **Now wired (gap-closure `4bfcb4f`):** `TlsKeyLogRegistry` lookup for Handshake + 1-RTT traffic
+  secrets, `deriveKeysFromTrafficSecret` + short-header decrypt under key-phase rotation,
+  `Http3StreamParser` instantiation with reassembled STREAM data fed in, and
+  `CapturedTrafficEntity` persistence for decoded HTTP/3 rows (`protocol = "HTTP/3"`).
+- **`QuicDecodeStatus` is driven honestly:** a monotonic high-water mark raised to
+  `OBSERVED_NO_KEYS` / `PARTIALLY_DECODED` / `FULLY_DECODED` (no longer hardcoded
+  `DETECTED_ONLY`); `parseServerHello` → `lockCipherSuiteFromIana(...)` selects the 1-RTT AEAD.
+- **What was already wired (gap-fix):** `QuicDatagramRouter` CID routing + direction detection,
+  `QuicCidTable` lookup, `persistQuicConnection` with SNI/ALPN metadata.
+- **Tests:** `PacketPumpQuicDatagramTest`, `Http3PersistenceDurabilityTest`,
+  `Http3EndToEndFixtureTest` (and `QuicOneRttSuiteTest`/`QuicRetryTest`/`QuicStatePoisoningTest`).
 
-The end-to-end decrypt pipeline (Initial→Handshake→1-RTT decrypt → Http3StreamParser →
-CapturedTrafficEntity) is the critical next milestone tracked in `PROCESS_VS_GAPS.md`.
-
-### 10. QUIC/HTTP-3 UI Honest States (in-memory only)
-The QUIC tab in `InterceptScreen.kt` has decode-status badges but they are currently driven by
-in-memory flags (`quicLiveMap[conn.connectionId]?.decodedFrames == true`), not by the Room
-`QuicDecodeStatus` column:
+### 10. QUIC/HTTP-3 UI Honest States (Room-driven badges; detail sheets pending)
+The QUIC tab in `InterceptScreen.kt` decode-status badges now read the Room `QuicDecodeStatus`
+column (gap-closure `9919aa8`): `conn.decodeStatus` is compared against `FULLY_DECODED` /
+`PARTIALLY_DECODED` / `OBSERVED_NO_KEYS` for persistent badge state, instead of in-memory
+`decodedFrames` flags. The badge set is unchanged:
 
 - Green "HTTP/3" badge, amber "HTTP/3" badge, gray "QUIC" badge
 - `TlsKeyLogRegistry.entryCount` display for key availability signal
 - No-key explanation card with honest copy + remedy actions
 - TCP-fallback copy
 
-**Not yet implemented:** Reading `decodeStatus` from the Room column for persistent badge state,
-`Http3DetailSheet`, `Http3RowIndicator`. See `PROCESS_VS_GAPS.md` and the design implementation
-plan (`docs/designs/implementation-plan.md`, Domain A: HTTP/3 Indicators).
+**Now implemented:** Room-column-driven badge state (`9919aa8`). **Still pending (design-plan
+Domain A):** `Http3DetailSheet`, `Http3RowIndicator`, and the detail bottom sheets — these are
+v3 plan UI tasks. See `PROCESS_VS_GAPS.md` and `docs/designs/implementation-plan.md`.
 
 Tests: 7 (badge text/color/icon, amber-never-red, version labels — `QuicDecodeStatusBadgeTest`
 does not exist; the 7 test count refers to existing UI tests).
@@ -257,8 +259,8 @@ Tests: `QuicFrameWalkerTest`.
 | Production QPACK decoder | ✅ DONE | Dynamic table, RIC/Base, blocked streams, incremental feeding + 13 tests |
 | HTTP/3 stream parser | ✅ DONE | Frame parsing, SETTINGS, QPACK integration, pseudo-headers + 9 tests |
 | `QuicDatagramRouter` | ✅ DONE | Coalesced packets, CID routing, direction detection + 9 tests |
-| PacketPump QUIC decrypt wiring | 🟡 PARTIAL | Router CID routing + connection persistence wired; keylog lookup + 1-RTT decrypt + HTTP/3 row persistence not yet driven |
-| QUIC/HTTP-3 UI honest states | 🟡 PARTIAL | In-memory badges exist; not yet reading Room `QuicDecodeStatus` column; design plan (Domain A) not started |
+| PacketPump QUIC decrypt wiring | ✅ DONE | End-to-end pipeline wired via `QuicConnectionDecoder` (gap-closure `4bfcb4f`): keylog lookup + 1-RTT decrypt + HTTP/3 `CapturedTrafficEntity` persistence + honest `QuicDecodeStatus` |
+| QUIC/HTTP-3 UI honest states | 🟡 PARTIAL | Badges now read the Room `QuicDecodeStatus` column (`9919aa8`); design-plan Domain A detail sheets (`Http3DetailSheet`/`Http3RowIndicator`) still pending |
 
 ## Files Changed
 - `api/LocalApiServer.kt` — UTF-8 byte-accurate responses, `org.json` serialization, `POST /api/keylog` route
@@ -274,7 +276,8 @@ Tests: `QuicFrameWalkerTest`.
 - `interception/quic/QuicCidTable.kt` — full CID lifecycle routing (NEW/RETIRE_CONNECTION_ID, multi-CID, zero-length DCID fallback)
 - `data/local/Entities.kt` — `QuicDecodeStatus` enum + `QuicConnectionEntity` fields
 - `data/local/RequestrDatabase.kt` — `MIGRATION_9_10`, `version = 10`, `QuicDecodeStatusConverter`
-- `interception/PacketPump.kt` — `ingestQuicDatagram`: CID routing via `QuicDatagramRouter`, `QuicConnectionEntity` persistence, `lockCipherSuite` tracking; end-to-end decrypt + HTTP/3 persistence not yet driven
+- `interception/PacketPump.kt` — `ingestQuicDatagram`: CID routing via `QuicDatagramRouter`, `QuicConnectionEntity` persistence, `lockCipherSuite` tracking; end-to-end decrypt + HTTP/3 persistence now driven via `QuicConnectionDecoder` (gap-closure `4bfcb4f`)
+- `interception/quic/QuicConnectionDecoder.kt` — NEW (gap-closure): per-connection QUIC/HTTP-3 decode state machine wired from `PacketPump`; keylog lookup, Handshake + 1-RTT decrypt, `Http3StreamParser` feed, honest `QuicDecodeStatus`, HTTP/3 persistence
 - `interception/quic/QpackDecoder.kt` — production RFC 9204 decoder: dynamic table, RIC/Base, encoder/decoder streams, blocked-stream buffering
 - `interception/quic/Http3StreamParser.kt` — HTTP/3 frame parser + QPACK integration + pseudo-header extraction
 - `interception/quic/QuicDatagramRouter.kt` — connection-oriented ingestion: coalesced packets, CID routing, direction detection
@@ -287,22 +290,21 @@ Tests: `QuicFrameWalkerTest`.
 - Docs: `docs/legacy-main/` (archived `main`-unique `MASTER_PLAN_AND_FIX_SPEC.md` + 10-accent theme snapshots), `TODO_v5.md`, `TODO.md`, `SESSION_WORK_TRACKER.md`
 
 ## Remaining / Known Limits (honest)
-- **End-to-end PacketPump wiring:** Keylog lookup → 1-RTT decrypt → `Http3StreamParser` →
-  `CapturedTrafficEntity` persistence is not yet driven. Components exist and are tested
-  independently (`deriveKeysFromTrafficSecret`, `decryptProtectedPayload`, `Http3StreamParser`,
-  `QpackDecoder`, `QuicDatagramRouter`, `QuicFrameWalker`) but PacketPump does not instantiate
-  or call them. See `PROCESS_VS_GAPS.md` for detailed status.
-- **QUIC UI:** Badges are in-memory only, not yet reading the Room `QuicDecodeStatus` column.
-  The design implementation plan (`docs/designs/implementation-plan.md`, 4 domains) has zero
-  implementation — this covers HTTP/3 indicators, Runtime CDP, Relay health, and TLS failure
-  surfaces.
+- **Design-plan UI (kept open):** The approved design implementation plan
+  (`docs/designs/implementation-plan.md`, 4 domains + Task 0, exactly 36 approved HTML mockups)
+  has zero implementation — HTTP/3 detail indicators (`Http3DetailSheet`/`Http3RowIndicator`),
+  Runtime CDP, Relay health, and TLS failure surfaces are all pending (v3 plan UI tasks).
 - **Device verification (CAT-3):** the tun/UDP/ICMP/IPv6 relay datapath, live QUIC/HTTP-3
   capture + real 1-RTT decrypt of on-wire traffic, system-CA MITM of third-party HTTPS, and
   root/Shizuku/Frida are not runnable on this non-rooted, no-kernel-TUN Redroid tier. The QUIC
-  crypto layer's correctness bar here is unit vectors, not real capture.
-- **What IS done (beyond v6.0 foundation):** ChaCha20-Poly1305 cipher (commit `f083841`,
-  `QuicCryptoTest`), key-phase rotation with auth-before-promotion (`aff4b6d`, `KeyPhaseTest`
-  211 lines), QuicDatagramRouter integration into PacketPump (`74b9328`,
-  `PacketPumpQuicDatagramTest`), production QPACK decoder (`12d22e1`, `QpackProductionTest`),
-  Http3StreamParser (`1bffb00`, `Http3StreamParserTest`), NEW/RETIRE_CONNECTION_ID frame walker
-  (`0b4bbdb`, `QuicFrameWalkerTest`). All merged at `62329d3`.
+  crypto layer's correctness bar here is unit vectors + deterministic fixtures, not real capture.
+- **API-36 runtime behavior (kept open):** not validated — Android 16 `system_server` requires
+  `/dev/ashmem`, unavailable on kernel `7.0.0-1010-aws`. Build/toolchain gates remain SDK 36;
+  runtime validation used Android 15 / API 35.
+- **What IS done (beyond v6.0 foundation):** ChaCha20-Poly1305 cipher (`f083841`), key-phase
+  rotation with auth-before-promotion (`aff4b6d`, `KeyPhaseTest`), QuicDatagramRouter→PacketPump
+  (`74b9328`), production QPACK decoder (`12d22e1`), Http3StreamParser (`1bffb00`),
+  NEW/RETIRE_CONNECTION_ID frame walker (`0b4bbdb`) — all merged at `62329d3`. **Gap-closure
+  (`4bfcb4f`) then wired the full end-to-end pipeline** via `QuicConnectionDecoder`: keylog lookup
+  → Handshake + 1-RTT decrypt → `Http3StreamParser` → HTTP/3 `CapturedTrafficEntity` persistence,
+  honest `QuicDecodeStatus` transitions, and Room-driven QUIC UI badges (`9919aa8`).

@@ -4,6 +4,55 @@
 > **Plan:** `/code/.plans/v1-complete-v5-pending.md` (Tasks 1-18, 3b, 7b)  
 > **Design plan:** `/code/Mahesh953-hub/requestr/docs/designs/implementation-plan.md` (4 domains + Task 0)
 
+> **Reconciliation (v3 plan task 4, 2026-08-24):** The body below was written at the
+> gap-fix merge state (`62329d3` / `95bdb03`) and predates the gap-closure PR (v3 task 3,
+> branch `vorflux/v6-gap-closure` @ `4bfcb4f`, verified but not yet merged into
+> `vorflux/v6-integration`). The gap-closure PR **wires the end-to-end QUIC/HTTP-3 decode
+> pipeline** that §1/§3 below mark partial/pending, so those rows are now superseded. This
+> banner records the reconciled, reproducible state; the inline rows are corrected where
+> noted and the historical "partial" wording is retained for audit trail only.
+>
+> **Reconciled test counts (reproducible, JDK 17 / Android SDK 36 / Build-Tools 36.0.0,
+> at gap-closure head `4bfcb4f` + the test-only `app/src/test/resources/robolectric.properties`
+> pin that lets Robolectric run under JDK 17):**
+>
+> | Module | Command | Classes | Tests | Skipped | Failed | Errors |
+> |--------|---------|---------|-------|---------|--------|--------|
+> | `:app` | `./gradlew :app:testDebugUnitTest` | 80 | 547 | 0 | 0 | 0 |
+> | `:sdk` | `./gradlew :sdk:testDebugUnitTest` | 9 | 37 | 0 | 0 | 0 |
+> | `:cli` | `./gradlew :cli:test` | 1 | 4 | 0 | 0 | 0 |
+> | browser-extension | `node test/unit/{utils,enforcer,queue}.test.mjs` | 3 files | 31 | 0 | 0 | 0 |
+>
+> Totals: **588** Gradle JVM tests (547 + 37 + 4); **619** including the 31 browser-extension
+> tests. App has 82 `*Test.kt` source files = 80 test classes + 2 shared helpers
+> (`QuicConnectionScenario.kt`, `QuicWireFixtures.kt`, 0 `@Test` each).
+>
+> **What the retired numbers meant:** `403` was the `:app:testDebugUnitTest` count at the
+> gap-fix state (`4b25e76`, 64 classes) — real for that SHA but superseded by the 144 tests
+> the gap-closure PR added. `446` was an undocumented aggregate in `TODO.md`'s v6.0-gapfix
+> row; it does not reconcile with any clean per-module sum (`403 + 37 + 4 = 444`, not 446)
+> and has no recorded command or SHA, so it is retired as unsupported. Both are replaced by
+> the reproducible per-module table above.
+>
+> **Gap-closure resolved (verified against merged code on `4bfcb4f`):** 1-RTT decrypt wiring
+> (Task 7), `QuicDecodeStatus` drive beyond `DETECTED_ONLY` (Task 8/12),
+> `Http3StreamParser` instantiation + reassembled-STREAM feed (Tasks 9/10/11), HTTP/3
+> `CapturedTrafficEntity` persistence with `protocol = "HTTP/3"` (Task 12), `parseServerHello`
+> → `lockCipherSuite` (the §Summary "intermediate gap"), Room-driven QUIC decode badges in
+> `InterceptScreen.kt` (Task 14, partial — badges now read `conn.decodeStatus`), and
+> deterministic end-to-end fixtures incl. `Http3EndToEndFixtureTest` (Task 17). The driving
+> class is the new `QuicConnectionDecoder.kt` (per-connection decode state machine) wired
+> from `PacketPump`.
+>
+> **Real known limits kept open (NOT resolved by gap-closure):** the approved design-plan UI
+> domains (Task 0 `BadgePill` extraction + Domains A–D, incl. `Http3DetailSheet` /
+> `Http3RowIndicator` detail sheets) remain zero implementation — those are v3 plan tasks
+> 7–14, not v1 Task 14; live on-wire QUIC/HTTP-3 device capture (CAT-3) is not runnable on
+> this non-rooted, no-kernel-TUN Redroid tier (correctness bar = unit vectors + fixtures); and
+> API-36-specific runtime behavior is unvalidated because Android 16 `system_server` requires
+> `/dev/ashmem`, unavailable on kernel `7.0.0-1010-aws` (build/toolchain gates remain SDK 36;
+> runtime validation used Android 15 / API 35).
+
 ---
 
 ## 1. Process: What the plan promised
@@ -15,22 +64,22 @@ Every task from the v6.0 execution plan (`v1-complete-v5-pending.md`), its claim
 | **1** | Archive `main` from a ref (`archive/main-v5.7` tag + branch) | ✅ Done | SESSION_WORK_TRACKER.md confirms; `docs/legacy-main/` exists |
 | **2** | Confirm `main`-unique content → `docs/legacy-main/` | ✅ Done | `docs/legacy-main/MASTER_PLAN_AND_FIX_SPEC.md` + theme snapshots preserved |
 | **3** | Create `vorflux/complete-v5-pending` off `origin/backup` | ✅ Done | Branch created from `8194e96`; later integrated via `vorflux/v6-merge-integrate` |
-| **3b** | CAT-4 gate verification (keylog / Initial / QPACK / migration) | ✅ Done | `TlsKeyLogRegistryTest`, `QuicCryptoTest`, `QpackDecoderTest`, `Migration8To9Test` all green (403 total tests) |
+| **3b** | CAT-4 gate verification (keylog / Initial / QPACK / migration) | ✅ Done | `TlsKeyLogRegistryTest`, `QuicCryptoTest`, `QpackDecoderTest`, `Migration8To9Test` all green (counts reconciled above; the historical `403` was the `:app` count at `4b25e76`, superseded) |
 | **4** | `LocalApiServer` UTF-8 `Content-Length` + `org.json` (CAT-1) | ✅ Done | Commit `99f72af`; tests: `LocalApiServerToolsEncodingTest`, `ToolsParseTest` |
 | **5** | Port 10-accent model into canonical theme architecture (CAT-2a) | ✅ Done | Commits `267a5ee`, `70c8e20`, `542382b`/`fb74bb0`, `008333b` (Settings + Onboarding + Drawer pickers) |
 | **6** | Accent theme tests | ✅ Done | `AccentThemeTest`, `AccentPersistenceTest` |
-| **7** | QuicCrypto: client+server Initial, Handshake, 1-RTT, all AEADs, short-header, PN spaces, key-phase | 🟡 Partial | Client+server Initial ✅ (`caea073`), traffic-secret derivation ✅, PN ✅, Retry ✅ (`a54ca26`), Handshake decrypt ✅ (`2b86b20`), ChaCha20 ✅ (`f083841`), key-phase ✅ (`aff4b6d`). 1-RTT short-header **path exists but PacketPump does not drive it**: `decryptProtectedPayload` is in `QuicCrypto.kt` but no PacketPump call site looks up keys and decrypts 1-RTT. |
+| **7** | QuicCrypto: client+server Initial, Handshake, 1-RTT, all AEADs, short-header, PN spaces, key-phase | ✅ Done | Client+server Initial ✅ (`caea073`), traffic-secret derivation ✅, PN ✅, Retry ✅ (`a54ca26`), Handshake decrypt ✅ (`2b86b20`), ChaCha20 ✅ (`f083841`), key-phase ✅ (`aff4b6d`). **1-RTT short-header decrypt now driven** by gap-closure (`4bfcb4f`): `QuicConnectionDecoder` looks up `CLIENT/SERVER_TRAFFIC_SECRET_0` from `TlsKeyLogRegistry`, calls `QuicCrypto.deriveKeysFromTrafficSecret`, and decrypts 1-RTT short-header packets under key-phase rotation. |
 | **7b** | `TlsDecoder.parseServerHello` → negotiated cipher suite | ✅ Done | Commit `2b86b20`; `TlsServerHelloTest` (10 tests) |
-| **8** | `QuicConnection` + `QuicDecodeStatus` column (MIGRATION_9_10) + CID lifecycle + retained ClientHello random | 🟡 Partial | Schema: `QuicDecodeStatus` enum + `MIGRATION_9_10` + `10.json` ✅ (`2814d5c`, `4977e49`). CID lifecycle: `QuicCidTable` ✅ (`5ff7bc6`; `QuicCidTableTest` 14 tests). Retained ClientHello random: structurally present (`clientRandomHex` column) but actual retention from decrypted Initial not verified in PacketPump flow. |
-| **9** | `QuicDatagramRouter` — v4/v6 + coalesced ingestion, CID routing, STREAM/CRYPTO reassembly | 🟡 Partial | QuicDatagramRouter: ✅ wired into PacketPump (`62329d3` gap-fix merge; `QuicDatagramRouterTest`). STREAM/CRYPTO reassembly: ✅ `QuicStreamReassembler` (`2d11762`; `QuicStreamReassemblerTest` 13 tests). **But** Http3StreamParser is not instantiated in PacketPump — reassembled STREAM data is not fed to HTTP/3 parsing. |
-| **10** | Production QPACK decoder (RFC 9204) | ✅ Exists, not driven | `12d22e1` (gap-fix): full rewrite with encoder/decoder streams, RIC/Base, dynamic table, blocked fields. `QpackProductionTest`. Http3StreamParser references it. **But** PacketPump does not instantiate `Http3StreamParser` → no production call site from live capture. |
-| **11** | `Http3StreamParser` — control/unidirectional + request streams | ✅ Exists, not driven | `1bffb00` (gap-fix): full implementation with QPACK integration, stream-type varint demux, blocked-stream handling. `Http3StreamParserTest`. **But** PacketPump has zero references to `Http3StreamParser`. |
-| **12** | `PacketPump` wiring — keylog lookup → Handshake+1-RTT decrypt → HTTP/3 rows + honest key-miss | 🟡 Partial | Gap-fix (`62329d3`): `QuicDatagramRouter` + `QuicCidTable` wired in, `lockCipherSuite`/`lockedCipherSuite` added, CID routing + coalesced packet splitting functional. `PacketPumpQuicDatagramTest`. **Missing:** no keylog lookup for 1-RTT secrets, no `decryptProtectedPayload` call site, no `Http3StreamParser` instantiation, no `CapturedTrafficEntity` persistence for decoded HTTP/3, no `QuicDecodeStatus` drive beyond `DETECTED_ONLY`. |
+| **8** | `QuicConnection` + `QuicDecodeStatus` column (MIGRATION_9_10) + CID lifecycle + retained ClientHello random | ✅ Done | Schema: `QuicDecodeStatus` enum + `MIGRATION_9_10` + `10.json` ✅ (`2814d5c`, `4977e49`). CID lifecycle: `QuicCidTable` ✅ (`5ff7bc6`; `QuicCidTableTest` 14 tests). **ClientHello random now retained and driven** by gap-closure (`4bfcb4f`): `QuicConnectionDecoder` keeps the ClientHello random from the decrypted Initial and uses it as the `TlsKeyLogRegistry.lookup` key; `decodeStatus` is a monotonic high-water mark raised to `OBSERVED_NO_KEYS`/`PARTIALLY_DECODED`/`FULLY_DECODED` (no longer stuck at `DETECTED_ONLY`). |
+| **9** | `QuicDatagramRouter` — v4/v6 + coalesced ingestion, CID routing, STREAM/CRYPTO reassembly | ✅ Done | QuicDatagramRouter: ✅ wired into PacketPump (`62329d3` gap-fix merge; `QuicDatagramRouterTest`). STREAM/CRYPTO reassembly: ✅ `QuicStreamReassembler` (`2d11762`; `QuicStreamReassemblerTest`). **Http3StreamParser now instantiated and fed** by gap-closure (`4bfcb4f`): `QuicConnectionDecoder` owns per-direction `Http3StreamParser` instances and feeds reassembled STREAM data into them. |
+| **10** | Production QPACK decoder (RFC 9204) | ✅ Done | `12d22e1` (gap-fix): full rewrite with encoder/decoder streams, RIC/Base, dynamic table, blocked fields. `QpackProductionTest`. **Now driven from live capture** by gap-closure (`4bfcb4f`): `Http3StreamParser` (instantiated in `QuicConnectionDecoder`) calls `QpackDecoder` to decode HEADERS frames. |
+| **11** | `Http3StreamParser` — control/unidirectional + request streams | ✅ Done | `1bffb00` (gap-fix): full implementation with QPACK integration, stream-type varint demux, blocked-stream handling. `Http3StreamParserTest`. **Now instantiated** by gap-closure (`4bfcb4f`) inside `QuicConnectionDecoder` (wired from `PacketPump`), with reassembled STREAM data fed in and decoded HTTP/3 events handled. |
+| **12** | `PacketPump` wiring — keylog lookup → Handshake+1-RTT decrypt → HTTP/3 rows + honest key-miss | ✅ Done | Gap-fix (`62329d3`): `QuicDatagramRouter` + `QuicCidTable` wired in, `lockCipherSuite`/`lockedCipherSuite`, CID routing + coalesced splitting. **Gap-closure (`4bfcb4f`) completes the pipeline:** `PacketPump` drives `QuicConnectionDecoder`, which does keylog lookup → Handshake+1-RTT decrypt → `Http3StreamParser` → `CapturedTrafficEntity` persistence with `protocol = "HTTP/3"`, and raises `QuicDecodeStatus` honestly (key-miss → `OBSERVED_NO_KEYS`). `PacketPumpQuicDatagramTest` + new `Http3PersistenceDurabilityTest`/`Http3EndToEndFixtureTest`. |
 | **13** | Key producers — authenticated `/api/keylog` PRIMARY + NSS import (CAT-2d) | ✅ Done | Commits `5a50d3c`; `LocalApiServerKeylogTest`, `KeyLogProducerHttpTest` — end-to-end SDK→registry proof |
-| **14** | QUIC/HTTP-3 UI honest state (QuicDecodeStatus-driven badges) | 🟡 Partial | QUIC tab badges exist from transport/packet-core rework (`58b3b8c`): green HTTP/3, amber HTTP/3, gray QUIC. **But** not driven by `QuicDecodeStatus` column — driven by in-memory `quicLiveMap`/`decodedFrames` flags. No `Http3DetailSheet`, no `Http3RowIndicator`, no detail bottom sheet for any of the three design states. |
+| **14** | QUIC/HTTP-3 UI honest state (QuicDecodeStatus-driven badges) | 🟡 Partial | Badges now **driven by the Room `QuicDecodeStatus` column** by gap-closure (`9919aa8`): `InterceptScreen.kt` reads `conn.decodeStatus` (`FULLY_DECODED`/`PARTIALLY_DECODED`/`OBSERVED_NO_KEYS`) rather than in-memory `decodedFrames`. **Still pending (design-plan Domain A):** no `Http3DetailSheet`, no `Http3RowIndicator`, no detail bottom sheet — those are v3 plan UI tasks, not this baseline. |
 | **15** | Docs + unconditional v6.0 bump + `RELEASE_NOTES_v6.0.md` (CAT-5) | ✅ Done | `a3a6190`: `versionCode 28`, `versionName "6.0"`, `RELEASE_NOTES_v6.0.md`; stale-doc banners added (`4b25e76`) |
-| **16** | Host build + unit-test gate | ✅ Done | 403 tests, 64 test classes, compile/assemble all green (`4b25e76`) |
-| **17** | Redroid device gate + deterministic per-suite E2E fixtures | ❌ Not done | `Http3EndToEndFixtureTest` does not exist. Device verification not run. CAT-3 scope (device-limited). |
+| **16** | Host build + unit-test gate | ✅ Done | Reconciled counts above (547 `:app` / 37 `:sdk` / 4 `:cli` / 31 browser-extension at `4bfcb4f`); historical `403`/`446` retired. compile/assemble all green |
+| **17** | Redroid device gate + deterministic per-suite E2E fixtures | 🟡 Partial | **Deterministic E2E fixtures now exist** by gap-closure (`ca1de13`): `Http3EndToEndFixtureTest` + `QuicOneRttSuiteTest`/`QuicRetryTest`/`QuicStatePoisoningTest` cover AES-128/256-GCM + ChaCha20 key-miss/lock/update/coalesced/malformed/out-of-order paths (JVM fixtures, not Redroid egress). **Still pending (CAT-3):** live on-wire device capture/decrypt not runnable on this non-rooted, no-kernel-TUN Redroid tier. |
 | **18** | Open one PR into `backup` | ❌ Not done | PR agent a10 pending per `SESSION_WORK_TRACKER.md` |
 | **a11-a15** | (Not in plan — these were gap-fix sub-tasks) | N/A | See §2 below |
 
@@ -68,7 +117,9 @@ From `/code/Mahesh953-hub/requestr/docs/designs/implementation-plan.md` — all 
 | **Domain C: VPN Relay Health** | Design plan §1 (Domain C) | 🟡 Medium | Extract + augment `RelayHealthCard.kt`, `RelayHealthDetailSheet.kt` from `InterceptScreen.kt`; create `RelayHealthState.kt`; modify `TunRelay.kt` (per-reason drop counters). |
 | **Domain D: TLS Failure Detail** | Design plan §1 (Domain D) | 🟢 Low | 4 new files: `TlsFailureDetailSheet.kt`, `TlsFailureDetail.kt`, `TlsFailureDetailProvider.kt`, + modify `InterceptScreen.kt` (tap-to-open). |
 
-All 38 design mockups (HTML files) exist in `docs/designs/` — design is complete, implementation is zero.
+All 36 design mockups (HTML files) exist in `docs/designs/` — verified exactly 36: HTTP/3 8,
+runtime/CDP 12, relay health 10, TLS 6. Design is complete, implementation is zero. (Earlier
+"38" wording was a stale count and is corrected here.)
 
 ### 3b. Plan task remainders
 
@@ -102,14 +153,14 @@ Stale rows found across the tracker files that claim completion of things still 
 | `backup/SESSION_WORK_TRACKER.md` | #4 QUIC Crypto: QPACK production decoder, HTTP/3 stream parsing, PacketPump integration `🔲` | Gap-fix added QPACK (`12d22e1`), Http3StreamParser (`1bffb00`), DatagramRouter→PacketPump (`74b9328`). **However** PacketPump does not instantiate Http3StreamParser — end-to-end wiring incomplete. | 🟡 Components exist; not wired end-to-end |
 | `backup/SESSION_WORK_TRACKER.md` | Uncommitted Changes table: `QuicCrypto.kt` "modified — handshake decrypt", `TlsDecoder.kt` "modified — parseServerHello" | These were integrated in `vorflux/v6-merge-integrate` (commits `2b86b20`, `4977e49`) | ✅ Committed and integrated |
 | `backup/TODO_v5.md` | P2 row: claims `QpackDecoder.decode()` still has no production call site; HTTP/3 remains PARTIAL "by design" | Gap-fix added `Http3StreamParser` that calls `QpackDecoder.decodeFieldSection()` and `feedEncoderStream()`. The decoder has a real call site — just not wired into PacketPump for live capture. | 🟡 QPACK has a call site (Http3StreamParser); not yet wired to live capture |
-| `backup/TODO_v5.md` | BUILD LOG "NEXT": "0 remaining -- ALL TODO_v5.md items now DONE or explicitly-scoped PARTIAL (only P2 remains PARTIAL, by design)" | P2 advanced by gap-fix but end-to-end wiring incomplete. Design plan (4 domains + Task 0, 38 mockups) not mentioned anywhere in TODO_v5.md — genuinely new scope. | P2 partially addressed; design plan scope is entirely unaccounted for |
+| `backup/TODO_v5.md` | BUILD LOG "NEXT": "0 remaining -- ALL TODO_v5.md items now DONE or explicitly-scoped PARTIAL (only P2 remains PARTIAL, by design)" | P2 advanced by gap-fix but end-to-end wiring incomplete. Design plan (4 domains + Task 0, 36 mockups) not mentioned anywhere in TODO_v5.md — genuinely new scope. | P2 partially addressed; design plan scope is entirely unaccounted for |
 | `SESSION_WORK_TRACKER.md` (root) | Tasks 10 (QPACK), 11 (Http3StreamParser), 12 (PacketPump wiring) listed as `⬜ follow-on (not in v6.0)` | Gap-fix merged QPACK (`12d22e1`), Http3StreamParser (`1bffb00`), DatagramRouter→PacketPump (`74b9328`) into `origin/backup`. Written before gap-fix merge. | 🟡 Components built and merged to origin/backup; end-to-end wiring incomplete |
 | `SESSION_WORK_TRACKER.md` (root) | Tasks 14 (QUIC/HTTP-3 UI), 17 (E2E fixtures) listed as `⬜ follow-on` | **This is accurate** — genuinely still not done. Not stale; included for completeness. | Correct as-is |
 | `SESSION_WORK_TRACKER.md` (root) | Remaining Follow-ons section: "Task 7 remainder: … ChaCha20-Poly1305 … key-phase prev/current/next with auth-before-promotion" | Gap-fix merged both into `origin/backup` | ✅ Both done |
 | `SESSION_WORK_TRACKER.md` (root) | Remaining Follow-ons: "Task 9 remainder: QuicDatagramRouter … the router is not" | Gap-fix merged `QuicDatagramRouter` wired into PacketPump (`62329d3`) | ✅ Done |
 | `TODO_v5.md` (root) | v6.0 COMPLETION SNAPSHOT: "P2 … remains an honestly-scoped PARTIAL … QpackDecoder.decode() still has no production call site" | Gap-fix added `Http3StreamParser` which calls `QpackDecoder.decodeFieldSection()` | 🟡 Stale: QPACK has a call site now (just not in live capture path) |
 | `TODO_v5.md` (root) | v6.0 COMPLETION SNAPSHOT: "Foundation follow-ons" table — lists Handshake decrypt, ServerHello, Reassembler, CidTable as "all wired at this snapshot" | **This is accurate** — these items are done. Not stale; included for completeness. | Correct as-is |
-| `TODO_v5.md` (root) | BUILD LOG: no entry for gap-fix merge (`62329d3`); no entry for design plan scope | The gap-fix merge added 3,165 lines across 13 files including 7 new test files. Design plan domains (38 mockups, 20+ files planned) are entirely new scope not tracked here. | Missing entries |
+| `TODO_v5.md` (root) | BUILD LOG: no entry for gap-fix merge (`62329d3`); no entry for design plan scope | The gap-fix merge added 3,165 lines across 13 files including 7 new test files. Design plan domains (36 mockups, 20+ files planned) are entirely new scope not tracked here. | Missing entries |
 
 ---
 
@@ -117,11 +168,12 @@ Stale rows found across the tracker files that claim completion of things still 
 
 | Dimension | Count | Status |
 |-----------|-------|--------|
-| Plan tasks fully complete | 12 of 20 | 1, 2, 3, 3b, 4, 5, 6, 7b, 13, 15, 16 done; 7, 8, 9, 12 partial |
-| Plan tasks not started | 3 of 20 | 17 (E2E fixtures), 18 (PR); 14 (UI) partial |
-| Gaps fixed (of 5) | 5 merged | 1 (ChaCha20), 2 (key-phase), 3 (DatagramRouter wiring), 5 (NEW/RETIRE frames) ✅; 4 (Http3/QPACK) components exist but not wired end-to-end |
-| **Intermediate gap** | `parseServerHello` → `lockCipherSuite` | PacketPump has `lockCipherSuite` but nothing in the Handshake path feeds it the parsed `cipherSuite` from `TlsDecoder.parseServerHello` — 1-RTT AEAD selection blocked |
-| Design plan domains | 0 of 5 | Task 0 (BadgePill) + Domains A-D all zero implementation |
+| Plan tasks fully complete | 17 of 20 | 1, 2, 3, 3b, 4, 5, 6, 7, 7b, 8, 9, 10, 11, 12, 13, 15, 16 done (7-12 wired end-to-end by gap-closure `4bfcb4f`); 14, 17 partial |
+| Plan tasks partial | 2 of 20 | 14 (badges now Room-driven; detail sheets pending = design-plan Domain A), 17 (deterministic fixtures now exist; live on-wire device capture pending CAT-3) |
+| Plan tasks not started | 0 of 20 | none — Task 18 (gap-closure PR) is open & verified, not yet merged into `vorflux/v6-integration` |
+| Gaps fixed (of 5) | 5 merged + wired | 1 (ChaCha20), 2 (key-phase), 3 (DatagramRouter wiring), 5 (NEW/RETIRE frames) ✅; 4 (Http3/QPACK) now wired end-to-end by gap-closure (`4bfcb4f`) |
+| **Intermediate gap** | `parseServerHello` → `lockCipherSuite` | ✅ Resolved by gap-closure (`4bfcb4f`): `QuicConnectionDecoder` calls `lockCipherSuiteFromIana(serverHello.cipherSuiteId)` from the decrypted Initial ServerHello — 1-RTT AEAD selection unblocked |
+| Design plan domains | 0 of 5 | Task 0 (BadgePill) + Domains A-D all zero implementation (v3 plan tasks 7-14) |
 | Stale tracker rows found | 11 | Across `backup/SESSION_WORK_TRACKER.md`, `backup/TODO_v5.md`, root `SESSION_WORK_TRACKER.md`, root `TODO.md` (2 additional rows verified accurate, kept in table for completeness) |
 
-**The biggest honest gap:** the gap-fix merge (`62329d3`) built and tested all five gap components, but the end-to-end pipeline — keylog lookup → 1-RTT decrypt → `Http3StreamParser` → HTTP/3 `CapturedTrafficEntity` persistence — is unwired. `Http3StreamParser` and `QpackDecoder` exist as fully-tested standalone classes with no call site in `PacketPump`. The datagram router is wired for packet ingestion/dispatch but the final "decrypt and persist HTTP/3" step is missing. This is the critical path: once wired, Task 14 (UI), Task 17 (E2E fixtures), and the design plan's Domain A all become buildable.
+**The biggest honest gap (updated by task-4 reconciliation):** the gap-closure PR (`4bfcb4f`) **wired the end-to-end pipeline** that the gap-fix merge (`62329d3`) had only built as standalone components — keylog lookup → 1-RTT decrypt → `Http3StreamParser` → HTTP/3 `CapturedTrafficEntity` persistence is now driven from `PacketPump` through `QuicConnectionDecoder`, with honest `QuicDecodeStatus` transitions and Room-driven UI badges. The critical remaining work is the **approved design-plan UI** (Task 0 `BadgePill` extraction + Domains A-D, incl. `Http3DetailSheet`/`Http3RowIndicator` detail sheets) — zero implementation, tracked as v3 plan tasks 7-14 — plus live on-wire device capture (CAT-3), which is not runnable on this non-rooted, no-kernel-TUN Redroid tier.

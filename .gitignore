@@ -16,6 +16,6 @@
 local.properties
 .env
 debug.keystore
-*.pemcli/build/
+*.pem
 cli/build/
 sdk/build/

@@ -10,8 +10,11 @@
 
 > All 50 numbered TODO items below remain ✅ complete (unchanged since v4.0). v6.0 closes v5
 > *pending* work + a CLI defect and adds five independently tested QUIC/HTTP-3 pipeline
-> components. The end-to-end decrypt pipeline is not yet wired — components exist as tested
-> standalone units. See `PROCESS_VS_GAPS.md` for complete honest status.
+> components. **Reconciled by v3 plan task 4:** the gap-closure PR (`4bfcb4f`) wired the
+> end-to-end decrypt pipeline (keylog lookup → 1-RTT decrypt → `Http3StreamParser` → HTTP/3
+> persistence) via `QuicConnectionDecoder`; reconciled test counts are `:app` 547 / `:sdk` 37 /
+> `:cli` 4 / browser-extension 31 (0 failures) and exactly **36** approved design mockups.
+> See `PROCESS_VS_GAPS.md` and `BUILD_LOG.md` for complete honest status.
 
 ### ✅ Resolved in v6.0 (foundation — wired at this snapshot)
 - [x] **UTF-8 Content-Length fix** — `LocalApiServer` byte-accurate responses + `org.json` serialization; fixes the CLI `tools` `↔`-truncation crash.
@@ -34,10 +37,12 @@
 - [x] **Http3StreamParser** — HTTP/3 frame parsing, SETTINGS, QPACK integration, pseudo-header extraction. `Http3StreamParserTest` (not instantiated from PacketPump).
 - [x] **QuicFrameWalker** — NEW_CONNECTION_ID / RETIRE_CONNECTION_ID frame detection + CID lifecycle routing. `QuicFrameWalkerTest`.
 
-### 🟡 Pending (end-to-end pipeline not yet driven)
-- [ ] **PacketPump end-to-end:** No `TlsKeyLogRegistry` lookup, no `decryptProtectedPayload` call, no `Http3StreamParser` instantiation, no HTTP/3 `CapturedTrafficEntity` persistence. Only writes `DETECTED_ONLY` for `decodeStatus`.
-- [ ] **parseServerHello → lockCipherSuite:** `PacketPump` has `lockCipherSuite` but nothing feeds it the parsed cipher suite from live capture.
-- [ ] **QUIC/HTTP-3 UI:** Badges driven by in-memory `quicLiveMap`, not Room `QuicDecodeStatus` column. Design plan (38 mockups) not started.
+### ✅ Resolved by gap-closure PR (`4bfcb4f`, task 4 reconciliation)
+- [x] **PacketPump end-to-end:** `QuicConnectionDecoder` (driven from `PacketPump`) does `TlsKeyLogRegistry` lookup, 1-RTT `decryptProtectedPayload`, `Http3StreamParser` instantiation, and HTTP/3 `CapturedTrafficEntity` persistence (`protocol = "HTTP/3"`); `decodeStatus` is raised honestly beyond `DETECTED_ONLY`.
+- [x] **parseServerHello → lockCipherSuite:** `QuicConnectionDecoder` feeds the parsed ServerHello cipher suite into `lockCipherSuiteFromIana(...)` during live capture.
+
+### 🟡 Still pending (kept open)
+- [ ] **QUIC/HTTP-3 UI:** Badges now read the Room `QuicDecodeStatus` column (`9919aa8`), but detail sheets (`Http3DetailSheet`, `Http3RowIndicator`) are not built. Design plan (36 mockups) not started — v3 plan UI tasks.
 
 ---
 
@@ -172,7 +177,8 @@ These are polish items, future roadmap features, or items that don't affect curr
 | v3.9 | Custom tools, Chats, Diff view, HAR import, API Discovery, Schema, Workspace | 2026-08-20 |
 | v4.0 | **ProGuard fix** (-dontoptimize + comprehensive keep rules → APK 10→15MB), **MediaPlayer** audio playback, custom tools in catalog, Chat nav wiring, GlassCard border fix, keyboard shortcuts | 2026-08-20 |
 | v6.0 | UTF-8 Content-Length fix, 10-accent theme, authenticated `POST /api/keylog`, QUIC crypto foundation, Room v10, handshake decrypt, `parseServerHello`, `QuicStreamReassembler`, `QuicCidTable` | 2026-08-23 |
-| v6.0-gapfix | ChaCha20-Poly1305, key-phase rotation, QuicDatagramRouter→PacketPump, production QPACK decoder, Http3StreamParser, QuicFrameWalker. Components built + tested; end-to-end pipeline not wired — see `PROCESS_VS_GAPS.md`. 34 branches consolidated, 30 stale .md files removed. 446 tests. | 2026-08-24 |
+| v6.0-gapfix | ChaCha20-Poly1305, key-phase rotation, QuicDatagramRouter→PacketPump, production QPACK decoder, Http3StreamParser, QuicFrameWalker. Components built + tested. 34 branches consolidated, 30 stale .md files removed. (Historical `446` test count retired — see reconciled counts in `PROCESS_VS_GAPS.md`.) | 2026-08-24 |
+| v6.0-gap-closure | End-to-end QUIC/HTTP-3 decode pipeline wired from `PacketPump` via `QuicConnectionDecoder`: keylog lookup → Handshake+1-RTT decrypt → `Http3StreamParser` → HTTP/3 `CapturedTrafficEntity` persistence; honest `QuicDecodeStatus`; Room-driven UI badges; deterministic fixtures. Reconciled counts: `:app` 547 / `:sdk` 37 / `:cli` 4 / browser-extension 31, 0 failures. 36 approved mockups. | 2026-08-24 |
 
 **Remaining (separate modules):** ~~#47 Plugin architecture~~, ~~#48 Local API~~, ~~#49 CLI~~ — ALL DONE in v4.0
 
