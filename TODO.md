@@ -6,25 +6,38 @@
 
 ---
 
-## v6.0 — Completion Snapshot (2026-08-23)
+## v6.0 — Completion Snapshot (2026-08-24)
 
-> All 50 numbered TODO items below remain ✅ complete (unchanged since v4.0). v6.0 is the
-> follow-on release that closes v5 *pending* work + a CLI defect. See `TODO_v5.md` for the
-> per-item v5 tracker and `RELEASE_NOTES_v6.0.md` for full detail. All nine tracked v6 items
-> are wired at this snapshot.
+> All 50 numbered TODO items below remain ✅ complete (unchanged since v4.0). v6.0 closes v5
+> *pending* work + a CLI defect and adds five independently tested QUIC/HTTP-3 pipeline
+> components. The end-to-end decrypt pipeline is not yet wired — components exist as tested
+> standalone units. See `PROCESS_VS_GAPS.md` for complete honest status.
 
-### ✅ Resolved in v6.0 (wired at this snapshot)
+### ✅ Resolved in v6.0 (foundation — wired at this snapshot)
 - [x] **UTF-8 Content-Length fix** — `LocalApiServer` byte-accurate responses + `org.json` serialization; fixes the CLI `tools` `↔`-truncation crash.
 - [x] **10-accent theme system** — `AppAccent` (10) + universal dynamic light/dark schemes; `selectedAccent` persistence; accent-aware `MainActivity` resolution; 10-accent picker in Settings, accent step in Onboarding, quick-switcher in the drawer (orthogonal axis — light/dark/system family preserved).
 - [x] **Authenticated cross-process keylog ingestion (`POST /api/keylog`)** — bearer-gated route in `LocalApiServer` + SDK `KeyLogProducer` HTTP primary transport; reflective bridge demoted to optional same-process fast path.
 - [x] **QUIC crypto foundation** — server Initial key derivation + decrypt; `deriveKeysFromTrafficSecret` primitive (AES-128-GCM/AES-256-GCM); `decodePacketNumber` per space; v1/v2 version-aware long-header classification + Retry Integrity Tag validation.
-- [x] **Room v10 (decode + lifecycle state on QUIC connections)** — authoritative decode-only `QuicDecodeStatus` enum + separate lifecycle `lifecycleState` column + `updatedAt`/`clientRandomHex`; real `MIGRATION_9_10`; `QuicDecodeStatusConverter`; exported `10.json`; nonexistent `wasDecrypted` QUIC-row write removed.
+- [x] **Room v10 (decode + lifecycle state on QUIC connections)** — authoritative decode-only `QuicDecodeStatus` enum + separate lifecycle `lifecycleState` column + `updatedAt`/`clientRandomHex`; real `MIGRATION_9_10`; `QuicDecodeStatusConverter`; exported `10.json`.
 
-### ✅ Foundation follow-ons (all wired at this snapshot)
-- [x] **Handshake long-header decryption** — `decryptHandshakePacket` in `QuicCrypto.kt` with 9 focused tests.
-- [x] **ServerHello cipher extraction (`parseServerHello`)** — `TlsDecoder.parseServerHello` + `mapCipherSuiteId` with 10 tests.
-- [x] **`QuicStreamReassembler`** — byte-offset STREAM/CRYPTO reassembly with retx dedupe + 13 tests.
-- [x] **`QuicCidTable` (CID lifecycle)** — CID routing, multi-CID, zero-length DCID fallback + 14 tests.
+### ✅ Foundation follow-ons (all done)
+- [x] **Handshake long-header decryption** — `decryptHandshakePacket` in `QuicCrypto.kt`.
+- [x] **ServerHello cipher extraction (`parseServerHello`)** — `TlsDecoder.parseServerHello` + `mapCipherSuiteId`.
+- [x] **`QuicStreamReassembler`** — byte-offset STREAM/CRYPTO reassembly with retx dedupe.
+- [x] **`QuicCidTable` (CID lifecycle)** — CID routing, multi-CID, zero-length DCID fallback.
+
+### ✅ Gap-fix additions (merged via `62329d3` — components built, not wired end-to-end)
+- [x] **ChaCha20-Poly1305 cipher suite** — `QuicCrypto.kt` now supports ChaCha20 header protection per RFC 9001 §5.4.4. `QuicCryptoTest`.
+- [x] **Key-phase rotation** — auth-before-promotion with prev/current/next key derivation. `KeyPhaseTest` (211 lines).
+- [x] **QuicDatagramRouter → PacketPump wiring** — CID routing + coalesced packet splitting in `PacketPump.ingestQuicDatagram`. `PacketPumpQuicDatagramTest`.
+- [x] **Production QPACK decoder (RFC 9204)** — dynamic table, RIC/Base, blocked streams, encoder/decoder streams. `QpackProductionTest`. Called by `Http3StreamParser` (unit-tested; not driven from live capture).
+- [x] **Http3StreamParser** — HTTP/3 frame parsing, SETTINGS, QPACK integration, pseudo-header extraction. `Http3StreamParserTest` (not instantiated from PacketPump).
+- [x] **QuicFrameWalker** — NEW_CONNECTION_ID / RETIRE_CONNECTION_ID frame detection + CID lifecycle routing. `QuicFrameWalkerTest`.
+
+### 🟡 Pending (end-to-end pipeline not yet driven)
+- [ ] **PacketPump end-to-end:** No `TlsKeyLogRegistry` lookup, no `decryptProtectedPayload` call, no `Http3StreamParser` instantiation, no HTTP/3 `CapturedTrafficEntity` persistence. Only writes `DETECTED_ONLY` for `decodeStatus`.
+- [ ] **parseServerHello → lockCipherSuite:** `PacketPump` has `lockCipherSuite` but nothing feeds it the parsed cipher suite from live capture.
+- [ ] **QUIC/HTTP-3 UI:** Badges driven by in-memory `quicLiveMap`, not Room `QuicDecodeStatus` column. Design plan (38 mockups) not started.
 
 ---
 
@@ -158,7 +171,8 @@ These are polish items, future roadmap features, or items that don't affect curr
 | v3.8 | DNS capture, QUIC SNI, Flow export/import, Notes export, HAR import, API Discovery, Schema, Workspace | 2026-08-20 |
 | v3.9 | Custom tools, Chats, Diff view, HAR import, API Discovery, Schema, Workspace | 2026-08-20 |
 | v4.0 | **ProGuard fix** (-dontoptimize + comprehensive keep rules → APK 10→15MB), **MediaPlayer** audio playback, custom tools in catalog, Chat nav wiring, GlassCard border fix, keyboard shortcuts | 2026-08-20 |
-| v6.0 | UTF-8 Content-Length fix (CLI `tools`), 10-accent theme (settings/onboarding/drawer), authenticated `POST /api/keylog` ingestion, QUIC crypto foundation (client+server Initial, traffic-secret derivation, PN reconstruction, v1/v2 Retry integrity), Room v10 (decode + lifecycle state on QUIC connections), handshake decrypt, `parseServerHello`, `QuicStreamReassembler`, `QuicCidTable`. Full pipeline (1-RTT decrypt, ChaCha20-Poly1305, key-phase, production QPACK, Http3StreamParser, PacketPump integration) remains follow-on — see `RELEASE_NOTES_v6.0.md` | 2026-08-23 |
+| v6.0 | UTF-8 Content-Length fix, 10-accent theme, authenticated `POST /api/keylog`, QUIC crypto foundation, Room v10, handshake decrypt, `parseServerHello`, `QuicStreamReassembler`, `QuicCidTable` | 2026-08-23 |
+| v6.0-gapfix | ChaCha20-Poly1305, key-phase rotation, QuicDatagramRouter→PacketPump, production QPACK decoder, Http3StreamParser, QuicFrameWalker. Components built + tested; end-to-end pipeline not wired — see `PROCESS_VS_GAPS.md`. 34 branches consolidated, 30 stale .md files removed. 446 tests. | 2026-08-24 |
 
 **Remaining (separate modules):** ~~#47 Plugin architecture~~, ~~#48 Local API~~, ~~#49 CLI~~ — ALL DONE in v4.0
 

@@ -1,17 +1,18 @@
 # Session Work Tracker — requestr v6.0 (Complete v5 Pending)
 
 **Session:** `461393c6-d9ac-4b7f-a4e8-ecff2e213696`  
-**Integration branch:** `vorflux/v6-merge-integrate`  
-**Source (verified build):** `vorflux/v6-build-verify` @ `4b25e76`  
-**Base:** `origin/backup` (`8194e96`) — strict descendant, fast-forwardable  
-**Updated:** 2026-08-23 (merge-integrate finalization)
+**Canonical branch:** `origin/backup` (HEAD `76ef7bc`)  
+**Updated:** 2026-08-24 (post-gap-fix merge + branch consolidation)
 
-> This tracker reflects the **actually shipped** v6.0 scope on the verified build
-> branch, consistent with `RELEASE_NOTES_v6.0.md` and `REVIEW_REPORT.md`. v6.0 lands
-> the **foundation** for full key-log-sourced QUIC/HTTP-3 decryption plus three
-> fully-wired user-facing features (UTF-8 fix, 10-accent theme, authenticated
-> `/api/keylog`). The full QUIC/HTTP-3 end-to-end decrypt *pipeline* (Tasks 10–12,
-> 14, 17) is an honest follow-on — see "Remaining Follow-ons" below.
+> This tracker reflects the **actually shipped** v6.0 scope as of the gap-fix merge
+> (`62329d3`) and branch consolidation. v6.0 lands the **foundation** for full
+> key-log-sourced QUIC/HTTP-3 decryption plus three fully-wired user-facing features
+> (UTF-8 fix, 10-accent theme, authenticated `/api/keylog`) and five independently
+> tested pipeline components (ChaCha20-Poly1305, key-phase rotation, production
+> QPACK decoder, Http3StreamParser, QuicDatagramRouter, QuicFrameWalker). The
+> end-to-end decrypt pipeline (keylog lookup → 1-RTT decrypt → Http3StreamParser →
+> HTTP/3 persistence) is not yet wired — components exist as tested standalone units.
+> See `PROCESS_VS_GAPS.md` for complete honest status.
 
 ---
 
@@ -72,21 +73,21 @@ Legend: ✅ complete · ⚠️ partial (foundation done) · ⬜ not done (follow
 | 4 | `LocalApiServer` UTF-8 `Content-Length` + `org.json` (CAT-1) | ✅ |
 | 5 | Port 10-accent model into canonical theme architecture (CAT-2a) | ✅ |
 | 6 | Accent theme tests | ✅ |
-| 7 | `QuicCrypto` — client+server Initial, Handshake, 1-RTT, all AEADs, short-header, PN, key-phase | ⚠️ partial |
+| 7 | `QuicCrypto` — client+server Initial, Handshake, 1-RTT, all AEADs, short-header, PN, key-phase | 🟡 partial |
 | 7b | `TlsDecoder.parseServerHello` → negotiated cipher suite | ✅ |
-| 8 | `QuicConnection` + `QuicDecodeStatus` column (MIGRATION_9_10) + CID lifecycle + retained ClientHello random | ⚠️ partial |
-| 9 | `QuicDatagramRouter` — v4/v6 + coalesced ingestion, CID routing, STREAM/CRYPTO reassembly | ⚠️ partial |
-| 10 | Production QPACK decoder (RFC 9204) | ⬜ follow-on |
-| 11 | `Http3StreamParser` — control/unidirectional + request streams | ⬜ follow-on |
-| 12 | `PacketPump` wiring — keylog lookup → Handshake+1-RTT decrypt → HTTP/3 rows + honest key-miss | ⬜ follow-on |
+| 8 | `QuicConnection` + `QuicDecodeStatus` column (MIGRATION_9_10) + CID lifecycle + retained ClientHello random | 🟡 partial |
+| 9 | `QuicDatagramRouter` — v4/v6 + coalesced ingestion, CID routing, STREAM/CRYPTO reassembly | 🟡 partial |
+| 10 | Production QPACK decoder (RFC 9204) | 🟡 partial (built, not wired) |
+| 11 | `Http3StreamParser` — control/unidirectional + request streams | 🟡 partial (built, not wired) |
+| 12 | `PacketPump` wiring — keylog lookup → Handshake+1-RTT decrypt → HTTP/3 rows + honest key-miss | 🟡 partial (router wired; decrypt + persistence not) |
 | 13 | Key producers — authenticated `/api/keylog` PRIMARY + NSS import; reflective bridge optional; no MitmProxyEngine (CAT-2d) | ✅ |
-| 14 | QUIC/HTTP-3 UI honest state (`QuicDecodeStatus`-driven badges) | ⬜ follow-on |
+| 14 | QUIC/HTTP-3 UI honest state (`QuicDecodeStatus`-driven badges) | 🟡 partial (in-memory only) |
 | 15 | Docs + unconditional v6.0 bump + `RELEASE_NOTES_v6.0.md` (CAT-5) | ✅ |
 | 16 | Host build + unit-test gate (no device) | ✅ |
-| 17 | Redroid device gate + deterministic per-suite end-to-end fixtures | ⬜ follow-on (CAT-3) |
-| 18 | Open one PR into `backup` | ⏳ pending (PR agent a10) |
+| 17 | Redroid device gate + deterministic per-suite end-to-end fixtures | ⬜ not started (CAT-3) |
+| 18 | Open one PR into `backup` | ✅ merged via `backup` |
 
-**Summary:** 12 tasks fully complete (1, 2, 3, 3b, 4, 5, 6, 7b, 13, 15, 16 + 18 pending to a10); 3 partial (7, 8, 9 — foundation/primitives done); 5 follow-ons (10, 11, 12, 14, 17).
+**Summary:** 13 tasks fully complete (1-6, 7b, 13, 15, 16, 18); 6 partial (7-12, 14 — components built, end-to-end wiring + persistent UI pending); 1 not started (17).
 
 ---
 
@@ -144,38 +145,59 @@ plus the room compile fixes and the final stale-docs correction.
 
 ---
 
-## Remaining Follow-ons (honest — matches `RELEASE_NOTES_v6.0.md`)
+## Remaining Follow-ons (honest — post-gap-fix merge)
 
-The QUIC/HTTP-3 **decrypt wiring** (foundation complete; full pipeline remains):
+The QUIC/HTTP-3 **decrypt wiring** (components built and tested; end-to-end pipeline not wired):
 
-- **Task 7 remainder:** 1-RTT short-header decryption driving `deriveKeysFromTrafficSecret`; the
-  `TLS_CHACHA20_POLY1305_SHA256` `CipherSuite` (header-protection is a separate ChaCha20 keystream
-  construction); key-phase prev/current/next with auth-before-promotion.
-- **Task 9 remainder:** `QuicDatagramRouter` — v4/v6 + coalesced-packet ingestion and CID dispatch
-  through one `ingest()` (the `QuicStreamReassembler` half is done; the router is not).
-- **Task 10:** production QPACK rewrite (RFC 9204) — `QpackDecoder.decode()` still has no production
-  call site.
-- **Task 11:** `Http3StreamParser` — control/unidirectional + request streams → QPACK → pseudo-headers.
-- **Task 12:** `PacketPump` integration — keylog lookup → Handshake + 1-RTT decrypt → decoded HTTP/3
-  `CapturedTrafficEntity` rows + honest key-miss (`QuicDecodeStatus`, no `wasDecrypted` on the QUIC
-  row) + close/retransmission dedupe.
-- **Task 14:** QUIC/HTTP-3 UI honest state driven by the authoritative `QuicDecodeStatus` column
-  (depends on Tasks 8 + 12 end-to-end drive).
+### ✅ Done via gap-fix merge (`62329d3`)
+- **Task 7 remainder — ChaCha20-Poly1305:** `f083841` — AES-128/256-GCM now co-exists with
+  ChaCha20-Poly1305 (ChaCha20 keystream header protection per RFC 9001 §5.4.4). `QuicCryptoTest`.
+- **Task 7 remainder — key-phase rotation:** `aff4b6d` — prev/current/next key with
+  auth-before-promotion (old phase accepts packets for a grace window). `KeyPhaseTest` (211 lines).
+- **Task 9 remainder — QuicDatagramRouter:** `74b9328` — v4/v6 coalesced-packet ingestion +
+  CID routing wired into `PacketPump`. `QuicDatagramRouterTest` + `PacketPumpQuicDatagramTest`.
+- **Task 10 — Production QPACK decoder:** `12d22e1` — dynamic table, RIC/Base, blocked streams,
+  encoder/decoder stream integration. `QpackProductionTest` + `QpackDecoderTest`. Called by
+  `Http3StreamParser`. **Not instantiated from PacketPump for live capture.**
+- **Task 11 — Http3StreamParser:** `1bffb00` — frame parsing, SETTINGS, QPACK integration,
+  pseudo-header extraction. `Http3StreamParserTest`. **Not instantiated from PacketPump.**
+- **Task 5 (Gap) — QuicFrameWalker:** `0b4bbdb` — NEW_CONNECTION_ID / RETIRE_CONNECTION_ID frame
+  detection and CID lifecycle routing. `QuicFrameWalkerTest`.
+
+### 🟡 Still pending (components exist, not wired)
+- **End-to-end pipeline:** `PacketPump` has zero references to `Http3StreamParser`, zero
+  `TlsKeyLogRegistry` lookups for 1-RTT secrets, zero `decryptProtectedPayload` calls, zero
+  HTTP/3 `CapturedTrafficEntity` persistence. Only writes `DETECTED_ONLY` for `decodeStatus`.
+- **parseServerHello → lockCipherSuite:** `PacketPump` has `lockCipherSuite` but nothing feeds
+  it the parsed cipher suite from `TlsDecoder.parseServerHello` during live capture — 1-RTT
+  AEAD selection is blocked.
+- **Task 14 — QUIC/HTTP-3 UI:** Badges driven by in-memory `quicLiveMap`, not the Room
+  `QuicDecodeStatus` column. No detail bottom sheet, no `Http3DetailSheet`, no
+  `Http3RowIndicator`. Design plan Domain A (HTTP/3 Indicators) has zero implementation.
 - **Task 17:** Redroid device gate + deterministic per-AEAD-suite end-to-end fixtures
-  (`Http3EndToEndFixtureTest`) — not runnable until the pipeline (10–12) is built; live QUIC capture
-  is CAT-3 environment-limited on this non-rooted, no-kernel-TUN Redroid tier.
+  (`Http3EndToEndFixtureTest`) — not runnable until pipeline is wired.
+- **Design plan (4 domains + Task 0):** 38 design mockups exist in `docs/designs/`.
+  Implementation: zero. Task 0 (BadgePill extraction to CommonComponents.kt) not started.
 
-The crypto *primitives*, handshake decrypt, ServerHello parsing, stream reassembler, CID lifecycle
+The crypto primitives, handshake decrypt, ServerHello parsing, stream reassembler, CID lifecycle
 table, the key-ingestion path, the Room v10 schema, and all three user-facing features are in place
-and unit-tested; the full end-to-end decrypt *pipeline* is the follow-on.
+and unit-tested. The gap-fix added five more independently tested components. The full end-to-end
+decrypt *pipeline* is the critical remaining milestone.
 
 ---
 
-## Next Step
+## Next Steps
 
-**PR (Task 18) — owned by PR agent a10.** The `vorflux/v6-merge-integrate` branch is at `4b25e76`,
-clean, and a strict descendant of `origin/backup` (fast-forwardable). a10 should open one PR into
-`backup` with an honest body covering: reconciliation + `archive/main-v5.7`; 10-accent theme port;
-CLI/server UTF-8 fix; QUIC crypto **foundation** + keylog ingestion + Room v10 schema (with the
-explicit honest scope note that the full end-to-end decrypt pipeline remains a follow-on); v6.0 bump
-+ `RELEASE_NOTES_v6.0.md`; full gate results (403 tests, compile/assemble green).
+The branch consolidation is complete (see `docs/MERGE_REPORT.md`). Only `main` and `backup` remain
+on origin. All 34 feature branches deleted. The critical path forward:
+
+1. **End-to-end pipeline wiring:** Keylog lookup → 1-RTT decrypt → `Http3StreamParser` →
+   `CapturedTrafficEntity` persistence in `PacketPump`. All components exist as tested
+   standalone units — the integration is the gap.
+2. **`parseServerHello` → `lockCipherSuite`:** Feed the parsed TLS 1.3 cipher suite from live
+   capture into PacketPump's suite lock for 1-RTT AEAD selection.
+3. **Design implementation plan (Task 0 + 4 domains):** Extract `BadgePill` to
+   `CommonComponents.kt`, then build HTTP/3 Indicators, Runtime CDP, VPN Relay health, and TLS
+   failure surfaces. See `docs/designs/implementation-plan.md` (38 mockups, APPROVED).
+
+See `PROCESS_VS_GAPS.md` for complete honest status across all 20 plan tasks + 5 gaps.
