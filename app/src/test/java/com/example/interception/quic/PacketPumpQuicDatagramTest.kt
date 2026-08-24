@@ -8,6 +8,7 @@ import com.example.data.local.QuicDecodeStatus
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -194,8 +195,15 @@ class PacketPumpQuicDatagramTest {
         assertEquals("example.com", row.sniHost)
         assertEquals("alpn", row.alpn)
         assertEquals(QuicCrypto.VERSION_1, row.quicVersion)
-        assertEquals(QuicDecodeStatus.DETECTED_ONLY, row.decodeStatus)
-        assertEquals("INITIALIZING", row.lifecycleState)
+        // Gap closure: the client Initial's ClientHello really decrypts here (public Initial keys), so
+        // the authoritative status is PARTIALLY_DECODED, not DETECTED_ONLY -- and the row now carries the
+        // ClientHello random that later 1-RTT key lookups are keyed by. The coalesced Handshake packet
+        // stays undecrypted because no traffic secret is registered in this test, which is exactly the
+        // honest key-missing state (no keylogLabels recorded).
+        assertEquals(QuicDecodeStatus.PARTIALLY_DECODED, row.decodeStatus)
+        assertEquals("HANDSHAKE_IN_PROGRESS", row.lifecycleState)
+        assertEquals(64, row.clientRandomHex?.length)
+        assertNull("no traffic secret resolved, so no key-log provenance may be claimed", row.keylogLabels)
     }
 
     @Test
