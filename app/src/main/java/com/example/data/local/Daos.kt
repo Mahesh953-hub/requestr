@@ -59,6 +59,33 @@ interface CapturedTrafficDao {
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insert(item: CapturedTrafficEntity): Long
 
+    /**
+     * Updates the parts of a live HTTP/3 exchange that keep arriving after its row was first written.
+     *
+     * A decoded HTTP/3 request is a real transaction the moment its HEADERS field section decodes, but
+     * its `:status`, response headers, and DATA-frame bodies arrive later, across further QUIC packets
+     * on the same stream. [com.example.interception.PacketPump] therefore inserts the row on first
+     * decode and calls this to keep it truthful, rather than either withholding the row until FIN
+     * (which never arrives for an aborted stream) or inserting a second, duplicate row per update.
+     * Only genuinely decoded values are ever passed here -- nothing is defaulted into place.
+     */
+    @Query(
+        "UPDATE captured_traffic SET statusCode = :statusCode, responseHeaders = :responseHeaders, " +
+            "requestBody = :requestBody, responseBody = :responseBody, " +
+            "requestSizeBytes = :requestSizeBytes, responseSizeBytes = :responseSizeBytes, " +
+            "latencyMs = :latencyMs WHERE id = :id"
+    )
+    suspend fun updateDecodedExchange(
+        id: Long,
+        statusCode: Int?,
+        responseHeaders: Map<String, String>,
+        requestBody: String?,
+        responseBody: String?,
+        requestSizeBytes: Long,
+        responseSizeBytes: Long,
+        latencyMs: Long,
+    )
+
     @Delete
     suspend fun delete(item: CapturedTrafficEntity)
 
@@ -286,6 +313,31 @@ interface QuicConnectionDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(item: QuicConnectionEntity)
+
+    /**
+     * Drives the authoritative decode state of a QUIC connection row from the live decoder
+     * ([com.example.interception.quic.QuicConnectionDecoder]): the [QuicDecodeStatus] high-water mark,
+     * the transport lifecycle state, and the decode provenance -- [clientRandomHex] (the TLS key-log
+     * identity that made decryption possible at all) and [keylogLabels] (exactly which traffic secrets
+     * really resolved, or NULL when none did).
+     *
+     * A targeted UPDATE rather than a whole-row upsert on purpose: the identity columns written once
+     * when the connection was first observed (SNI/ALPN/version/5-tuple) must not be rewritten -- and
+     * cannot be re-derived -- on every status transition.
+     */
+    @Query(
+        "UPDATE quic_connections SET decodeStatus = :decodeStatus, lifecycleState = :lifecycleState, " +
+            "clientRandomHex = :clientRandomHex, keylogLabels = :keylogLabels, updatedAt = :updatedAt " +
+            "WHERE connectionId = :connectionId"
+    )
+    suspend fun updateDecodeState(
+        connectionId: String,
+        decodeStatus: QuicDecodeStatus,
+        lifecycleState: String,
+        clientRandomHex: String?,
+        keylogLabels: String?,
+        updatedAt: Long,
+    )
 
     @Query("SELECT COUNT(*) FROM quic_connections WHERE sessionId = :sessionId")
     fun observeCount(sessionId: Long): Flow<Int>
