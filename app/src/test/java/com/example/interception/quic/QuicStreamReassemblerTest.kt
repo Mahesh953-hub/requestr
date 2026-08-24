@@ -10,7 +10,8 @@ import org.junit.Test
  * Covers each required behaviour in isolation:
  *  - byte-offset segment insertion via [QuicStreamReassembler.feed]
  *  - contiguous [QuicStreamReassembler.drain] of in-order and out-of-order (gapped) segments
- *  - overlap validation: partial overlaps are rejected
+ *  - overlap validation: a legal partial retransmission contributes its new bytes; only bytes that
+ *    contradict still-buffered data are rejected
  *  - retransmission dedupe via `seenRanges` (exact retransmissions, already-drained retransmissions,
  *    and adjacent-range retransmissions that span multiple stored ranges)
  *  - FIN / final-size tracking (final size locked, completion, conflicting-FIN and beyond-final-size
@@ -106,18 +107,103 @@ class QuicStreamReassemblerTest {
     }
 
     @Test
-    fun `a partial overlap with received bytes is rejected as an overlapping-offset violation`() {
+    fun `a partial overlap whose bytes contradict buffered data is rejected`() {
         val r = QuicStreamReassembler(streamId = 5L)
 
         assertEquals(QuicStreamReassembler.FeedResult.ACCEPTED, r.feed(0, bytes("abcde"), isFin = false)) // [0,5)
         val seenBefore = r.seenRangeCount
 
-        // [3,6) overlaps [0,5) on [3,5) and adds [5,6) — partial overlap, strict policy rejects.
+        // [3,6) overlaps [0,5) on [3,5), where the buffered bytes are "de" but this segment claims
+        // "XY". RFC 9000 §2.2 requires retransmitted stream data to be identical, so this is a real
+        // protocol violation (or an injection attempt) and is rejected outright.
         assertEquals(QuicStreamReassembler.FeedResult.REJECTED_OVERLAP, r.feed(3, bytes("XYZ"), isFin = false))
         assertEquals(seenBefore, r.seenRangeCount)          // rejected range not recorded
 
         assertEquals("abcde", str(r.drain()))               // only the accepted segment delivered
         assertEquals(5L, r.nextExpectedOffset)
+    }
+
+    @Test
+    fun `a legal partial retransmission is accepted for its new bytes only`() {
+        // RFC 9000 §2.2: a sender may re-frame stream data on retransmission, so a legal segment can
+        // overlap what was already received and extend beyond it. Rejecting it (the previous behaviour)
+        // discarded real data and could stall the stream behind a gap the peer had already filled.
+        val r = QuicStreamReassembler(streamId = 50L)
+
+        assertEquals(QuicStreamReassembler.FeedResult.ACCEPTED, r.feed(0, bytes("abcde"), isFin = false)) // [0,5)
+        // [3,9) repeats "de" identically and adds "fghi".
+        assertEquals(QuicStreamReassembler.FeedResult.ACCEPTED, r.feed(3, bytes("defghi"), isFin = false))
+
+        assertEquals("abcdefghi", str(r.drain()))
+        assertEquals(9L, r.nextExpectedOffset)
+        assertEquals("coverage collapses into the drained prefix", 0, r.seenRangeCount)
+    }
+
+    @Test
+    fun `a partial retransmission over already-drained bytes still contributes its new bytes`() {
+        // Once bytes are drained they are no longer held, so an overlap against them cannot be
+        // re-verified; it is treated as covered and only the genuinely new remainder is buffered.
+        val r = QuicStreamReassembler(streamId = 51L)
+
+        r.feed(0, bytes("abcd"), isFin = false)
+        assertEquals("abcd", str(r.drain()))
+
+        assertEquals(QuicStreamReassembler.FeedResult.ACCEPTED, r.feed(2, bytes("cdef"), isFin = false))
+        assertEquals("ef", str(r.drain()))
+        assertEquals(6L, r.nextExpectedOffset)
+    }
+
+    @Test
+    fun `an overlapping retransmission that fills a gap unblocks the stream`() {
+        val r = QuicStreamReassembler(streamId = 52L)
+
+        r.feed(4, bytes("efgh"), isFin = false)             // [4,8) — out of order, gap at [0,4)
+        assertEquals("nothing drainable while the gap is open", 0, str(r.drain()).length)
+
+        // The peer re-frames and re-sends from 0, overlapping the buffered tail identically.
+        assertEquals(QuicStreamReassembler.FeedResult.ACCEPTED, r.feed(0, bytes("abcdefgh"), isFin = true))
+
+        assertEquals("abcdefgh", str(r.drain()))
+        assertTrue(r.isComplete)
+    }
+
+    @Test
+    fun `coverage tracking stays bounded and refuses further out-of-order segments at the limit`() {
+        // A peer sending many non-contiguous segments must not grow coverage/buffer state without
+        // limit. Past the bound the reassembler refuses rather than dropping coverage tracking (which
+        // would corrupt reassembly) or buffering unboundedly.
+        val r = QuicStreamReassembler(streamId = 53L, maxTrackedIntervals = 4, maxPendingSegments = 8)
+
+        // Offsets 2,4,6,8 with a permanent gap at 0 -> four disjoint intervals.
+        for (i in 1..4) {
+            assertEquals(QuicStreamReassembler.FeedResult.ACCEPTED, r.feed(i * 2L, bytes("x"), isFin = false))
+        }
+        assertEquals(4, r.seenRangeCount)
+
+        assertEquals(
+            "a fifth disjoint interval exceeds the bound",
+            QuicStreamReassembler.FeedResult.REJECTED_LIMIT,
+            r.feed(20, bytes("x"), isFin = false),
+        )
+        assertEquals("the refused segment is not buffered", 4, r.pendingSegmentCount)
+
+        // A segment that merges into existing coverage adds no interval, so it is still accepted.
+        assertEquals(QuicStreamReassembler.FeedResult.ACCEPTED, r.feed(3, bytes("y"), isFin = false))
+        assertTrue("buffered bytes stay small", r.bufferedByteCount <= 8)
+    }
+
+    @Test
+    fun `a contiguous stream tracks no coverage intervals at all`() {
+        val r = QuicStreamReassembler(streamId = 54L)
+
+        for (i in 0 until 200) {
+            r.feed(i.toLong(), bytes("z"), isFin = false)
+            r.drain()
+        }
+
+        assertEquals("a contiguous stream needs no interval tracking", 0, r.seenRangeCount)
+        assertEquals(0, r.pendingSegmentCount)
+        assertEquals(200L, r.nextExpectedOffset)
     }
 
     @Test

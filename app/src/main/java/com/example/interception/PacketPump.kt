@@ -121,15 +121,18 @@ class PacketPump(
     private val quicConnectionState = LinkedHashMap<String, com.example.interception.quic.QuicConnection>()
 
     /**
-     * The negotiated TLS 1.3 AEAD cipher suite locked per connection (keyed by the same
-     * [connectionId] used for [quicConnectionState]). Normally set from the **real** ServerHello the
-     * live decoder recovers out of the server's Initial-level CRYPTO stream (RFC 8446 §4.1.3 / RFC
-     * 9001 §4.1.3) -- mirrored here so [lockedCipherSuite] can answer for a connection without
-     * reaching into its decoder -- and settable externally through [lockCipherSuite] by a plane that
-     * negotiated the suite itself (e.g. the MITM leg). Until a suite is locked, a connection has no
-     * negotiated AEAD and its Handshake/1-RTT packets cannot be decrypted (the honest key-miss path).
+     * Guards every QUIC decode-state structure above ([quicConnections], [quicConnectionState],
+     * [quicDecoders], [http3RowIds], [pendingHttp3Writes], [quicConnectionGenerations]) plus
+     * [activeFlows] and [lastUdpPersist].
+     *
+     * These are mutated from the tun-read coroutine ([parseIpv4]/[parseIpv6] -> [ingestQuicDatagram]),
+     * pruned and drained from the flush-loop coroutine ([flushNow]), and read from the UI thread
+     * ([quicLiveStateSnapshot]) -- three different threads over plain `LinkedHashMap`s, which is a data
+     * race, not merely a `ConcurrentModificationException` risk. Every access now takes this lock, and
+     * no database call is made while holding it: the ingest path prepares its writes under the lock and
+     * performs them outside it, so a slow disk can never block packet reading.
      */
-    private val quicCipherSuites = mutableMapOf<String, com.example.interception.quic.QuicCrypto.CipherSuite>()
+    private val quicStateLock = Any()
 
     /**
      * P2 QUIC connection-ID routing table and datagram router. [quicDatagramRouter] splits a
@@ -166,14 +169,50 @@ class PacketPump(
     private val quicDecoders = LinkedHashMap<String, com.example.interception.quic.QuicConnectionDecoder>()
 
     /**
-     * Room `captured_traffic.id` per decoded HTTP/3 exchange, keyed `connectionId#streamId`, so later
-     * DATA/`:status` arrivals on the same stream update the row this pump already inserted instead of
-     * inserting a duplicate. Cleared alongside [quicDecoders].
+     * Monotonic decode-state generation per connection routing key. A 5-tuple can legitimately be reused
+     * by a genuinely different QUIC connection later, and after an idle connection's decode state is
+     * released the next packet starts a fresh decoder. Both cases must not inherit the previous
+     * decoder's [http3RowIds] entries, or an update would be applied to an unrelated, older
+     * `captured_traffic` row. Including the generation in the row key makes that impossible.
+     */
+    private val quicConnectionGenerations = mutableMapOf<String, Int>()
+
+    /**
+     * Room `captured_traffic.id` per decoded HTTP/3 exchange, keyed
+     * `connectionId#generation#streamId`, so later DATA/`:status` arrivals on the same stream update
+     * the row this pump already inserted instead of inserting a duplicate -- and so a *different*
+     * decoder generation can never update a previous generation's row.
      */
     private val http3RowIds = LinkedHashMap<String, Long>()
 
+    /**
+     * HTTP/3 exchanges whose decoded content has changed and not yet been written, keyed by the same
+     * row key as [http3RowIds].
+     *
+     * Persisting inside the packet path meant a Room insert/update -- plus a full body serialization --
+     * for every decoded DATA frame, on the tun-read thread, via `runBlocking`. Writes are instead
+     * batched here and flushed from [flushLoop], which already runs once a second: a burst of DATA
+     * frames on one stream now costs one write carrying the latest state instead of one write per
+     * packet, and the read loop never blocks on the database.
+     */
+    private val pendingHttp3Writes = LinkedHashMap<String, PendingHttp3Write>()
+
     /** Real count of HTTP/3 exchanges decoded and persisted, folded into the session's counters. */
     private var http3TransactionCount = 0
+
+    /**
+     * One queued HTTP/3 row write. Holds the live [exchange] plus the immutable per-connection context
+     * a row needs, and the [com.example.interception.quic.QuicConnectionDecoder.Http3Exchange.revision]
+     * last written, so the flush can skip an exchange whose decoded content has not moved since -- the
+     * check that stops repeated body serialization for a stream that is merely being ACKed.
+     */
+    private class PendingHttp3Write(
+        val rowKey: String,
+        val connectionId: String,
+        val exchange: com.example.interception.quic.QuicConnectionDecoder.Http3Exchange,
+        val fallbackAuthority: String,
+        var writtenRevision: Int = -1,
+    )
 
     /**
      * Locks the negotiated TLS 1.3 AEAD cipher suite for [connectionId] from the IANA cipher-suite
@@ -187,16 +226,19 @@ class PacketPump(
      */
     fun lockCipherSuite(connectionId: String, ianaCode: Int): com.example.interception.quic.QuicCrypto.CipherSuite? {
         val suite = com.example.interception.quic.QuicCrypto.CipherSuite.fromIanaCode(ianaCode) ?: return null
-        quicCipherSuites[connectionId] = suite
-        // Push it into the live decoder too, so an externally-negotiated suite unlocks the same
-        // Handshake/1-RTT decrypt path a ServerHello-recovered suite does.
-        quicDecoders[connectionId]?.lockCipherSuite(suite)
+        // The decoder is the single owner of a connection's negotiated suite -- there is no mirrored
+        // copy here to drift out of sync with it. An external lock (a plane that negotiated the suite
+        // itself, e.g. the MITM leg) therefore creates the decoder if this connection has not been seen
+        // yet, with an unknown version that a later long header corrects.
+        synchronized(quicStateLock) {
+            decoderFor(connectionId, version = 0).lockCipherSuite(suite)
+        }
         return suite
     }
 
     /** The locked negotiated cipher suite for [connectionId], or null if none has been locked yet. */
     fun lockedCipherSuite(connectionId: String): com.example.interception.quic.QuicCrypto.CipherSuite? =
-        quicCipherSuites[connectionId]
+        synchronized(quicStateLock) { quicDecoders[connectionId]?.negotiatedCipherSuite }
 
     /**
      * Task 14: read-only snapshot of the live QUIC decode state for the HTTP/3 UI surface. The
@@ -212,10 +254,8 @@ class PacketPump(
      * [missingKeyLabels] names the exact labels that missed, so the UI can say *why* a connection is
      * undecrypted instead of implying it could have been decoded.
      *
-     * Caught defensively: these maps are mutated from the tun-read coroutine and pruned from the
-     * flush-loop coroutine with no lock between them (a pre-existing property of this class), so a
-     * concurrent structural change during iteration is possible in principle; this snapshot degrades
-     * to "nothing to show yet" rather than crashing the caller.
+     * Taken under [quicStateLock], so it is a consistent view rather than an iteration racing the
+     * tun-read and flush coroutines.
      */
     data class QuicLiveSummary(
         val connectionId: String,
@@ -235,9 +275,13 @@ class PacketPump(
         val cipherSuiteUnavailable: Boolean = false,
         val decodedHttp3Exchanges: Int = 0,
         val keyUpdatesPromoted: Int = 0,
+        /** Retry packets whose integrity tag authenticated and which re-keyed the connection. */
+        val retriesAccepted: Int = 0,
+        /** Retry packets rejected because their integrity tag did not authenticate (spoofed/corrupt). */
+        val retriesRejected: Int = 0,
     )
 
-    fun quicLiveStateSnapshot(): List<QuicLiveSummary> = try {
+    fun quicLiveStateSnapshot(): List<QuicLiveSummary> = synchronized(quicStateLock) {
         quicConnectionState.values.map { conn ->
             val decoder = quicDecoders[conn.connectionId]
             QuicLiveSummary(
@@ -258,10 +302,10 @@ class PacketPump(
                 cipherSuiteUnavailable = decoder?.cipherSuiteUnavailable == true,
                 decodedHttp3Exchanges = decoder?.exchanges?.count { it.hasRequestHeaders || it.hasResponseHeaders } ?: 0,
                 keyUpdatesPromoted = decoder?.keyUpdatesPromoted ?: 0,
+                retriesAccepted = decoder?.retriesAccepted ?: 0,
+                retriesRejected = decoder?.retriesRejected ?: 0,
             )
         }
-    } catch (e: ConcurrentModificationException) {
-        emptyList()
     }
 
     /** TCP reassembly + HTTP/TLS pipeline. Feeds decoded transactions into Room. */
@@ -407,9 +451,16 @@ class PacketPump(
     private fun persistUdpFlow(src: String, sPort: Int, dst: String, dPort: Int, payloadLen: Int) {
         val flowId = com.example.correlation.ConnectionKey.forTcp(src, sPort, dst, dPort, 17)
         val now = System.currentTimeMillis()
-        val last = lastUdpPersist[flowId]
-        if (last != null && now - last < UDP_PERSIST_INTERVAL_MS) return
-        lastUdpPersist[flowId] = now
+        val throttled = synchronized(quicStateLock) {
+            val last = lastUdpPersist[flowId]
+            if (last != null && now - last < UDP_PERSIST_INTERVAL_MS) {
+                true
+            } else {
+                lastUdpPersist[flowId] = now
+                false
+            }
+        }
+        if (throttled) return
         val entity = UdpFlowEntity(
             flowId = flowId,
             sessionId = sessionId,
@@ -458,16 +509,22 @@ class PacketPump(
         quicDecoders[connectionId]?.let { return it }
         val decoder = com.example.interception.quic.QuicConnectionDecoder(
             connectionId = connectionId,
-            version = version,
+            initialVersion = version,
             frameWalker = quicFrameWalker,
+            cidTable = quicCidTable,
             secretLookup = { label, clientRandom ->
                 com.example.interception.tls.TlsKeyLogRegistry.lookup(label, clientRandom)
             },
         )
-        quicCipherSuites[connectionId]?.let { decoder.lockCipherSuite(it) }
         quicDecoders[connectionId] = decoder
+        // A new decoder for a routing key that has been seen before starts a new generation, so none of
+        // the previous decoder's HTTP/3 row keys can ever be reused (see [quicConnectionGenerations]).
+        quicConnectionGenerations[connectionId] = (quicConnectionGenerations[connectionId] ?: 0) + 1
         return decoder
     }
+
+    /** Current decode-state generation for [connectionId] (1 for its first decoder). */
+    private fun generationOf(connectionId: String): Int = quicConnectionGenerations[connectionId] ?: 1
 
     /**
      * M1/P2: upsert a quic_connections row once per connection (identified by the routed
@@ -494,47 +551,98 @@ class PacketPump(
         routed: com.example.interception.quic.QuicDatagramRouter.RoutedPacket,
     ) {
         val connectionId = routed.connectionId
+        val outbound = routed.direction == com.example.interception.quic.QuicDatagramRouter.Direction.OUTBOUND
+        // The row's 5-tuple is stored in canonical client->server orientation, matching the routing key
+        // the router builds, so a connection first observed inbound does not record the server as `src`.
+        val clientIp = if (outbound) src else dst
+        val clientPort = if (outbound) sPort else dPort
+        val serverIp = if (outbound) dst else src
+        val serverPort = if (outbound) dPort else sPort
 
-        // Advance (or create) the in-memory state machine for every routed packet on this
-        // connection, regardless of whether we've already persisted the Room row below -- e.g. a
-        // coalesced Handshake after the Initial, or a retransmitted/second Initial, still means
-        // "handshake in progress".
-        val conn = quicConnectionState.getOrPut(connectionId) {
-            com.example.interception.quic.QuicConnection(
-                connectionId = connectionId,
-                sessionId = sessionId,
-                srcIp = src, srcPort = sPort,
-                dstIp = dst, dstPort = dPort,
+        // Everything below prepares the writes under [quicStateLock]; the database calls happen after it
+        // is released so a slow disk never blocks the tun-read loop.
+        val write: QuicConnectionWrite
+        synchronized(quicStateLock) {
+            val conn = quicConnectionState.getOrPut(connectionId) {
+                com.example.interception.quic.QuicConnection(
+                    connectionId = connectionId,
+                    sessionId = sessionId,
+                    srcIp = clientIp, srcPort = clientPort,
+                    dstIp = serverIp, dstPort = serverPort,
+                    sniHost = routed.sniHostname,
+                    alpn = routed.alpn,
+                    quicVersion = routed.version,
+                    dstConnectionId = connectionId,
+                )
+            }
+            conn.bytesReceived += routed.payloadBytes.size
+
+            // P2 (gap closure): run the real decode state machine for this connection -- key-log identity
+            // lookup, ServerHello cipher lock, Handshake/0-RTT/1-RTT decryption with key-phase rotation,
+            // CRYPTO/STREAM reassembly, and HTTP/3 parsing. The lifecycle state is the decoder's measured
+            // one, not a packet-type guess: HANDSHAKE_COMPLETE means 1-RTT really decrypted, and CLOSED
+            // means a CONNECTION_CLOSE frame was really read out of a decrypted payload.
+            val decoder = decoderFor(connectionId, routed.version)
+            val decode = decoder.ingest(routed)
+            conn.state = decoder.lifecycle
+
+            // Register the streams the decoder actually reassembled so
+            // [com.example.interception.quic.QuicStream] reflects real decoded state, keyed by the full
+            // 62-bit stream ID rather than a narrowed one.
+            for (exchange in decoder.exchanges) {
+                val stream = conn.streams.getOrPut(exchange.streamId) {
+                    com.example.interception.quic.QuicStream(streamId = exchange.streamId, connectionId = connectionId)
+                }
+                if (exchange.hasRequestHeaders && stream.decodedHeaders == null) {
+                    stream.decodedHeaders = exchange.requestHeaders
+                }
+                if (exchange.requestComplete && exchange.responseComplete) {
+                    stream.state = com.example.interception.quic.StreamState.CLOSED
+                }
+            }
+
+            val firstObservation = quicConnections.add(connectionId)
+            val now = System.currentTimeMillis()
+            write = QuicConnectionWrite(
+                insertIdentity = if (firstObservation) {
+                    QuicConnectionEntity(
+                        connectionId = connectionId,
+                        sessionId = sessionId,
+                        srcIp = clientIp, destIp = serverIp,
+                        srcPort = clientPort, destPort = serverPort,
+                        sniHost = routed.sniHostname,
+                        alpn = routed.alpn,
+                        quicVersion = decoder.version,
+                        dstConnectionId = connectionId,
+                        establishedAt = now,
+                        decodeStatus = decoder.decodeStatus,
+                        lifecycleState = decoder.lifecycle.name,
+                        updatedAt = now,
+                        clientRandomHex = decoder.clientRandomHex,
+                        keylogLabels = decoder.resolvedKeyLabelsCsv(),
+                    )
+                } else {
+                    null
+                },
+                // The monotonic update runs on first observation too: the identity insert is
+                // IGNORE-on-conflict, so when a row already exists (an idle connection whose decode state
+                // was released, then resumed) this is what carries the state forward without wiping it.
+                updateState = firstObservation || decode.statusChanged || decode.lifecycleChanged || decode.provenanceChanged,
+                decodeStatus = decoder.decodeStatus,
+                decodeStatusRank = decoder.decodeStatusRank,
+                lifecycleState = decoder.lifecycle.name,
+                lifecycleRank = decoder.lifecycleStateRank,
+                clientRandomHex = decoder.clientRandomHex,
+                keylogLabels = decoder.resolvedKeyLabelsCsv(),
                 sniHost = routed.sniHostname,
                 alpn = routed.alpn,
-                quicVersion = routed.version,
-                dstConnectionId = connectionId,
+                quicVersion = decoder.version,
+                updatedAt = now,
             )
-        }
-        conn.bytesReceived += routed.payloadBytes.size
 
-        // P2 (gap closure): run the real decode state machine for this connection -- key-log identity
-        // lookup, ServerHello cipher lock, Handshake/0-RTT/1-RTT decryption with key-phase rotation,
-        // CRYPTO/STREAM reassembly, and HTTP/3 parsing. The lifecycle state below is the decoder's
-        // measured one, not a packet-type guess: HANDSHAKE_COMPLETE means 1-RTT really decrypted, and
-        // CLOSED means a CONNECTION_CLOSE frame was really read out of a decrypted payload.
-        val decoder = decoderFor(connectionId, routed.version)
-        val decode = decoder.ingest(routed)
-        conn.state = decoder.lifecycle
-        // Mirror a ServerHello-recovered suite so [lockedCipherSuite] answers for this connection.
-        decoder.negotiatedCipherSuite?.let { quicCipherSuites[connectionId] = it }
-        // Stream 0 is the client-initiated bidirectional first-request stream; register the streams the
-        // decoder actually reassembled so [com.example.interception.quic.QuicStream] reflects real
-        // decoded state rather than an assumption.
-        for (exchange in decoder.exchanges) {
-            val stream = conn.streams.getOrPut(exchange.streamId.toInt()) {
-                com.example.interception.quic.QuicStream(streamId = exchange.streamId.toInt(), connectionId = connectionId)
-            }
-            if (exchange.hasRequestHeaders && stream.decodedHeaders == null) {
-                stream.decodedHeaders = exchange.requestHeaders
-            }
-            if (exchange.requestComplete && exchange.responseComplete) {
-                stream.state = com.example.interception.quic.StreamState.CLOSED
+            // Queue the exchanges that gained real decoded content; the write happens in [flushNow].
+            for (exchange in decode.updatedExchanges) {
+                enqueueHttp3Write(connectionId, conn, exchange)
             }
         }
 
@@ -543,91 +651,166 @@ class PacketPump(
                 TAG,
                 "QUIC ${if (routed.decrypted) "decrypted" else "heuristic"} SNI: " +
                     "${routed.sniHostname} alpn=${routed.alpn} " +
-                    "(${if (routed.direction == com.example.interception.quic.QuicDatagramRouter.Direction.OUTBOUND) "outbound" else "inbound"})",
+                    "(${if (outbound) "outbound" else "inbound"})",
             )
         }
 
-        val firstObservation = quicConnections.add(connectionId)
-        if (firstObservation) {
-            val now = System.currentTimeMillis()
-            val entity = QuicConnectionEntity(
-                connectionId = connectionId,
-                sessionId = sessionId,
-                srcIp = src, destIp = dst,
-                srcPort = sPort, destPort = dPort,
-                sniHost = routed.sniHostname,
-                alpn = routed.alpn,
-                quicVersion = routed.version,
-                dstConnectionId = connectionId,
-                establishedAt = now,
-                decodeStatus = decoder.decodeStatus,
-                lifecycleState = decoder.lifecycle.name,
-                updatedAt = now,
-                clientRandomHex = decoder.clientRandomHex,
-                keylogLabels = decoder.resolvedKeyLabelsCsv(),
-            )
-            runCatching {
-                runBlocking { db.quicConnectionDao().upsert(entity) }
-            }.onFailure { e -> Log.w(TAG, "Failed to persist QUIC connection: ${e.message}") }
-        } else if (decode.statusChanged || decode.lifecycleChanged || decode.provenanceChanged) {
-            // Targeted update: the identity columns written on first observation (SNI/ALPN/version/
-            // 5-tuple) stay untouched; only the decode status, lifecycle and provenance move.
-            runCatching {
-                runBlocking {
-                    db.quicConnectionDao().updateDecodeState(
-                        connectionId = connectionId,
-                        decodeStatus = decoder.decodeStatus,
-                        lifecycleState = decoder.lifecycle.name,
-                        clientRandomHex = decoder.clientRandomHex,
-                        keylogLabels = decoder.resolvedKeyLabelsCsv(),
-                        updatedAt = System.currentTimeMillis(),
-                    )
-                }
-            }.onFailure { e -> Log.w(TAG, "Failed to update QUIC decode state: ${e.message}") }
-        }
-
-        for (exchange in decode.updatedExchanges) {
-            persistHttp3Exchange(connectionId, routed, conn, exchange)
-        }
+        applyQuicConnectionWrite(connectionId, write)
     }
 
     /**
-     * Persists one genuinely decoded HTTP/3 exchange into [CapturedTrafficEntity], inserting the row
-     * the first time the exchange carries decoded HEADERS and updating that same row as its `:status`,
-     * response headers and DATA bodies arrive on later packets.
-     *
-     * Honesty rules this enforces:
-     *  - **Nothing is written without a decoded field section.** An exchange with neither request nor
-     *    response HEADERS decoded produces no row at all, so an undecryptable connection leaves the
-     *    traffic table empty rather than holding a plausible-looking placeholder.
-     *  - `wasDecrypted = true` / `isUndecoded = false` are literally true here: the bytes came out of
-     *    an AEAD-authenticated 1-RTT payload and a QPACK field section, not from an SNI guess.
-     *  - `statusCode` stays null until a `:status` pseudo-header really decodes.
-     *  - The row's `connectionId` is this QUIC connection's routing key, so
-     *    [com.example.correlation.graph.ConnectionLineage] joins it exactly like a TCP transaction.
+     * The prepared Room writes for one routed packet. Built while holding [quicStateLock] and applied
+     * after releasing it, so the decode state and the database never contend on the same critical
+     * section.
      */
-    private fun persistHttp3Exchange(
+    private class QuicConnectionWrite(
+        val insertIdentity: QuicConnectionEntity?,
+        val updateState: Boolean,
+        val decodeStatus: QuicDecodeStatus,
+        val decodeStatusRank: Int,
+        val lifecycleState: String,
+        val lifecycleRank: Int,
+        val clientRandomHex: String?,
+        val keylogLabels: String?,
+        val sniHost: String?,
+        val alpn: String?,
+        val quicVersion: Int?,
+        val updatedAt: Long,
+    )
+
+    /**
+     * Applies a prepared connection write: an IGNORE-on-conflict identity insert (never a REPLACE, which
+     * would discard the SNI/ALPN/identity columns a resumed connection can no longer re-derive) followed
+     * by the monotonic state update that can only move `decodeStatus`/`lifecycleState` forward and
+     * fill-forward provenance.
+     */
+    private fun applyQuicConnectionWrite(connectionId: String, write: QuicConnectionWrite) {
+        write.insertIdentity?.let { entity ->
+            runCatching {
+                runBlocking {
+                    // -1 means the row already exists. It may belong to a *previous* capture session,
+                    // because a 5-tuple key is reused across sessions; in that case claim it for this
+                    // session rather than leaving a stale row owned by a finished one. Within one session
+                    // the claim is a no-op and the monotonic update below stays the only writer.
+                    if (db.quicConnectionDao().insertIfAbsent(entity) == -1L) {
+                        db.quicConnectionDao().claimForSession(
+                            connectionId = entity.connectionId,
+                            sessionId = entity.sessionId,
+                            srcIp = entity.srcIp,
+                            destIp = entity.destIp,
+                            srcPort = entity.srcPort,
+                            destPort = entity.destPort,
+                            sniHost = entity.sniHost,
+                            alpn = entity.alpn,
+                            quicVersion = entity.quicVersion,
+                            establishedAt = entity.establishedAt,
+                            decodeStatus = entity.decodeStatus,
+                            lifecycleState = entity.lifecycleState,
+                            clientRandomHex = entity.clientRandomHex,
+                            keylogLabels = entity.keylogLabels,
+                            updatedAt = entity.updatedAt,
+                        )
+                    }
+                }
+            }.onFailure { e -> Log.w(TAG, "Failed to persist QUIC connection: ${e.message}") }
+        }
+        if (!write.updateState) return
+        runCatching {
+            runBlocking {
+                db.quicConnectionDao().updateDecodeState(
+                    connectionId = connectionId,
+                    decodeStatus = write.decodeStatus,
+                    decodeStatusRank = write.decodeStatusRank,
+                    lifecycleState = write.lifecycleState,
+                    lifecycleRank = write.lifecycleRank,
+                    clientRandomHex = write.clientRandomHex,
+                    keylogLabels = write.keylogLabels,
+                    sniHost = write.sniHost,
+                    alpn = write.alpn,
+                    quicVersion = write.quicVersion,
+                    updatedAt = write.updatedAt,
+                )
+            }
+        }.onFailure { e -> Log.w(TAG, "Failed to update QUIC decode state: ${e.message}") }
+    }
+
+    /**
+     * Queues one genuinely decoded HTTP/3 exchange for persistence. Must be called while holding
+     * [quicStateLock].
+     *
+     * Nothing is queued without a decoded field section, so an undecryptable connection contributes no
+     * traffic row at all rather than a plausible-looking placeholder. The queue is keyed by
+     * connection + decode generation + stream, so repeated updates to one exchange collapse into a
+     * single pending write instead of accumulating.
+     */
+    private fun enqueueHttp3Write(
         connectionId: String,
-        routed: com.example.interception.quic.QuicDatagramRouter.RoutedPacket,
         conn: com.example.interception.quic.QuicConnection,
         exchange: com.example.interception.quic.QuicConnectionDecoder.Http3Exchange,
     ) {
         if (!exchange.hasRequestHeaders && !exchange.hasResponseHeaders) return
-        val rowKey = "$connectionId#${exchange.streamId}"
-        val host = exchange.authority?.substringBefore(':') ?: conn.sniHost ?: conn.dstIp
-        val path = exchange.path ?: ""
-        val scheme = exchange.scheme ?: "https"
-        val authority = exchange.authority ?: conn.sniHost ?: conn.dstIp
-        val requestBody = exchange.requestBody().takeIf { it.isNotEmpty() }?.let { decodeBody(it, exchange.requestBodyTruncated) }
-        val responseBody = exchange.responseBody().takeIf { it.isNotEmpty() }?.let { decodeBody(it, exchange.responseBodyTruncated) }
+        val rowKey = "$connectionId#${generationOf(connectionId)}#${exchange.streamId}"
+        val existing = pendingHttp3Writes[rowKey]
+        if (existing != null) return // already queued; the flush reads the exchange's latest state
+        pendingHttp3Writes[rowKey] = PendingHttp3Write(
+            rowKey = rowKey,
+            connectionId = connectionId,
+            exchange = exchange,
+            fallbackAuthority = conn.sniHost ?: conn.dstIp,
+        )
+    }
 
-        val existingId = http3RowIds[rowKey]
-        if (existingId != null) {
-            runCatching {
-                runBlocking {
+    /**
+     * Writes every queued HTTP/3 exchange, inserting a row the first time an exchange carries decoded
+     * HEADERS and updating that same row afterwards. Called from [flushNow], never from the packet path.
+     *
+     * Honesty rules this enforces:
+     *  - **Nothing is written without a decoded field section** (see [enqueueHttp3Write]).
+     *  - `wasDecrypted = true` / `isUndecoded = false` are literally true: the bytes came out of an
+     *    AEAD-authenticated payload and a QPACK field section, not from an SNI guess.
+     *  - `statusCode` stays null until a `:status` pseudo-header really decodes, and request metadata is
+     *    filled in later if the response decoded first, rather than staying permanently blank.
+     *  - The row's `connectionId` is the QUIC connection's routing key, so
+     *    [com.example.correlation.graph.ConnectionLineage] joins it exactly like a TCP transaction.
+     *
+     * An exchange whose revision has not moved since its last write is skipped, so a stream that is only
+     * being ACKed costs neither a body serialization nor a database round trip.
+     */
+    private suspend fun flushHttp3Writes() {
+        val queued = synchronized(quicStateLock) {
+            val snapshot = pendingHttp3Writes.values.toList()
+            pendingHttp3Writes.clear()
+            snapshot
+        }
+        if (queued.isEmpty()) return
+        var inserted = 0
+        for (write in queued) {
+            val exchange = write.exchange
+            val revision = exchange.revision
+            if (revision == write.writtenRevision) continue
+            val rowId = synchronized(quicStateLock) { http3RowIds[write.rowKey] }
+            val requestBody = exchange.requestBody().takeIf { it.isNotEmpty() }
+                ?.let { decodeBody(it, exchange.requestBodyTruncated) }
+            val responseBody = exchange.responseBody().takeIf { it.isNotEmpty() }
+                ?.let { decodeBody(it, exchange.responseBodyTruncated) }
+            val authority = exchange.authority ?: write.fallbackAuthority
+            val host = exchange.authority?.substringBefore(':') ?: write.fallbackAuthority
+            val path = exchange.path ?: ""
+            val scheme = exchange.scheme ?: "https"
+            val method = exchange.method ?: ""
+
+            if (rowId != null) {
+                runCatching {
                     db.capturedTrafficDao().updateDecodedExchange(
-                        id = existingId,
+                        id = rowId,
+                        method = method,
+                        url = "$scheme://$authority$path",
+                        host = host,
+                        path = path,
+                        hasRequestHeaders = exchange.hasRequestHeaders,
+                        requestHeaders = exchange.requestHeaders,
                         statusCode = exchange.statusCode,
+                        hasResponseHeaders = exchange.hasResponseHeaders,
                         responseHeaders = exchange.responseHeaders,
                         requestBody = requestBody,
                         responseBody = responseBody,
@@ -635,43 +818,70 @@ class PacketPump(
                         responseSizeBytes = exchange.responseBodyBytes,
                         latencyMs = exchange.latencyMs,
                     )
-                }
-            }.onFailure { e -> Log.w(TAG, "Failed to update HTTP/3 exchange: ${e.message}") }
-            return
-        }
+                }.onSuccess { write.writtenRevision = revision }
+                    .onFailure { e -> Log.w(TAG, "Failed to update HTTP/3 exchange: ${e.message}") }
+                continue
+            }
 
-        val entity = com.example.data.local.CapturedTrafficEntity(
-            sessionId = sessionId,
-            method = exchange.method ?: "",
-            url = "$scheme://$authority$path",
-            host = host,
-            path = path,
-            statusCode = exchange.statusCode,
-            protocol = HTTP3_PROTOCOL,
-            requestHeaders = exchange.requestHeaders,
-            responseHeaders = exchange.responseHeaders,
-            requestBody = requestBody,
-            responseBody = responseBody,
-            requestSizeBytes = exchange.requestBodyBytes,
-            responseSizeBytes = exchange.responseBodyBytes,
-            latencyMs = exchange.latencyMs,
-            timestamp = System.currentTimeMillis(),
-            wasDecrypted = true,
-            isUndecoded = false,
-            connectionId = connectionId,
-        )
-        runCatching {
-            runBlocking { db.capturedTrafficDao().insert(entity) }
-        }.onSuccess { rowId ->
-            http3RowIds[rowKey] = rowId
-            exchange.persistedRowId = rowId
-            http3TransactionCount++
-            Log.i(
-                TAG,
-                "HTTP/3 decoded: ${exchange.method ?: "?"} $authority$path " +
-                    "status=${exchange.statusCode ?: "-"} stream=${exchange.streamId} v${routed.version.toString(16)}",
+            val entity = com.example.data.local.CapturedTrafficEntity(
+                sessionId = sessionId,
+                method = method,
+                url = "$scheme://$authority$path",
+                host = host,
+                path = path,
+                statusCode = exchange.statusCode,
+                protocol = HTTP3_PROTOCOL,
+                requestHeaders = exchange.requestHeaders,
+                responseHeaders = exchange.responseHeaders,
+                requestBody = requestBody,
+                responseBody = responseBody,
+                requestSizeBytes = exchange.requestBodyBytes,
+                responseSizeBytes = exchange.responseBodyBytes,
+                latencyMs = exchange.latencyMs,
+                timestamp = System.currentTimeMillis(),
+                wasDecrypted = true,
+                isUndecoded = false,
+                connectionId = write.connectionId,
             )
-        }.onFailure { e -> Log.w(TAG, "Failed to persist HTTP/3 exchange: ${e.message}") }
+            runCatching { db.capturedTrafficDao().insert(entity) }
+                .onSuccess { newId ->
+                    write.writtenRevision = revision
+                    inserted++
+                    synchronized(quicStateLock) { http3RowIds[write.rowKey] = newId }
+                }
+                .onFailure { e -> Log.w(TAG, "Failed to persist HTTP/3 exchange: ${e.message}") }
+        }
+        if (inserted > 0) {
+            synchronized(quicStateLock) {
+                http3TransactionCount += inserted
+                trimHttp3RowIds()
+            }
+        }
+        // Exchanges that are still live must stay queued so later DATA/:status arrivals are written; the
+        // revision check above makes a re-queued, unchanged exchange free.
+        synchronized(quicStateLock) {
+            for (write in queued) {
+                if (write.exchange.revision != write.writtenRevision) pendingHttp3Writes[write.rowKey] = write
+            }
+        }
+    }
+
+    /**
+     * Bounds [http3RowIds] without breaking a live exchange's update path: entries whose connection no
+     * longer has a decoder are dropped first (those exchanges can never change again), and only if that
+     * is not enough are the oldest remaining entries dropped. Must be called while holding
+     * [quicStateLock].
+     */
+    private fun trimHttp3RowIds() {
+        if (http3RowIds.size <= MAX_TRACKED_HTTP3_ROWS) return
+        val live = quicDecoders.keys
+        val dead = http3RowIds.keys.filter { key -> live.none { key.startsWith("$it#") } }
+        for (key in dead) {
+            http3RowIds.remove(key)
+            if (http3RowIds.size <= MAX_TRACKED_HTTP3_ROWS) return
+        }
+        val excess = http3RowIds.size - MAX_TRACKED_HTTP3_ROWS
+        http3RowIds.keys.take(excess).toList().forEach { http3RowIds.remove(it) }
     }
 
     /**
@@ -748,10 +958,12 @@ class PacketPump(
 
     private fun trackFlow(key: String) {
         val now = System.currentTimeMillis()
-        activeFlows[key] = now
-        if (activeFlows.size > MAX_TRACKED_FLOWS) {
-            val cutoff = now - FLOW_TTL_MS
-            activeFlows.entries.removeAll { it.value < cutoff }
+        synchronized(quicStateLock) {
+            activeFlows[key] = now
+            if (activeFlows.size > MAX_TRACKED_FLOWS) {
+                val cutoff = now - FLOW_TTL_MS
+                activeFlows.entries.removeAll { it.value < cutoff }
+            }
         }
     }
 
@@ -765,18 +977,24 @@ class PacketPump(
     private suspend fun flushNow() {
         val now = System.currentTimeMillis()
         val cutoff = now - FLOW_TTL_MS
-        activeFlows.entries.removeAll { it.value < cutoff }
-        val connections = activeFlows.size
+
+        // Queued HTTP/3 rows are written here rather than on the packet path (see [pendingHttp3Writes]).
+        flushHttp3Writes()
 
         captureEngine.prune()
 
-        // M1: bound the UDP/QUIC bookkeeping maps -- drop entries for flows no longer active so
-        // long-running sessions don't leak memory keyed by every 5-tuple ever seen.
-        lastUdpPersist.entries.removeAll { it.value < cutoff }
-        if (quicConnections.size > MAX_TRACKED_FLOWS) quicConnections.clear()
-        if (quicConnectionState.size > MAX_TRACKED_FLOWS) quicConnectionState.clear()
-        if (quicCipherSuites.size > MAX_TRACKED_FLOWS) quicCipherSuites.clear()
-        pruneQuicDecoders(cutoff)
+        val connections = synchronized(quicStateLock) {
+            activeFlows.entries.removeAll { it.value < cutoff }
+            // M1: bound the UDP/QUIC bookkeeping maps -- drop entries for flows no longer active so
+            // long-running sessions don't leak memory keyed by every 5-tuple ever seen. Eviction is
+            // always per-connection and idle-driven: the previous "clear the whole map when it grows
+            // past the cap" behaviour discarded live connections' decode state (and their identity
+            // bookkeeping) wholesale, which is what let a still-active connection be re-announced as a
+            // brand new one.
+            lastUdpPersist.entries.removeAll { it.value < cutoff }
+            pruneQuicDecoders(cutoff)
+            activeFlows.size
+        }
 
         InterceptionStateRepository.updateCounters(
             packetCount = packetCount,
@@ -786,7 +1004,7 @@ class PacketPump(
 
         // Real transaction count: HTTP/1.x transactions the capture engine decoded plus HTTP/3
         // exchanges this pump decoded and persisted. Both are genuinely decoded rows, never estimates.
-        val transactions = captureEngine.transactionCount + http3TransactionCount
+        val transactions = captureEngine.transactionCount + synchronized(quicStateLock) { http3TransactionCount }
 
         runCatching {
             db.captureSessionDao().updateCounters(
@@ -808,26 +1026,67 @@ class PacketPump(
      */
     private fun pruneQuicDecoders(cutoff: Long) {
         val expired = quicDecoders.entries.filter { it.value.lastActivityAt < cutoff }.map { it.key }
-        for (key in expired) {
-            quicDecoders.remove(key)?.release()
-            http3RowIds.keys.removeAll { it.startsWith("$key#") }
-        }
+        for (key in expired) releaseQuicConnectionState(key)
+        // Still over the cap: evict the least recently active connection, not an arbitrary one, and never
+        // the whole map.
         while (quicDecoders.size > MAX_TRACKED_FLOWS) {
-            val oldest = quicDecoders.keys.firstOrNull() ?: break
-            quicDecoders.remove(oldest)?.release()
-            http3RowIds.keys.removeAll { it.startsWith("$oldest#") }
+            val leastRecent = quicDecoders.entries.minByOrNull { it.value.lastActivityAt }?.key ?: break
+            releaseQuicConnectionState(leastRecent)
         }
-        if (http3RowIds.size > MAX_TRACKED_HTTP3_ROWS) {
-            val excess = http3RowIds.size - MAX_TRACKED_HTTP3_ROWS
-            http3RowIds.keys.take(excess).forEach { http3RowIds.remove(it) }
+        trimHttp3RowIds()
+    }
+
+    /**
+     * Releases every connection-scoped in-memory index together, leaving persisted Room rows intact.
+     * Single place so a new index can never be forgotten by one eviction path and retained by another.
+     *
+     * Deliberately does **not** drop [quicConnectionGenerations]: the generation counter is what stops a
+     * later decoder for the same routing key from inheriting this one's HTTP/3 row keys, so it must
+     * outlive the decoder it identifies. Its own growth is bounded by the same eviction that bounds
+     * [quicDecoders], since only routing keys that were once live can appear in it.
+     *
+     * Must be called while holding [quicStateLock].
+     */
+    private fun releaseQuicConnectionState(connectionId: String) {
+        quicDecoders.remove(connectionId)?.release()
+        quicConnectionState.remove(connectionId)
+        quicConnections.remove(connectionId)
+        quicFrameWalker.removeConnection(connectionId)
+        quicCidTable.removeConnection(connectionId)
+        pendingHttp3Writes.keys.removeAll { it.startsWith("$connectionId#") }
+        http3RowIds.keys.removeAll { it.startsWith("$connectionId#") }
+        if (quicConnectionGenerations.size > MAX_TRACKED_FLOWS * 2) {
+            // Bound the generation ledger itself: a key with no live decoder can only matter again if
+            // traffic resumes, and that resumption gets a fresh generation anyway.
+            quicConnectionGenerations.keys.removeAll { it !in quicDecoders }
         }
     }
 
     /** Test/inspection hook: the number of live per-connection QUIC decoders currently retained. */
-    internal fun quicDecoderCount(): Int = quicDecoders.size
+    internal fun quicDecoderCount(): Int = synchronized(quicStateLock) { quicDecoders.size }
+
+    /** Test/inspection hook: the number of live QUIC summary objects currently retained. */
+    internal fun quicConnectionStateCount(): Int = synchronized(quicStateLock) { quicConnectionState.size }
+
+    /** Test/inspection hook: whether the decoder still holds a negotiated cipher for this connection. */
+    internal fun hasQuicCipherSuite(connectionId: String): Boolean =
+        synchronized(quicStateLock) { quicDecoders[connectionId]?.negotiatedCipherSuite != null }
 
     /** Test/inspection hook: forces the bounded QUIC decode-state cleanup with an explicit cutoff. */
-    internal fun pruneQuicDecodersForTest(cutoff: Long) = pruneQuicDecoders(cutoff)
+    internal fun pruneQuicDecodersForTest(cutoff: Long) {
+        runBlocking { flushHttp3Writes() }
+        synchronized(quicStateLock) { pruneQuicDecoders(cutoff) }
+    }
+
+    /**
+     * Test/inspection hook: writes every queued HTTP/3 row now. Production code batches these into
+     * [flushNow]; a test that asserts on Room immediately after feeding packets calls this instead of
+     * sleeping for a flush interval.
+     */
+    internal fun flushHttp3WritesForTest() = runBlocking { flushHttp3Writes() }
+
+    /** Test/inspection hook: the number of HTTP/3 row writes still queued. */
+    internal fun pendingHttp3WriteCount(): Int = synchronized(quicStateLock) { pendingHttp3Writes.size }
 
     private fun Byte.u(): Int = this.toInt() and 0xFF
 

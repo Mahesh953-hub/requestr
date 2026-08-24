@@ -679,16 +679,10 @@ object QuicCrypto {
             val header = working.copyOfRange(0, headerLen)
             val ciphertext = working.copyOfRange(headerLen, payloadEnd)
 
-            // Nonce = iv XOR packet number (right-aligned, RFC 9001 §5.3).
-            val nonce = keys.iv.copyOf()
-            for (i in 0 until 8) {
-                val shift = i * 8
-                val pnByte = ((pn ushr shift) and 0xFF).toByte()
-                nonce[nonce.size - 1 - i] = (nonce[nonce.size - 1 - i].toInt() xor pnByte.toInt()).toByte()
-            }
-
+            // Nonce = iv XOR packet number (right-aligned, RFC 9001 §5.3) -- the same construction every
+            // level uses, so it comes from the one shared helper rather than a per-call-site copy.
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keys.key, "AES"), GCMParameterSpec(128, nonce))
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keys.key, "AES"), GCMParameterSpec(128, nonceFor(keys.iv, pn)))
             cipher.updateAAD(header)
             val plaintext = cipher.doFinal(ciphertext)
             return DecryptedInitial(cryptoData = plaintext, packetNumber = pn)
@@ -1054,19 +1048,11 @@ object QuicCrypto {
             if (working.size - ciphertextStart < 16) return null // not even a full 16-byte AEAD tag
             val ciphertext = working.copyOfRange(ciphertextStart, working.size)
 
-            // Nonce = iv XOR packet number (right-aligned, RFC 9001 §5.3).
-            val nonce = keys.iv.copyOf()
-            for (i in 0 until 8) {
-                val shift = i * 8
-                val pnByte = ((pn ushr shift) and 0xFF).toByte()
-                nonce[nonce.size - 1 - i] = (nonce[nonce.size - 1 - i].toInt() xor pnByte.toInt()).toByte()
-            }
-
             // Empty AAD: this primitive authenticates only the ciphertext + packet number, not the
             // stripped header (callers that need full-header authentication keep using
             // [decryptInitialPacket], which AADs the whole long header). The suite's AEAD is selected
             // by [PacketProtectionKeys.cipherSuite] (AES/GCM or ChaCha20-Poly1305).
-            aeadDecrypt(keys, nonce, ciphertext)
+            aeadDecrypt(keys, nonceFor(keys.iv, pn), ciphertext)
         } catch (e: Exception) {
             Log.d(TAG, "Protected payload decrypt failed: ${e.message}")
             null
@@ -1272,6 +1258,34 @@ object QuicCrypto {
         }
         if (aad.isNotEmpty()) cipher.updateAAD(aad)
         return cipher.doFinal(plaintext)
+    }
+
+    /**
+     * Computes the Retry Integrity Tag (RFC 9001 §5.8 / RFC 9369 §3.3.3) for [retryPacketWithoutTag]
+     * under [odcid] -- the protect-side counterpart of [validateRetryIntegrityTag], exposed inside the
+     * module so deterministic fixtures can build a *genuinely valid* Retry packet. Returns null for an
+     * unrecognized [version] or on any failure, never throws.
+     */
+    internal fun retryIntegrityTag(version: Int, odcid: ByteArray, retryPacketWithoutTag: ByteArray): ByteArray? {
+        if (odcid.size > 255) return null
+        val (key, nonce) = when (version) {
+            VERSION_1 -> RETRY_INTEGRITY_KEY_V1 to RETRY_INTEGRITY_NONCE_V1
+            VERSION_2 -> RETRY_INTEGRITY_KEY_V2 to RETRY_INTEGRITY_NONCE_V2
+            else -> return null
+        }
+        return try {
+            val pseudoPacket = ByteArray(1 + odcid.size + retryPacketWithoutTag.size)
+            pseudoPacket[0] = odcid.size.toByte()
+            System.arraycopy(odcid, 0, pseudoPacket, 1, odcid.size)
+            System.arraycopy(retryPacketWithoutTag, 0, pseudoPacket, 1 + odcid.size, retryPacketWithoutTag.size)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce))
+            cipher.updateAAD(pseudoPacket)
+            cipher.doFinal(ByteArray(0)) // empty plaintext: the output is exactly the 16-byte tag
+        } catch (e: Exception) {
+            Log.d(TAG, "Retry Integrity Tag computation failed: ${e.message}")
+            null
+        }
     }
 
     /**

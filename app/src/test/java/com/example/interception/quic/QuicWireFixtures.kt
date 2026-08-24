@@ -292,6 +292,41 @@ internal object QuicWireFixtures {
     )
 
     /**
+     * Builds a Retry packet (RFC 9000 §17.2.5) with a genuinely valid Retry Integrity Tag (RFC 9001
+     * §5.8) computed over [odcid] — the client's *original* Destination Connection ID, which is what
+     * makes the tag verifiable only by an entity that actually observed the client's Initial.
+     *
+     * A Retry has no Length field, no packet number and no protected payload: it is the long header,
+     * the token, and the trailing 16-byte tag. Pass [validTag] = false to corrupt the tag and reproduce
+     * a spoofed or damaged Retry, which must be rejected rather than acted upon.
+     */
+    fun retryPacket(
+        version: Int,
+        dcid: ByteArray,
+        scid: ByteArray,
+        token: ByteArray,
+        odcid: ByteArray,
+        validTag: Boolean = true,
+    ): ByteArray {
+        val firstByte = 0xC0 or (retryTypeBits(version) shl 4)
+        val withoutTag = byteArrayOf(firstByte.toByte()) +
+            byteArrayOf(
+                ((version shr 24) and 0xFF).toByte(),
+                ((version shr 16) and 0xFF).toByte(),
+                ((version shr 8) and 0xFF).toByte(),
+                (version and 0xFF).toByte(),
+            ) +
+            byteArrayOf(dcid.size.toByte()) + dcid +
+            byteArrayOf(scid.size.toByte()) + scid +
+            token
+        val tag = requireNotNull(QuicCrypto.retryIntegrityTag(version, odcid, withoutTag)) {
+            "retry integrity tag could not be computed for version $version"
+        }
+        val finalTag = if (validTag) tag else tag.copyOf().also { it[0] = (it[0].toInt() xor 0xFF).toByte() }
+        return withoutTag + finalTag
+    }
+
+    /**
      * Builds a real protected 1-RTT short-header packet (RFC 9000 §17.3) carrying [frames], with
      * KEY_PHASE bit [keyPhase] (RFC 9001 §6) and the connection's [dcid] verbatim in the header.
      *
@@ -386,6 +421,7 @@ internal object QuicWireFixtures {
     private fun initialTypeBits(version: Int): Int = if (version == QuicCrypto.VERSION_2) 1 else 0
     private fun zeroRttTypeBits(version: Int): Int = if (version == QuicCrypto.VERSION_2) 2 else 1
     private fun handshakeTypeBits(version: Int): Int = if (version == QuicCrypto.VERSION_2) 3 else 2
+    private fun retryTypeBits(version: Int): Int = if (version == QuicCrypto.VERSION_2) 0 else 3
 
     // ── Key material ─────────────────────────────────────────────────────────────────────
 

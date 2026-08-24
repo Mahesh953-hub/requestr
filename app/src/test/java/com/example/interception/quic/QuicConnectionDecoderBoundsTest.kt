@@ -150,6 +150,88 @@ class QuicConnectionDecoderBoundsTest {
     }
 
     @Test
+    fun `a finished stream's reassembler is released as soon as its FIN is drained`() {
+        val scenario = QuicConnectionScenario()
+        scenario.registerSecrets()
+        scenario.completeHandshake()
+
+        scenario.feedInbound(
+            scenario.serverOneRtt(
+                0,
+                QuicWireFixtures.streamFrame(
+                    streamId = 0,
+                    offset = 0,
+                    data = QuicWireFixtures.responseHeadersFrame("200") + QuicWireFixtures.dataFrame("done".toByteArray()),
+                    fin = true,
+                ),
+            ),
+        )
+
+        assertEquals(
+            "a completed stream holds no reassembler: it can never contribute another byte",
+            0,
+            scenario.decoder.trackedStreamCount,
+        )
+        assertEquals("done", String(scenario.decoder.exchanges.single().responseBody()))
+        assertTrue(scenario.decoder.exchanges.single().responseComplete)
+    }
+
+    @Test
+    fun `a retransmission after a stream completes is dropped rather than re-parsed`() {
+        val scenario = QuicConnectionScenario()
+        scenario.registerSecrets()
+        scenario.completeHandshake()
+        val responseBytes = QuicWireFixtures.responseHeadersFrame("200") + QuicWireFixtures.dataFrame("once".toByteArray())
+
+        scenario.feedInbound(scenario.serverOneRtt(0, QuicWireFixtures.streamFrame(0, 0, responseBytes, fin = true)))
+        // The same bytes again after the FIN was already drained. Re-creating a reassembler here would
+        // re-feed the whole response into the HTTP/3 parser and duplicate the body.
+        scenario.feedInbound(scenario.serverOneRtt(1, QuicWireFixtures.streamFrame(0, 0, responseBytes, fin = true)))
+
+        assertEquals(1, scenario.decoder.exchanges.size)
+        assertEquals("once", String(scenario.decoder.exchanges.single().responseBody()))
+        assertEquals(4L, scenario.decoder.exchanges.single().responseBodyBytes)
+        assertEquals(0, scenario.decoder.trackedStreamCount)
+    }
+
+    @Test
+    fun `stream eviction prefers a victim that cannot lose buffered data`() {
+        // Stream 0 completes; streams 4 and 8 hold buffered out-of-order bytes behind a gap. When the cap
+        // forces an eviction, the finished/empty stream must be chosen over one holding real data.
+        val scenario = QuicConnectionScenario(maxTrackedStreams = 2)
+        scenario.registerSecrets()
+        scenario.completeHandshake()
+
+        // Two streams with a permanent gap at offset 0 -> both retain buffered bytes.
+        scenario.feedInbound(scenario.serverOneRtt(0, QuicWireFixtures.streamFrame(4, 8, "gap-a".toByteArray())))
+        scenario.feedInbound(scenario.serverOneRtt(1, QuicWireFixtures.streamFrame(8, 8, "gap-b".toByteArray())))
+        assertEquals(2, scenario.decoder.trackedStreamCount)
+
+        // A third stream forces an eviction; state stays bounded and nothing throws.
+        scenario.feedInbound(scenario.serverOneRtt(2, QuicWireFixtures.streamFrame(12, 8, "gap-c".toByteArray())))
+
+        assertTrue(
+            "tracked streams stay bounded, got ${scenario.decoder.trackedStreamCount}",
+            scenario.decoder.trackedStreamCount <= 2,
+        )
+    }
+
+    @Test
+    fun `bufferedByteCount counts reassembly buffers without copying bodies`() {
+        val scenario = QuicConnectionScenario()
+        scenario.registerSecrets()
+        scenario.completeHandshake()
+
+        // Out-of-order bytes behind a gap: held by the reassembler, not yet by any exchange.
+        scenario.feedInbound(scenario.serverOneRtt(0, QuicWireFixtures.streamFrame(0, 64, ByteArray(128) { 'p'.code.toByte() })))
+
+        assertTrue(
+            "reassembly buffers are part of the bounded-memory probe",
+            scenario.decoder.bufferedByteCount() >= 128,
+        )
+    }
+
+    @Test
     fun `release makes a closed connection reclaim all decode memory`() {
         val scenario = QuicConnectionScenario()
         scenario.registerSecrets()

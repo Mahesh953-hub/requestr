@@ -20,7 +20,13 @@ data class QuicConnection(
     val dstConnectionId: String,
     val establishedAt: Long = System.currentTimeMillis()
 ) {
-    val streams = ConcurrentHashMap<Int, QuicStream>()
+    /**
+     * Live streams observed on this connection, keyed by the full RFC 9000 §2.1 stream ID. The key is a
+     * [Long] because a QUIC stream ID is a 62-bit varint: narrowing it to [Int] silently collided
+     * distinct high-numbered streams onto one entry (and mislabelled them), so the model carries the
+     * real value.
+     */
+    val streams = ConcurrentHashMap<Long, QuicStream>()
     var state: QuicState = QuicState.INITIALIZING
     var bytesSent: Long = 0
     var bytesReceived: Long = 0
@@ -33,7 +39,8 @@ enum class QuicState { INITIALIZING, HANDSHAKE_IN_PROGRESS, HANDSHAKE_COMPLETE, 
  * A single QUIC stream — maps to one HTTP request/response.
  */
 data class QuicStream(
-    val streamId: Int,
+    /** Full 62-bit RFC 9000 §2.1 stream ID -- never narrowed. */
+    val streamId: Long,
     val connectionId: String,
     var isUnidirectional: Boolean = false,
     var state: StreamState = StreamState.OPEN

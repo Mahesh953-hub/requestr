@@ -42,8 +42,9 @@ class QuicDatagramRouter(private val cidTable: QuicCidTable) {
      * (== the [com.example.data.local.QuicConnectionEntity] connectionId), packet type, CIDs, and
      * — for Initial packets — the recovered SNI/ALPN.
      *
-     * @param connectionId routing key resolved via [cidTable] (a [ConnectionKey.forQuic] 5-tuple
-     *   key); the persist path uses this directly as the Room row's primary key.
+     * @param connectionId routing key resolved via [cidTable] (a [ConnectionKey.forQuic] 5-tuple key in
+     *   canonical client->server orientation, so both directions of one connection share it); the
+     *   persist path uses this directly as the Room row's primary key.
      * @param packetType the long-header packet type, or null for a short header (1-RTT).
      * @param payloadBytes this single packet's bytes within the datagram
      *   ([offset] .. [offset] + [length]).
@@ -94,7 +95,16 @@ class QuicDatagramRouter(private val cidTable: QuicCidTable) {
     ): List<RoutedPacket> {
         if (datagramPayload.isEmpty()) return emptyList()
         val direction = directionFor(sPort, dPort)
-        val tupleKey = ConnectionKey.forQuic(src, sPort, dst, dPort)
+        // Canonical client->server orientation. The 5-tuple fallback key must be the SAME string for
+        // both directions of one connection, otherwise a server reply whose DCID is not (or is no
+        // longer) in the CID table mints a second connection keyed by the reversed 5-tuple -- producing
+        // two Room rows for one connection, which is exactly what happens after the in-memory decode
+        // state for an idle connection has been released and traffic resumes.
+        val tupleKey = if (direction == Direction.INBOUND) {
+            ConnectionKey.forQuic(dst, dPort, src, sPort)
+        } else {
+            ConnectionKey.forQuic(src, sPort, dst, dPort)
+        }
         val normTuple = normalizedTuple(src, sPort, dst, dPort)
         val out = mutableListOf<RoutedPacket>()
         var offset = 0
@@ -224,7 +234,19 @@ class QuicDatagramRouter(private val cidTable: QuicCidTable) {
             }
         }
 
-        val connectionId = route(dcid, scid, tupleKey, normTuple, trustDcid = packetType != null)
+        // A Retry's Source Connection ID must NOT become routable here. RFC 9001 §5.8 requires the
+        // Retry Integrity Tag to authenticate before its new CID or token is accepted, and only the
+        // per-connection decoder holds the original DCID that tag is computed over. Registering it at
+        // routing time would let a spoofed Retry inject a CID alias for this connection; the decoder
+        // registers it after the tag verifies (see QuicConnectionDecoder's Retry handling).
+        val connectionId = route(
+            dcid = dcid,
+            scid = scid,
+            tupleKey = tupleKey,
+            normTuple = normTuple,
+            trustDcid = packetType != null,
+            registerScid = packetType != QuicCrypto.LongHeaderPacketType.RETRY,
+        )
 
         val routed = RoutedPacket(
             connectionId = connectionId,
@@ -281,7 +303,9 @@ class QuicDatagramRouter(private val cidTable: QuicCidTable) {
     }
 
     /**
-     * Resolves the routing key for a packet carrying [dcid]/[scid]. When [trustDcid] is true and
+     * Resolves the routing key for a packet carrying [dcid]/[scid]. [registerScid] is false only for a
+     * Retry packet, whose Source Connection ID may not be accepted before its integrity tag has been
+     * validated by the owning connection's decoder. When [trustDcid] is true and
      * [dcid] is non-empty, an existing CID resolves to its connection; an unknown DCID starts a new
      * connection keyed by the 5-tuple [tupleKey]. Otherwise (zero-length DCID, or an untrusted
      * DCID from an unrecognized version / short header) routing falls back to the normalized
@@ -290,15 +314,26 @@ class QuicDatagramRouter(private val cidTable: QuicCidTable) {
      * Initial→Handshake DCID change and the Retry re-key); the normalized tuple is always
      * registered so a zero-length-DCID packet from the opposite direction reaches the connection.
      */
-    private fun route(dcid: ByteArray, scid: ByteArray, tupleKey: String, normTuple: String, trustDcid: Boolean): String {
+    private fun route(
+        dcid: ByteArray,
+        scid: ByteArray,
+        tupleKey: String,
+        normTuple: String,
+        trustDcid: Boolean,
+        registerScid: Boolean = true,
+    ): String {
         val connectionId = if (trustDcid && dcid.isNotEmpty()) {
-            cidTable.lookup(dcid) ?: tupleKey
+            // An unknown DCID still belongs to a known connection when the 4-tuple is already
+            // registered -- a server issuing a fresh CID mid-connection, or a resumed connection whose
+            // CID aliases were released. Consulting the tuple before minting a new key is what keeps
+            // that from splitting one connection into two.
+            cidTable.lookup(dcid) ?: cidTable.lookupByTuple(normTuple) ?: tupleKey
         } else {
             cidTable.lookupByTuple(normTuple) ?: tupleKey
         }
         if (trustDcid) {
             if (dcid.isNotEmpty()) cidTable.addCid(connectionId, dcid)
-            if (scid.isNotEmpty()) cidTable.addCid(connectionId, scid)
+            if (registerScid && scid.isNotEmpty()) cidTable.addCid(connectionId, scid)
         }
         cidTable.registerZeroLengthConnection(normTuple, connectionId)
         return connectionId

@@ -6,55 +6,86 @@ import java.util.TreeMap
 /**
  * Gap-tolerant, retransmission-deduping byte-offset reassembler for a single QUIC stream.
  *
- * QUIC STREAM frames (RFC 9000 §19.8) carry an explicit byte [offset][feed] and a FIN bit, and
- * may arrive out of order, duplicated (retransmissions), or overlapping data already received.
- * This reassembler models one logical stream: it accepts such segments via [feed], deduplicates
- * pure retransmissions, rejects overlapping offsets, tracks the FIN/final-size, and lets the
- * caller [drain] the contiguous byte prefix that has been reassembled in offset order.
+ * QUIC STREAM frames (RFC 9000 §19.8) carry an explicit byte [offset][feed] and a FIN bit, and may
+ * arrive out of order, duplicated (retransmissions), or overlapping data already received. This
+ * reassembler models one logical stream: it accepts such segments via [feed], deduplicates
+ * retransmissions, tracks the FIN/final-size, and lets the caller [drain] the contiguous byte prefix
+ * reassembled so far in offset order.
  *
- * Out-of-order (not-yet-drainable) segments are held in a [TreeMap] keyed by offset, so the
- * lowest pending offset — the next contiguous candidate — is always reachable in O(log n) and
- * segments need not arrive in order. Every byte range ever accepted (including bytes already
- * drained and delivered) is recorded in `seenRanges`, which is what makes a later retransmission
- * of already-delivered data deduplicate instead of re-buffering.
+ * **Overlap policy (RFC 9000 §2.2).** A sender may retransmit stream data with *different* framing
+ * than the original — "the data sent in STREAM frames … MUST be the same", but the frame boundaries
+ * need not be — so a legal retransmission can partially overlap what was already received (e.g.
+ * `[0,5)` arrives, then `[3,9)` re-sends the tail and extends it). Such a segment is therefore
+ * **accepted for its new bytes only**: the already-covered portion is dropped and only the uncovered
+ * remainder is buffered. Rejecting it outright (the previous behaviour) would discard legitimate data
+ * and stall the stream forever behind a gap the peer already filled.
  *
- * Scope: this is the per-stream reassembly primitive backing HTTP/3 STREAM demultiplexing
- * (RFC 9114). It is deliberately single-threaded and self-contained — no Android, Room, or
- * sibling `quic`-package dependencies — so it can be unit-tested in isolation.
+ * A partial overlap is only a violation when the overlapping bytes actually *contradict* bytes still
+ * buffered — that is a detectable protocol error (or an injection attempt) and yields
+ * [FeedResult.REJECTED_OVERLAP]. Overlap against bytes already drained cannot be re-checked (they are
+ * no longer held), so those bytes are simply treated as covered.
  *
- * Overlap policy (stricter than RFC 9000's "retransmitted bytes must be identical"): a segment
- * whose range is already fully covered by received bytes is a [FeedResult.DUPLICATE] retransmission
- * and is dropped; a segment that *partially* overlaps received bytes (bringing new bytes at
- * positions that collide with old ones) is a [FeedResult.REJECTED_OVERLAP] protocol violation and
- * is dropped; only a segment disjoint from all received bytes is [FeedResult.ACCEPTED].
+ * **Bounded tracking.** Received coverage is kept as a *merged, sorted* interval list plus the
+ * implicit `[0, drainedUpTo)` prefix, so a normal contiguous stream collapses to zero tracked
+ * intervals instead of growing one entry per frame. A peer that sends many small non-contiguous
+ * segments (offsets 0, 2, 4, …) still cannot grow this state without limit: once
+ * [maxTrackedIntervals] intervals or [maxPendingSegments] buffered segments are in flight, further
+ * out-of-order segments are refused with [FeedResult.REJECTED_LIMIT] rather than silently dropping
+ * coverage tracking (which would corrupt reassembly) or buffering without bound.
+ *
+ * Scope: this is the per-stream reassembly primitive backing HTTP/3 STREAM demultiplexing (RFC 9114).
+ * It is deliberately single-threaded and self-contained — no Android, Room, or sibling `quic`-package
+ * dependencies — so it can be unit-tested in isolation.
  */
-class QuicStreamReassembler(val streamId: Long) {
+class QuicStreamReassembler(
+    val streamId: Long,
+    private val maxTrackedIntervals: Int = MAX_TRACKED_INTERVALS,
+    private val maxPendingSegments: Int = MAX_PENDING_SEGMENTS,
+) {
 
     /** Half-open byte range `[start, end)`. Invariant: `start >= 0` and `end >= start`. */
     private data class Range(val start: Long, val end: Long) {
         init {
             require(start >= 0L && end >= start) { "invalid range [$start, $end)" }
         }
+
+        val length: Long get() = end - start
     }
 
     /** Outcome of offering a segment via [feed]. */
     enum class FeedResult {
-        /** Segment was disjoint from all received bytes and is now buffered for draining. */
+        /**
+         * The segment carried at least one byte not already received; those bytes are now buffered for
+         * draining. A legal partial retransmission lands here too — only its new bytes are kept.
+         */
         ACCEPTED,
         /** Segment's range was already fully received — a retransmission, deduplicated (no state change). */
         DUPLICATE,
-        /** Segment partially overlaps already-received bytes — overlapping-offset violation, rejected. */
+        /**
+         * Segment's overlapping bytes contradict bytes still buffered for those offsets — a real
+         * protocol violation (RFC 9000 §2.2 requires retransmitted data to be identical), rejected.
+         */
         REJECTED_OVERLAP,
         /** Segment violates the locked final size (conflicting FIN or data beyond final size), rejected. */
         REJECTED_FINAL_SIZE,
+        /**
+         * Accepting the segment would exceed this stream's bounded reassembly state
+         * ([maxTrackedIntervals] / [maxPendingSegments]), so it is refused rather than buffered. The
+         * peer is free to retransmit it once the gap ahead of it has been filled and drained.
+         */
+        REJECTED_LIMIT,
     }
 
     // Out-of-order segments not yet drainable, keyed by byte offset. TreeMap keeps them ordered so
     // the lowest pending offset (the next contiguous candidate) is O(log n) to reach.
     private val pending: TreeMap<Long, ByteArray> = TreeMap()
 
-    // Every byte range ever accepted (including already-drained ones) — the retransmission-dedupe set.
-    private val seenRanges: MutableSet<Range> = mutableSetOf()
+    /**
+     * Received coverage **above** [drainedUpTo], as a merged, sorted, disjoint interval list. Bytes
+     * below [drainedUpTo] are covered implicitly by the prefix, so a contiguous stream keeps this list
+     * empty — that is what bounds the memory this tracking costs.
+     */
+    private val covered: MutableList<Range> = mutableListOf()
 
     // Number of contiguous bytes already drained (the next expected offset).
     private var drainedUpTo: Long = 0L
@@ -84,59 +115,70 @@ class QuicStreamReassembler(val streamId: Long) {
     /** Number of out-of-order segments currently buffered (not yet drainable). */
     val pendingSegmentCount: Int get() = pending.size
 
-    /** Number of distinct byte ranges recorded for retransmission dedupe. */
-    val seenRangeCount: Int get() = seenRanges.size
+    /**
+     * Number of tracked coverage intervals above the drained prefix. A fully contiguous stream reports
+     * `0`, which is the property that keeps this state bounded on a long-lived stream.
+     */
+    val seenRangeCount: Int get() = covered.size
+
+    /** Bytes currently buffered in out-of-order segments — the per-stream memory this holds. */
+    val bufferedByteCount: Int get() = pending.values.sumOf { it.size }
 
     /**
      * Offer a STREAM segment at byte [offset] carrying [data], with FIN flag [isFin].
      *
-     * - A range already fully covered by received bytes is a retransmission → [FeedResult.DUPLICATE]
-     *   (no state change; this is what dedupes retransmissions of already-delivered data too).
-     * - A range that partially overlaps received bytes is an overlapping-offset violation →
-     *   [FeedResult.REJECTED_OVERLAP] (no state change).
-     * - A range that conflicts with a known final size, or lies at/beyond it, is a final-size
-     *   violation → [FeedResult.REJECTED_FINAL_SIZE] (no state change).
-     * - Otherwise the range is recorded in `seenRanges` and buffered in `pending`; if [isFin], the
-     *   final size is locked to `offset + data.size` → [FeedResult.ACCEPTED].
+     * - A range already fully covered by received bytes is a retransmission → [FeedResult.DUPLICATE].
+     * - A range that partially overlaps received bytes is accepted for its **new** bytes
+     *   ([FeedResult.ACCEPTED]) unless the overlapping bytes contradict data still buffered, which is
+     *   → [FeedResult.REJECTED_OVERLAP].
+     * - A range that conflicts with a known final size, or lies beyond it, is → [FeedResult.REJECTED_FINAL_SIZE].
+     * - A range that would exceed this stream's bounded state is → [FeedResult.REJECTED_LIMIT].
+     * - Otherwise the new bytes are buffered and coverage recorded → [FeedResult.ACCEPTED].
      *
      * @throws IllegalArgumentException if [offset] is negative.
      */
     fun feed(offset: Long, data: ByteArray, isFin: Boolean): FeedResult {
         require(offset >= 0L) { "offset must be non-negative: $offset" }
         val end = offset + data.size
-        val candidateFinal = end // final size implied by a FIN on this segment
 
-        // Final size is immutable once known (RFC 9000 §19.8), and no data may lie at/beyond it.
-        if (isFin && hasFinalSize && candidateFinal != lockedFinalSize) {
-            return FeedResult.REJECTED_FINAL_SIZE
-        }
-        if (hasFinalSize && end > lockedFinalSize) {
-            return FeedResult.REJECTED_FINAL_SIZE
-        }
+        // Final size is immutable once known (RFC 9000 §19.8), and no data may lie beyond it.
+        if (isFin && hasFinalSize && end != lockedFinalSize) return FeedResult.REJECTED_FINAL_SIZE
+        if (hasFinalSize && end > lockedFinalSize) return FeedResult.REJECTED_FINAL_SIZE
 
         // Pure FIN (no bytes): lock/confirm the final size only.
         if (data.isEmpty()) {
             if (isFin) {
                 if (finReceived) return FeedResult.DUPLICATE // repeated identical FIN
-                lockedFinalSize = candidateFinal
+                lockedFinalSize = end
                 finReceived = true
             }
             return FeedResult.ACCEPTED
         }
 
-        // Retransmission dedupe vs. overlap validation, measured against the union of all seen
-        // ranges (summing per-range overlap handles adjacent ranges correctly without merging).
-        val r = Range(offset, end)
-        val covered = seenRanges.sumOf { overlap(r, it) }
-        if (covered == end - offset) return FeedResult.DUPLICATE       // fully already received
-        if (covered > 0L) return FeedResult.REJECTED_OVERLAP           // partial overlap = violation
+        val fresh = uncoveredParts(offset, end)
+        if (fresh.isEmpty()) return FeedResult.DUPLICATE // wholly already received
 
-        // Disjoint: accept. Record the range for future dedupe and buffer the segment for draining.
-        seenRanges.add(r)
-        pending[offset] = data
+        val freshBytes = fresh.sumOf { it.length }
+        if (freshBytes < data.size.toLong() && contradictsBufferedBytes(offset, data)) {
+            // Overlapping bytes disagree with bytes we still hold for those offsets: RFC 9000 §2.2
+            // requires retransmitted stream data to be identical, so this is a real violation.
+            return FeedResult.REJECTED_OVERLAP
+        }
+
+        // Bounded state: refuse rather than buffer without limit or stop tracking coverage.
+        if (pending.size + fresh.size > maxPendingSegments) return FeedResult.REJECTED_LIMIT
+        if (covered.size + fresh.size > maxTrackedIntervals && !wouldMergeIntoExisting(fresh)) {
+            return FeedResult.REJECTED_LIMIT
+        }
+
+        for (part in fresh) {
+            val from = (part.start - offset).toInt()
+            val to = (part.end - offset).toInt()
+            pending[part.start] = data.copyOfRange(from, to)
+            addCovered(part)
+        }
         if (isFin) {
-            // candidateFinal == lockedFinalSize already validated above (or this FIN sets it first).
-            lockedFinalSize = candidateFinal
+            lockedFinalSize = end
             finReceived = true
         }
         return FeedResult.ACCEPTED
@@ -146,7 +188,8 @@ class QuicStreamReassembler(val streamId: Long) {
      * Pull the contiguous byte prefix that has been reassembled in offset order, starting at
      * [nextExpectedOffset]. Advances [nextExpectedOffset]; a second call with no newly-arrived
      * contiguous data returns an empty array. Out-of-order segments beyond the current gap remain
-     * buffered until the gap is filled.
+     * buffered until the gap is filled. Draining also collapses the coverage intervals it absorbs into
+     * the implicit prefix, so tracked state shrinks as the stream progresses.
      */
     fun drain(): ByteArray {
         val out = ByteArrayOutputStream()
@@ -157,10 +200,88 @@ class QuicStreamReassembler(val streamId: Long) {
             pending.remove(entry.key)
             entry = pending.firstEntry()
         }
+        if (out.size() > 0) collapseCoveredBelowPrefix()
         return out.toByteArray()
     }
 
-    /** Overlap length of half-open ranges [a] and [b]; `0` when they are disjoint or only touch. */
-    private fun overlap(a: Range, b: Range): Long =
-        maxOf(0L, minOf(a.end, b.end) - maxOf(a.start, b.start))
+    /** The sub-ranges of `[start, end)` not yet covered by the drained prefix or [covered]. */
+    private fun uncoveredParts(start: Long, end: Long): List<Range> {
+        val out = mutableListOf<Range>()
+        var cursor = maxOf(start, drainedUpTo)
+        if (cursor >= end) return out
+        for (c in covered) {
+            if (c.end <= cursor) continue
+            if (c.start >= end) break
+            if (c.start > cursor) out.add(Range(cursor, minOf(c.start, end)))
+            cursor = maxOf(cursor, c.end)
+            if (cursor >= end) return out
+        }
+        if (cursor < end) out.add(Range(cursor, end))
+        return out
+    }
+
+    /**
+     * True when [data] disagrees with bytes still buffered at the same offsets. Only buffered segments
+     * can be checked — already-drained bytes have been handed to the caller and are gone — so this is a
+     * best-effort detector of a genuine contradiction, never a guess about data we no longer hold.
+     */
+    private fun contradictsBufferedBytes(offset: Long, data: ByteArray): Boolean {
+        val end = offset + data.size
+        for ((bufferedOffset, buffered) in pending) {
+            if (bufferedOffset >= end) break
+            val bufferedEnd = bufferedOffset + buffered.size
+            if (bufferedEnd <= offset) continue
+            val from = maxOf(offset, bufferedOffset)
+            val to = minOf(end, bufferedEnd)
+            for (position in from until to) {
+                if (data[(position - offset).toInt()] != buffered[(position - bufferedOffset).toInt()]) return true
+            }
+        }
+        return false
+    }
+
+    /** Inserts [range] into [covered], merging with any interval it touches so the list stays disjoint. */
+    private fun addCovered(range: Range) {
+        var start = range.start
+        var end = range.end
+        val iterator = covered.iterator()
+        while (iterator.hasNext()) {
+            val existing = iterator.next()
+            if (existing.end < start || existing.start > end) continue // strictly disjoint, keep
+            start = minOf(start, existing.start)
+            end = maxOf(end, existing.end)
+            iterator.remove()
+        }
+        val merged = Range(start, end)
+        val insertAt = covered.indexOfFirst { it.start > merged.start }
+        if (insertAt < 0) covered.add(merged) else covered.add(insertAt, merged)
+    }
+
+    /** True when every part of [fresh] would merge into an existing interval, adding no new entry. */
+    private fun wouldMergeIntoExisting(fresh: List<Range>): Boolean =
+        fresh.all { part -> covered.any { it.end >= part.start && it.start <= part.end } }
+
+    /** Drops (or trims) coverage intervals absorbed by the drained prefix, keeping the list minimal. */
+    private fun collapseCoveredBelowPrefix() {
+        val iterator = covered.listIterator()
+        while (iterator.hasNext()) {
+            val range = iterator.next()
+            when {
+                range.end <= drainedUpTo -> iterator.remove()
+                range.start < drainedUpTo -> iterator.set(Range(drainedUpTo, range.end))
+                else -> Unit
+            }
+        }
+    }
+
+    companion object {
+        /**
+         * Maximum coverage intervals tracked above the drained prefix. A contiguous stream needs none;
+         * this only bounds a peer that sends many non-contiguous segments.
+         */
+        const val MAX_TRACKED_INTERVALS = 64
+
+        /** Maximum out-of-order segments buffered before further ones are refused. */
+        const val MAX_PENDING_SEGMENTS = 64
+    }
 }

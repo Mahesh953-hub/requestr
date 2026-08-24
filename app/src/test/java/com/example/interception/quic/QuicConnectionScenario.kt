@@ -38,8 +38,9 @@ internal class QuicConnectionScenario(
 
     val decoder = QuicConnectionDecoder(
         connectionId = CONNECTION_ID,
-        version = version,
+        initialVersion = version,
         frameWalker = frameWalker,
+        cidTable = cidTable,
         secretLookup = { label, random -> TlsKeyLogRegistry.lookup(label, random) },
         maxTrackedStreams = maxTrackedStreams,
         maxTrackedExchanges = maxTrackedExchanges,
@@ -161,6 +162,31 @@ internal class QuicConnectionScenario(
         headerProtectionKeys = serverApplicationKeys,
     )
 
+    /**
+     * A server Retry packet (RFC 9000 §17.2.5) carrying a genuinely valid Retry Integrity Tag computed
+     * over the client's original DCID, plus [token]. [scid] is the new connection ID the client must
+     * switch to; pass [validTag] = false to produce the spoofed/corrupted case.
+     */
+    fun serverRetry(
+        scid: ByteArray = retryScid,
+        token: ByteArray = QuicWireFixtures.hex("d0d0cafe"),
+        odcid: ByteArray = requireNotNull(originalDcidForRetry),
+        validTag: Boolean = true,
+    ): ByteArray = QuicWireFixtures.retryPacket(
+        version = version,
+        dcid = clientScid,
+        scid = scid,
+        token = token,
+        odcid = odcid,
+        validTag = validTag,
+    )
+
+    /** The connection ID a Retry in this scenario re-keys the connection to. */
+    val retryScid: ByteArray = QuicWireFixtures.hex("11aa22bb33cc44dd")
+
+    /** The DCID a Retry's integrity tag must be computed over — the client's original DCID. */
+    val originalDcidForRetry: ByteArray? get() = originalDcid
+
     /** Routes a client→server datagram (dest port 443) and feeds every packet it carries. */
     fun feedOutbound(datagram: ByteArray): List<QuicConnectionDecoder.IngestResult> =
         router.ingest(datagram, CLIENT_IP, CLIENT_PORT, SERVER_IP, QUIC_PORT).map { decoder.ingest(it) }
@@ -168,6 +194,44 @@ internal class QuicConnectionScenario(
     /** Routes a server→client datagram (source port 443) and feeds every packet it carries. */
     fun feedInbound(datagram: ByteArray): List<QuicConnectionDecoder.IngestResult> =
         router.ingest(datagram, SERVER_IP, QUIC_PORT, CLIENT_IP, CLIENT_PORT).map { decoder.ingest(it) }
+
+    /**
+     * The client's retried Initial: after a Retry the client's DCID becomes the Retry's SCID, and both
+     * directions' Initial secrets re-derive from that new CID (RFC 9001 §5.2), so this packet is
+     * protected with keys derived from [retryScid] rather than [originalDcid].
+     */
+    fun retriedClientInitial(
+        packetNumber: Long = 1,
+        random: ByteArray = retriedClientRandom,
+        newDcid: ByteArray = retryScid,
+    ): ByteArray = QuicWireFixtures.initialPacket(
+        version = version,
+        dcid = newDcid,
+        scid = clientScid,
+        packetNumber = packetNumber,
+        frames = QuicWireFixtures.cryptoFrame(0, QuicWireFixtures.clientHello(random, sni, alpn, ianaCipherSuite)) +
+            QuicWireFixtures.padding(8),
+        keys = requireNotNull(QuicCrypto.deriveClientInitialKeys(version, newDcid)),
+        token = QuicWireFixtures.hex("d0d0cafe"),
+    )
+
+    /** The server's Initial in the retried exchange, keyed from the post-Retry connection ID. */
+    fun retriedServerInitial(
+        packetNumber: Long = 0,
+        cipherSuiteId: Int = ianaCipherSuite,
+        newDcid: ByteArray = retryScid,
+    ): ByteArray = QuicWireFixtures.initialPacket(
+        version = version,
+        dcid = clientScid,
+        scid = serverScid,
+        packetNumber = packetNumber,
+        frames = QuicWireFixtures.cryptoFrame(0, QuicWireFixtures.serverHello(cipherSuiteId)) +
+            QuicWireFixtures.padding(8),
+        keys = requireNotNull(QuicCrypto.deriveServerInitialKeys(version, newDcid)),
+    )
+
+    /** The ClientHello random of the retried handshake — a new value, as a real client sends. */
+    val retriedClientRandom: ByteArray = QuicWireFixtures.clientRandom(0x7c)
 
     /**
      * Drives the handshake far enough for 1-RTT decryption: the ClientHello establishes identity and
@@ -181,10 +245,17 @@ internal class QuicConnectionScenario(
     }
 
     companion object {
-        const val CONNECTION_ID = "quic-scenario-connection"
         const val CLIENT_IP = "10.0.0.7"
         const val SERVER_IP = "93.184.216.34"
         const val CLIENT_PORT = 54321
         const val QUIC_PORT = 443
+
+        /**
+         * The routing key the real [QuicDatagramRouter] resolves for this 5-tuple, in the canonical
+         * client->server orientation it uses. The decoder is created with exactly this id so CID-table
+         * interactions (NEW_CONNECTION_ID registration, Retry re-keying) behave as they do in
+         * production, where the decoder's id *is* the router's routing key.
+         */
+        val CONNECTION_ID: String = com.example.correlation.ConnectionKey.forQuic(CLIENT_IP, CLIENT_PORT, SERVER_IP, QUIC_PORT)
     }
 }

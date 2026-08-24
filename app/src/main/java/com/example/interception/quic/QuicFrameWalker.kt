@@ -59,6 +59,11 @@ class QuicFrameWalker(private val cidTable: QuicCidTable) {
      */
     private val seqToCid = mutableMapOf<String, MutableMap<Long, ByteArray>>()
 
+    /** Releases sequence-to-CID bookkeeping for an evicted connection. */
+    fun removeConnection(routingKey: String) {
+        seqToCid.remove(routingKey)
+    }
+
     /**
      * Walks [payload] starting at [offset], applying CID-lifecycle frames to [cidTable] for
      * [routingKey] and returning every surfaced frame in order ([Frame.Stream],

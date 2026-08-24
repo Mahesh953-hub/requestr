@@ -47,14 +47,17 @@ import java.io.ByteArrayOutputStream
  * Not thread-safe: one instance is owned by the single tun-read path for its connection.
  *
  * @param connectionId the routing key resolved by the router (== the Room row's primary key).
- * @param version the QUIC version observed for this connection (selects `quic`/`quicv2` labels).
+ * @param initialVersion the QUIC version first observed. A connection first seen through a short
+ *   header carries no version at all, so this is only a starting value -- see [version].
  * @param frameWalker shared frame walker; also applies NEW/RETIRE_CONNECTION_ID to the CID table.
+ * @param cidTable shared CID routing table, re-keyed here when a Retry is accepted.
  * @param secretLookup resolves a TLS 1.3 traffic secret for (label, client random), or null on a miss.
  */
 class QuicConnectionDecoder(
     val connectionId: String,
-    val version: Int,
+    initialVersion: Int,
     private val frameWalker: QuicFrameWalker,
+    private val cidTable: QuicCidTable,
     private val secretLookup: (KeyLogLabel, ByteArray) -> ByteArray?,
     private val maxTrackedStreams: Int = MAX_TRACKED_STREAMS,
     private val maxTrackedExchanges: Int = MAX_TRACKED_EXCHANGES,
@@ -124,15 +127,27 @@ class QuicConnectionDecoder(
             internal set
         var lastUpdatedAt: Long = startedAt
             internal set
+
         /**
-         * Room `captured_traffic.id` once the owning persist path has written this exchange, so later
-         * body/status updates target the same row instead of inserting a duplicate. The decoder never
-         * touches Room itself — this is set by [com.example.interception.PacketPump].
+         * Increments on every mutation that changes what a persisted row would contain. The persist path
+         * records the revision it last wrote and skips an exchange whose revision has not moved, which is
+         * what keeps a batched flush from re-serializing and re-writing unchanged bodies.
          */
-        var persistedRowId: Long? = null
+        var revision: Int = 0
+            private set
 
         private val requestBodyBuffer = ByteArrayOutputStream()
         private val responseBodyBuffer = ByteArrayOutputStream()
+
+        /** Bytes currently held for the request body — a size read, never a copy of the buffer. */
+        val requestBodyBuffered: Int get() = requestBodyBuffer.size()
+
+        /** Bytes currently held for the response body — a size read, never a copy of the buffer. */
+        val responseBodyBuffered: Int get() = responseBodyBuffer.size()
+
+        internal fun touchRevision() {
+            revision += 1
+        }
 
         /** Latency from decoded request HEADERS to decoded response HEADERS, or 0 when unknown. */
         val latencyMs: Long
@@ -194,6 +209,16 @@ class QuicConnectionDecoder(
 
     // ── Connection-level state ───────────────────────────────────────────────────────────
 
+    /**
+     * The QUIC version in force for this connection, which selects the `quic`/`quicv2` HKDF labels for
+     * every derived key. A connection first observed through a short header (1-RTT, mid-connection
+     * capture start) has no version on the wire at all, so this starts at whatever was first seen —
+     * possibly `0` — and is corrected the moment a long header carries the real value. A correction
+     * discards key material derived under the wrong labels rather than leaving it to fail silently.
+     */
+    var version: Int = initialVersion
+        private set
+
     var lifecycle: QuicState = QuicState.INITIALIZING
         private set
 
@@ -242,6 +267,21 @@ class QuicConnectionDecoder(
     var closeReason: String? = null
         private set
 
+    /** Count of Retry packets whose integrity tag authenticated and which were therefore applied. */
+    var retriesAccepted: Int = 0
+        private set
+
+    /**
+     * Count of Retry packets rejected because their integrity tag did not authenticate — a corrupted
+     * or spoofed Retry (RFC 9001 §5.8). Such a packet never re-keys the connection.
+     */
+    var retriesRejected: Int = 0
+        private set
+
+    /** Count of times [version] was corrected from a later long header (see [version]). */
+    var versionCorrections: Int = 0
+        private set
+
     /** Wall-clock time of the last packet ingested, for the owner's idle-based eviction. */
     var lastActivityAt: Long = clock()
         private set
@@ -273,6 +313,14 @@ class QuicConnectionDecoder(
     private val cryptoStreams = mutableMapOf<LevelKey, ByteArrayOutputStream>()
 
     private val streamReassemblers = LinkedHashMap<StreamKey, QuicStreamReassembler>()
+
+    /**
+     * Streams whose FIN has been received *and* fully drained. Their reassemblers are released
+     * immediately (they can never contribute another byte), and the key is remembered so a post-FIN
+     * retransmission is dropped instead of re-creating a reassembler and re-feeding already-parsed
+     * bytes into the HTTP/3 parser. Bounded, oldest-first.
+     */
+    private val completedStreams = LinkedHashSet<StreamKey>()
     private val http3Parsers = mutableMapOf<QuicDatagramRouter.Direction, Http3StreamParser>()
     private val exchangeMap = LinkedHashMap<Long, Http3Exchange>()
 
@@ -284,10 +332,15 @@ class QuicConnectionDecoder(
 
     val trackedStreamCount: Int get() = streamReassemblers.size
 
-    /** Bytes currently buffered across HTTP/3 bodies and crypto streams — the bounded-memory probe. */
+    /**
+     * Bytes currently buffered across HTTP/3 bodies, stream reassembly and crypto streams — the
+     * bounded-memory probe. Reads buffer sizes only; it never copies a body out, so calling it is not a
+     * hidden allocation of every buffered payload.
+     */
     fun bufferedByteCount(): Int {
         var total = cryptoStreams.values.sumOf { it.size() }
-        for (ex in exchangeMap.values) total += ex.requestBody().size + ex.responseBody().size
+        for (ex in exchangeMap.values) total += ex.requestBodyBuffered + ex.responseBodyBuffered
+        for (reassembler in streamReassemblers.values) total += reassembler.bufferedByteCount
         return total
     }
 
@@ -308,6 +361,7 @@ class QuicConnectionDecoder(
 
         var decrypted = false
         try {
+            correctVersion(routed)
             recordConnectionIdLengths(routed)
             val firstByte = routed.payloadBytes.firstOrNull()?.toInt()?.and(0xFF) ?: 0
             val isLongHeader = (firstByte and 0x80) != 0
@@ -317,12 +371,7 @@ class QuicConnectionDecoder(
                     handleProtectedLongHeader(routed, Level.HANDSHAKE)
                 routed.packetType == QuicCrypto.LongHeaderPacketType.ZERO_RTT ->
                     handleProtectedLongHeader(routed, Level.ZERO_RTT)
-                routed.packetType == QuicCrypto.LongHeaderPacketType.RETRY -> {
-                    // A Retry re-keys the connection; the router already registered the Retry's SCID as
-                    // a routable CID. Nothing is decryptable here (a Retry carries no payload).
-                    advanceLifecycle(QuicState.HANDSHAKE_IN_PROGRESS)
-                    false
-                }
+                routed.packetType == QuicCrypto.LongHeaderPacketType.RETRY -> handleRetry(routed)
                 !isLongHeader -> handleShortHeader(routed)
                 else -> false // Version Negotiation / unknown version: no payload protection to remove
             }
@@ -343,6 +392,84 @@ class QuicConnectionDecoder(
 
     /** Exchanges touched by the packet currently being ingested (cleared at the start of [ingest]). */
     private val touchedExchanges = LinkedHashSet<Http3Exchange>()
+
+    /**
+     * Adopts the real QUIC version from a long header when the connection was first observed without
+     * one (a mid-connection capture that started at a 1-RTT packet reports version `0`) or when the
+     * version genuinely changes. Because the version selects the `quic` vs `quicv2` HKDF labels, any
+     * key material already derived under the previous value is discarded, so nothing decrypts — or
+     * fails to decrypt — under mismatched labels.
+     */
+    private fun correctVersion(routed: QuicDatagramRouter.RoutedPacket) {
+        if (routed.packetType == null) return // short header / version negotiation: no version to trust
+        val observed = routed.version
+        if (observed == 0 || observed == version) return
+        version = observed
+        versionCorrections += 1
+        levelKeys.clear()
+        keyPhaseManagers.clear()
+    }
+
+    /**
+     * Applies a Retry packet (RFC 9000 §17.2.5 / RFC 9001 §5.8).
+     *
+     * A Retry is only acted on once its 128-bit Retry Integrity Tag authenticates against the client's
+     * *original* Destination Connection ID: the tag exists precisely so that "only an entity that
+     * observes an Initial packet can send a valid Retry packet", and acting on a spoofed Retry would
+     * re-key the connection to an attacker's CID and make every subsequent Initial undecryptable.
+     *
+     * Once accepted, the client switches its DCID to the Retry's Source Connection ID, so:
+     *  - [cidTable] is re-keyed via [QuicCidTable.rekeyAfterRetry] so packets carrying the new CID
+     *    route to this same connection while the superseded CID is retired;
+     *  - [originalDcid] becomes that new CID, which is what both directions' Initial secrets re-derive
+     *    from (RFC 9001 §5.2) — without this the retried Initial exchange, including the ServerHello,
+     *    stays undecryptable;
+     *  - Initial-level CRYPTO reassembly is reset, because the retried handshake restarts its crypto
+     *    stream at offset 0 and the previous coverage would make those bytes look like duplicates;
+     *  - the previous ClientHello identity is dropped, since the retried ClientHello carries a new
+     *    random and the key log is indexed by it. Packet-number spaces are deliberately *not* reset
+     *    (RFC 9000 §17.2.5.3: a client must not restart a packet number space after a Retry).
+     */
+    private fun handleRetry(routed: QuicDatagramRouter.RoutedPacket): Boolean {
+        advanceLifecycle(QuicState.HANDSHAKE_IN_PROGRESS)
+        val odcid = originalDcid ?: return false // no observed client Initial: nothing to verify against
+        val packet = routed.payloadBytes
+        if (packet.size <= RETRY_INTEGRITY_TAG_LEN) return false
+        val withoutTag = packet.copyOfRange(0, packet.size - RETRY_INTEGRITY_TAG_LEN)
+        val tag = packet.copyOfRange(packet.size - RETRY_INTEGRITY_TAG_LEN, packet.size)
+        if (!QuicCrypto.validateRetryIntegrityTag(version, odcid, withoutTag, tag)) {
+            retriesRejected += 1
+            return false
+        }
+        if (routed.scid.isEmpty()) return false // a Retry must carry the new CID it re-keys to
+
+        retriesAccepted += 1
+        // Re-key through the CID table so the Retry's SCID routes to this connection and the superseded
+        // CID is retired. If the table never held the original CID (it was evicted, or this observer
+        // attached mid-handshake), register the new CID directly rather than silently not routing it.
+        if (cidTable.rekeyAfterRetry(odcid, routed.scid) == null) {
+            cidTable.addCid(connectionId, routed.scid)
+        }
+        originalDcid = routed.scid.copyOf()
+        // The retried ClientHello carries a new random, so the old identity and anything resolved
+        // against it no longer describe this connection.
+        clientRandom = null
+        clientRandomHex = null
+        resolvedLabels.clear()
+        missingLabels.clear()
+        levelKeys.clear()
+        keyPhaseManagers.clear()
+        // The retried handshake negotiates from scratch, so anything locked from the superseded exchange
+        // no longer describes this connection and must be re-read from the retried ServerHello.
+        negotiatedCipherSuite = null
+        cipherSuiteUnavailable = false
+        for (direction in QuicDatagramRouter.Direction.entries) {
+            val key = LevelKey(Level.INITIAL, direction)
+            cryptoReassemblers.remove(key)
+            cryptoStreams.remove(key)
+        }
+        return true
+    }
 
     /**
      * Records the Source Connection ID length each peer advertises, which is the *other* peer's
@@ -620,8 +747,11 @@ class QuicConnectionDecoder(
      */
     private fun handleStreamFrame(frame: QuicFrameWalker.Frame.Stream, direction: QuicDatagramRouter.Direction) {
         val key = StreamKey(frame.streamId, direction)
+        // A stream that already reached its FIN and was fully drained can never contribute another byte;
+        // a retransmission after that point is dropped rather than re-parsed into duplicate HTTP/3 data.
+        if (key in completedStreams) return
         val reassembler = streamReassemblers[key] ?: run {
-            if (streamReassemblers.size >= maxTrackedStreams) evictOldestStream()
+            if (streamReassemblers.size >= maxTrackedStreams) evictStreamVictim()
             val created = QuicStreamReassembler(frame.streamId)
             streamReassemblers[key] = created
             created
@@ -637,7 +767,22 @@ class QuicConnectionDecoder(
             )
             applyHttp3Events(events)
         }
-        if (reassembler.isComplete) markStreamComplete(frame.streamId, direction)
+        if (reassembler.isComplete) {
+            // Release the reassembler the moment the stream is finished, instead of holding its coverage
+            // and FIN state until the whole connection is evicted.
+            streamReassemblers.remove(key)
+            rememberCompleted(key)
+            markStreamComplete(frame.streamId, direction)
+        }
+    }
+
+    /** Records [key] as finished, bounded oldest-first so the set cannot grow with the connection. */
+    private fun rememberCompleted(key: StreamKey) {
+        completedStreams.add(key)
+        while (completedStreams.size > maxTrackedStreams * 2) {
+            val oldest = completedStreams.firstOrNull() ?: break
+            completedStreams.remove(oldest)
+        }
     }
 
     /** Applies decoded HTTP/3 events onto their exchange; only real decodes create or touch a row. */
@@ -705,12 +850,23 @@ class QuicConnectionDecoder(
 
     private fun touch(exchange: Http3Exchange) {
         exchange.lastUpdatedAt = clock()
+        exchange.touchRevision()
         touchedExchanges.add(exchange)
     }
 
-    private fun evictOldestStream() {
-        val oldest = streamReassemblers.keys.firstOrNull() ?: return
-        streamReassemblers.remove(oldest)
+    /**
+     * Frees one stream reassembler when the per-connection cap is reached, preferring victims that
+     * cannot lose data: first a finished stream (FIN drained), then one holding no buffered bytes, and
+     * only then the oldest. Dropping a stream with buffered out-of-order bytes loses those bytes, so it
+     * is the last resort rather than the default.
+     */
+    private fun evictStreamVictim() {
+        val victim = streamReassemblers.entries.firstOrNull { it.value.isComplete }
+            ?: streamReassemblers.entries.firstOrNull { it.value.pendingSegmentCount == 0 }
+            ?: streamReassemblers.entries.firstOrNull()
+            ?: return
+        streamReassemblers.remove(victim.key)
+        if (victim.value.isComplete) rememberCompleted(victim.key)
     }
 
     // ── Status, lifecycle, provenance ────────────────────────────────────────────────────
@@ -749,6 +905,16 @@ class QuicConnectionDecoder(
     /** Comma-separated resolved key-log labels for the row's provenance column, or null when none. */
     fun resolvedKeyLabelsCsv(): String? =
         if (resolvedLabels.isEmpty()) null else resolvedLabels.joinToString(",") { it.name }
+
+    /**
+     * Rank of [decodeStatus] for the monotonic persisted comparison. Exposed because SQLite cannot rank
+     * a Kotlin enum, so the persist path passes this alongside the value and the SQL CASE ladder in
+     * [com.example.data.local.QuicConnectionDao.updateDecodeState] must agree with it.
+     */
+    val decodeStatusRank: Int get() = statusRank(decodeStatus)
+
+    /** Rank of [lifecycle] for the same monotonic persisted comparison. */
+    val lifecycleStateRank: Int get() = lifecycleRank(lifecycle)
 
     /** Monotonic: [decodeStatus] only ever moves to a strictly better-evidenced state. */
     private fun raiseStatus(candidate: QuicDecodeStatus) {
@@ -799,6 +965,7 @@ class QuicConnectionDecoder(
      */
     fun release() {
         streamReassemblers.clear()
+        completedStreams.clear()
         http3Parsers.clear()
         cryptoReassemblers.clear()
         cryptoStreams.clear()
@@ -819,6 +986,9 @@ class QuicConnectionDecoder(
 
         /** Synthetic stream id for a CRYPTO stream, which is not a QUIC stream and has no real id. */
         private const val CRYPTO_STREAM_ID = -1L
+
+        /** RFC 9001 §5.8: a Retry packet's trailing Retry Integrity Tag is always 128 bits. */
+        private const val RETRY_INTEGRITY_TAG_LEN = 16
 
         /** Short-header DCID lengths to try when the peer's SCID length was never observed. */
         private val FALLBACK_DCID_LENGTHS = listOf(8, 0)

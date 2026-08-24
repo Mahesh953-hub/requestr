@@ -67,17 +67,41 @@ interface CapturedTrafficDao {
      * on the same stream. [com.example.interception.PacketPump] therefore inserts the row on first
      * decode and calls this to keep it truthful, rather than either withholding the row until FIN
      * (which never arrives for an aborted stream) or inserting a second, duplicate row per update.
-     * Only genuinely decoded values are ever passed here -- nothing is defaulted into place.
+     *
+     * **Every column here only ever moves from less-known to more-known.** A response can decode before
+     * its request HEADERS do (a capture that started mid-stream, or reordering), in which case the row
+     * is first written with empty request metadata; this fills `method`/`url`/`host`/`path`/
+     * `requestHeaders` once they genuinely decode instead of leaving them permanently blank. Nothing is
+     * overwritten with a blank or null: request metadata is only applied when non-empty, header maps
+     * only when the exchange really has them, sizes take the maximum, and `statusCode`/bodies use
+     * `COALESCE` so a later packet that carries no body cannot erase one already recorded.
      */
     @Query(
-        "UPDATE captured_traffic SET statusCode = :statusCode, responseHeaders = :responseHeaders, " +
-            "requestBody = :requestBody, responseBody = :responseBody, " +
-            "requestSizeBytes = :requestSizeBytes, responseSizeBytes = :responseSizeBytes, " +
-            "latencyMs = :latencyMs WHERE id = :id"
+        "UPDATE captured_traffic SET " +
+            "method = CASE WHEN :method != '' THEN :method ELSE method END, " +
+            "url = CASE WHEN :method != '' OR url = '' THEN :url ELSE url END, " +
+            "host = CASE WHEN :host != '' THEN :host ELSE host END, " +
+            "path = CASE WHEN :path != '' THEN :path ELSE path END, " +
+            "requestHeaders = CASE WHEN :hasRequestHeaders THEN :requestHeaders ELSE requestHeaders END, " +
+            "statusCode = COALESCE(:statusCode, statusCode), " +
+            "responseHeaders = CASE WHEN :hasResponseHeaders THEN :responseHeaders ELSE responseHeaders END, " +
+            "requestBody = COALESCE(:requestBody, requestBody), " +
+            "responseBody = COALESCE(:responseBody, responseBody), " +
+            "requestSizeBytes = MAX(requestSizeBytes, :requestSizeBytes), " +
+            "responseSizeBytes = MAX(responseSizeBytes, :responseSizeBytes), " +
+            "latencyMs = CASE WHEN :latencyMs > 0 THEN :latencyMs ELSE latencyMs END " +
+            "WHERE id = :id"
     )
     suspend fun updateDecodedExchange(
         id: Long,
+        method: String,
+        url: String,
+        host: String,
+        path: String,
+        hasRequestHeaders: Boolean,
+        requestHeaders: Map<String, String>,
         statusCode: Int?,
+        hasResponseHeaders: Boolean,
         responseHeaders: Map<String, String>,
         requestBody: String?,
         responseBody: String?,
@@ -315,27 +339,111 @@ interface QuicConnectionDao {
     suspend fun upsert(item: QuicConnectionEntity)
 
     /**
+     * Inserts a connection's identity row only if it does not already exist.
+     *
+     * The REPLACE-based [upsert] must never be used to re-announce a connection: replacing the row
+     * discards every column the caller does not currently hold. After the in-memory decode state for an
+     * idle connection is released, a later packet on that same connection is "first observation" as far
+     * as memory is concerned, while Room still holds the real SNI, ALPN, client random, resolved key
+     * labels and decode status. IGNORE-on-conflict keeps that record intact and lets
+     * [updateDecodeState] move it forward monotonically instead.
+     */
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertIfAbsent(item: QuicConnectionEntity): Long
+
+    /**
+     * Re-attributes an existing connection row to the **current** capture session, resetting its decode
+     * state to what the live decoder currently knows.
+     *
+     * `connectionId` is a 5-tuple-derived key, and a 5-tuple is genuinely reused by a different QUIC
+     * connection in a later capture session. Because [insertIfAbsent] deliberately never replaces a row,
+     * such a reuse would otherwise leave the row owned by the finished session -- invisible to the live
+     * one, and still advertising the previous connection's SNI, identity and decode status. The
+     * `sessionId != :sessionId` guard is what keeps this from firing inside a single session, where the
+     * monotonic [updateDecodeState] must remain the only writer.
+     *
+     * Returns the number of rows re-attributed (0 when the row already belongs to this session).
+     */
+    @Query(
+        "UPDATE quic_connections SET sessionId = :sessionId, srcIp = :srcIp, destIp = :destIp, " +
+            "srcPort = :srcPort, destPort = :destPort, sniHost = :sniHost, alpn = :alpn, " +
+            "quicVersion = :quicVersion, establishedAt = :establishedAt, dstConnectionId = :connectionId, " +
+            "decodeStatus = :decodeStatus, lifecycleState = :lifecycleState, " +
+            "clientRandomHex = :clientRandomHex, keylogLabels = :keylogLabels, updatedAt = :updatedAt " +
+            "WHERE connectionId = :connectionId AND sessionId != :sessionId"
+    )
+    suspend fun claimForSession(
+        connectionId: String,
+        sessionId: Long,
+        srcIp: String,
+        destIp: String,
+        srcPort: Int,
+        destPort: Int,
+        sniHost: String?,
+        alpn: String?,
+        quicVersion: Int?,
+        establishedAt: Long,
+        decodeStatus: QuicDecodeStatus,
+        lifecycleState: String,
+        clientRandomHex: String?,
+        keylogLabels: String?,
+        updatedAt: Long,
+    ): Int
+
+    /**
      * Drives the authoritative decode state of a QUIC connection row from the live decoder
      * ([com.example.interception.quic.QuicConnectionDecoder]): the [QuicDecodeStatus] high-water mark,
      * the transport lifecycle state, and the decode provenance -- [clientRandomHex] (the TLS key-log
      * identity that made decryption possible at all) and [keylogLabels] (exactly which traffic secrets
      * really resolved, or NULL when none did).
      *
-     * A targeted UPDATE rather than a whole-row upsert on purpose: the identity columns written once
-     * when the connection was first observed (SNI/ALPN/version/5-tuple) must not be rewritten -- and
-     * cannot be re-derived -- on every status transition.
+     * **Monotonic and resume-safe in SQL, not just in memory.** `decodeStatus` and `lifecycleState`
+     * only move forward: the statement compares the caller's rank against the stored row's rank, so a
+     * freshly-created decoder that has so far only seen one undecryptable packet cannot pull a stored
+     * `FULLY_DECODED`/`CLOSED` backwards after the in-memory state for an idle connection was released.
+     * Provenance and identity are fill-forward only -- `clientRandomHex`/`keylogLabels` keep their
+     * stored value when the caller has none, `sniHost`/`alpn` are only filled when still NULL (an
+     * Initial recovered them once and cannot recover them again), and `quicVersion` is corrected only
+     * when the stored value is absent or `0`, which is what a connection first observed through a
+     * short header records before a long header reveals the real version.
+     *
+     * A targeted UPDATE rather than a whole-row upsert on purpose: the identity columns written when the
+     * connection was first observed must not be rewritten -- and cannot be re-derived -- on every
+     * status transition.
+     *
+     * [decodeStatusRank] and [lifecycleRank] are supplied by the caller because SQLite cannot rank a
+     * Kotlin enum; they must match the CASE ladders above (see
+     * [com.example.interception.quic.QuicConnectionDecoder.decodeStatusRank]).
      */
     @Query(
-        "UPDATE quic_connections SET decodeStatus = :decodeStatus, lifecycleState = :lifecycleState, " +
-            "clientRandomHex = :clientRandomHex, keylogLabels = :keylogLabels, updatedAt = :updatedAt " +
+        "UPDATE quic_connections SET " +
+            "decodeStatus = CASE WHEN :decodeStatusRank > (CASE decodeStatus " +
+            "    WHEN 'FULLY_DECODED' THEN 3 WHEN 'PARTIALLY_DECODED' THEN 2 " +
+            "    WHEN 'OBSERVED_NO_KEYS' THEN 1 ELSE 0 END) " +
+            "  THEN :decodeStatus ELSE decodeStatus END, " +
+            "lifecycleState = CASE WHEN :lifecycleRank > (CASE lifecycleState " +
+            "    WHEN 'CLOSED' THEN 4 WHEN 'DRAINING' THEN 3 WHEN 'HANDSHAKE_COMPLETE' THEN 2 " +
+            "    WHEN 'HANDSHAKE_IN_PROGRESS' THEN 1 ELSE 0 END) " +
+            "  THEN :lifecycleState ELSE lifecycleState END, " +
+            "clientRandomHex = COALESCE(:clientRandomHex, clientRandomHex), " +
+            "keylogLabels = COALESCE(:keylogLabels, keylogLabels), " +
+            "sniHost = COALESCE(sniHost, :sniHost), " +
+            "alpn = COALESCE(alpn, :alpn), " +
+            "quicVersion = CASE WHEN COALESCE(quicVersion, 0) = 0 THEN :quicVersion ELSE quicVersion END, " +
+            "updatedAt = :updatedAt " +
             "WHERE connectionId = :connectionId"
     )
     suspend fun updateDecodeState(
         connectionId: String,
         decodeStatus: QuicDecodeStatus,
+        decodeStatusRank: Int,
         lifecycleState: String,
+        lifecycleRank: Int,
         clientRandomHex: String?,
         keylogLabels: String?,
+        sniHost: String?,
+        alpn: String?,
+        quicVersion: Int?,
         updatedAt: Long,
     )
 

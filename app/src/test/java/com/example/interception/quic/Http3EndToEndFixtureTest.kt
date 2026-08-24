@@ -101,6 +101,9 @@ class Http3EndToEndFixtureTest {
                 ),
             ),
         )
+        // HTTP/3 rows are batched off the packet path and written by the flush loop; a test that reads
+        // Room immediately drains that queue explicitly instead of waiting a flush interval.
+        pump.flushHttp3WritesForTest()
     }
 
     @Test
@@ -161,6 +164,7 @@ class Http3EndToEndFixtureTest {
         )
 
         // The request row exists as soon as the request HEADERS decoded, with no status yet.
+        pump.flushHttp3WritesForTest()
         val afterRequest = runBlocking { db.capturedTrafficDao().getBySession(sessionId) }.single()
         assertNull("no :status has decoded yet, so none may be claimed", afterRequest.statusCode)
 
@@ -185,6 +189,7 @@ class Http3EndToEndFixtureTest {
             ),
         )
 
+        pump.flushHttp3WritesForTest()
         val rows = runBlocking { db.capturedTrafficDao().getBySession(sessionId) }
         assertEquals("one exchange must persist exactly one row", 1, rows.size)
         assertEquals(afterRequest.id, rows.single().id)
@@ -260,6 +265,7 @@ class Http3EndToEndFixtureTest {
             scenario.clientOneRtt(0, QuicWireFixtures.streamFrame(0, 0, QuicWireFixtures.requestHeadersFrame("GET", "/v6", scenario.sni), fin = true)),
             CLIENT_IP_V6, CLIENT_PORT, SERVER_IP_V6, 443, isIpv6 = true,
         )
+        pump.flushHttp3WritesForTest()
 
         val row = runBlocking { db.capturedTrafficDao().getBySession(sessionId) }.single()
         assertEquals("/v6", row.path)
@@ -291,6 +297,7 @@ class Http3EndToEndFixtureTest {
             ),
         )
 
+        pump.flushHttp3WritesForTest()
         val row = runBlocking { db.capturedTrafficDao().getBySession(sessionId) }.single()
         assertEquals("<binary ${binary.size} bytes>", row.responseBody)
         assertEquals("the real observed size is still recorded", binary.size.toLong(), row.responseSizeBytes)
@@ -304,13 +311,18 @@ class Http3EndToEndFixtureTest {
         val pump = newPump(sessionId)
 
         driveDecodedExchange(pump, scenario, "/cleanup", "bye")
+        val connectionId = runBlocking { db.quicConnectionDao().getBySession(sessionId) }.single().connectionId
         assertEquals("one live decoder for one connection", 1, pump.quicDecoderCount())
+        assertEquals("one live connection summary", 1, pump.quicConnectionStateCount())
+        assertTrue("the negotiated suite mirror is retained while active", pump.hasQuicCipherSuite(connectionId))
 
         // A cutoff in the future makes every decoder idle, the same condition the flush loop applies
         // after FLOW_TTL_MS with no packets.
         pump.pruneQuicDecodersForTest(System.currentTimeMillis() + 60_000L)
 
         assertEquals("idle decode state must be released", 0, pump.quicDecoderCount())
+        assertEquals("idle live summary state must be released", 0, pump.quicConnectionStateCount())
+        assertFalse("idle cipher state must be released", pump.hasQuicCipherSuite(connectionId))
         assertEquals(
             "the persisted row survives the cleanup",
             1,

@@ -113,6 +113,17 @@ class QuicCidTable(
     fun lookupByTuple(tupleKey: String): String? = tupleToConnection[tupleKey]
 
     /**
+     * Releases every routing alias owned by [routingKey]. Called when the owning connection decoder
+     * is evicted, so retired connections cannot retain CID or zero-length-DCID tuple entries forever
+     * or route a later, unrelated connection into stale state.
+     */
+    fun removeConnection(routingKey: String) {
+        val cids = connectionToCids.remove(routingKey).orEmpty()
+        for (cid in cids) cidToConnection.remove(cid, routingKey)
+        tupleToConnection.entries.removeIf { it.value == routingKey }
+    }
+
+    /**
      * Content-equal wrapper for [ByteArray] CIDs, so the [ConcurrentHashMap] keys compare by CID
      * bytes rather than by array identity (a raw [ByteArray] uses reference equality, which would
      * make a freshly-extracted DCID from a second packet miss an entry added from the first).
