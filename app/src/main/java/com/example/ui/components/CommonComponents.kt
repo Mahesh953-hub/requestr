@@ -98,6 +98,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
@@ -1561,6 +1562,59 @@ fun RequestrFilterChip(
                     )
                 }
             }
+        }
+    }
+}
+
+/**
+ * Shared empty-state surface (DESIGN-SYSTEM §15 state vocabulary).
+ *
+ * Centered icon (48.dp at onSurfaceVariant@0.4) + message (14.sp onSurfaceVariant) + an
+ * optional call-to-action. This is the single canonical empty-state composable all lanes
+ * consume so empty surfaces stay visually consistent across Home/Music/Reqy/Flow. Lane-owned
+ * content (the icon, copy, and CTA) is passed in; the tokens are fixed here.
+ *
+ * Accessibility: the icon carries a [contentDescription] only when it conveys state not already
+ * announced by the message — pass `null` (default) when the icon is purely decorative so
+ * TalkBack does not redundantly announce it. The message text wraps and centers, so the
+ * surface is font-scale-safe (no fixed-height container). The optional [cta] is announced as
+ * whatever control the lane supplies (typically a labeled pill/button).
+ *
+ * @param icon leading image vector rendered at 48.dp at 40% onSurfaceVariant.
+ * @param message explanatory copy, 14.sp centered, wrapping allowed.
+ * @param modifier layout modifier (e.g. `Modifier.fillMaxWidth()`).
+ * @param contentDescription TalkBack label for the icon, or null when decorative.
+ * @param cta optional call-to-action composable (a pill or button) rendered below the message.
+ */
+@Composable
+fun EmptyState(
+    icon: ImageVector,
+    message: String,
+    modifier: Modifier = Modifier,
+    contentDescription: String? = null,
+    cta: (@Composable () -> Unit)? = null,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 24.dp, vertical = 32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+            modifier = Modifier.size(48.dp),
+        )
+        Text(
+            text = message,
+            fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+        if (cta != null) {
+            cta()
         }
     }
 }

@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.FilterList
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
@@ -81,6 +82,7 @@ import com.example.data.search.GlobalSearchHit
 import com.example.data.interception.CaptureLogRepository
 import com.example.data.interception.InterceptionStateRepository
 import com.example.data.interception.InterceptionStatus
+import com.example.ui.components.EmptyState
 import com.example.ui.components.GlassCard
 import com.example.ui.components.RequestrWordmark
 import com.example.ui.components.SearchInputField
@@ -569,20 +571,21 @@ fun HomeScreen(
                     }
 
                     if (recentItems.isEmpty()) {
+                        // DESIGN-SYSTEM §15 empty-state vocabulary (mockup home-empty): folder icon
+                        // 48dp @0.4, message, and a "+ New API" CTA pill — not a bare line of text.
                         GlassCard(
                             modifier = Modifier.fillMaxWidth(),
                             backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(16.dp),
-                                contentAlignment = Alignment.Center
+                            EmptyState(
+                                icon = Icons.Default.Folder,
+                                message = "No recently opened APIs or notes yet. Start by creating a new API or note.",
                             ) {
-                                Text(
-                                    text = "No recent items yet. Create an API or Note to get started.",
-                                    fontSize = 12.5.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                HomeQuickActionPill(
+                                    label = "+ New API",
+                                    icon = Icons.Default.Public,
+                                    iconTint = Color(0xFF10B981),
+                                    onClick = { onNavigateToSection("apis") }
                                 )
                             }
                         }

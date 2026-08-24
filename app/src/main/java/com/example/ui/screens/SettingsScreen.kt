@@ -3,7 +3,9 @@ package com.example.ui.screens
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -11,6 +13,8 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -72,7 +76,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -93,6 +100,7 @@ import com.example.data.interception.ShizukuState
 import com.example.interception.CapabilityProbe
 import com.example.interception.CertificateAuthority
 import kotlinx.coroutines.launch
+import com.example.ui.components.BadgePill
 import com.example.ui.components.GlassCard
 import com.example.ui.components.RequestrWordmark
 import com.example.ui.components.SectionHeader
@@ -494,21 +502,18 @@ fun SettingsScreen(
                         // (Root > Shizuku > VPN auto-probe, or force the rootless VPN
                         // path for baseline testing). Previously defined in
                         // SettingsDataStore with zero Settings-page UI anywhere.
-                        SelectPreference(
-                            title = "Default Capture Tier",
-                            currentValue = captureTierPref.name,
-                            description = "AUTO probes Root > Shizuku > VPN and picks the best available. Force VPN Only always uses the rootless path.",
-                            options = listOf(
-                                com.example.data.prefs.CaptureTierPreference.AUTO.name to "Auto (best available)",
-                                com.example.data.prefs.CaptureTierPreference.FORCE_VPN_ONLY.name to "Force VPN Only"
-                            )
-                        ) { value ->
-                            settingsScope.launch {
-                                interceptionDataStore.setCaptureTierPreference(
-                                    com.example.data.prefs.CaptureTierPreference.valueOf(value)
-                                )
+                        // 6-tier visual grid (settings-main-dark.html .tiergrid): VPN maps
+                        // to FORCE_VPN_ONLY; every other tier maps to AUTO (auto-probe).
+                        // The backing CaptureTierPreference enum (frozen in SettingsDataStore,
+                        // consumed read-only by PreflightController) is unchanged.
+                        ProxyTierTypeSelector(
+                            currentTierPref = captureTierPref,
+                            onTierSelected = { pref ->
+                                settingsScope.launch {
+                                    interceptionDataStore.setCaptureTierPreference(pref)
+                                }
                             }
-                        }
+                        )
 
                         // B9(d): remember-last-app-filter — real value read by
                         // PreflightController.run() alongside appFilterMode/selectedPackages
@@ -978,18 +983,55 @@ fun SettingsScreen(
                             Text("none registered", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         } else {
                             adapterStatuses.forEach { (adapterName, statusText) ->
-                                Row(
-                                    modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.Top
+                                val eventCount = eventCounts[adapterName] ?: 0
+                                val state = adapterStateFor(statusText, eventCount)
+                                val stateColor = Color(state.color)
+                                // vrow (runtime-instrumentation-healthy-dark.html): rounded
+                                // surface card with a 3dp state-colored left rail + a state
+                                // pill, event count, and the real status line below.
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 3.dp)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(MaterialTheme.colorScheme.surface)
+                                        .drawBehind {
+                                            drawRect(
+                                                color = stateColor,
+                                                topLeft = Offset(0f, 0f),
+                                                size = Size(width = 3.dp.toPx(), height = size.height),
+                                            )
+                                        }
+                                        .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
+                                        .padding(start = 14.dp, end = 10.dp, top = 8.dp, bottom = 8.dp)
                                 ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(adapterName, fontSize = 11.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
-                                        Text(statusText, fontSize = 9.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(adapterName, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                        ) {
+                                            BadgePill(text = state.label, color = state.color)
+                                            Text(
+                                                String.format("%,d", eventCount),
+                                                fontSize = 11.sp,
+                                                fontFamily = FontFamily.Monospace,
+                                                fontWeight = FontWeight.Bold,
+                                                color = stateColor
+                                            )
+                                            Text("events", fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
                                     }
                                     Text(
-                                        "${eventCounts[adapterName] ?: 0}",
-                                        fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.primary
+                                        statusText,
+                                        fontSize = 9.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(top = 3.dp)
                                     )
                                 }
                             }
@@ -2013,26 +2055,154 @@ private fun AccentColorGrid(
         Text("Accent Color", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
         Text(displayName, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
-    Spacer(modifier = Modifier.height(8.dp))
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        AppAccent.values().toList().chunked(5).forEach { rowAccents ->
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                rowAccents.forEach { accent ->
-                    val selected = currentAccent.equals(accent.name, ignoreCase = true)
-                    Box(
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .then(if (selected) Modifier.border(2.dp, MaterialTheme.colorScheme.onSurface, RoundedCornerShape(10.dp)).padding(4.dp) else Modifier.padding(4.dp))
-                            .clip(CircleShape)
-                            .background(accent.primary)
-                            .clickable { onAccentSelected(accent.name) }
+    Spacer(modifier = Modifier.height(10.dp))
+    // Single horizontally-scrollable row of all 10 accents in M6 declaration order
+    // (INDIGO → OBSIDIAN). Selected swatch grows to 40dp with an onSurface ring + check;
+    // unselected stays 32dp. Matches settings-main-dark.html .accentrow overflow-x:auto.
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        AppAccent.values().forEach { accent ->
+            val selected = currentAccent.equals(accent.name, ignoreCase = true)
+            val swatchSize by animateDpAsState(if (selected) 40.dp else 32.dp, tween(200), label = "accentSwatch")
+            Box(
+                modifier = Modifier
+                    .size(swatchSize)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(accent.primary)
+                    .then(
+                        if (selected) Modifier.border(2.dp, MaterialTheme.colorScheme.onSurface, RoundedCornerShape(8.dp))
+                        else Modifier
                     )
+                    .clickable { onAccentSelected(accent.name) },
+                contentAlignment = Alignment.Center
+            ) {
+                if (selected) {
+                    Icon(Icons.Default.Check, "Selected", tint = Color.White, modifier = Modifier.size(14.dp))
                 }
             }
         }
     }
     Spacer(modifier = Modifier.height(8.dp))
+}
+
+/**
+ * 6-tier capture-method selector (settings-main-dark.html .tiergrid, flex-wrap).
+ *
+ * The backing [com.example.data.prefs.CaptureTierPreference] enum (frozen in SettingsDataStore,
+ * consumed read-only by PreflightController) has only two values: AUTO (probe Root → Shizuku →
+ * VPN, pick the best available) and FORCE_VPN_ONLY (always the rootless VPN path). The six
+ * visual tiers below surface the capture methods requestr supports; selecting any non-VPN tier
+ * maps to AUTO (auto-probe) while VPN maps to FORCE_VPN_ONLY. Root is the visual stand-in for
+ * AUTO because it heads the probe chain, so an AUTO-backed preference highlights Root.
+ *
+ * A session-scoped [selectedLabel] override keeps the highlight on the tier the user actually
+ * tapped instead of snapping back to Root whenever the backing value resolves to AUTO — the
+ * override is not persisted because the frozen enum cannot distinguish which non-VPN tier was
+ * chosen.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ProxyTierTypeSelector(
+    currentTierPref: com.example.data.prefs.CaptureTierPreference,
+    onTierSelected: (com.example.data.prefs.CaptureTierPreference) -> Unit,
+) {
+    val tiers = listOf(
+        ProxyTierVisual("VPN", 0xFF3B82F6, com.example.data.prefs.CaptureTierPreference.FORCE_VPN_ONLY),
+        ProxyTierVisual("Proxy", 0xFF06B6D4, com.example.data.prefs.CaptureTierPreference.AUTO),
+        ProxyTierVisual("Root", 0xFF10B981, com.example.data.prefs.CaptureTierPreference.AUTO),
+        ProxyTierVisual("Shizuku", 0xFF8B5CF6, com.example.data.prefs.CaptureTierPreference.AUTO),
+        ProxyTierVisual("Frida", 0xFFF43F5E, com.example.data.prefs.CaptureTierPreference.AUTO),
+        ProxyTierVisual("LSPosed", 0xFFF59E0B, com.example.data.prefs.CaptureTierPreference.AUTO),
+    )
+    var selectedLabel by remember { mutableStateOf<String?>(null) }
+    val effectiveLabel = selectedLabel ?: when (currentTierPref) {
+        com.example.data.prefs.CaptureTierPreference.FORCE_VPN_ONLY -> "VPN"
+        com.example.data.prefs.CaptureTierPreference.AUTO -> "Root"
+    }
+    Text("Default Capture Tier", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
+    Spacer(modifier = Modifier.height(2.dp))
+    Text(
+        "Auto probes Root → Shizuku → VPN and picks the best available. VPN forces the rootless path.",
+        fontSize = 11.sp,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    Spacer(modifier = Modifier.height(8.dp))
+    FlowRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        tiers.forEach { tier ->
+            val on = tier.label == effectiveLabel
+            val tierColor = Color(tier.color)
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(
+                        if (on) tierColor.copy(alpha = 0.16f)
+                        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                    )
+                    .border(
+                        1.dp,
+                        if (on) tierColor.copy(alpha = 0.4f) else MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
+                        RoundedCornerShape(10.dp)
+                    )
+                    .clickable {
+                        selectedLabel = tier.label
+                        onTierSelected(tier.backing)
+                    }
+                    .padding(horizontal = 11.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(7.dp)
+                        .clip(CircleShape)
+                        .background(tierColor)
+                )
+                Text(
+                    tier.label,
+                    fontSize = 10.5.sp,
+                    fontWeight = if (on) FontWeight.Bold else FontWeight.SemiBold,
+                    color = if (on) tierColor else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+    Spacer(modifier = Modifier.height(4.dp))
+}
+
+private data class ProxyTierVisual(
+    val label: String,
+    val color: Long,
+    val backing: com.example.data.prefs.CaptureTierPreference,
+)
+
+/**
+ * Visual state for a runtime instrumentation adapter row
+ * (runtime-instrumentation-healthy-dark.html .pill + .vrow left rail).
+ */
+private enum class AdapterState(val label: String, val color: Long) {
+    CAPTURING("CAPTURING", 0xFF10B981),
+    IDLE("IDLE", 0xFF64748B),
+    UNAVAILABLE("UNAVAILABLE", 0xFFEF4444),
+}
+
+/**
+ * Derive an adapter's visual state honestly from its real status text and event count —
+ * never guessed. An adapter that has captured events is CAPTURING; one whose status text
+ * reports a failure is UNAVAILABLE; everything else (registered but no events yet) is IDLE.
+ */
+private fun adapterStateFor(statusText: String, eventCount: Int): AdapterState = when {
+    eventCount > 0 -> AdapterState.CAPTURING
+    statusText.contains("failed", ignoreCase = true) -> AdapterState.UNAVAILABLE
+    else -> AdapterState.IDLE
 }
 
 // B3: TokenPlaceholders() (Typography/Surfaces/Borders/Icons/States inert label list)
