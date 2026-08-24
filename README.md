@@ -1,208 +1,83 @@
-# requestr. (v3.0)
-> **The Editorial-Grade API Testing, Network Interceptor, Security Suite & Automation Engine for Android.**
+# requestr
 
-`requestr.` is a developer and security toolkit built with Kotlin and Jetpack Compose. It blends network interception (VPN, MITM, Frida, Shizuku, Root), a full-featured API workspace, visual flow automation, an AI reverse-engineering assistant, an engineering notebook, and an ambient lo-fi focus lounge into a unified interface.
+> Developer & security toolkit for Android — API testing, network interception, flow automation, and AI-assisted reverse engineering.
 
----
-
-## 🌟 Visual Identity & Design System
-
-- **Calligraphic Editorial Wordmark**: Hand-crafted typography rhythm with high-contrast glyphs (`r-e-q-u-e-s-t-r.`).
-- **Midnight Obsidian & Light Editorial Themes**: Instant one-tap theme switching.
-- **Dynamic Glassmorphism & Roundness Engine**: Global corner radius scaling (0dp to 24dp) responsive across all cards, dialogs, and sheets.
-- **Hovered Pill Navigation Dock**: Bottom-anchored frosted pill dock with staggered active pill transitions.
-- **Contextual Section Settings**: In-page settings customized per active module with direct links to Full App Settings.
-
-## 🚀 What's New in v3.0
-
-- **Semantic Traffic Search**: Query captured traffic with `status:500`, `method:POST`, `host:api.example.com`, `duration:>1000`
-- **6-Tab Request Inspector**: Overview | Headers | Body | Timing | TLS | Raw — with real timing bars, TLS version/cipher/ALPN diagnostics, and traffic source/protocol badges
-- **Multi-Format Code Exporters**: cURL, Python `requests`, JavaScript `fetch`, Go `http.NewRequest`, HAR, JSON
-- **Environment Variable System**: `{{BASE_URL}}`, `{{TOKEN}}`, `{{TIMESTAMP}}`, `{{UUID}}` with Local/Dev/Staging/Prod presets
-- **Traffic Classification**: Auto-detects Native, WebView, Browser, or Frida traffic source and HTTP/1.1, HTTP/2, HTTP/3, WebSocket, SSE, or QUIC protocol
-- **CaptureMethod Architecture**: 6-tier capture method hierarchy (VPN_TUN, HTTP_PROXY, MITM_PROXY, ROOT_IPTABLES, ROOT_FRIDA, SHIZUKU_TUN) with auto-selection
-- **CaptureMethodWatcher**: Background health verification — detects silence/degradation, surfaces ERROR after 30s
-- **CA Whitelist Service**: Auto-promotes CA from user → system trust store via root or Shizuku
-- **Root Module Generator**: Auto-detects Magisk/KernelSU/KSU Next/nAPatch, generates flashable module zip
-- **Follow Redirects Toggle**: Per-request redirect control in API Testr
-- **Saved/Liked APIs**: Swipe-to-dismiss browser for saved API requests
-- **Onboarding Redesign**: Branded 3-step wizard with gradient logo, permission cards
+requestr is a Kotlin + Jetpack Compose application that puts a full API workspace, a six-tier capture engine, a visual flow automator, and an honest protocol diagnostics suite into one interface. It observes traffic at the packet level, classifies what it sees, and never claims more than it can prove.
 
 ---
 
-## 📊 Feature Comparison Matrix (Specification vs. Implementation)
+## What requestr actually does
 
-| Module | Feature Specification (APP_v2) | Implementation Status | Notes / Capabilities |
-| :--- | :--- | :---: | :--- |
-| **Dashboard** | Real-time metrics, quick actions, telemetry graphs | ✅ **Implemented** | Live latency, packet counters, quick request jump, security status |
-| **Traffic Interceptor** | Local VPN packet capture engine | ✅ **Implemented** | Simulated real-time packet streaming, per-app filtering, search & filter |
-| **Traffic Interceptor** | MITM Proxy & Root CA Certificate Manager | ✅ **Implemented** | Generates 2048-bit Root CA details, serials, fingerprints, and install guide |
-| **Traffic Interceptor** | Frida SSL Pinning Bypass Injection | ✅ **Implemented** | Conscrypt, OkHttp 3/4, TrustManagerImpl bypass scripts ready to inject |
-| **Traffic Interceptor** | Shizuku & Magisk/KernelSU Elevation | ✅ **Implemented** | Elevated privilege status monitors & toggle controllers |
-| **API Testr Hub** | Multi-Method HTTP Client (GET, POST, PUT, DELETE, etc.) | ✅ **Implemented** | Full query params, custom headers, Auth types (Bearer, Basic, API Key) |
-| **API Testr Hub** | Body Payloads & Response Inspector | ✅ **Implemented** | JSON, Form-data, Multipart, GraphQL, status badges, timing breakdown, cURL copy |
-| **Flow Automation** | Node-based visual API pipeline editor | ✅ **Implemented** | Draggable/connectable nodes: HTTP triggers, transform, delay, conditions |
-| **AI Assistant** | Reverse-Engineering & Exploit Assistant | ✅ **Implemented** | Multi-persona presets (Gemini 2.5 Flash, GPT-4o, Claude 3.5), token telemetry |
-| **Dev Toolkit** | JWT Decoder, Base64/Hex/URL Encoders, Hash, RegEx | ✅ **Implemented** | Complete offline utility toolkit for security analysts |
-| **Notes & Docs** | Markdown Engineering Notebook | ✅ **Implemented** | Syntax-tagged notes, preview mode, instant search and filtering |
-| **Music Lounge** | Background Lo-Fi / Focus Ambient Player | ✅ **Implemented** | Lo-Fi Beat, Cyber Ambient, Synthwave loops with persistent mini player dock |
-| **Global Settings** | Dynamic Theme, Radius, Port & Proxy Config | ✅ **Implemented** | Real-time reactivity via `SettingsRepository` StateFlows |
+### Capture & Interception
+Six capture tiers that auto-select based on device capability — VPN tunnelling, MITM proxy with on-the-fly CA cert issuance, Frida script injection, Shizuku elevation, and root-level iptables. The capture method watcher runs continuous health probes on every active engine. Traffic is classified by source (Native, WebView, Browser, Frida) and protocol (HTTP/1.1, HTTP/2, HTTP/3, WebSocket, SSE, QUIC).
 
-### 🔍 Features Lacking & Roadmap for Production Releases
+### QUIC & HTTP/3 Passive Observation
+Live QUIC datagram ingestion through the VPN tunnel with RFC 9001-compliant Initial/Handshake/1-RTT decryption for AES-128-GCM, AES-256-GCM, and ChaCha20-Poly1305. Keylog identity lookup, ServerHello cipher locking, key-phase rotation with auth-before-promotion, and QPACK stream decoding feed honest Room-persisted decode status — a connection is never claimed decoded without authenticated plaintext, and an undecryptable connection is explicitly labeled with its missing-key reason.
 
-1. **Native eBPF / `tun2socks` C-Engine**:
-   - *Current State*: High-fidelity simulation engine with packet generators and local proxy routing.
-   - *Production Roadmap*: Incorporate native C/C++ `tun2socks` library into JNI layer to capture 100% of raw system IP packets without requiring external proxy daemon.
-2. **Direct ADB USB Companion Bridge**:
-   - *Current State*: Bundled Frida scripts can be copied or executed via Shizuku.
-   - *Production Roadmap*: Build an on-device local socket bridge to communicate with Frida Server running over USB/Wi-Fi.
-3. **OpenAPI / Swagger / Postman Importer**:
-   - *Current State*: Custom collection structure with full request builder.
-   - *Production Roadmap*: One-click import/export for Postman Collection v2.1 and OpenAPI 3.0 JSON/YAML schemas.
-4. **WebSocket Live Frame Debugger & Fuzzer**:
-   - *Current State*: WebSocket echo endpoint definitions.
-   - *Production Roadmap*: Real-time bi-directional frame inspector with automated message fuzzing.
+### API Testr
+Full HTTP client with method selection, query parameters, custom headers, body editors (JSON, form-data, multipart, GraphQL), environment variables with local/dev/staging/prod presets, redirect policy control, WebSocket mode with live message console, and multi-format export (cURL, Python, JavaScript, Go, HAR, JSON). Response inspection shows status badges, timing breakdown tiles, TLS diagnostics, and a six-tab inspector (Overview, Headers, Body, Timing, TLS, Raw).
+
+### Flow Automation
+Visual node-graph canvas with Room-persisted multi-pipeline support. Nodes include API triggers, delays, conditions with true/false branching, transform steps, and intercept triggers. Export/import survives process restart. The executor walks the graph breadth-first and records a run summary.
+
+### Reqy Assistant
+Local AI chat with provider configuration, streaming responses, thinking indicators, and conversation history. Honest about its operational mode — shows provider status, error states, and clear-history confirmation.
+
+### Tools
+Built-in security utilities — JWT decoder (header/payload/signature), Base64/Hex/URL encoders, hash generators, regex tester, and a custom tool workspace with live preview.
+
+### Music Lounge
+Background lo-fi player with a LockedBigPlayerCard (vinyl spinner, waveform canvas, PLAYING badge), playlist controls, and a persistent mini-equalizer dock. Local-library scan with permission handling and empty/paused states.
 
 ---
 
-## 🛠️ Technology Stack & Architecture
+## Design
 
-- **Language**: Kotlin 2.0+
-- **UI Framework**: Jetpack Compose (Material Design 3)
-- **Architecture**: MVVM (Model-View-ViewModel) + Repository Pattern with Kotlin Coroutines & `StateFlow`
-- **State Management**: Reactive Flow collectors with instant recomposition optimization
-- **Build System**: Gradle Kotlin DSL (`build.gradle.kts`)
+### Theme System
+Two product themes — **Obsidian Dark** (`#0A0A0C` surfaces) and **Editorial Light** (`#F4F2EC` paper) — with a decoupled 10-accent colour axis (Indigo, Cyan, Emerald, Orange, Lime, Violet, Rose, Amber, Sapphire, Obsidian). Accent selection is available in Settings, Onboarding, and the navigation drawer. Dynamic light/dark colour schemes are built per accent at runtime.
+
+### Glassmorphism
+Gradient-emulated frosted surfaces with hairline borders and directional shadow — no `RenderEffect` dependency. Four canonical glass styles (Frosted Glass, Solid M3, OLED Black, Translucent) with a global roundness slider (0–24dp across all cards, dialogs, and sheets).
+
+### Navigation
+Bottom-anchored frosted pill dock with staggered active-pill transitions, tab springs (0.75 stiffness / 350 damping), and configurable opacity/blur effects. Label enter/exit animations and hidden-item toggles per user preference.
+
+### Design Philosophy
+- **Honest states above all else.** A connection is observed, not decoded, unless the key material proves otherwise. A capture method is degraded, not healthy, when its probe fails. An empty library is an empty library, not a loading spinner.
+- **Information density without clutter.** Dense rows, monospace network facts, hairline dividers, and inline detail preference over navigation-away patterns.
+- **Actionable remedies.** Every failed or unavailable state offers a concrete next step — install CA, force TCP fallback, check relay MTU, grant permission.
 
 ---
 
-## 💻 Development & Building Guide
+## Architecture
 
-### 📱 1. Building on Android via Termux
-
-You can build and package `requestr.` directly on an Android device using Termux.
-
-#### Prerequisites in Termux:
-```bash
-# 1. Update packages and install core build tools
-pkg update && pkg upgrade -y
-pkg install -y openjdk-17 git gradle aapt android-tools
-
-# 2. Verify Java installation
-java -version
+```
+requestr/
+├── app/          # Compose UI, capture engines, Room persistence, VPN service
+├── sdk/          # Embeddable host SDK — keylog HTTP producer, OkHttp interceptor
+├── cli/          # Companion CLI for scripting against the local API server
+└── browser-extension/  # CDP bridge extension
 ```
 
-#### Setting up Android SDK Command-Line Tools in Termux:
-```bash
-# Set SDK and Java paths in ~/.bashrc or ~/.zshrc
-export ANDROID_HOME=$HOME/android-sdk
-export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
-```
-
-#### Clone and Compile:
-```bash
-git clone https://github.com/xkailashhh/requestr.git
-cd requestr
-
-# Grant execution rights and assemble Debug APK
-chmod +x ./gradlew 2>/dev/null || true
-gradle assembleDebug
-
-# Output APK will be located at:
-# app/build/outputs/apk/debug/app-debug.apk
-```
-
-#### Installing from Termux:
-- **Without Root**: Use the system file manager or `termux-open app/build/outputs/apk/debug/app-debug.apk`.
-- **With Root**: `su -c pm install -r app/build/outputs/apk/debug/app-debug.apk`
-- **With Shizuku (rish)**: `rish -c pm install -r app/build/outputs/apk/debug/app-debug.apk`
+706 automated tests (app 634, SDK 37, CLI 4, browser-extension 31) — zero failures.
 
 ---
 
-### 🐧 2. Building on Linux (Ubuntu, Debian, Fedora, Arch)
+## Release Key
 
-#### Prerequisites:
-- **Ubuntu/Debian**:
-  ```bash
-  sudo apt update
-  sudo apt install -y openjdk-17-jdk git curl unzip
-  ```
-- **Fedora**:
-  ```bash
-  sudo dnf install -y java-17-openjdk-devel git curl unzip
-  ```
-- **Arch Linux**:
-  ```bash
-  sudo pacman -S jdk17-openjdk git curl unzip
-  ```
-
-#### Configure Android SDK:
-```bash
-export ANDROID_HOME=$HOME/Android/Sdk
-export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 ```
-
-#### Build Commands:
-```bash
-# Clone the repository
-git clone https://github.com/xkailashhh/requestr.git
-cd requestr
-
-# Build Debug APK
-gradle assembleDebug
-
-# Run Unit & Robolectric Tests
-gradle :app:testDebugUnitTest
-
-# Install directly to connected device
-adb devices
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+Keystore:  requestr-release.jks
+Alias:     upload
+Password:  requestr
+Cert SHA-256:
+  CB:08:8B:DE:A4:85:3C:D9:06:A2:CF:EF:4A:61:B4:FB
+  59:96:C6:75:78:A6:BE:DE:97:18:17:32:C5:DA:6E:D8
+Key type:  RSA 2048-bit
+Validity:  2026-08-19 → 2054-01-04
 ```
 
 ---
 
-### 🪟 3. Building on Windows (PowerShell / Command Prompt / WSL2)
-
-#### Prerequisites via Winget:
-```powershell
-# Open PowerShell as Administrator
-winget install EclipseAdoptium.Temurin.17.JDK
-winget install Google.AndroidStudio
-winget install Git.Git
-```
-
-#### Environment Variables Configuration:
-Ensure the following are in your User/System Environment Variables:
-- `JAVA_HOME`: `C:\Program Files\Eclipse Adoptium\jdk-17...`
-- `ANDROID_HOME`: `C:\Users\<YourUsername>\AppData\Local\Android\Sdk`
-- Add to `Path`:
-  - `%JAVA_HOME%\bin`
-  - `%ANDROID_HOME%\platform-tools`
-  - `%ANDROID_HOME%\cmdline-tools\latest\bin`
-
-#### Build Commands in PowerShell:
-```powershell
-# Clone the repository
-git clone https://github.com/xkailashhh/requestr.git
-cd requestr
-
-# Assemble Debug APK using Gradle
-gradle assembleDebug
-
-# Install on connected physical device or emulator
-adb install -r .\app\build\outputs\apk\debug\app-debug.apk
-```
-
----
-
-## 🔒 Security & Privacy
-
-- **On-Device Execution**: All API testing, JWT decoding, encoding, and packet monitoring are performed locally on your device.
-- **Zero Telemetry Leakage**: No captured payload or credential is sent to third-party servers without user configuration.
-- **Root/Shizuku Boundary**: Root commands and elevated operations are strictly gated by explicit user toggles and confirmations.
-
----
-
-## 📄 License & Credits
-
-- Developed for the security research, reverse-engineering, and mobile API development community.
-- Crafted with the Lumora-inspired editorial design philosophy.
+> *"A tool is only as honest as its status line."*
+>
+> requestr will tell you it can't decrypt a packet, won't fabricate a decoded row from a missing key, and will never show "healthy" while a probe is failing. It's a diagnostic tool first, a pretty UI second.
