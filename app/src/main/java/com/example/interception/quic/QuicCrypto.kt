@@ -105,6 +105,41 @@ object QuicCrypto {
     )
 
     /**
+     * Result of removing header protection (RFC 9001 §5.4) from a real on-wire QUIC packet, before
+     * the AEAD step. Unlike the simplified [decryptProtectedPayload] contract, this keeps the
+     * packet's own header bytes so the AEAD can authenticate them as Associated Data exactly as RFC
+     * 9001 §5.3 requires (`AAD = the contents of the QUIC header, starting from the first byte …
+     * through the end of the packet number field`).
+     *
+     * @param firstByte the *unprotected* first byte (its low 4/5 bits have been de-masked).
+     * @param packetNumber the full packet number reconstructed via [decodePacketNumber] against the
+     *   caller-supplied largest packet number for this packet's own packet-number space.
+     * @param pnLength the on-wire Packet Number field length in bytes (1..4).
+     * @param keyPhaseBit the short-header KEY_PHASE bit (RFC 9001 §6); always 0 for a long header,
+     *   which has no key phase.
+     * @param aad the packet header bytes (with the first byte and packet number unprotected) that
+     *   the AEAD must authenticate.
+     * @param ciphertext the protected payload including its trailing 16-byte AEAD tag.
+     */
+    data class UnprotectedPacket(
+        val firstByte: Int,
+        val packetNumber: Long,
+        val pnLength: Int,
+        val keyPhaseBit: Int,
+        val aad: ByteArray,
+        val ciphertext: ByteArray,
+    )
+
+    /** A decrypted QUIC packet payload: the plaintext frame bytes plus the packet's own metadata. */
+    data class DecryptedPacket(
+        val plaintext: ByteArray,
+        val packetNumber: Long,
+        val keyPhaseBit: Int,
+        /** The 1-RTT key generation that authenticated (RFC 9001 §6); 0 for non-1-RTT levels. */
+        val keyGeneration: Int = 0,
+    )
+
+    /**
      * {key, iv, hp} derived from a TLS 1.3 traffic secret via [deriveKeysFromTrafficSecret]. The
      * [cipherSuite] is carried alongside the key material so the decrypt path ([decryptProtectedPayload]
      * / [decryptShortHeaderOrHandshakePayload]) can pick the right AEAD transformation (AES/GCM vs
@@ -343,11 +378,30 @@ object QuicCrypto {
         private var currentGeneration: Int = 0
         private var currentSecret: ByteArray = initialSecret
 
+        /**
+         * The connection's header-protection keys. RFC 9001 §5.4 fixes header protection for the whole
+         * connection -- "the same header protection key is used for the duration of the connection, with
+         * the value not changing after a key update" -- so this is generation 0's `hp` material and stays
+         * that way no matter how many times the AEAD keys rotate. Later generations' derived `hp` bytes
+         * exist as a side effect of [deriveKeysFromTrafficSecret] and are deliberately never used: a peer
+         * that rotated its AEAD keys is still masking headers with this key, so unprotecting with a
+         * rotated `hp` would corrupt the packet number and fail every AEAD candidate.
+         */
+        private val fixedHeaderProtectionKeys: PacketProtectionKeys
+
         init {
             val keys = deriveKeysFromTrafficSecret(version, cipherSuite, initialSecret)
                 ?: throw IllegalArgumentException("failed to derive initial key-phase traffic keys")
             phases.add(KeyPhase(key = 0, protectKeys = keys, unprotectKeys = keys))
+            fixedHeaderProtectionKeys = keys
         }
+
+        /**
+         * The keys whose `hp` value must be used to remove header protection for **every** generation
+         * (RFC 9001 §5.4). Callers pass this to [unprotectShortHeaderPacket]; only the AEAD step, via
+         * [attemptUnprotectPacket], varies by key phase.
+         */
+        fun headerProtectionKeys(): PacketProtectionKeys = fixedHeaderProtectionKeys
 
         /** The current generation number (0 for the initial application-data keys, +1 per key update). */
         val generation: Int get() = currentGeneration
@@ -455,6 +509,53 @@ object QuicCrypto {
                 } ?: continue
                 // Authenticated. Promote only if this was the speculative next generation (a retained
                 // previous generation is strictly older than currentGeneration+1, so the check is exact).
+                val promoted = gen == currentGeneration + 1 && stagedNext != null
+                if (promoted) {
+                    val (nextSecret, nextKeys) = stagedNext!!
+                    promote(nextSecret, nextKeys)
+                }
+                return DecryptResult(plaintext = plaintext, generation = gen, promoted = promoted)
+            }
+            return null
+        }
+
+        /**
+         * The packet-number-aware form of [attemptUnprotect], and the one the live 1-RTT decrypt path
+         * uses. [attemptUnprotect] takes a single pre-computed nonce, which is only correct when every
+         * candidate generation shares an IV — they do not: `quic iv` is re-derived per generation
+         * (RFC 9001 §6.1), so the nonce (`iv XOR packet number`, §5.3) differs per candidate. This
+         * overload takes the reconstructed [packetNumber] instead and computes each candidate's own
+         * nonce, so a delayed old-phase packet and a promoted new-phase packet both authenticate.
+         *
+         * Same auth-before-promotion contract as [attemptUnprotect]: the speculative next generation
+         * is promoted only when its AEAD authenticates, a failed candidate never disturbs the current
+         * generation, and retained previous generations stay decryptable for the bounded window.
+         * [aad] is the packet's unprotected header bytes (RFC 9001 §5.3), i.e.
+         * [UnprotectedPacket.aad]. Returns null when no candidate authenticates; never throws.
+         */
+        fun attemptUnprotectPacket(keyPhaseBit: Int, packetNumber: Long, aad: ByteArray, ciphertext: ByteArray): DecryptResult? {
+            val currentBit = currentKeyPhaseBit
+            val candidates = mutableListOf<Pair<Int, PacketProtectionKeys>>()
+            if (currentBit == keyPhaseBit) {
+                candidates.add(currentGeneration to currentUnprotectKeys())
+            }
+            var stagedNext: Pair<ByteArray, PacketProtectionKeys>? = null
+            if ((currentGeneration + 1) % 2 == keyPhaseBit) {
+                stagedNext = deriveNextGeneration()
+                if (stagedNext != null) candidates.add((currentGeneration + 1) to stagedNext.second)
+            }
+            for (i in phases.size - 2 downTo 0) {
+                val phase = phases[i]
+                if (phase.key % 2 == keyPhaseBit && phase.unprotectKeys != null) {
+                    candidates.add(phase.key to phase.unprotectKeys)
+                }
+            }
+            for ((gen, keys) in candidates) {
+                val plaintext = try {
+                    aeadDecrypt(keys, nonceFor(keys.iv, packetNumber), ciphertext, aad)
+                } catch (e: Exception) {
+                    null // wrong generation / bad tag -- try the next candidate
+                } ?: continue
                 val promoted = gen == currentGeneration + 1 && stagedNext != null
                 if (promoted) {
                     val (nextSecret, nextKeys) = stagedNext!!
@@ -602,6 +703,215 @@ object QuicCrypto {
     // ── Handshake long-header + 1-RTT short-header payload decryption (key-log sourced) ──
 
     /**
+     * Removes header protection (RFC 9001 §5.4) from a **real on-wire** QUIC packet and returns the
+     * unprotected header (as AEAD Associated Data), the reconstructed packet number, and the
+     * protected payload — the correct-by-construction input to [aeadDecrypt].
+     *
+     * [packet] is the single QUIC packet's bytes starting at its first (form/flags) byte;
+     * [pnOffset] is the offset of the still-protected Packet Number field within [packet] (for a
+     * long header: just past the Length varint; for a short header: `1 + dcidLen`); [packetEnd] is
+     * one past this packet's last byte (== `packet.size` for a short header, which always consumes
+     * the datagram remainder, and the Length-field-derived end for a long header inside a coalesced
+     * datagram). [largestPn] is the largest packet number already processed in **this packet's own
+     * packet-number space and direction** (RFC 9000 §12.3), or `-1L` if none — it only affects
+     * packet-number reconstruction ([decodePacketNumber]), never key material.
+     *
+     * The header-protection sample is the 16 bytes at `pnOffset + 4` (RFC 9001 §5.4.2); the mask is
+     * generated with the construction selected by [PacketProtectionKeys.cipherSuite] (AES-ECB, or
+     * the ChaCha20 keystream for TLS_CHACHA20_POLY1305_SHA256). The form bit selects whether the
+     * first byte's low 4 bits (long header) or low 5 bits (short header) are protected. For a short
+     * header the KEY_PHASE bit (`0x04` of the unprotected first byte, RFC 9001 §6) is returned so
+     * the caller can drive [KeyPhaseManager.attemptUnprotectPacket].
+     *
+     * Returns null (never throws) when the packet is too short for a sample, the offsets are
+     * inconsistent, or there is not even a full 16-byte AEAD tag.
+     */
+    fun unprotectPacketHeader(
+        keys: PacketProtectionKeys,
+        packet: ByteArray,
+        pnOffset: Int,
+        packetEnd: Int,
+        largestPn: Long = -1L,
+    ): UnprotectedPacket? {
+        return try {
+            if (pnOffset < 1 || packetEnd > packet.size || pnOffset >= packetEnd) return null
+            val sampleOffset = pnOffset + 4
+            if (sampleOffset + 16 > packetEnd) return null
+            val sample = packet.copyOfRange(sampleOffset, sampleOffset + 16)
+            val mask = headerProtectionMask(keys, sample)
+
+            val working = packet.copyOfRange(0, packetEnd)
+            val isLongHeader = (working[0].toInt() and 0x80) != 0
+            val firstByteMask = if (isLongHeader) 0x0f else 0x1f
+            working[0] = (working[0].toInt() xor (mask[0].toInt() and firstByteMask)).toByte()
+            val pnLength = (working[0].toInt() and 0x03) + 1
+            if (pnOffset + pnLength > packetEnd) return null
+            for (i in 0 until pnLength) {
+                working[pnOffset + i] = (working[pnOffset + i].toInt() xor (mask[1 + i].toInt() and 0xFF)).toByte()
+            }
+
+            var truncatedPn = 0L
+            for (i in 0 until pnLength) {
+                truncatedPn = (truncatedPn shl 8) or (working[pnOffset + i].toLong() and 0xFF)
+            }
+            val pn = decodePacketNumber(largestPn, truncatedPn, pnLength)
+
+            val headerLen = pnOffset + pnLength
+            val ciphertext = working.copyOfRange(headerLen, packetEnd)
+            if (ciphertext.size < 16) return null // not even a full AEAD tag
+            UnprotectedPacket(
+                firstByte = working[0].toInt() and 0xFF,
+                packetNumber = pn,
+                pnLength = pnLength,
+                keyPhaseBit = if (isLongHeader) 0 else (working[0].toInt() shr 2) and 0x01,
+                aad = working.copyOfRange(0, headerLen),
+                ciphertext = ciphertext,
+            )
+        } catch (e: Exception) {
+            Log.d(TAG, "Header protection removal failed: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Decrypts a **real on-wire** long-header protected packet (Handshake or 0-RTT, RFC 9000
+     * §17.2.2/§17.2.3) with the RFC 9001 §5.3 Associated Data (the full unprotected header), keyed
+     * from a TLS 1.3 traffic secret obtained from
+     * [com.example.interception.tls.TlsKeyLogRegistry] via [deriveKeysFromTrafficSecret].
+     *
+     * This is the production Handshake/0-RTT decrypt entry point, and the reason
+     * [decryptHandshakePacket]/[decryptProtectedPayload] are not: those authenticate with an **empty**
+     * AAD, which cannot decrypt a genuine packet (every QUIC sender authenticates its header). See
+     * [unprotectPacketHeader] for [pnOffset]/[packetEnd]/[largestPn] semantics. Returns null on any
+     * failure (wrong secret, wrong space, truncated/coalesced boundary mismatch, bad tag).
+     */
+    fun decryptLongHeaderPacket(
+        keys: PacketProtectionKeys,
+        packet: ByteArray,
+        pnOffset: Int,
+        packetEnd: Int,
+        largestPn: Long = -1L,
+    ): DecryptedPacket? {
+        val unprotected = unprotectPacketHeader(keys, packet, pnOffset, packetEnd, largestPn) ?: return null
+        return try {
+            val plaintext = aeadDecrypt(keys, nonceFor(keys.iv, unprotected.packetNumber), unprotected.ciphertext, unprotected.aad)
+            DecryptedPacket(plaintext = plaintext, packetNumber = unprotected.packetNumber, keyPhaseBit = 0)
+        } catch (e: Exception) {
+            Log.d(TAG, "Long-header packet decrypt failed: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Removes header protection from a **real on-wire** 1-RTT short-header packet (RFC 9000 §17.3).
+     * A short header carries no Length field and no DCID length, so the caller must supply the
+     * connection's [dcidLen] for this direction (learned from the peer's Source Connection ID during
+     * the handshake) — the Packet Number field starts at `1 + dcidLen` — and the packet always
+     * consumes the datagram remainder.
+     *
+     * The returned [UnprotectedPacket.keyPhaseBit] and [UnprotectedPacket.packetNumber] feed
+     * [KeyPhaseManager.attemptUnprotectPacket], which performs the AEAD step under
+     * auth-before-promotion. Header protection itself is **not** re-keyed by a key update (RFC 9001
+     * §5.4: the header protection key does not change after a key update), so
+     * [KeyPhaseManager.headerProtectionKeys] is the correct — and only correct — `hp` source here,
+     * regardless of the packet's key phase: a rotated generation's derived `hp` is never on the wire.
+     */
+    fun unprotectShortHeaderPacket(
+        keys: PacketProtectionKeys,
+        packet: ByteArray,
+        dcidLen: Int,
+        largestPn: Long = -1L,
+    ): UnprotectedPacket? {
+        if (packet.isEmpty()) return null
+        if ((packet[0].toInt() and 0x80) != 0) return null // long header, not 1-RTT
+        if (dcidLen < 0 || dcidLen > 20) return null // RFC 9000 §17.2: CIDs are at most 20 bytes
+        return unprotectPacketHeader(keys, packet, pnOffset = 1 + dcidLen, packetEnd = packet.size, largestPn = largestPn)
+    }
+
+    /**
+     * Decrypts a **real on-wire** 1-RTT short-header packet with a single, fixed key generation (no
+     * key-phase rotation). Used where the caller has exactly one set of application keys — the
+     * key-update-aware path is [KeyPhaseManager.attemptUnprotectPacket] on top of
+     * [unprotectShortHeaderPacket], which is what the live decoder uses. Returns null on any failure.
+     */
+    fun decryptShortHeaderPacket(
+        keys: PacketProtectionKeys,
+        packet: ByteArray,
+        dcidLen: Int,
+        largestPn: Long = -1L,
+    ): DecryptedPacket? {
+        val unprotected = unprotectShortHeaderPacket(keys, packet, dcidLen, largestPn) ?: return null
+        return try {
+            val plaintext = aeadDecrypt(keys, nonceFor(keys.iv, unprotected.packetNumber), unprotected.ciphertext, unprotected.aad)
+            DecryptedPacket(
+                plaintext = plaintext,
+                packetNumber = unprotected.packetNumber,
+                keyPhaseBit = unprotected.keyPhaseBit,
+            )
+        } catch (e: Exception) {
+            Log.d(TAG, "Short-header packet decrypt failed: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Locates an Initial packet's Packet Number offset and end (RFC 9000 §17.2.2) and decrypts it
+     * with already-derived [keys] — the client-direction keys from [deriveClientInitialKeys] or the
+     * server-direction keys from [deriveServerInitialKeys], both of which are derived from the
+     * *client's original* Destination Connection ID (RFC 9001 §5.2), never from the DCID carried in
+     * a server-sourced packet.
+     *
+     * This is what makes a server's Initial packet (carrying the ServerHello, and therefore the
+     * negotiated cipher suite) decodable from a passive capture: [decryptInitialPacket] needs the
+     * payload offsets, which only a caller that has already walked the Token Length + Length varints
+     * can supply. Returns null for a non-Initial/truncated packet or on any decrypt failure.
+     */
+    fun decryptInitialPacketAt(
+        packet: ByteArray,
+        keys: InitialKeys,
+        largestPn: Long = -1L,
+    ): DecryptedInitial? {
+        val span = locateInitialPayload(packet) ?: return null
+        return decryptInitialPacket(packet, span.first, span.second, keys, largestPn)
+    }
+
+    /**
+     * Walks an Initial long header (first byte, version, DCID, SCID, Token Length + Token, Length)
+     * and returns `(pnOffset, packetEnd)` — the offsets [decryptInitialPacket] needs. Returns null
+     * if the packet is not a long header or any field is truncated/out of bounds.
+     */
+    fun locateInitialPayload(packet: ByteArray): Pair<Int, Int>? {
+        if (packet.size < 7) return null
+        if ((packet[0].toInt() and 0x80) == 0) return null
+        var pos = 5
+        if (pos >= packet.size) return null
+        val dcidLen = packet[pos].toInt() and 0xFF
+        pos += 1 + dcidLen
+        if (pos >= packet.size) return null
+        val scidLen = packet[pos].toInt() and 0xFF
+        pos += 1 + scidLen
+        if (pos >= packet.size) return null
+        val (tokenLen, tokenLenSize) = readVarint(packet, pos) ?: return null
+        val afterToken = pos + tokenLenSize + tokenLen.toInt()
+        if (afterToken < 0 || afterToken >= packet.size) return null
+        val (payloadLen, lengthSize) = readVarint(packet, afterToken) ?: return null
+        val pnOffset = afterToken + lengthSize
+        val packetEnd = pnOffset + payloadLen.toInt()
+        if (packetEnd <= pnOffset || packetEnd > packet.size) return null
+        return pnOffset to packetEnd
+    }
+
+    /** AEAD nonce for [packetNumber]: `iv XOR packet number`, right-aligned (RFC 9001 §5.3). */
+    private fun nonceFor(iv: ByteArray, packetNumber: Long): ByteArray {
+        val nonce = iv.copyOf()
+        for (i in 0 until 8) {
+            val pnByte = ((packetNumber ushr (i * 8)) and 0xFF).toByte()
+            nonce[nonce.size - 1 - i] = (nonce[nonce.size - 1 - i].toInt() xor pnByte.toInt()).toByte()
+        }
+        return nonce
+    }
+
+    /**
      * Decrypts a QUIC Handshake-level long-header packet (RFC 9000 §17.2.2 / RFC 9001 §5.2) keyed
      * from a TLS 1.3 handshake traffic secret -- a `CLIENT_HANDSHAKE_TRAFFIC_SECRET` /
      * `SERVER_HANDSHAKE_TRAFFIC_SECRET` obtained from
@@ -626,6 +936,11 @@ object QuicCrypto {
      * bytes are AEAD-decrypted with an **empty AAD** (this object's simplified payload contract --
      * see [decryptProtectedPayload]). A wrong secret, corrupt packet, or DCID mismatch returns null,
      * never throws. Returns the decrypted frame bytes (CRYPTO/ACK/etc.) or null on any failure.
+     *
+     * **Not the production entry point.** Because the AAD is empty, this cannot decrypt a genuine
+     * on-wire packet: every QUIC sender authenticates the packet header as Associated Data (RFC 9001
+     * §5.3). It is retained as the simplified payload-level primitive (and its test vectors);
+     * [decryptLongHeaderPacket] is what the live decoder uses for real Handshake/0-RTT packets.
      */
     fun decryptHandshakePacket(
         version: Int,
@@ -921,13 +1236,58 @@ object QuicCrypto {
         return cipher.doFinal(ciphertext)
     }
 
+    // ── Protect-side primitives (packet construction) ───────────────────────────────────
+    //
+    // QUIC header protection and AEAD are symmetric: the same mask construction and the same key
+    // material protect a packet as unprotect it. These `internal` counterparts to
+    // [headerProtectionMask]/[aeadDecrypt] exist so a caller inside this module can build a
+    // genuinely protected packet — used by the deterministic QUIC fixtures in the unit-test source
+    // set, which must produce real RFC 9001 wire bytes (correct header-protection mask, correct
+    // `iv XOR pn` nonce, correct header AAD) rather than re-implementing the crypto and thereby
+    // testing a second implementation instead of this one.
+
+    /**
+     * The RFC 9001 §5.4 header-protection mask for [keys]' negotiated suite over the 16-byte
+     * [sample16] — AES-ECB for the AES-GCM suites, the ChaCha20 keystream construction for
+     * TLS_CHACHA20_POLY1305_SHA256. At least 5 bytes: `[0]` masks the first byte, `[1..4]` the
+     * packet number.
+     */
+    internal fun headerProtectionMaskFor(keys: PacketProtectionKeys, sample16: ByteArray): ByteArray =
+        headerProtectionMask(keys, sample16)
+
+    /** The AEAD nonce for [packetNumber] under [iv]: `iv XOR packet number`, right-aligned (RFC 9001 §5.3). */
+    internal fun aeadNonce(iv: ByteArray, packetNumber: Long): ByteArray = nonceFor(iv, packetNumber)
+
+    /**
+     * AEAD-seals [plaintext] under [keys]' negotiated suite with [nonce] and [aad], returning
+     * ciphertext with its trailing 16-byte tag — the exact inverse of [aeadDecrypt].
+     */
+    internal fun aeadSeal(keys: PacketProtectionKeys, nonce: ByteArray, plaintext: ByteArray, aad: ByteArray = ByteArray(0)): ByteArray {
+        val suite = keys.cipherSuite
+        val cipher = Cipher.getInstance(suite.aeadTransformation)
+        if (suite.headerProtectionIsChaCha20) {
+            cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(keys.key, suite.aeadKeyAlgorithm), IvParameterSpec(nonce))
+        } else {
+            cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(keys.key, suite.aeadKeyAlgorithm), GCMParameterSpec(128, nonce))
+        }
+        if (aad.isNotEmpty()) cipher.updateAAD(aad)
+        return cipher.doFinal(plaintext)
+    }
+
+    /**
+     * TLS 1.3 HKDF-Expand-Label (RFC 8446 §7.1) over [hmacAlgorithm], exposed inside the module so
+     * fixtures can derive the same next-generation key-update secret ([KeyPhaseManager]'s RFC 9001
+     * §6.1 `"quic ku"` step) this object derives internally.
+     */
+    internal fun expandLabel(secret: ByteArray, label: String, length: Int, hmacAlgorithm: String = "HmacSHA256"): ByteArray =
+        hkdfExpandLabel(secret, label, length, hmacAlgorithm)
+
     /**
      * Reads a QUIC variable-length integer (RFC 9000 §16) at [offset]: the top 2 bits of the first
      * byte encode the byte length (00=1, 01=2, 10=4, 11=8), the remaining bits + trailing bytes are
      * the big-endian value. Returns (value, byteCount) or null on truncation. Used by
      * [decryptHandshakePacket] to walk the Handshake long header's Length field.
-     */
-    private fun readVarint(buf: ByteArray, offset: Int): Pair<Long, Int>? {
+     */    private fun readVarint(buf: ByteArray, offset: Int): Pair<Long, Int>? {
         if (offset >= buf.size) return null
         val first = buf[offset].toInt() and 0xFF
         val len = when (first shr 6) {
