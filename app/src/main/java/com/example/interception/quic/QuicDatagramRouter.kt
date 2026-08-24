@@ -50,6 +50,15 @@ class QuicDatagramRouter(private val cidTable: QuicCidTable) {
      * @param sniHostname recovered SNI (Initial packets only); null for non-Initial or when
      *   unrecoverable.
      * @param decrypted true when [sniHostname]/[alpn] came from a real AEAD-decrypted ClientHello.
+     * @param clientRandom the ClientHello's 32-byte `random` (Initial packets whose ClientHello was
+     *   decrypted only) — the identity a TLS key log is keyed by, so the 1-RTT decrypt path can look
+     *   up this connection's traffic secrets in
+     *   [com.example.interception.tls.TlsKeyLogRegistry]. Null for every other packet.
+     * @param pnOffset offset of the (still-protected) Packet Number field **within
+     *   [payloadBytes]**, for long-header packets that carry a Length field (Initial / Handshake /
+     *   0-RTT); `-1` for Retry, Version Negotiation, unknown versions, and short headers (whose PN
+     *   offset depends on connection state the router does not hold — see
+     *   [QuicCrypto.unprotectShortHeaderPacket]).
      */
     data class RoutedPacket(
         val connectionId: String,
@@ -64,6 +73,8 @@ class QuicDatagramRouter(private val cidTable: QuicCidTable) {
         val sniHostname: String?,
         val alpn: String?,
         val decrypted: Boolean,
+        val clientRandom: ByteArray? = null,
+        val pnOffset: Int = -1,
     )
 
     /**
@@ -150,6 +161,9 @@ class QuicDatagramRouter(private val cidTable: QuicCidTable) {
 
         var packetEnd: Int
         var consumeRemainder = false
+        // Offset of the Packet Number field within the datagram, for the levels that carry a Length
+        // field; stays -1 for Retry / Version Negotiation / unknown versions (no Length field).
+        var pnOffsetAbs = -1
         when (packetType) {
             null, QuicCrypto.LongHeaderPacketType.RETRY -> {
                 // No Length field: Version Negotiation, Retry, or an unrecognized version — consume
@@ -167,6 +181,7 @@ class QuicDatagramRouter(private val cidTable: QuicCidTable) {
                 val lenVar = readVarint(data, afterToken) ?: return null
                 val (lenVal, lenSize) = lenVar
                 val pnOffset = afterToken + lenSize
+                pnOffsetAbs = pnOffset
                 val end = pnOffset + lenVal.toInt()
                 if (end < pnOffset || end > data.size) {
                     // Truncated payload / coalesced boundary mismatch — consume the remainder.
@@ -181,6 +196,7 @@ class QuicDatagramRouter(private val cidTable: QuicCidTable) {
                 val lenVar = readVarint(data, pos) ?: return null
                 val (lenVal, lenSize) = lenVar
                 val pnOffset = pos + lenSize
+                pnOffsetAbs = pnOffset
                 val end = pnOffset + lenVal.toInt()
                 if (end < pnOffset || end > data.size) {
                     packetEnd = data.size
@@ -197,12 +213,14 @@ class QuicDatagramRouter(private val cidTable: QuicCidTable) {
         var sni: String? = null
         var alpn: String? = null
         var decrypted = false
+        var clientRandom: ByteArray? = null
         if (packetType == QuicCrypto.LongHeaderPacketType.INITIAL) {
             val initial = QuicParser.parseInitial(payloadBytes)
             if (initial != null) {
                 sni = initial.sniHostname
                 alpn = initial.alpn
                 decrypted = initial.decrypted
+                clientRandom = initial.clientRandom
             }
         }
 
@@ -221,6 +239,10 @@ class QuicDatagramRouter(private val cidTable: QuicCidTable) {
             sniHostname = sni,
             alpn = alpn,
             decrypted = decrypted,
+            clientRandom = clientRandom,
+            // Re-based to the packet's own start so the decrypt path can address [payloadBytes]
+            // directly, regardless of where in a coalesced datagram this packet began.
+            pnOffset = if (pnOffsetAbs >= 0) pnOffsetAbs - offset else -1,
         )
         return LongHeaderParse(routed, packetEnd, consumeRemainder)
     }

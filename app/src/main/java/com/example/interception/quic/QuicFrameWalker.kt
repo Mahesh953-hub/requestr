@@ -11,6 +11,10 @@ package com.example.interception.quic
  *   that wires the previously-uncalled [QuicCidTable.retireCid].
  * - **Stream extraction:** surfaces every `STREAM` (0x08–0x0f) frame as [Frame.Stream] so the
  *   PacketPump 1-RTT path can feed reassembled bytes into [Http3StreamParser].
+ * - **CRYPTO extraction:** surfaces every `CRYPTO` (0x06) frame as [Frame.Crypto] with its byte
+ *   offset, so the caller can reassemble the encryption level's TLS handshake stream (a ServerHello
+ *   or a server Certificate chain routinely spans several CRYPTO frames and several packets) and
+ *   recover the negotiated cipher suite from the real ServerHello.
  * - **Close detection:** surfaces `CONNECTION_CLOSE` (0x1c / 0x1d) as [Frame.ConnectionClose] so
  *   the caller can drive the connection lifecycle ([com.example.interception.quic.QuicState]).
  *
@@ -33,6 +37,13 @@ class QuicFrameWalker(private val cidTable: QuicCidTable) {
     sealed class Frame {
         /** A STREAM frame (RFC 9000 §19.8): bytes [data] at stream byte [offset], [fin] if the FIN bit was set. */
         data class Stream(val streamId: Long, val offset: Long, val fin: Boolean, val data: ByteArray) : Frame()
+        /**
+         * A CRYPTO frame (RFC 9000 §19.6): TLS handshake bytes [data] at crypto-stream byte [offset]
+         * within this packet's encryption level. Each level (Initial/Handshake/1-RTT) has its own
+         * independent crypto stream, so the caller must key its reassembly by level as well as
+         * direction.
+         */
+        data class Crypto(val offset: Long, val data: ByteArray) : Frame()
         /** A NEW_CONNECTION_ID frame (RFC 9000 §19.15); already applied to [cidTable] when surfaced. */
         data class NewConnectionId(val sequence: Long, val retirePriorTo: Long, val cid: ByteArray, val statelessResetToken: ByteArray) : Frame()
         /** A RETIRE_CONNECTION_ID frame (RFC 9000 §19.16); already applied to [cidTable] when surfaced. */
@@ -67,6 +78,7 @@ class QuicFrameWalker(private val cidTable: QuicCidTable) {
             val body = payload.copyOfRange(afterType, end)
             when (type.toInt()) {
                 in STREAM_TYPES -> parseStream(type.toInt(), body)?.let(out::add)
+                CRYPTO -> parseCrypto(body)?.let(out::add)
                 NEW_CONNECTION_ID -> parseNewConnectionId(body)?.let { f ->
                     applyNewConnectionId(routingKey, seqs, f)
                     out.add(f)
@@ -80,7 +92,7 @@ class QuicFrameWalker(private val cidTable: QuicCidTable) {
                     }
                 }
                 CONNECTION_CLOSE, CONNECTION_CLOSE_APP -> parseConnectionClose(type.toInt(), body)?.let(out::add)
-                else -> Unit // PADDING/PING/ACK/CRYPTO/MAX_*/BLOCKED/DATAGRAM/grease: delimited & skipped
+                else -> Unit // PADDING/PING/ACK/MAX_*/BLOCKED/DATAGRAM/grease: delimited & skipped
             }
             pos = end
         }
@@ -201,6 +213,15 @@ class QuicFrameWalker(private val cidTable: QuicCidTable) {
             body.copyOfRange(p, body.size)
         }
         return Frame.Stream(idRead.second, offset, fin, data)
+    }
+
+    /** Parses a CRYPTO frame body (offset varint + length varint + data) into a [Frame.Crypto]; null if truncated. */
+    private fun parseCrypto(body: ByteArray): Frame.Crypto? {
+        val offRead = readVarint(body, 0) ?: return null
+        val lenRead = readVarint(body, offRead.first) ?: return null
+        val dataLen = lenRead.second.toInt()
+        if (dataLen < 0 || lenRead.first + dataLen > body.size) return null
+        return Frame.Crypto(offRead.second, body.copyOfRange(lenRead.first, lenRead.first + dataLen))
     }
 
     /** Delimits a NEW_CONNECTION_ID frame: sequence (i) + retire-prior-to (i) + CID-len (8) + CID + 16-byte token. */

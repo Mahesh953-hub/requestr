@@ -40,6 +40,13 @@ object QuicParser {
          * decrypt path failed for any reason.
          */
         val decrypted: Boolean,
+        /**
+         * The ClientHello's 32-byte `random` when (and only when) the Initial was really decrypted —
+         * the TLS-key-log identity for this connection (see
+         * [com.example.interception.tls.TlsClientHello.clientRandom]). Null for the heuristic
+         * fallback, which never sees a structurally-located random.
+         */
+        val clientRandom: ByteArray? = null,
     )
 
     /** Long-header packet types (RFC 9000 §17.2, bits 4-5 of the first byte). */
@@ -117,6 +124,7 @@ object QuicParser {
         var alpn: String? = null
         var sni: String? = null
         var decrypted = false
+        var clientRandom: ByteArray? = null
 
         // Only real Initial packets (type 0b00) of a version we know an Initial-key salt for
         // carry a Token field + Length field we can parse to locate the AEAD ciphertext.
@@ -141,6 +149,7 @@ object QuicParser {
                                     decrypted = true
                                     sni = chello.sni
                                     alpn = chello.alpn
+                                    clientRandom = chello.clientRandom
                                     Log.d(
                                         TAG,
                                         "Decrypted QUIC Initial pn=${result?.packetNumber} " +
@@ -171,6 +180,7 @@ object QuicParser {
             sniHostname = sni,
             alpn = alpn,
             decrypted = decrypted,
+            clientRandom = clientRandom,
         )
     }
 
