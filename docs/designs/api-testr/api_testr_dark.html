@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API Testr · Obsidian Dark · requestr</title>
+<meta name="description" content="requestr API Testr screen — new request builder with method dropdown, follow-redirects toggle, query/headers table with add/delete rows, live JSON preview block, raw text editor toggle, and send request action. Obsidian Dark theme.">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-text-size-adjust:100%}
+body{background:#050608;min-height:100vh;display:flex;flex-direction:column;align-items:center;
+ padding:22px 12px 34px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+.frame-label{font:700 10px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:1.4px;
+ text-transform:uppercase;color:#8B95A6;margin-bottom:10px;text-align:center}
+.phone{width:390px;height:844px;background:#0A0E1A;color:#F1F5F9;border:1px solid #1E2D45;border-radius:36px;
+ overflow:hidden;position:relative;box-shadow:0 22px 60px rgba(0,0,0,0.55);display:flex;flex-direction:column}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
+.sysbar{height:28px;flex:0 0 28px;display:flex;align-items:center;justify-content:space-between;padding:0 18px;
+ font:600 11px/1 ui-monospace,Menlo,monospace;color:#F1F5F9;opacity:.9}
+.sysbar .right{display:flex;align-items:center;gap:5px}
+
+/* ===== HEADER ===== */
+.hdr{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:10px 16px 10px;
+ background:rgba(10,14,26,0.75);backdrop-filter:blur(20px) saturate(140%);-webkit-backdrop-filter:blur(20px) saturate(140%);
+ border-bottom:1px solid #1E2D45}
+.hdr h1{font-size:22px;font-weight:700;letter-spacing:-.5px;color:#F1F5F9}
+.hdr .acts{display:flex;align-items:center;gap:6px}
+.ibtn{width:38px;height:38px;border-radius:19px;display:flex;align-items:center;justify-content:center;
+ background:#1C2333;color:#60A5FA;border:1px solid #263049;cursor:pointer;transition:transform .15s ease,box-shadow .15s ease}
+.ibtn:hover{box-shadow:0 0 0 4px rgba(59,130,246,0.20);transform:translateY(-1px)}
+.ibtn:active{transform:scale(0.94)}
+.ibtn.on{background:#3B82F6;color:#0A0E1A;border-color:#5B9BF7}
+
+/* ===== BODY / SCROLL ===== */
+.body{flex:1 1 auto;overflow-y:auto;display:flex;flex-direction:column;padding:14px 16px 90px}
+.body::-webkit-scrollbar{width:0;height:0}
+
+/* ===== TITLE ROW ===== */
+.titlecard{background:#111827;border:1px solid #1E2D45;border-radius:18px;padding:16px 16px 14px;margin-bottom:12px}
+.titlerow{display:flex;align-items:center;gap:8px}
+.titlerow h2{font-size:23px;font-weight:800;letter-spacing:-.4px;color:#F1F5F9;flex:1}
+.titlerow input.title-input{font-size:23px;font-weight:800;letter-spacing:-.4px;color:#F1F5F9;flex:1;
+ background:transparent;border:none;border-bottom:2px dashed #3B82F6;outline:none;padding:0 0 2px;font-family:inherit}
+.pencil{width:26px;height:26px;border-radius:8px;display:flex;align-items:center;justify-content:center;
+ color:#60A5FA;cursor:pointer;flex:0 0 26px;transition:background .15s ease}
+.pencil:hover{background:rgba(96,165,250,0.14)}
+.draft-note{font-size:9.5px;color:#5B6B85;margin-top:4px;font-style:italic;height:12px;opacity:0;transition:opacity .3s ease}
+.draft-note.show{opacity:1}
+
+/* ===== URL BAR ===== */
+.urlbar{display:flex;align-items:center;gap:0;margin-top:12px;background:#0D1220;border:1px solid #1E2D45;
+ border-radius:14px;overflow:visible;position:relative}
+.method-btn{flex:0 0 auto;display:flex;align-items:center;gap:4px;padding:11px 12px;font:800 13px/1 ui-monospace,Menlo,monospace;
+ border-right:1px solid #1E2D45;cursor:pointer;user-select:none;border-radius:14px 0 0 14px;transition:background .15s ease}
+.method-btn:hover{background:rgba(255,255,255,0.04)}
+.method-btn .car{width:9px;height:9px;opacity:.6;margin-left:1px}
+.url-text{flex:1;padding:0 10px;font:500 13px/1 ui-monospace,Menlo,monospace;color:#F1F5F9;white-space:nowrap;
+ overflow:hidden;text-overflow:ellipsis;min-width:0}
+.url-text .scheme{color:#5B6B85}
+.url-text .host{color:#60A5FA;font-weight:700}
+.url-text .path{color:#F1F5F9}
+.redirect-btn{flex:0 0 auto;width:40px;height:40px;display:flex;align-items:center;justify-content:center;
+ border-left:1px solid #1E2D45;cursor:pointer;color:#5B6B85;transition:color .15s ease,background .15s ease}
+.redirect-btn.active{color:#3B82F6;background:rgba(59,130,246,0.14)}
+.redirect-btn:hover{background:rgba(255,255,255,0.04)}
+
+/* method dropdown menu */
+.method-menu{position:absolute;top:46px;left:0;width:190px;background:#151B2C;border:1px solid #263049;
+ border-radius:16px;box-shadow:0 14px 34px rgba(0,0,0,0.55);padding:6px;z-index:30;display:none;
+ animation:menuIn .16s cubic-bezier(.2,.9,.3,1.2)}
+.method-menu.show{display:block}
+@keyframes menuIn{from{opacity:0;transform:translateY(-6px) scale(.97)}to{opacity:1;transform:translateY(0) scale(1)}}
+.method-opt{display:flex;align-items:center;justify-content:space-between;padding:9px 11px;border-radius:10px;
+ cursor:pointer;transition:background .12s ease}
+.method-opt:hover{background:#1C2333}
+.method-opt .m-label{font:800 12px/1 ui-monospace,Menlo,monospace;padding:3px 8px;border-radius:6px}
+.method-opt .check{width:14px;height:14px;color:#3B82F6;opacity:0}
+.method-opt.sel .check{opacity:1}
+
+/* content-type dropdown (body tab) */
+.ct-menu{position:absolute;top:46px;left:0;right:0;background:#151B2C;border:1px solid #263049;
+ border-radius:16px;box-shadow:0 14px 34px rgba(0,0,0,0.55);padding:6px;z-index:30;display:none;
+ animation:menuIn .16s cubic-bezier(.2,.9,.3,1.2)}
+.ct-menu.show{display:block}
+.ct-opt{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-radius:10px;
+ cursor:pointer;font:500 12.5px/1 -apple-system,sans-serif;color:#F1F5F9;transition:background .12s ease}
+.ct-opt:hover{background:#1C2333}
+.ct-opt.sel{background:#1C2A44;font-weight:700}
+.ct-opt .check{width:15px;height:15px;color:#3B82F6;opacity:0}
+.ct-opt.sel .check{opacity:1}
+
+/* ===== TABS ===== */
+.tabs{display:flex;gap:2px;margin-top:14px;border-bottom:1px solid #1E2D45;overflow-x:auto;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tab{flex:0 0 auto;padding:8px 12px;font:700 12.5px/1 -apple-system,sans-serif;color:#5B6B85;white-space:nowrap;
+ cursor:pointer;position:relative;transition:color .15s ease}
+.tab.on{color:#60A5FA}
+.tab.on:after{content:"";position:absolute;left:8px;right:8px;bottom:-1px;height:2px;background:#3B82F6;border-radius:2px 2px 0 0}
+.tab .badge{display:inline-block;margin-left:3px;font:700 9px/1 ui-monospace,Menlo,monospace;color:#60A5FA;
+ background:#1C2A44;border-radius:6px;padding:1px 5px}
+
+/* ===== KEY-VALUE TABLE ===== */
+.kvtable{margin-top:10px;background:#0D1220;border:1px solid #1E2D45;border-radius:16px;overflow:hidden}
+.kvhead{display:grid;grid-template-columns:30px 1fr 1fr 30px;gap:6px;padding:9px 10px 7px;
+ font:700 10px/1 -apple-system,sans-serif;letter-spacing:.5px;text-transform:uppercase;color:#5B6B85;
+ border-bottom:1px solid #1A2338}
+.kvrow{display:grid;grid-template-columns:30px 1fr 1fr 30px;gap:6px;align-items:center;padding:7px 10px;
+ border-bottom:1px solid #161D2E;transition:background .2s ease}
+.kvrow:last-child{border-bottom:none}
+.kvrow.disabled input{color:#48536B;text-decoration:line-through;text-decoration-color:#2C3548}
+.kvrow.new-row{animation:rowIn .28s cubic-bezier(.2,.85,.35,1.1)}
+@keyframes rowIn{from{opacity:0;transform:translateY(-8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}
+.kvrow.removing{animation:rowOut .22s ease forwards}
+@keyframes rowOut{to{opacity:0;transform:translateX(14px) scale(.96);max-height:0;padding-top:0;padding-bottom:0}}
+.chk{width:19px;height:19px;border-radius:6px;border:1.6px solid #2C3548;display:flex;align-items:center;
+ justify-content:center;cursor:pointer;flex:0 0 19px;transition:all .15s ease}
+.chk.on{background:#3B82F6;border-color:#3B82F6}
+.chk svg{opacity:0;transition:opacity .1s ease}
+.chk.on svg{opacity:1}
+.kvinput{width:100%;background:#161D2E;border:1px solid #1E2D45;border-radius:9px;padding:7px 9px;
+ font:500 12px/1.2 ui-monospace,Menlo,monospace;color:#F1F5F9;outline:none;transition:border-color .15s ease,background .15s ease}
+.kvinput:focus{border-color:#3B82F6;background:#0D1220}
+.kvinput.val{color:#4ADE80}
+.kvdel{width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;
+ color:#8A6A6A;cursor:pointer;flex:0 0 28px;transition:background .15s ease}
+.kvdel:hover{background:rgba(239,68,68,0.16);color:#EF4444}
+.kv-addrow{display:flex;align-items:center;gap:7px;padding:11px 12px;color:#60A5FA;cursor:pointer;
+ font:700 12px/1 -apple-system,sans-serif;border-top:1px dashed #1E2D45;transition:background .15s ease}
+.kv-addrow:hover{background:#111827}
+.kv-addrow svg{flex:0 0 16px}
+
+/* ===== JSON TOOLBAR + BLOCK ===== */
+.jsonwrap{margin-top:14px;background:#02030A;border-radius:16px;overflow:hidden;border:1px solid #1A2338}
+.jsontoolbar{display:flex;align-items:center;justify-content:space-between;padding:9px 12px;background:#080B14;
+ border-bottom:1px solid #1A2338}
+.jsontoolbar .lbl{font:700 11px/1 ui-monospace,Menlo,monospace;letter-spacing:1px;text-transform:uppercase;color:#8B95A6}
+.jsontoolbar .jt-acts{display:flex;align-items:center;gap:3px}
+.jt-btn{width:29px;height:29px;border-radius:9px;display:flex;align-items:center;justify-content:center;
+ color:#8B95A6;cursor:pointer;transition:background .15s ease,color .15s ease}
+.jt-btn:hover{background:rgba(59,130,246,0.20);color:#60A5FA}
+.jt-btn.raw-on{background:#3B82F6;color:#02030A}
+.jsonbody{padding:12px 14px 14px;font:400 11.5px/1.65 ui-monospace,Menlo,monospace;overflow-x:auto;max-height:180px;
+ overflow-y:auto;transition:max-height .25s ease}
+.jsonbody .ln{color:#39435C;display:inline-block;width:16px;text-align:right;margin-right:10px;user-select:none}
+.jk{color:#7EC8E3}.js{color:#8CE3A0}.jn{color:#E3B98A}.jp{color:#C9D3E8}
+
+.rawwrap{max-height:0;overflow:hidden;transition:max-height .3s cubic-bezier(.3,.8,.4,1),border-top-width .3s;
+ border-top:0 solid #1A2338}
+.rawwrap.open{max-height:220px;border-top-width:1px}
+.rawtoolbar{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:#050710}
+.rawtoolbar .lbl{font:700 10px/1 ui-monospace,Menlo,monospace;letter-spacing:1px;text-transform:uppercase;color:#5B6B85}
+.rawtoolbar .hint{font:400 9.5px/1.3 -apple-system,sans-serif;color:#3F495F}
+.rawedit{padding:10px 14px 14px;font:400 11.5px/1.75 ui-monospace,Menlo,monospace;color:#C9D3E8;
+ white-space:pre;overflow-x:auto}
+.raw-key{color:#7EC8E3}.raw-sep{color:#3F495F}.raw-val{color:#8CE3A0}.raw-off{color:#39435C;font-style:italic}
+
+/* ===== SEND BAR ===== */
+.sendbar{position:absolute;left:0;right:0;bottom:0;padding:12px 16px 16px;background:linear-gradient(180deg,rgba(10,14,26,0) 0%,#0A0E1A 28%);
+ display:flex;justify-content:flex-end}
+.send-btn{display:flex;align-items:center;gap:8px;padding:13px 22px;border-radius:16px;background:#3B82F6;
+ color:#08101F;font:700 14px/1 -apple-system,sans-serif;box-shadow:0 10px 24px rgba(59,130,246,0.38);cursor:pointer;
+ transition:transform .15s ease,box-shadow .15s ease}
+.send-btn:hover{transform:translateY(-1px);box-shadow:0 12px 28px rgba(59,130,246,0.46)}
+.send-btn:active{transform:scale(0.96)}
+.send-btn svg{flex:0 0 16px}
+.send-btn.sending{background:#2563C9;pointer-events:none}
+.send-btn.sending .dots span{animation:blink 1.1s infinite ease-in-out}
+.send-btn.sending .dots span:nth-child(2){animation-delay:.15s}
+.send-btn.sending .dots span:nth-child(3){animation-delay:.3s}
+@keyframes blink{0%,80%,100%{opacity:.25}40%{opacity:1}}
+
+/* legend */
+.legend{margin-top:14px;padding:0 2px}
+.legend-title{font:700 10px/1 ui-monospace,Menlo,monospace;letter-spacing:1.4px;text-transform:uppercase;
+ color:#8B95A6;margin-bottom:6px}
+.legend-item{font:400 10.5px/1.55 -apple-system,sans-serif;color:#8B95A6;padding-left:12px;position:relative}
+.legend-item:before{content:"\2022";position:absolute;left:0;color:#3B82F6}
+</style>
+</head>
+<body>
+<p class="frame-label">API Testr — Obsidian Dark</p>
+<div class="phone">
+<div class="sysbar mono"><span>9:41</span><span class="right">
+<svg width="12" height="12" viewBox="0 0 24 24" fill="#F1F5F9"><path d="M2 22h20V2z"/></svg>
+<svg width="13" height="13" viewBox="0 0 24 24" fill="#F1F5F9"><path d="M12 3a9 9 0 0 0-6.36 2.64l1.42 1.42A7 7 0 0 1 12 5c1.93 0 3.68.78 4.95 2.05l1.41-1.41A9 9 0 0 0 12 3zm0 4a5 5 0 0 0-3.54 1.46l1.42 1.42A3 3 0 0 1 12 9c.83 0 1.58.34 2.12.88l1.42-1.42A5 5 0 0 0 12 7zm0 4a1.99 1.99 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>
+<svg width="12" height="12" viewBox="0 0 24 24" fill="#F1F5F9"><path d="M15.67 4H14V2h-4v2H8.33C7.6 4 7 4.6 7 5.33v15.34C7 21.4 7.6 22 8.33 22h7.34c.73 0 1.33-.6 1.33-1.33V5.33C17 4.6 16.4 4 15.67 4z"/></svg>
+</span></div>
+
+<div class="hdr">
+ <h1>API Testr</h1>
+ <div class="acts">
+  <div class="ibtn" data-component-id="testr-star-btn" role="button" aria-label="Favorite this request">
+   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+  </div>
+  <div class="ibtn" data-component-id="testr-save-btn" role="button" aria-label="Save request">
+   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+  </div>
+  <div class="ibtn" data-component-id="testr-more-btn" role="button" aria-label="More options">
+   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></svg>
+  </div>
+  <div class="ibtn" data-component-id="testr-settings-btn" role="button" aria-label="API Testr settings">
+   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
+  </div>
+ </div>
+</div>
+
+<div class="body">
+
+ <div class="titlecard" data-component-id="testr-title-card">
+  <div class="titlerow">
+   <h2 data-component-id="testr-title-text">New Request</h2>
+   <div class="pencil" data-component-id="testr-title-edit-btn" role="button" aria-label="Edit request title">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+   </div>
+  </div>
+  <div class="draft-note show">Autosaved as draft · unsaved changes</div>
+
+  <div class="urlbar" data-component-id="testr-urlbar">
+   <div class="method-btn" data-component-id="testr-method-dropdown" role="button" aria-label="Select HTTP method" style="background:#3B82F626;color:#60A5FA">
+    POST
+    <svg class="car" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 9l6 6 6-6"/></svg>
+   </div>
+   <div class="url-text" data-component-id="testr-url-input"><span class="scheme">https://</span><span class="host">people-pa.googleapis</span><span class="path">.com/v1/people</span></div>
+   <div class="redirect-btn active" data-component-id="testr-follow-redirects-btn" role="button" aria-label="Follow redirects — tap to toggle, long-press for options">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/></svg>
+   </div>
+
+   <div class="method-menu" data-component-id="testr-method-menu">
+    <div class="method-opt sel" data-component-id="method-opt-get"><span class="m-label" style="background:#22C55E26;color:#4ADE80">GET</span><svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></div>
+    <div class="method-opt sel" data-component-id="method-opt-post"><span class="m-label" style="background:#3B82F626;color:#60A5FA">POST</span><svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></div>
+    <div class="method-opt" data-component-id="method-opt-put"><span class="m-label" style="background:#F59E0B26;color:#FBBF24">PUT</span><svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></div>
+    <div class="method-opt" data-component-id="method-opt-delete"><span class="m-label" style="background:#EF444426;color:#F87171">DELETE</span><svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></div>
+    <div class="method-opt" data-component-id="method-opt-patch"><span class="m-label" style="background:#A855F726;color:#C084FC">PATCH</span><svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></div>
+    <div class="method-opt" data-component-id="method-opt-head"><span class="m-label" style="background:#64748B26;color:#94A3B8">HEAD</span><svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></div>
+    <div class="method-opt" data-component-id="method-opt-ws"><span class="m-label" style="background:#06B6D426;color:#22D3EE">WS</span><svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></div>
+   </div>
+  </div>
+ </div>
+
+ <div class="tabs" data-component-id="testr-tabs-primary">
+  <div class="tab on" data-component-id="tab-query">Query<span class="badge">1</span></div>
+  <div class="tab" data-component-id="tab-headers">Headers<span class="badge">6</span></div>
+  <div class="tab" data-component-id="tab-body">Body</div>
+  <div class="tab" data-component-id="tab-auth">Auth</div>
+  <div class="tab" data-component-id="tab-scripts">Scripts</div>
+  <div class="tab" data-component-id="tab-chain">Chain</div>
+ </div>
+
+ <div class="kvtable" data-component-id="testr-kv-table">
+  <div class="kvhead"><span></span><span>Key</span><span>Value</span><span></span></div>
+
+  <div class="kvrow" data-component-id="kv-row-0">
+   <div class="chk on" data-component-id="kv-row-0-checkbox"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#08101F" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></div>
+   <input class="kvinput" data-component-id="kv-row-0-key" value="API_Key">
+   <input class="kvinput val" data-component-id="kv-row-0-value" value="v4_auth_key">
+   <div class="kvdel" data-component-id="kv-row-0-delete" role="button" aria-label="Delete row"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></div>
+  </div>
+
+  <div class="kvrow disabled" data-component-id="kv-row-1">
+   <div class="chk" data-component-id="kv-row-1-checkbox"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#08101F" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></div>
+   <input class="kvinput" data-component-id="kv-row-1-key" value="Version">
+   <input class="kvinput val" data-component-id="kv-row-1-value" value="1.2.3">
+   <div class="kvdel" data-component-id="kv-row-1-delete" role="button" aria-label="Delete row"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></div>
+  </div>
+
+  <div class="kvrow new-row" data-component-id="kv-row-new">
+   <div class="chk on" data-component-id="kv-row-new-checkbox"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#08101F" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></div>
+   <input class="kvinput" data-component-id="kv-row-new-key" placeholder="Key">
+   <input class="kvinput val" data-component-id="kv-row-new-value" placeholder="Value">
+   <div class="kvdel" data-component-id="kv-row-new-delete" role="button" aria-label="Delete row"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></div>
+  </div>
+
+  <div class="kv-addrow" data-component-id="testr-add-row-btn" role="button" aria-label="Add new row">
+   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+   Add row
+  </div>
+ </div>
+
+ <div class="jsonwrap" data-component-id="testr-json-block">
+  <div class="jsontoolbar">
+   <span class="lbl">JSON</span>
+   <div class="jt-acts">
+    <div class="jt-btn" data-component-id="testr-json-beautify-btn" role="button" aria-label="Beautify JSON">
+     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21 3-6.5 6.5"/><path d="m19 12-1.5 1.5"/><path d="M15 3v4"/><path d="M13 5h4"/><path d="M3 21l6-6"/><path d="m3 13 1.5-1.5"/><path d="M3 17v4h4"/><path d="M17 3h4v4"/></svg>
+    </div>
+    <div class="jt-btn" data-component-id="testr-json-copy-braces-btn" role="button" aria-label="Copy as JSON">
+     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h1"/><path d="M16 3h1a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-1"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/></svg>
+    </div>
+    <div class="jt-btn" data-component-id="testr-json-copy-flat-btn" role="button" aria-label="Copy as key=value">
+     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+    </div>
+    <div class="jt-btn" data-component-id="testr-json-clear-btn" role="button" aria-label="Clear all query/header rows">
+     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+    </div>
+    <div class="jt-btn raw-on" data-component-id="testr-raw-editor-toggle-btn" role="button" aria-label="Toggle raw text editor">
+     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="M9 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h4"/><line x1="9" y1="9" x2="9" y2="9.01"/><line x1="9" y1="12" x2="9" y2="12.01"/><line x1="9" y1="15" x2="9" y2="15.01"/></svg>
+    </div>
+   </div>
+  </div>
+
+  <div class="jsonbody" data-component-id="testr-json-preview"><span class="ln">1</span>{<br>
+<span class="ln">2</span>&nbsp;&nbsp;<span class="jk">"API_Key"</span>: <span class="js">"v4_auth_key"</span><br>
+<span class="ln">3</span>}</div>
+
+  <div class="rawwrap open" data-component-id="testr-raw-editor-wrap">
+   <div class="rawtoolbar">
+    <span class="lbl">Raw editor</span>
+    <span class="hint">key: value · // to disable a row</span>
+   </div>
+   <div class="rawedit" data-component-id="testr-raw-editor-textarea"><span class="raw-key">API_Key</span><span class="raw-sep">:</span> <span class="raw-val">v4_auth_key</span>
+<span class="raw-off">// Version: 1.2.3</span>
+<span class="raw-off">// Endpoint: /people</span></div>
+  </div>
+ </div>
+
+</div>
+
+<div class="sendbar">
+ <div class="send-btn" data-component-id="testr-send-btn" role="button" aria-label="Send request">
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+  Send Request
+ </div>
+</div>
+
+</div>
+
+<div class="legend" style="width:390px">
+ <div class="legend-title">Key interactions in this mockup</div>
+ <div class="legend-item">Star / Save / More / Settings — dynamic pill-outline on press, Lucide icons only</div>
+ <div class="legend-item">Pencil edits title only; draft autosaves the instant the screen opens, independent of Save</div>
+ <div class="legend-item">Method dropdown — colored rounded menu; WS entry included, drives adaptive screen mode</div>
+ <div class="legend-item">Redirect icon — single tap toggles on/off (shown active/blue); long-press opens redirect options</div>
+ <div class="legend-item">JSON block toolbar — beautify, copy-as-JSON, copy-as-flat, clear-all, raw-editor toggle</div>
+ <div class="legend-item">Raw editor sits below the JSON block, in sync with the table — // lines are disabled but visible</div>
+ <div class="legend-item">Add-row control lives at the bottom of the table; new rows animate in</div>
+ <div class="legend-item">Send button shows a sending state, then screen auto-reveals the Response panel</div>
+</div>
+
+</body>
+</html>

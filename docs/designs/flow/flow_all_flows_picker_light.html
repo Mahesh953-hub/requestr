@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>All Flows · Editorial Light · requestr</title>
+<meta name="description" content="requestr Flow section — All Flows picker screen. The entry point above the single-flow List/Flow toggle: choose which flow becomes 'active' before List View or Flow View can render it.">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-text-size-adjust:100%}
+body{background:#E7E4DA;min-height:100vh;display:flex;flex-direction:column;align-items:center;
+ padding:22px 12px 34px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+.frame-label{font:700 10px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:1.4px;
+ text-transform:uppercase;color:#555555;margin-bottom:10px;text-align:center}
+.frame-note{font:400 10.5px/1.5 -apple-system,sans-serif;color:#6B6152;max-width:390px;text-align:center;margin-bottom:14px}
+.phone{width:390px;height:844px;background:#F4F2EC;color:#111111;border:1px solid #E5E2D8;border-radius:36px;
+ overflow:hidden;position:relative;box-shadow:0 22px 60px rgba(17,17,17,0.20);display:flex;flex-direction:column}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.sysbar{height:28px;flex:0 0 28px;display:flex;align-items:center;justify-content:space-between;padding:0 18px;
+ font:600 11px/1 ui-monospace,Menlo,monospace;color:#111111;opacity:.85}
+.hdr{flex:0 0 auto;padding:14px 16px 10px;background:rgba(250,248,243,0.75);backdrop-filter:blur(20px);
+ border-bottom:1px solid #E5E2D8}
+.hdr-top{display:flex;align-items:center;justify-content:space-between}
+.hdr-top .back{width:34px;height:34px;border-radius:12px;display:flex;align-items:center;justify-content:center;
+ color:#B5551A;cursor:pointer}
+.hdr-top .acts{display:flex;gap:6px}
+.ibtn{width:34px;height:34px;border-radius:12px;display:flex;align-items:center;justify-content:center;
+ background:#F2E3CE;color:#B5551A;cursor:pointer;transition:box-shadow .15s ease,transform .15s ease}
+.ibtn:hover{box-shadow:0 0 0 4px rgba(242,140,40,0.16);transform:translateY(-1px)}
+.hdr h1{font-size:24px;font-weight:800;letter-spacing:-.4px;margin-top:10px}
+.hdr .sub{font-size:12px;color:#8A7A5C;margin-top:2px}
+.searchrow{display:flex;gap:8px;margin-top:12px}
+.searchbar{flex:1;display:flex;align-items:center;gap:8px;height:40px;border-radius:13px;background:#FFFFFF;
+ border:1px solid #E3D2A9;padding:0 12px;color:#8A7A5C;font-size:12.5px}
+.filter-btn{width:40px;height:40px;border-radius:13px;background:#FFFFFF;border:1px solid #E3D2A9;
+ display:flex;align-items:center;justify-content:center;color:#B5551A;cursor:pointer}
+
+.body{flex:1;overflow-y:auto;padding:14px 16px 90px}
+.body::-webkit-scrollbar{width:0}
+
+.sec-lbl{font:700 10.5px/1 -apple-system,sans-serif;letter-spacing:1.1px;text-transform:uppercase;color:#8A7A5C;
+ margin:4px 0 8px}
+
+.flowcard{position:relative;background:#FFFFFF;border:1px solid #E3D2A9;border-radius:18px;padding:14px 14px 13px;
+ margin-bottom:10px;cursor:pointer;transition:transform .15s ease,box-shadow .15s ease;overflow:hidden}
+.flowcard:hover{transform:translateY(-1px);box-shadow:0 8px 20px rgba(30,20,5,0.10)}
+.flowcard:active{transform:scale(0.985)}
+.flowcard.active-flow{border-color:#F28C28;box-shadow:0 0 0 3px rgba(242,140,40,0.14)}
+.fc-top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.fc-title-wrap{display:flex;align-items:center;gap:8px;min-width:0}
+.fc-icon{width:36px;height:36px;border-radius:11px;display:flex;align-items:center;justify-content:center;flex:0 0 36px}
+.fc-title{font:800 14.5px/1.25 -apple-system,sans-serif;color:#161311}
+.fc-meta{font:500 10.5px/1.4 ui-monospace,Menlo,monospace;color:#8A7A5C;margin-top:2px}
+.fc-status{flex:0 0 auto;font:700 9.5px/1 ui-monospace,Menlo,monospace;letter-spacing:.4px;text-transform:uppercase;
+ padding:4px 8px;border-radius:7px;white-space:nowrap}
+.fc-preview{margin-top:11px;height:46px;border-radius:10px;background:#FAF3E7;border:1px solid #F2E9D5;
+ display:flex;align-items:center;padding:0 10px;gap:6px;overflow:hidden}
+.pv-node{width:20px;height:20px;border-radius:6px;flex:0 0 20px}
+.pv-line{width:14px;height:2px;background:#D9C9A3;flex:0 0 14px}
+.fc-foot{display:flex;align-items:center;justify-content:space-between;margin-top:10px}
+.fc-badges{display:flex;gap:5px}
+.fc-badge{font:700 9px/1 ui-monospace,Menlo,monospace;color:#8A7A5C;background:#FAF3E7;border-radius:6px;padding:3px 6px}
+.fc-open{display:flex;align-items:center;gap:4px;font:700 11px/1 -apple-system,sans-serif;color:#B5551A}
+.active-tag{position:absolute;top:0;right:0;background:#F28C28;color:#FFFFFF;font:800 9px/1 ui-monospace,Menlo,monospace;
+ letter-spacing:.5px;padding:4px 10px 4px 12px;border-radius:0 0 0 12px}
+
+.fab-new{position:absolute;right:18px;bottom:18px;width:58px;height:58px;border-radius:29px;background:#C4531B;
+ display:flex;align-items:center;justify-content:center;color:#FFFFFF;box-shadow:0 12px 26px rgba(196,83,27,0.36);
+ cursor:pointer;transition:transform .15s ease}
+.fab-new:hover{transform:scale(1.05)}
+.fab-new:active{transform:scale(0.92)}
+
+.callout{background:#FBEFD9;border:1px dashed #E3B96B;border-radius:14px;padding:11px 12px;margin-bottom:14px;
+ font:400 11px/1.5 -apple-system,sans-serif;color:#6B4E1E}
+.callout b{color:#B5551A}
+</style>
+</head>
+<body>
+<p class="frame-label">Flow — All Flows Picker · Editorial Light</p>
+<p class="frame-note">Resolves the portrait selection problem: this screen sits above List View / Flow View. Opening any card here sets that flow as the single "active flow" — List View and Flow View always render whichever flow is currently active, never an ambiguous default.</p>
+
+<div class="phone">
+<div class="sysbar mono"><span>9:41</span><span></span></div>
+
+<div class="hdr">
+ <div class="hdr-top">
+  <div class="back" data-component-id="allflows-back-btn" role="button" aria-label="Back to Home">
+   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+  </div>
+  <div class="acts">
+   <div class="ibtn" data-component-id="allflows-import-btn" role="button" aria-label="Import flow"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></div>
+   <div class="ibtn" data-component-id="allflows-sort-btn" role="button" aria-label="Sort flows"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5h10"/><path d="M11 9h7"/><path d="M11 13h4"/><path d="m3 17 3 3 3-3"/><path d="M6 18V4"/></svg></div>
+  </div>
+ </div>
+ <h1>All Flows</h1>
+ <div class="sub">4 flows · 1 active</div>
+ <div class="searchrow">
+  <div class="searchbar"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>Search flows...</div>
+  <div class="filter-btn" data-component-id="allflows-filter-btn" role="button" aria-label="Filter flows"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg></div>
+ </div>
+</div>
+
+<div class="body">
+
+ <div class="callout"><b>How this works:</b> tap a flow to open it — it becomes the active flow. The Flow tab's List/Flow toggle always shows this one, until you come back here and open a different one.</div>
+
+ <div class="sec-lbl">Active</div>
+
+ <div class="flowcard active-flow" data-component-id="flowcard-auth-guard" role="button" aria-label="Open Auth Login Guard flow">
+  <div class="active-tag">ACTIVE</div>
+  <div class="fc-top">
+   <div class="fc-title-wrap">
+    <div class="fc-icon" style="background:#FDE7CE"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#B5551A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7v6c0 5.25 3.5 9.74 9 11 5.5-1.26 9-5.75 9-11V7l-9-5z"/></svg></div>
+    <div>
+     <div class="fc-title">Auth Login Guard</div>
+     <div class="fc-meta">5 nodes · trigger: Intercept</div>
+    </div>
+   </div>
+   <div class="fc-status" style="background:#22C55E26;color:#16803C">RUNNING</div>
+  </div>
+  <div class="fc-preview">
+   <div class="pv-node" style="background:#F28C28"></div><div class="pv-line"></div>
+   <div class="pv-node" style="background:#3B82F6"></div><div class="pv-line"></div>
+   <div class="pv-node" style="background:#8B5CF6"></div><div class="pv-line"></div>
+   <div class="pv-node" style="background:#F59E0B"></div><div class="pv-line"></div>
+   <div class="pv-node" style="background:#06B6D4"></div>
+  </div>
+  <div class="fc-foot">
+   <div class="fc-badges"><span class="fc-badge">42 runs</span><span class="fc-badge">2m ago</span></div>
+   <div class="fc-open">Open<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></div>
+  </div>
+ </div>
+
+ <div class="sec-lbl" style="margin-top:16px">Other Flows</div>
+
+ <div class="flowcard" data-component-id="flowcard-jwt-refresh" role="button" aria-label="Open JWT Refresh Watcher flow">
+  <div class="fc-top">
+   <div class="fc-title-wrap">
+    <div class="fc-icon" style="background:#E3EEFB"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#3B82F6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
+    <div>
+     <div class="fc-title">JWT Refresh Watcher</div>
+     <div class="fc-meta">3 nodes · trigger: Scheduled</div>
+    </div>
+   </div>
+   <div class="fc-status" style="background:#64748B1F;color:#6B7280">PAUSED</div>
+  </div>
+  <div class="fc-preview">
+   <div class="pv-node" style="background:#3B82F6"></div><div class="pv-line"></div>
+   <div class="pv-node" style="background:#8B5CF6"></div><div class="pv-line"></div>
+   <div class="pv-node" style="background:#06B6D4"></div>
+  </div>
+  <div class="fc-foot">
+   <div class="fc-badges"><span class="fc-badge">8 runs</span><span class="fc-badge">3h ago</span></div>
+   <div class="fc-open">Open<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></div>
+  </div>
+ </div>
+
+ <div class="flowcard" data-component-id="flowcard-payment-log" role="button" aria-label="Open Payment Confirm Logger flow">
+  <div class="fc-top">
+   <div class="fc-title-wrap">
+    <div class="fc-icon" style="background:#EAF7EC"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#16803C" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h9"/><path d="M16 16h6"/><path d="m19 13-3 3 3 3"/></svg></div>
+    <div>
+     <div class="fc-title">Payment Confirm Logger</div>
+     <div class="fc-meta">4 nodes · trigger: Intercept</div>
+    </div>
+   </div>
+   <div class="fc-status" style="background:#22C55E26;color:#16803C">RUNNING</div>
+  </div>
+  <div class="fc-preview">
+   <div class="pv-node" style="background:#F28C28"></div><div class="pv-line"></div>
+   <div class="pv-node" style="background:#06B6D4"></div><div class="pv-line"></div>
+   <div class="pv-node" style="background:#EF4444"></div><div class="pv-line"></div>
+   <div class="pv-node" style="background:#8B5CF6"></div>
+  </div>
+  <div class="fc-foot">
+   <div class="fc-badges"><span class="fc-badge">116 runs</span><span class="fc-badge">14m ago</span></div>
+   <div class="fc-open">Open<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></div>
+  </div>
+ </div>
+
+ <div class="flowcard" data-component-id="flowcard-draft-scraper" role="button" aria-label="Open Draft — Scraper Chain flow, unfinished">
+  <div class="fc-top">
+   <div class="fc-title-wrap">
+    <div class="fc-icon" style="background:#F1EEFB"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8B5CF6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></div>
+    <div>
+     <div class="fc-title">Draft — Scraper Chain</div>
+     <div class="fc-meta">2 nodes · no trigger set</div>
+    </div>
+   </div>
+   <div class="fc-status" style="background:#F59E0B26;color:#B5551A">DRAFT</div>
+  </div>
+  <div class="fc-preview">
+   <div class="pv-node" style="background:#8B5CF6"></div><div class="pv-line"></div>
+   <div class="pv-node" style="background:#D9C9A3;border:1.5px dashed #B7A98A"></div>
+  </div>
+  <div class="fc-foot">
+   <div class="fc-badges"><span class="fc-badge">never run</span></div>
+   <div class="fc-open">Open<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></div>
+  </div>
+ </div>
+
+</div>
+
+<div class="fab-new" data-component-id="allflows-new-flow-fab" role="button" aria-label="Create new flow">
+ <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+</div>
+
+</div>
+</body>
+</html>

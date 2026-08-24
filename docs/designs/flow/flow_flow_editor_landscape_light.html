@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flow & Automation · Flow View · Landscape · Editorial Light</title>
+<meta name="description" content="requestr Flow section — landscape Flow View. Docked sidebar (not a swipe drawer, avoids colliding with the app's main navigation drawer), soft-locked draggable nodes, flexible bezier connectors that stay attached through zoom/pan, and a true/false branch on the Validate node.">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-text-size-adjust:100%}
+body{background:#E7E4DA;min-height:100vh;display:flex;flex-direction:column;align-items:center;
+ padding:22px 12px 34px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+.frame-label{font:700 10px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:1.4px;
+ text-transform:uppercase;color:#555555;margin-bottom:10px;text-align:center}
+.frame-note{font:400 10.5px/1.5 -apple-system,sans-serif;color:#6B6152;max-width:900px;text-align:center;margin-bottom:14px}
+.phone{width:896px;height:414px;background:#F4F2EC;color:#111111;border:1px solid #E5E2D8;border-radius:28px;
+ overflow:hidden;position:relative;box-shadow:0 22px 60px rgba(17,17,17,0.20);display:flex;flex-direction:row}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+
+/* ===== DOCKED SIDEBAR — NOT A DRAWER =====
+   Fixed, permanently visible in landscape width. Occupies real layout
+   space (canvas is narrower because of it), never overlays content,
+   never triggered by edge-swipe. The app's main nav drawer still opens
+   via its own edge-swipe gesture and slides OVER everything including
+   this sidebar — the two never compete for the same gesture zone. */
+.sidebar{width:200px;flex:0 0 200px;background:#FFFFFF;border-right:1px solid #E3D2A9;display:flex;
+ flex-direction:column;overflow-y:auto}
+.sb-top{padding:14px 14px 10px}
+.sb-flowname{display:flex;align-items:center;gap:6px;background:#EAF7EC;border:1px solid #BFE6C6;border-radius:12px;
+ padding:7px 9px;cursor:pointer}
+.sb-flowname .dot{width:7px;height:7px;border-radius:50%;background:#22C55E;flex:0 0 7px}
+.sb-flowname span{font:700 11px/1.2 ui-monospace,Menlo,monospace;color:#16803C;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb-toggle{display:flex;background:#EFE3CC;border-radius:11px;padding:2px;margin-top:10px}
+.sb-toggle .opt{flex:1;text-align:center;padding:6px 0;font:700 10.5px/1 -apple-system,sans-serif;color:#8A7A5C;
+ border-radius:9px;cursor:pointer}
+.sb-toggle .opt.on{background:#FFFFFF;color:#161311;box-shadow:0 1px 4px rgba(30,20,5,0.10)}
+.sb-sec{padding:10px 6px 4px}
+.sb-lbl{font:700 9.5px/1 -apple-system,sans-serif;letter-spacing:1px;text-transform:uppercase;color:#8A7A5C;
+ padding:0 8px;margin-bottom:5px}
+.sb-item{display:flex;align-items:center;gap:9px;padding:8px 8px;border-radius:9px;cursor:pointer;
+ font:600 12px/1 -apple-system,sans-serif;color:#5B4E3A;transition:background .13s ease}
+.sb-item:hover{background:#FAF3E7}
+.sb-item.on{background:#FDEFDA;color:#B5551A;font-weight:700}
+.sb-item svg{flex:0 0 16px;opacity:.8}
+.sb-bottom{margin-top:auto;padding:12px 14px;border-top:1px solid #EEE3CC;display:flex;align-items:center;gap:8px}
+.sb-avatar{width:28px;height:28px;border-radius:8px;background:#F28C28;color:#fff;display:flex;align-items:center;
+ justify-content:center;font:800 12px/1 -apple-system,sans-serif;flex:0 0 28px}
+.sb-user{min-width:0}
+.sb-user .n{font:700 11.5px/1.2 -apple-system,sans-serif;color:#161311}
+.sb-user .p{font:500 9.5px/1.2 -apple-system,sans-serif;color:#8A7A5C}
+
+/* ===== CANVAS AREA ===== */
+.canvaswrap{flex:1;display:flex;flex-direction:column;min-width:0}
+.canvastop{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:9px 14px;
+ border-bottom:1px solid #E3D2A9;background:rgba(250,248,243,0.7)}
+.ct-left{display:flex;align-items:center;gap:8px}
+.zoomgroup{display:flex;align-items:center;gap:2px;background:#FFFFFF;border:1px solid #E3D2A9;border-radius:11px;padding:3px}
+.zbtn{width:26px;height:26px;border-radius:8px;display:flex;align-items:center;justify-content:center;
+ color:#8A7A5C;cursor:pointer}
+.zbtn:hover{background:#FAF3E7}
+.zlabel{font:700 11px/1 ui-monospace,Menlo,monospace;color:#5B4E3A;padding:0 6px;min-width:36px;text-align:center}
+.ct-right{display:flex;align-items:center;gap:8px}
+.testbtn{display:flex;align-items:center;gap:6px;padding:7px 13px;border-radius:10px;background:#FFFFFF;
+ border:1px solid #E3D2A9;font:700 11.5px/1 -apple-system,sans-serif;color:#161311;cursor:pointer}
+.actbtn{display:flex;align-items:center;gap:6px;padding:7px 14px;border-radius:10px;background:#2E7D42;
+ color:#FFFFFF;font:700 11.5px/1 -apple-system,sans-serif;cursor:pointer}
+.iconbtn-sm{width:30px;height:30px;border-radius:9px;background:#FFFFFF;border:1px solid #E3D2A9;
+ display:flex;align-items:center;justify-content:center;color:#8A7A5C;cursor:pointer}
+
+.canvas{flex:1;position:relative;overflow:hidden;background-image:radial-gradient(#DCD0AE 1px, transparent 1px);
+ background-size:22px 22px;background-color:#F7F4EC}
+
+/* connector lines — svg overlay, always attaches port-to-port
+   regardless of node position, zoom, or scroll */
+.connlayer{position:absolute;inset:0;pointer-events:none}
+
+/* nodes — soft-locked: draggable, but with a resting "snap-settle"
+   feel (not free-floating chaos), each has explicit input/output ports */
+.node{position:absolute;width:168px;background:#FFFFFF;border-radius:14px;border:1.5px solid;
+ box-shadow:0 8px 20px rgba(30,20,5,0.10);cursor:grab;user-select:none}
+.node:active{cursor:grabbing}
+.node.dragging{box-shadow:0 16px 34px rgba(30,20,5,0.22);transform:scale(1.02);z-index:20}
+.node.selected{box-shadow:0 0 0 3px rgba(242,140,40,0.32),0 10px 24px rgba(30,20,5,0.14)}
+.n-head{display:flex;align-items:center;gap:7px;padding:9px 10px;border-radius:12px 12px 0 0}
+.n-icon{width:22px;height:22px;border-radius:6px;display:flex;align-items:center;justify-content:center;flex:0 0 22px}
+.n-title{font:800 11.5px/1.15 -apple-system,sans-serif;flex:1;color:#161311}
+.n-body{padding:8px 10px 10px;font:500 9.5px/1.4 ui-monospace,Menlo,monospace;color:#8A7A5C}
+.n-body b{color:#5B4E3A;font-weight:700}
+.port{position:absolute;width:11px;height:11px;border-radius:50%;background:#FFFFFF;border:2.5px solid;
+ top:50%;margin-top:-5.5px;cursor:crosshair}
+.port.in{left:-6px}
+.port.out{right:-6px}
+.port.out.true{top:34%}
+.port.out.false{top:66%}
+.port-lbl{position:absolute;font:700 8px/1 ui-monospace,Menlo,monospace;top:50%;margin-top:-4px}
+.port-lbl.true{right:14px;color:#16803C}
+.port-lbl.false{right:14px;color:#C0392B}
+
+.minimap{position:absolute;right:12px;bottom:12px;width:110px;height:70px;background:rgba(255,255,255,0.85);
+ border:1px solid #E3D2A9;border-radius:10px;backdrop-filter:blur(8px)}
+.mm-node{position:absolute;border-radius:2px}
+.mm-viewport{position:absolute;border:1.5px solid #F28C28;border-radius:3px;background:rgba(242,140,40,0.08)}
+
+.canvasbottom{position:absolute;left:14px;bottom:14px;display:flex;align-items:center;gap:6px}
+.cb-btn{width:34px;height:34px;border-radius:11px;background:#FFFFFF;border:1px solid #E3D2A9;
+ display:flex;align-items:center;justify-content:center;color:#8A7A5C;cursor:pointer;box-shadow:0 4px 12px rgba(30,20,5,0.08)}
+.cb-btn:hover{color:#B5551A}
+
+.fab-add{position:absolute;right:16px;bottom:16px;width:50px;height:50px;border-radius:25px;background:#2E7D42;
+ display:flex;align-items:center;justify-content:center;color:#FFFFFF;box-shadow:0 10px 22px rgba(46,125,66,0.34);
+ cursor:pointer}
+</style>
+</head>
+<body>
+<p class="frame-label">Flow &amp; Automation — Flow View · Landscape · Editorial Light</p>
+<p class="frame-note">Sidebar is docked layout space, not a swipe drawer — it never collides with the app's main navigation drawer, which still opens from the true screen edge over everything. Connector lines are an SVG overlay computed from each node's live port position, so they stay correctly attached at any zoom/pan/drag. Validate has two output ports (True/False) — every node supports at most two outgoing branches. Nodes are draggable (soft-locked = free to move, not fixed to a grid) with a lifted/scaled state while dragging.</p>
+
+<div class="phone">
+
+ <!-- DOCKED SIDEBAR -->
+ <div class="sidebar" data-component-id="flow-sidebar-docked">
+  <div class="sb-top">
+   <div class="sb-flowname" data-component-id="sidebar-active-flow-pill" role="button" aria-label="Auth Login Guard — active flow, tap to change">
+    <span class="dot"></span><span>Auth Login Guard</span>
+   </div>
+   <div class="sb-toggle" data-component-id="sidebar-view-toggle">
+    <div class="opt" data-component-id="sidebar-toggle-list">List View</div>
+    <div class="opt on" data-component-id="sidebar-toggle-flow">Flow View</div>
+   </div>
+  </div>
+  <div class="sb-sec">
+   <div class="sb-lbl">Flow</div>
+   <div class="sb-item" data-component-id="sb-overview"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>Overview</div>
+   <div class="sb-item on" data-component-id="sb-flows"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>Flows</div>
+   <div class="sb-item" data-component-id="sb-executions"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><polyline points="3 3 3 8 8 8"/><polyline points="12 7 12 12 16 14"/></svg>Executions</div>
+   <div class="sb-item" data-component-id="sb-credentials"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>Credentials</div>
+   <div class="sb-item" data-component-id="sb-environments"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>Environments</div>
+   <div class="sb-item" data-component-id="sb-variables"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg>Variables</div>
+   <div class="sb-item" data-component-id="sb-schedules"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>Schedules</div>
+   <div class="sb-item" data-component-id="sb-webhooks"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 16.98h-5.99c-1.1 0-1.95.94-2.48 1.9A4 4 0 0 1 2 17c.01-.7.2-1.4.57-2"/><path d="m6 17 3.13-5.78c.53-.97.1-2.18-.5-3.1a4 4 0 1 1 6.89-4.06"/><path d="m12 6 3.13 5.73C15.66 12.7 16.9 13 18 13a4 4 0 0 1 0 8"/></svg>Webhooks</div>
+   <div class="sb-item" data-component-id="sb-logs"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="15" x2="15" y2="15"/><line x1="9" y1="11" x2="15" y2="11"/></svg>Logs</div>
+   <div class="sb-item" data-component-id="sb-settings"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>Settings</div>
+   <div class="sb-item" data-component-id="sb-help"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>Help &amp; Docs</div>
+  </div>
+  <div class="sb-bottom">
+   <div class="sb-avatar">K</div>
+   <div class="sb-user"><div class="n">kailash</div><div class="p">Pro Plan</div></div>
+  </div>
+ </div>
+
+ <!-- CANVAS -->
+ <div class="canvaswrap">
+
+  <div class="canvastop">
+   <div class="ct-left">
+    <div class="zoomgroup">
+     <div class="zbtn" data-component-id="canvas-undo-btn" role="button" aria-label="Undo"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10h10a5 5 0 0 1 0 10H8"/><polyline points="7 5 3 10 7 15"/></svg></div>
+     <div class="zbtn" data-component-id="canvas-redo-btn" role="button" aria-label="Redo"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10H11a5 5 0 0 0 0 10h5"/><polyline points="17 5 21 10 17 15"/></svg></div>
+    </div>
+    <div class="zoomgroup">
+     <div class="zbtn" data-component-id="canvas-zoom-out-btn" role="button" aria-label="Zoom out"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="8" y1="11" x2="14" y2="11"/></svg></div>
+     <span class="zlabel" data-component-id="canvas-zoom-label">100%</span>
+     <div class="zbtn" data-component-id="canvas-zoom-in-btn" role="button" aria-label="Zoom in"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg></div>
+    </div>
+    <div class="iconbtn-sm" data-component-id="canvas-fit-view-btn" role="button" aria-label="Fit all nodes to view"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg></div>
+   </div>
+   <div class="ct-right">
+    <div class="testbtn" data-component-id="canvas-test-flow-btn" role="button" aria-label="Test flow"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg>Test Flow</div>
+    <div class="actbtn" data-component-id="canvas-activate-btn" role="button" aria-label="Activate flow">Activate<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></div>
+    <div class="iconbtn-sm" data-component-id="canvas-more-btn" role="button" aria-label="More canvas options"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect x="4" y="12" width="8" height="8" rx="1"/><path d="m20 4-4.9 4.9"/><path d="M20 12v8h-8"/></svg></div>
+   </div>
+  </div>
+
+  <div class="canvas" data-component-id="flow-canvas-surface">
+
+   <svg class="connlayer" width="100%" height="100%" data-component-id="flow-connector-svg">
+    <!-- Trigger(out) -> ExtractJSON(in) -->
+    <path d="M 214 116 C 250 116, 250 90, 286 90" fill="none" stroke="#D9A45E" stroke-width="2.5"/>
+    <circle cx="286" cy="90" r="3" fill="#D9A45E"/>
+    <!-- ExtractJSON(out) -> TransformData(in) -->
+    <path d="M 454 90 C 480 90, 480 90, 506 90" fill="none" stroke="#3B82F6" stroke-width="2.5"/>
+    <circle cx="506" cy="90" r="3" fill="#3B82F6"/>
+    <!-- TransformData(out) -> Validate(in) -->
+    <path d="M 674 90 C 700 90, 700 220, 286 220" fill="none" stroke="#8B5CF6" stroke-width="2.5"/>
+    <circle cx="286" cy="220" r="3" fill="#8B5CF6"/>
+    <!-- Validate TRUE(out) -> Respond(in) -->
+    <path d="M 454 205 C 520 205, 520 220, 596 220" fill="none" stroke="#22C55E" stroke-width="2.5"/>
+    <circle cx="596" cy="220" r="3" fill="#22C55E"/>
+    <!-- Validate FALSE(out) -> loops back to trigger area, dashed = reject path -->
+    <path d="M 454 245 C 500 280, 150 300, 118 156" fill="none" stroke="#EF4444" stroke-width="2.5" stroke-dasharray="5 4"/>
+    <circle cx="118" cy="156" r="3" fill="#EF4444"/>
+   </svg>
+
+   <!-- Node 1: Intercept Trigger -->
+   <div class="node" data-component-id="canvas-node-trigger" style="left:48px; top:64px; border-color:#E3B96B" role="button" aria-label="Intercept Trigger node — drag to move">
+    <div class="n-head" style="background:#FDF3E2"><div class="n-icon" style="background:#F2E3CE"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#B5551A" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1"/></svg></div><span class="n-title">Intercept Trigger</span></div>
+    <div class="n-body">Pattern<br><b>.*/auth/login.*</b></div>
+    <div class="port out" style="border-color:#D9A45E; top:64%"></div>
+   </div>
+
+   <!-- Node 2: Extract JSON -->
+   <div class="node" data-component-id="canvas-node-extract" style="left:286px; top:38px; border-color:#3B82F6" role="button" aria-label="Extract JSON node — drag to move">
+    <div class="n-head" style="background:#EBF2FE"><div class="n-icon" style="background:#E3EEFB"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#3B82F6" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3H5a2 2 0 0 0-2 2v4"/><path d="M15 3h4a2 2 0 0 1 2 2v4"/><path d="M9 21H5a2 2 0 0 1-2-2v-4"/><path d="M15 21h4a2 2 0 0 0 2-2v-4"/></svg></div><span class="n-title">Extract JSON</span></div>
+    <div class="n-body">JSONPath<br><b>$.data.token</b></div>
+    <div class="port in" style="border-color:#D9A45E"></div>
+    <div class="port out" style="border-color:#3B82F6"></div>
+   </div>
+
+   <!-- Node 3: Transform Data -->
+   <div class="node" data-component-id="canvas-node-transform" style="left:506px; top:38px; border-color:#8B5CF6" role="button" aria-label="Transform Data node — drag to move">
+    <div class="n-head" style="background:#F3F0FE"><div class="n-icon" style="background:#F1EEFB"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#8B5CF6" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg></div><span class="n-title">Transform Data</span></div>
+    <div class="n-body">Type<br><b>JSON → Object</b></div>
+    <div class="port in" style="border-color:#3B82F6"></div>
+    <div class="port out" style="border-color:#8B5CF6"></div>
+   </div>
+
+   <!-- Node 4: Validate (branching — True/False, max two outputs) -->
+   <div class="node selected" data-component-id="canvas-node-validate" style="left:286px; top:170px; border-color:#F59E0B" role="button" aria-label="Validate node, selected — has True and False output branches, drag to move">
+    <div class="n-head" style="background:#FDF3E2"><div class="n-icon" style="background:#FDEFDA"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#B5551A" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg></div><span class="n-title">Validate</span></div>
+    <div class="n-body">Rule<br><b>token exists</b></div>
+    <div class="port in" style="border-color:#8B5CF6"></div>
+    <div class="port out true" style="border-color:#22C55E"></div>
+    <span class="port-lbl true">TRUE</span>
+    <div class="port out false" style="border-color:#EF4444"></div>
+    <span class="port-lbl false">FALSE</span>
+   </div>
+
+   <!-- Node 5: Respond -->
+   <div class="node" data-component-id="canvas-node-respond" style="left:596px; top:170px; border-color:#06B6D4" role="button" aria-label="Respond node — drag to move">
+    <div class="n-head" style="background:#E9F8FB"><div class="n-icon" style="background:#E1F5F9"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0891B2" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></div><span class="n-title">Respond</span></div>
+    <div class="n-body">Status<br><b>200 OK</b></div>
+    <div class="port in" style="border-color:#22C55E"></div>
+   </div>
+
+   <div class="minimap" data-component-id="canvas-minimap">
+    <div class="mm-node" style="left:6px;top:14px;width:14px;height:9px;background:#E3B96B"></div>
+    <div class="mm-node" style="left:30px;top:8px;width:14px;height:9px;background:#3B82F6"></div>
+    <div class="mm-node" style="left:54px;top:8px;width:14px;height:9px;background:#8B5CF6"></div>
+    <div class="mm-node" style="left:30px;top:34px;width:14px;height:9px;background:#F59E0B"></div>
+    <div class="mm-node" style="left:78px;top:34px;width:14px;height:9px;background:#06B6D4"></div>
+    <div class="mm-viewport" style="left:2px;top:4px;width:80px;height:44px"></div>
+   </div>
+
+  </div>
+
+  <div class="canvasbottom">
+   <div class="cb-btn" data-component-id="canvas-pan-btn" role="button" aria-label="Pan tool"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 11V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0"/><path d="M14 10V4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v2"/><path d="M10 10.5V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></svg></div>
+   <div class="cb-btn" data-component-id="canvas-grid-toggle-btn" role="button" aria-label="Toggle grid snap"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></div>
+  </div>
+
+  <div class="fab-add" data-component-id="canvas-add-node-fab" role="button" aria-label="Add node to canvas">
+   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+  </div>
+
+ </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Music · Editorial Light · requestr</title>
+<meta name="description" content="requestr Music section — now-playing turntable card with waveform scrubber, transport controls, overflow menu (Music Settings, Information, Delete Current Track), and Up Next queue. Editorial Light theme. Import MP3 action removed per instruction.">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-text-size-adjust:100%}
+body{background:#E7E4DA;min-height:100vh;display:flex;flex-direction:column;align-items:center;
+ padding:22px 12px 34px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+.frame-label{font:700 10px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:1.4px;
+ text-transform:uppercase;color:#555555;margin-bottom:10px;text-align:center}
+.frame-note{font:400 10.5px/1.5 -apple-system,sans-serif;color:#6B6152;max-width:390px;text-align:center;margin-bottom:14px}
+.phone{width:390px;height:844px;background:#F4F2EC;color:#111111;border:1px solid #E5E2D8;border-radius:36px;
+ overflow:hidden;position:relative;box-shadow:0 22px 60px rgba(17,17,17,0.20);display:flex;flex-direction:column}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.sysbar{height:28px;flex:0 0 28px;display:flex;align-items:center;justify-content:space-between;padding:0 18px;
+ font:600 11px/1 ui-monospace,Menlo,monospace;color:#111111;opacity:.85}
+.sysbar .right{display:flex;align-items:center;gap:5px}
+
+/* ===== HEADER ===== */
+.hdr{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:12px 16px 10px;
+ background:rgba(250,248,243,0.75);backdrop-filter:blur(20px);border-bottom:1px solid #E5E2D8;position:relative;z-index:25}
+.hdr .back{width:38px;height:38px;border-radius:19px;background:#F2E3CE;color:#B5551A;display:flex;
+ align-items:center;justify-content:center;cursor:pointer;transition:box-shadow .15s ease,transform .15s ease}
+.hdr .back:hover{box-shadow:0 0 0 4px rgba(242,140,40,0.16);transform:translateY(-1px)}
+.hdr h1{font-size:19px;font-weight:800;letter-spacing:-.3px}
+.hdr .more{width:38px;height:38px;border-radius:19px;background:#F2E3CE;color:#B5551A;display:flex;
+ align-items:center;justify-content:center;cursor:pointer;transition:box-shadow .15s ease,transform .15s ease}
+.hdr .more:hover{box-shadow:0 0 0 4px rgba(242,140,40,0.16);transform:translateY(-1px)}
+
+/* overflow menu */
+.overflow-menu{position:absolute;top:58px;right:16px;width:210px;background:#FFFFFF;border:1px solid #E3D2A9;
+ border-radius:18px;box-shadow:0 16px 36px rgba(30,20,5,0.20);padding:6px;z-index:30;
+ animation:menuIn .16s cubic-bezier(.2,.9,.3,1.2)}
+@keyframes menuIn{from{opacity:0;transform:translateY(-6px) scale(.97)}to{opacity:1;transform:translateY(0) scale(1)}}
+.ov-item{display:flex;align-items:center;gap:11px;padding:11px 12px;border-radius:12px;cursor:pointer;
+ font:600 13px/1 -apple-system,sans-serif;color:#161311;transition:background .13s ease}
+.ov-item:hover{background:#FAF3E7}
+.ov-item svg{flex:0 0 18px;color:#8A7A5C}
+.ov-item.danger{color:#C0392B}
+.ov-item.danger svg{color:#C0392B}
+.ov-div{height:1px;background:#EEE3CC;margin:4px 6px}
+
+/* ===== BODY ===== */
+.body{flex:1;overflow-y:auto;padding:14px 16px 90px}
+.body::-webkit-scrollbar{width:0}
+
+/* ===== NOW PLAYING CARD ===== */
+.nowplaying{position:relative;border-radius:26px;overflow:hidden;background:#EFE3CC;box-shadow:0 10px 30px rgba(30,20,5,0.14)}
+.np-art{position:relative;height:300px;background:linear-gradient(180deg,rgba(20,14,8,0.05),rgba(20,14,8,0.28)),
+ radial-gradient(circle at 50% 40%,#3a2e22,#1c150e 70%);display:flex;align-items:center;justify-content:center}
+.np-art:before{content:"";position:absolute;inset:0;background-image:repeating-radial-gradient(circle at 50% 45%,
+ transparent 0,transparent 3px,rgba(0,0,0,0.15) 4px);opacity:.5}
+.disc{width:190px;height:190px;border-radius:50%;background:radial-gradient(circle,#181210 0 30%,#0e0a08 31% 100%);
+ display:flex;align-items:center;justify-content:center;box-shadow:0 14px 30px rgba(0,0,0,0.5);position:relative;z-index:2}
+.disc-center{width:66px;height:66px;border-radius:50%;background:#C4531B;display:flex;align-items:center;
+ justify-content:center;box-shadow:0 4px 10px rgba(0,0,0,0.3)}
+.np-meta{padding:16px 18px 4px}
+.np-title{font:800 17.5px/1.3 -apple-system,sans-serif;color:#161311;letter-spacing:-.2px}
+.np-sub{font:500 11.5px/1.4 -apple-system,sans-serif;color:#8A7A5C;margin-top:2px}
+
+.waveform{display:flex;align-items:flex-end;gap:2px;height:34px;padding:14px 18px 0;overflow:hidden}
+.wf-bar{width:2.5px;border-radius:2px;background:#D9A45E;flex:0 0 auto}
+.wf-bar.played{background:#C4531B}
+
+.scrubwrap{padding:8px 18px 2px}
+.scrubtrack{display:flex;gap:2px;height:8px;align-items:center}
+.scrub-seg{flex:1;height:5px;border-radius:3px;background:#E3D2A9}
+.scrub-seg.filled{background:#C4531B}
+.scrub-handle{width:3px;height:16px;border-radius:2px;background:#8A2E0A;flex:0 0 3px;margin:0 1px}
+.timerow{display:flex;justify-content:space-between;padding:5px 18px 0;font:600 11px/1 ui-monospace,Menlo,monospace;
+ color:#8A7A5C}
+
+.transport{display:flex;align-items:center;justify-content:space-between;padding:16px 22px 20px}
+.tp-side{width:44px;height:44px;border-radius:22px;background:#F2E3CE;color:#B5551A;display:flex;
+ align-items:center;justify-content:center;cursor:pointer;transition:transform .15s ease}
+.tp-side:hover{transform:translateY(-1px)}
+.tp-side:active{transform:scale(0.92)}
+.tp-side.on{background:#C4531B;color:#FFFFFF}
+.tp-skip{width:42px;height:42px;border-radius:21px;display:flex;align-items:center;justify-content:center;
+ color:#161311;cursor:pointer;transition:transform .13s ease}
+.tp-skip:hover{transform:scale(1.08)}
+.tp-play{width:66px;height:66px;border-radius:33px;background:#C4531B;color:#FFFFFF;display:flex;
+ align-items:center;justify-content:center;cursor:pointer;box-shadow:0 12px 26px rgba(196,83,27,0.4);
+ transition:transform .15s ease}
+.tp-play:hover{transform:scale(1.04)}
+.tp-play:active{transform:scale(0.92)}
+
+/* ===== UP NEXT ===== */
+.upnext-hdr{display:flex;align-items:center;justify-content:space-between;margin:20px 2px 10px}
+.upnext-hdr h2{font:800 16px/1 -apple-system,sans-serif;letter-spacing:-.2px}
+.queue-count{font:700 10.5px/1 ui-monospace,Menlo,monospace;color:#8A7A5C;background:#EFE3CC;border-radius:8px;
+ padding:4px 8px}
+
+.qrow{position:relative;display:flex;align-items:center;gap:11px;background:#FFFFFF;border:1px solid #E3D2A9;
+ border-radius:15px;padding:10px 11px;margin-bottom:8px;cursor:pointer;transition:transform .13s ease,box-shadow .13s ease}
+.qrow:hover{transform:translateY(-1px);box-shadow:0 6px 16px rgba(30,20,5,0.07)}
+.qrow.now-playing{border-color:#C4531B}
+.qrow.now-playing:before{content:"";position:absolute;left:0;top:8px;bottom:8px;width:3px;background:#C4531B;
+ border-radius:0 3px 3px 0}
+.q-icon{width:38px;height:38px;border-radius:11px;background:#FAF3E7;display:flex;align-items:center;
+ justify-content:center;color:#8A7A5C;flex:0 0 38px}
+.qrow.now-playing .q-icon{background:#FDEFDA;color:#C4531B}
+.q-text{flex:1;min-width:0}
+.q-title{font:700 13px/1.25 -apple-system,sans-serif;color:#161311;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.q-sub{font:500 10.5px/1.3 -apple-system,sans-serif;color:#8A7A5C;margin-top:1px}
+.q-right{display:flex;align-items:center;gap:8px;flex:0 0 auto}
+.q-eq{display:flex;align-items:flex-end;gap:1.5px;height:13px}
+.q-eq span{width:2.5px;background:#C4531B;border-radius:1px;animation:eq 1s ease-in-out infinite}
+.q-eq span:nth-child(1){height:5px;animation-delay:0s}
+.q-eq span:nth-child(2){height:12px;animation-delay:.15s}
+.q-eq span:nth-child(3){height:8px;animation-delay:.3s}
+@keyframes eq{0%,100%{transform:scaleY(0.5)}50%{transform:scaleY(1)}}
+.q-time{font:600 11px/1 ui-monospace,Menlo,monospace;color:#8A7A5C}
+.q-more{width:26px;height:26px;border-radius:13px;display:flex;align-items:center;justify-content:center;
+ color:#8A7A5C;cursor:pointer}
+.q-more:hover{background:#FAF3E7}
+
+/* ===== BOTTOM NAV ===== */
+.navpill{position:absolute;left:12px;right:12px;bottom:12px;background:rgba(250,248,243,0.85);backdrop-filter:blur(20px);
+ border:1px solid #E5E2D8;border-radius:24px;box-shadow:0 10px 26px rgba(30,20,5,0.14);display:flex;
+ align-items:center;padding:8px 8px;gap:2px;overflow-x:auto}
+.navitem{display:flex;flex-direction:column;align-items:center;gap:2px;padding:5px 9px;border-radius:13px;
+ color:#8A7A5C;cursor:pointer;flex:0 0 auto}
+.navitem span{font:700 8.5px/1 -apple-system,sans-serif}
+.navitem.music-active{background:#FDEFDA;color:#C4531B;flex-direction:row;gap:6px;padding:8px 14px}
+.navitem.music-active span{font:800 12px/1 -apple-system,sans-serif}
+
+.legend{margin-top:14px;padding:0 2px}
+.legend-title{font:700 10px/1 ui-monospace,Menlo,monospace;letter-spacing:1.4px;text-transform:uppercase;
+ color:#555555;margin-bottom:6px}
+.legend-item{font:400 10.5px/1.55 -apple-system,sans-serif;color:#555555;padding-left:12px;position:relative}
+.legend-item:before{content:"\2022";position:absolute;left:0;color:#C4531B}
+</style>
+</head>
+<body>
+<p class="frame-label">Music — Editorial Light</p>
+<p class="frame-note">Import MP3 removed per instruction. Overflow menu, transport controls, scrubber, and queue rows are all clickable targets tagged for build mapping.</p>
+
+<div class="phone">
+<div class="sysbar mono"><span>9:41</span><span class="right">
+<svg width="12" height="12" viewBox="0 0 24 24" fill="#111111"><path d="M2 22h20V2z"/></svg>
+<svg width="13" height="13" viewBox="0 0 24 24" fill="#111111"><path d="M12 3a9 9 0 0 0-6.36 2.64l1.42 1.42A7 7 0 0 1 12 5c1.93 0 3.68.78 4.95 2.05l1.41-1.41A9 9 0 0 0 12 3zm0 4a5 5 0 0 0-3.54 1.46l1.42 1.42A3 3 0 0 1 12 9c.83 0 1.58.34 2.12.88l1.42-1.42A5 5 0 0 0 12 7zm0 4a1.99 1.99 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>
+<svg width="12" height="12" viewBox="0 0 24 24" fill="#111111"><path d="M15.67 4H14V2h-4v2H8.33C7.6 4 7 4.6 7 5.33v15.34C7 21.4 7.6 22 8.33 22h7.34c.73 0 1.33-.6 1.33-1.33V5.33C17 4.6 16.4 4 15.67 4z"/></svg>
+</span></div>
+
+<div class="hdr">
+ <div class="back" data-component-id="music-back-btn" role="button" aria-label="Back to Home">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+ </div>
+ <h1>Music</h1>
+ <div class="more" data-component-id="music-more-btn" role="button" aria-label="More options">
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></svg>
+ </div>
+
+ <div class="overflow-menu" data-component-id="music-overflow-menu">
+  <div class="ov-item" data-component-id="music-settings-item" role="button" aria-label="Open Music settings">
+   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+   Music Settings
+  </div>
+  <div class="ov-item" data-component-id="music-information-item" role="button" aria-label="View track information">
+   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+   Information
+  </div>
+  <div class="ov-div"></div>
+  <div class="ov-item danger" data-component-id="music-delete-track-item" role="button" aria-label="Delete current track">
+   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+   Delete Current Track
+  </div>
+ </div>
+</div>
+
+<div class="body">
+
+ <div class="nowplaying" data-component-id="music-nowplaying-card">
+  <div class="np-art">
+   <div class="disc">
+    <div class="disc-center">
+     <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg>
+    </div>
+   </div>
+  </div>
+  <div class="np-meta">
+   <div class="np-title" data-component-id="music-track-title">Alag Aasmaan (Acoustic) [vA86QFrXoho]</div>
+   <div class="np-sub" data-component-id="music-track-sub">&lt;unknown&gt; · Local Storage</div>
+  </div>
+
+  <div class="waveform" data-component-id="music-waveform" role="slider" aria-label="Track waveform, tap to seek">
+   <!-- generated bar pattern, played portion darker -->
+   <div class="wf-bar played" style="height:9px"></div><div class="wf-bar played" style="height:18px"></div><div class="wf-bar played" style="height:26px"></div><div class="wf-bar played" style="height:14px"></div><div class="wf-bar played" style="height:22px"></div><div class="wf-bar played" style="height:10px"></div><div class="wf-bar played" style="height:28px"></div><div class="wf-bar played" style="height:16px"></div><div class="wf-bar played" style="height:20px"></div><div class="wf-bar played" style="height:8px"></div><div class="wf-bar played" style="height:24px"></div><div class="wf-bar played" style="height:12px"></div>
+   <div class="wf-bar" style="height:19px"></div><div class="wf-bar" style="height:27px"></div><div class="wf-bar" style="height:11px"></div><div class="wf-bar" style="height:23px"></div><div class="wf-bar" style="height:15px"></div><div class="wf-bar" style="height:9px"></div><div class="wf-bar" style="height:25px"></div><div class="wf-bar" style="height:17px"></div><div class="wf-bar" style="height:21px"></div><div class="wf-bar" style="height:13px"></div><div class="wf-bar" style="height:29px"></div><div class="wf-bar" style="height:10px"></div><div class="wf-bar" style="height:20px"></div><div class="wf-bar" style="height:16px"></div><div class="wf-bar" style="height:24px"></div><div class="wf-bar" style="height:12px"></div><div class="wf-bar" style="height:18px"></div><div class="wf-bar" style="height:26px"></div><div class="wf-bar" style="height:14px"></div><div class="wf-bar" style="height:22px"></div><div class="wf-bar" style="height:9px"></div><div class="wf-bar" style="height:28px"></div><div class="wf-bar" style="height:15px"></div><div class="wf-bar" style="height:20px"></div><div class="wf-bar" style="height:11px"></div><div class="wf-bar" style="height:25px"></div><div class="wf-bar" style="height:17px"></div>
+  </div>
+
+  <div class="scrubwrap">
+   <div class="scrubtrack" data-component-id="music-scrub-track" role="slider" aria-label="Seek position, 00:42 of 03:45">
+    <div class="scrub-seg filled"></div><div class="scrub-seg filled"></div><div class="scrub-seg filled"></div><div class="scrub-seg filled"></div><div class="scrub-seg filled"></div><div class="scrub-seg filled"></div><div class="scrub-seg filled"></div><div class="scrub-seg filled"></div>
+    <div class="scrub-handle"></div>
+    <div class="scrub-seg"></div><div class="scrub-seg"></div><div class="scrub-seg"></div><div class="scrub-seg"></div><div class="scrub-seg"></div><div class="scrub-seg"></div><div class="scrub-seg"></div><div class="scrub-seg"></div><div class="scrub-seg"></div><div class="scrub-seg"></div><div class="scrub-seg"></div><div class="scrub-seg"></div><div class="scrub-seg"></div><div class="scrub-seg"></div><div class="scrub-seg"></div><div class="scrub-seg"></div><div class="scrub-seg"></div><div class="scrub-seg"></div><div class="scrub-seg"></div><div class="scrub-seg"></div><div class="scrub-seg"></div><div class="scrub-seg"></div><div class="scrub-seg"></div><div class="scrub-seg"></div>
+   </div>
+   <div class="timerow"><span data-component-id="music-time-elapsed">00:42</span><span data-component-id="music-time-total">03:45</span></div>
+  </div>
+
+  <div class="transport">
+   <div class="tp-side" data-component-id="music-shuffle-btn" role="button" aria-label="Toggle shuffle">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
+   </div>
+   <div class="tp-skip" data-component-id="music-prev-btn" role="button" aria-label="Previous track">
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>
+   </div>
+   <div class="tp-play" data-component-id="music-playpause-btn" role="button" aria-label="Pause">
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
+   </div>
+   <div class="tp-skip" data-component-id="music-next-btn" role="button" aria-label="Next track">
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>
+   </div>
+   <div class="tp-side" data-component-id="music-repeat-btn" role="button" aria-label="Toggle repeat">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+   </div>
+  </div>
+ </div>
+
+ <div class="upnext-hdr">
+  <h2>Up Next</h2>
+  <span class="queue-count" data-component-id="music-queue-count">6 tracks</span>
+ </div>
+
+ <div class="qrow now-playing" data-component-id="queue-row-0" role="button" aria-label="[05gAyJZro3M], currently playing">
+  <div class="q-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>
+  <div class="q-text"><div class="q-title">[05gAyJZro3M]</div><div class="q-sub">&lt;unknown&gt;</div></div>
+  <div class="q-right">
+   <div class="q-eq"><span></span><span></span><span></span></div>
+   <span class="q-time">03:41</span>
+   <div class="q-more" data-component-id="queue-row-0-more" role="button" aria-label="Track options"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/></svg></div>
+  </div>
+ </div>
+
+ <div class="qrow" data-component-id="queue-row-1" role="button" aria-label="[1NEEJtZknY]">
+  <div class="q-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>
+  <div class="q-text"><div class="q-title">[1NEEJtZknY]</div><div class="q-sub">&lt;unknown&gt;</div></div>
+  <div class="q-right">
+   <span class="q-time">03:09</span>
+   <div class="q-more" data-component-id="queue-row-1-more" role="button" aria-label="Track options"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/></svg></div>
+  </div>
+ </div>
+
+ <div class="qrow" data-component-id="queue-row-2" role="button" aria-label="[2f5-lp5WjhY]">
+  <div class="q-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>
+  <div class="q-text"><div class="q-title">[2f5-lp5WjhY]</div><div class="q-sub">&lt;unknown&gt;</div></div>
+  <div class="q-right">
+   <span class="q-time">03:10</span>
+   <div class="q-more" data-component-id="queue-row-2-more" role="button" aria-label="Track options"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/></svg></div>
+  </div>
+ </div>
+
+ <div class="qrow" data-component-id="queue-row-3" role="button" aria-label="[2vP1CMK4l3Y]">
+  <div class="q-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>
+  <div class="q-text"><div class="q-title">[2vP1CMK4l3Y]</div><div class="q-sub">&lt;unknown&gt;</div></div>
+  <div class="q-right">
+   <span class="q-time">03:40</span>
+   <div class="q-more" data-component-id="queue-row-3-more" role="button" aria-label="Track options"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/></svg></div>
+  </div>
+ </div>
+
+ <div class="qrow" data-component-id="queue-row-4" role="button" aria-label="[d4KyLm8Qp9Z]">
+  <div class="q-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>
+  <div class="q-text"><div class="q-title">[d4KyLm8Qp9Z]</div><div class="q-sub">&lt;unknown&gt;</div></div>
+  <div class="q-right">
+   <span class="q-time">02:58</span>
+   <div class="q-more" data-component-id="queue-row-4-more" role="button" aria-label="Track options"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/></svg></div>
+  </div>
+ </div>
+
+ <div class="qrow" data-component-id="queue-row-5" role="button" aria-label="[9mNqRx7Tz8B]">
+  <div class="q-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>
+  <div class="q-text"><div class="q-title">[9mNqRx7Tz8B]</div><div class="q-sub">&lt;unknown&gt;</div></div>
+  <div class="q-right">
+   <span class="q-time">04:12</span>
+   <div class="q-more" data-component-id="queue-row-5-more" role="button" aria-label="Track options"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/></svg></div>
+  </div>
+ </div>
+
+</div>
+
+<div class="navpill">
+ <div class="navitem" data-component-id="nav-home"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg><span>Home</span></div>
+ <div class="navitem" data-component-id="nav-intercept"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="0.5"/></svg><span>Intercept</span></div>
+ <div class="navitem" data-component-id="nav-apis"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="3" y1="12" x2="21" y2="12"/><path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18"/></svg><span>APIs</span></div>
+ <div class="navitem" data-component-id="nav-tools"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/></svg><span>Tools</span></div>
+ <div class="navitem" data-component-id="nav-notes"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="21" y1="10" x2="3" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="17" y1="18" x2="3" y2="18"/></svg><span>Notes</span></div>
+ <div class="navitem" data-component-id="nav-flow"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg><span>Flow</span></div>
+ <div class="navitem music-active" data-component-id="nav-music">
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 1 0 8"/><path d="M4 12v-.5a5.5 5.5 0 0 1 5.5-5.5H10l6-4v20l-6-4h-.5A5.5 5.5 0 0 1 4 12.5V12z"/></svg>
+  <span>Music</span>
+ </div>
+</div>
+
+</div>
+
+<div class="legend" style="width:390px">
+ <div class="legend-title">Key interactions in this mockup</div>
+ <div class="legend-item">Overflow (⋮) opens Music Settings / Information / Delete Current Track — Delete is destructive-styled</div>
+ <div class="legend-item">Waveform + segmented scrubber both tappable/draggable for seeking; played portion darker</div>
+ <div class="legend-item">Transport: shuffle, prev, play/pause (large, center), next, repeat — all independently tappable</div>
+ <div class="legend-item">Now-playing queue row gets a left accent bar + live equalizer bars instead of a static duration</div>
+ <div class="legend-item">Every queue row has its own ⋮ for per-track options</div>
+ <div class="legend-item">Bottom nav pill shows Music as the active/expanded destination, matching the section in view</div>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>requestr — Setup & Onboarding (Editorial Light)</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #FDFBF7;
+      --bg-gradient: radial-gradient(circle at 50% 0%, #ECFEFF 0%, #FDFBF7 65%);
+      --card-bg: rgba(255, 255, 255, 0.95);
+      --card-border: rgba(15, 23, 42, 0.08);
+      --text: #1E293B;
+      --text-muted: #64748B;
+      --text-dim: #94A3B8;
+      --cyan: #0891B2;
+      --emerald: #059669;
+      --amber: #D97706;
+      --font-sans: 'Plus Jakarta Sans', -apple-system, sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg-gradient);
+      color: var(--text);
+      font-family: var(--font-sans);
+      min-height: 100vh;
+      padding: 16px 16px 30px;
+      display: flex;
+      justify-content: center;
+      -webkit-font-smoothing: antialiased;
+    }
+    .app-screen {
+      width: 100%;
+      max-width: 440px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    
+    /* Header Capsule */
+    .header-capsule {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 4px 6px;
+      background: rgba(255, 255, 255, 0.85);
+      backdrop-filter: blur(20px);
+      border: 1px solid rgba(15, 23, 42, 0.08);
+      border-radius: 24px;
+      box-shadow: 0 8px 30px rgba(15, 23, 42, 0.05);
+    }
+    .step-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 16px;
+      border-radius: 16px;
+      background: rgba(8, 145, 178, 0.1);
+      border: 1px solid rgba(8, 145, 178, 0.25);
+      font-weight: 800;
+      font-size: 13px;
+      color: #0891B2;
+      font-family: var(--font-mono);
+    }
+    .skip-btn {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 8px 12px;
+    }
+
+    /* Hero Card */
+    .hero-card {
+      background: linear-gradient(135deg, #ECFEFF 0%, #FFFFFF 100%);
+      border: 1px solid rgba(8, 145, 178, 0.2);
+      border-radius: 24px;
+      padding: 24px 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      gap: 12px;
+      box-shadow: 0 8px 24px rgba(8, 145, 178, 0.08);
+    }
+    .hero-icon-box {
+      width: 64px;
+      height: 64px;
+      border-radius: 20px;
+      background: linear-gradient(135deg, #0891B2, #059669);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 6px 18px rgba(8, 145, 178, 0.25);
+    }
+    .hero-card h2 { font-size: 20px; font-weight: 800; color: #1E293B; }
+    .hero-card p { font-size: 13px; color: var(--text-muted); line-height: 1.45; }
+
+    /* Step Requirements List */
+    .steps-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .step-item-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 18px;
+      padding: 14px 16px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      box-shadow: 0 2px 8px rgba(15, 23, 42, 0.02);
+    }
+    .step-number {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: rgba(5, 150, 105, 0.12);
+      border: 1px solid var(--emerald);
+      color: #059669;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 800;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .step-text h4 { font-size: 13px; font-weight: 700; color: #1E293B; }
+    .step-text p { font-size: 11px; color: var(--text-muted); }
+
+    /* Action Buttons */
+    .action-container {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .btn-primary {
+      width: 100%;
+      padding: 16px;
+      border-radius: 18px;
+      background: linear-gradient(135deg, #0891B2, #0E7490);
+      border: none;
+      color: #FFF;
+      font-size: 14px;
+      font-weight: 800;
+      cursor: pointer;
+      box-shadow: 0 8px 20px rgba(8, 145, 178, 0.25);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="app-screen">
+    <!-- Header -->
+    <div class="header-capsule">
+      <div class="step-pill">
+        <span>STEP 01 / 03</span>
+      </div>
+      <span class="skip-btn">Skip Setup</span>
+    </div>
+
+    <!-- Hero Card -->
+    <div class="hero-card">
+      <div class="hero-icon-box">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#FFF" stroke-width="2.2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      </div>
+      <h2>Enable Local SSL Decryption</h2>
+      <p>Requestr runs an on-device VPN loopback to intercept, modify, and replay HTTPS requests with zero cloud latency.</p>
+    </div>
+
+    <!-- Steps -->
+    <div class="steps-list">
+      <div class="step-item-card">
+        <div class="step-number">✓</div>
+        <div class="step-text">
+          <h4>VPN Service Permission</h4>
+          <p>Granted · Local tun0 routing enabled</p>
+        </div>
+      </div>
+      <div class="step-item-card">
+        <div class="step-number" style="background: rgba(217, 119, 6, 0.12); border-color: #D97706; color: #D97706;">2</div>
+        <div class="step-text">
+          <h4>Install requestr Root CA</h4>
+          <p>Required for MITM inspection on Android 7+</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Primary Action Button -->
+    <div class="action-container">
+      <button class="btn-primary">
+        <span>Install CA Certificate & Continue</span>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg>
+      </button>
+    </div>
+  </div>
+</body>
+</html>

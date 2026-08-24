@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reqy Assistant · Combined Mockup · Editorial Light · requestr</title>
+<meta name="description" content="requestr Reqy Assistant — rebranded AI chat section. Four combined screens: (1) New Chat with sample conversation, dynamic icon pills, message action locks, (2) full Settings screen — Provider/Key/Model, Instructions, Export, Appearance, Data & Storage, Notifications, Local Mode, Advanced, (3) side drawer — AI History, New Chat, Tools/Collections/Flows/Environments, current model + router detail, detached settings shortcut, back-to-home, (4) attachment menu — Image, File, Code Snippet, Request/Response, Screenshot. Every actionable element carries an HTML comment describing its intended real behavior for the build agent.">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-text-size-adjust:100%}
+body{background:#E7E4DA;min-height:100vh;display:flex;flex-wrap:wrap;justify-content:center;gap:40px;
+ padding:26px 16px 50px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.col{display:flex;flex-direction:column;align-items:center}
+.frame-label{font:700 10px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:1.4px;
+ text-transform:uppercase;color:#555555;margin-bottom:8px;text-align:center}
+.frame-note{font:400 10px/1.5 -apple-system,sans-serif;color:#6B6152;max-width:390px;text-align:center;margin-bottom:12px}
+.phone{width:390px;height:844px;background:#F4F2EC;color:#111111;border:1px solid #E5E2D8;border-radius:36px;
+ overflow:hidden;position:relative;box-shadow:0 22px 60px rgba(17,17,17,0.20);display:flex;flex-direction:column}
+.sysbar{height:28px;flex:0 0 28px;display:flex;align-items:center;justify-content:space-between;padding:0 18px;
+ font:600 11px/1 ui-monospace,Menlo,monospace;color:#111111;opacity:.85}
+
+/* ============ SHARED HEADER ============ */
+.hdr{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:11px 16px 10px;
+ background:rgba(250,248,243,0.75);backdrop-filter:blur(20px);border-bottom:1px solid #E5E2D8;position:relative;z-index:20}
+.hdr .left{display:flex;align-items:center;gap:10px}
+.ibtn{width:38px;height:38px;border-radius:19px;display:flex;align-items:center;justify-content:center;
+ background:#F2E3CE;color:#B5551A;cursor:pointer;transition:box-shadow .15s ease,transform .15s ease}
+.ibtn:hover{box-shadow:0 0 0 4px rgba(242,140,40,0.16);transform:translateY(-1px)}
+.ibtn:active{transform:scale(0.94)}
+.hdr h1{font-size:21px;font-weight:800;letter-spacing:-.4px}
+.hdr .acts{display:flex;gap:6px}
+
+/* ============ SCREEN 1: NEW CHAT ============ */
+.notice{margin:10px 16px 0;display:flex;gap:9px;background:#EAF0FE;border:1px solid #C9D9FB;border-radius:14px;
+ padding:11px 12px;font:500 11.5px/1.5 -apple-system,sans-serif;color:#3B4A6B}
+.notice svg{flex:0 0 16px;color:#3B82F6;margin-top:1px}
+.notice a{color:#3B82F6;font-weight:700;text-decoration:underline;cursor:pointer}
+
+.chatbody{flex:1;overflow-y:auto;padding:14px 16px 8px;display:flex;flex-direction:column;gap:16px}
+.chatbody::-webkit-scrollbar{width:0}
+
+.msg-row{display:flex;flex-direction:column;max-width:82%}
+.msg-row.user{align-self:flex-end;align-items:flex-end}
+.msg-row.ai{align-self:flex-start;align-items:flex-start}
+.msg-bubble{border-radius:18px;padding:12px 14px;font:500 13.5px/1.55 -apple-system,sans-serif}
+.msg-bubble.user{background:#3B82F6;color:#FFFFFF;border-bottom-right-radius:6px}
+.msg-bubble.ai{background:#FFFFFF;border:1px solid #E3D2A9;color:#161311;border-bottom-left-radius:6px}
+.ai-head{display:flex;align-items:center;gap:7px;margin-bottom:6px}
+.ai-avatar{width:22px;height:22px;border-radius:8px;background:#3B82F6;color:#fff;display:flex;align-items:center;
+ justify-content:center;font:800 11px/1 -apple-system,sans-serif;flex:0 0 22px}
+.ai-name{font:700 11.5px/1 -apple-system,sans-serif;color:#5B4E3A}
+
+/* locked action row — replaces double-check + time inline */
+.msg-foot{display:flex;align-items:center;gap:7px;margin-top:5px;padding:0 2px}
+.msg-foot.user{flex-direction:row-reverse}
+.foot-copy{width:22px;height:22px;border-radius:7px;display:flex;align-items:center;justify-content:center;
+ color:#8A7A5C;cursor:pointer}
+.foot-copy:hover{background:#EFE3CC}
+.foot-time{font:600 9.5px/1 ui-monospace,Menlo,monospace;color:#8A7A5C}
+
+.msg-actions-row{display:flex;align-items:center;gap:6px;margin-top:4px}
+.act-chip{display:flex;align-items:center;gap:4px;padding:5px 9px;border-radius:9px;background:#FAF3E7;
+ border:1px solid #EEE3CC;font:600 10px/1 -apple-system,sans-serif;color:#8A7A5C;cursor:pointer}
+.act-chip:hover{background:#F2E3CE;color:#B5551A}
+
+.composer{flex:0 0 auto;padding:10px 14px 14px;background:rgba(250,248,243,0.85);backdrop-filter:blur(16px);
+ border-top:1px solid #E5E2D8;display:flex;align-items:center;gap:9px}
+.attach-btn{width:40px;height:40px;border-radius:20px;background:#EAF0FE;color:#3B82F6;display:flex;
+ align-items:center;justify-content:center;cursor:pointer;flex:0 0 40px;transition:transform .15s ease}
+.attach-btn:hover{transform:translateY(-1px)}
+.composer-input{flex:1;height:42px;border-radius:21px;background:#FFFFFF;border:1px solid #E3D2A9;
+ display:flex;align-items:center;padding:0 15px;font:500 13px/1 -apple-system,sans-serif;color:#8A7A5C}
+.send-btn{width:40px;height:40px;border-radius:20px;background:#3B82F6;color:#FFFFFF;display:flex;
+ align-items:center;justify-content:center;cursor:pointer;flex:0 0 40px;box-shadow:0 6px 16px rgba(59,130,246,0.35);
+ transition:transform .15s ease}
+.send-btn:hover{transform:scale(1.06)}
+.send-btn:active{transform:scale(0.9)}
+
+/* long-press action lock for USER message (screen 1 demo, shown pinned open on last user msg) */
+.lockpanel{position:absolute;background:#FFFFFF;border:1px solid #E3D2A9;border-radius:16px;
+ box-shadow:0 16px 34px rgba(30,20,5,0.20);padding:6px;z-index:40;width:158px;
+ animation:menuIn .15s cubic-bezier(.2,.9,.3,1.2)}
+@keyframes menuIn{from{opacity:0;transform:translateY(-4px) scale(.96)}to{opacity:1;transform:translateY(0) scale(1)}}
+.lock-item{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:11px;cursor:pointer;
+ font:600 12.5px/1 -apple-system,sans-serif;color:#161311;transition:background .12s ease}
+.lock-item:hover{background:#FAF3E7}
+.lock-item svg{flex:0 0 16px;color:#8A7A5C}
+.lock-item.danger{color:#C0392B}
+.lock-item.danger svg{color:#C0392B}
+.lock-div{height:1px;background:#EEE3CC;margin:4px 6px}
+
+/* ============ SCREEN 2: SETTINGS ============ */
+.set-scroll{flex:1;overflow-y:auto;padding:12px 16px 30px}
+.set-scroll::-webkit-scrollbar{width:0}
+.set-sec-lbl{font:700 10.5px/1 -apple-system,sans-serif;letter-spacing:1px;text-transform:uppercase;
+ color:#8A7A5C;margin:16px 4px 8px}
+.set-sec-lbl:first-child{margin-top:4px}
+.set-card{background:#FFFFFF;border:1px solid #E3D2A9;border-radius:16px;overflow:hidden}
+.set-row{display:flex;align-items:center;gap:11px;padding:12px 13px;cursor:pointer;transition:background .13s ease;
+ border-bottom:1px solid #F2E9D5}
+.set-row:last-child{border-bottom:none}
+.set-row:hover{background:#FAF3E7}
+.set-icon{width:32px;height:32px;border-radius:10px;display:flex;align-items:center;justify-content:center;flex:0 0 32px}
+.set-text{flex:1;min-width:0}
+.set-title{font:700 13px/1.3 -apple-system,sans-serif;color:#161311}
+.set-sub{font:500 10.5px/1.4 -apple-system,sans-serif;color:#8A7A5C;margin-top:1px}
+.set-val{font:600 11.5px/1 -apple-system,sans-serif;color:#8A7A5C;flex:0 0 auto}
+.set-chev{color:#B7A98A;flex:0 0 14px}
+.set-toggle{width:40px;height:23px;border-radius:12px;background:#E3D2A9;position:relative;cursor:pointer;flex:0 0 40px}
+.set-toggle.on{background:#3B82F6}
+.set-toggle .knob{position:absolute;width:17px;height:17px;border-radius:9px;background:#FFFFFF;top:3px;left:3px;
+ transition:left .18s ease;box-shadow:0 1px 3px rgba(0,0,0,0.2)}
+.set-toggle.on .knob{left:20px}
+
+.provider-block{background:#FFFFFF;border:1px solid #E3D2A9;border-radius:16px;padding:13px 13px 12px}
+.pb-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:9px}
+.pb-row:last-child{margin-bottom:0}
+.pb-label{font:700 11px/1 -apple-system,sans-serif;color:#5B4E3A}
+.pb-field{background:#FAF3E7;border:1px solid #EEE3CC;border-radius:10px;padding:8px 10px;font:500 12px/1 ui-monospace,Menlo,monospace;
+ color:#161311;width:100%}
+.pb-select{display:flex;align-items:center;justify-content:space-between;background:#FAF3E7;border:1px solid #EEE3CC;
+ border-radius:10px;padding:9px 11px;cursor:pointer}
+.provider-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px}
+.provider-chip{display:flex;align-items:center;gap:5px;padding:6px 10px;border-radius:10px;background:#FAF3E7;
+ border:1px solid #EEE3CC;font:600 10.5px/1 -apple-system,sans-serif;color:#5B4E3A;cursor:pointer}
+.provider-chip.sel{background:#EAF0FE;border-color:#3B82F6;color:#3B82F6}
+.provider-chip .dot{width:6px;height:6px;border-radius:3px}
+
+.instr-area{background:#FAF3E7;border:1px solid #EEE3CC;border-radius:10px;padding:10px 11px;font:500 12px/1.5 -apple-system,sans-serif;
+ color:#5B4E3A;min-height:64px}
+
+.export-row{display:flex;gap:8px;margin-top:9px}
+.export-btn{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;padding:9px 0;border-radius:11px;
+ background:#FAF3E7;border:1px solid #EEE3CC;font:700 11px/1 -apple-system,sans-serif;color:#5B4E3A;cursor:pointer}
+.export-btn:hover{background:#F2E3CE}
+
+/* ============ SCREEN 3: SIDE DRAWER ============ */
+.drawer-scrim{position:absolute;inset:0;background:rgba(20,14,8,0.32);z-index:30}
+.drawer{position:absolute;left:0;top:0;bottom:0;width:290px;background:#FFFFFF;z-index:31;
+ border-right:1px solid #E3D2A9;display:flex;flex-direction:column;box-shadow:12px 0 30px rgba(30,20,5,0.18)}
+.drw-top{padding:16px 16px 12px;border-bottom:1px solid #EEE3CC}
+.drw-back{display:flex;align-items:center;gap:8px;color:#8A7A5C;cursor:pointer;font:700 12px/1 -apple-system,sans-serif;
+ margin-bottom:14px}
+.drw-back svg{flex:0 0 15px}
+.drw-brand{display:flex;align-items:center;gap:10px}
+.drw-brand-icon{width:38px;height:38px;border-radius:12px;background:linear-gradient(135deg,#3B82F6,#8B5CF6);
+ display:flex;align-items:center;justify-content:center;color:#fff}
+.drw-brand-text .n{font:800 15px/1.2 -apple-system,sans-serif;color:#161311}
+.drw-brand-text .t{font:500 10px/1.3 -apple-system,sans-serif;color:#8A7A5C}
+
+.drw-body{flex:1;overflow-y:auto;padding:10px 10px}
+.drw-item{display:flex;align-items:center;gap:11px;padding:11px 10px;border-radius:12px;cursor:pointer;
+ font:700 13px/1 -apple-system,sans-serif;color:#161311;transition:background .13s ease}
+.drw-item:hover{background:#FAF3E7}
+.drw-item svg{flex:0 0 17px;color:#8A7A5C}
+.drw-div{height:1px;background:#EEE3CC;margin:8px 6px}
+.drw-lbl{font:700 9.5px/1 -apple-system,sans-serif;letter-spacing:1px;text-transform:uppercase;color:#B7A98A;
+ padding:6px 10px 4px}
+
+.drw-modelcard{margin:6px 6px 0;background:#EAF0FE;border:1px solid #C9D9FB;border-radius:13px;padding:11px 12px}
+.drw-mc-top{display:flex;align-items:center;gap:8px}
+.drw-mc-dot{width:7px;height:7px;border-radius:4px;background:#22C55E;flex:0 0 7px}
+.drw-mc-name{font:800 12px/1.2 -apple-system,sans-serif;color:#1E3A6B}
+.drw-mc-router{font:500 10px/1.5 -apple-system,sans-serif;color:#5B6B85;margin-top:4px}
+
+.drw-bottom{padding:12px 14px;border-top:1px solid #EEE3CC;display:flex;align-items:center;gap:10px}
+.drw-settings-icon{width:34px;height:34px;border-radius:11px;background:#F2E3CE;color:#B5551A;display:flex;
+ align-items:center;justify-content:center;cursor:pointer;flex:0 0 34px}
+.drw-settings-text{font:700 12.5px/1 -apple-system,sans-serif;color:#161311}
+
+/* ============ SCREEN 4: ATTACHMENT MENU ============ */
+.attach-scrim{position:absolute;inset:0;background:rgba(20,14,8,0.28);z-index:30}
+.attach-sheet{position:absolute;left:0;right:0;bottom:0;background:#F9F6EF;border-radius:26px 26px 0 0;
+ z-index:31;padding:10px 16px 24px;box-shadow:0 -14px 34px rgba(30,20,5,0.20)}
+.sheet-handle{width:38px;height:4px;border-radius:2px;background:#D9C9A3;margin:0 auto 14px}
+.sheet-title{font:800 15px/1 -apple-system,sans-serif;color:#161311;margin-bottom:12px}
+.attach-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.attach-opt{display:flex;align-items:center;gap:11px;background:#FFFFFF;border:1px solid #E3D2A9;border-radius:15px;
+ padding:12px 12px;cursor:pointer;transition:transform .13s ease,box-shadow .13s ease}
+.attach-opt:hover{transform:translateY(-1px);box-shadow:0 8px 18px rgba(30,20,5,0.10)}
+.attach-icon{width:38px;height:38px;border-radius:11px;display:flex;align-items:center;justify-content:center;flex:0 0 38px}
+.attach-text .t{font:800 12.5px/1.2 -apple-system,sans-serif;color:#161311}
+.attach-text .s{font:500 10px/1.3 -apple-system,sans-serif;color:#8A7A5C;margin-top:1px}
+
+.legend{margin-top:12px;padding:0 2px;width:390px}
+.legend-title{font:700 10px/1 ui-monospace,Menlo,monospace;letter-spacing:1.4px;text-transform:uppercase;
+ color:#555555;margin-bottom:6px}
+.legend-item{font:400 10.5px/1.55 -apple-system,sans-serif;color:#555555;padding-left:12px;position:relative}
+.legend-item:before{content:"\2022";position:absolute;left:0;color:#3B82F6}
+</style>
+</head>
+<body>
+
+<!-- ================= SCREEN 1: NEW CHAT ================= -->
+<div class="col">
+<p class="frame-label">1 · Reqy Assistant — New Chat</p>
+<p class="frame-note">Sample 5-message conversation. Header icons use dynamic pill hover. Message action row is locked below each bubble (copy + time for both, extra action chips for AI replies). Long-press lock panel shown pinned open on the last user message as a demo of its content.</p>
+<div class="phone">
+<div class="sysbar mono"><span>9:41</span><span></span></div>
+
+<!-- HEADER: hamburger opens side drawer (screen 3) · title · new-chat + settings icons -->
+<div class="hdr">
+ <div class="left">
+  <!-- COMMENT FOR AGENT: opens the side navigation drawer (see Screen 3). Must NOT navigate away from chat — drawer overlays. -->
+  <div class="ibtn" data-component-id="reqy-drawer-btn" role="button" aria-label="Open Reqy Assistant navigation drawer">
+   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
+  </div>
+  <h1>Reqy Assistant</h1>
+ </div>
+ <div class="acts">
+  <!-- COMMENT FOR AGENT: tapping this icon directly creates and opens a brand-new empty chat immediately — no intermediate "name your chat" modal (that modal pattern from the old reference is removed per instruction; see Screen 4 note about repurposing that concept for AI-message actions instead). -->
+  <div class="ibtn" data-component-id="reqy-newchat-btn" role="button" aria-label="Start a new chat">
+   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+  </div>
+  <!-- COMMENT FOR AGENT: opens the Reqy Assistant Settings screen (see Screen 2) — full page, not a partial sheet. -->
+  <div class="ibtn" data-component-id="reqy-settings-btn" role="button" aria-label="Open Reqy Assistant settings">
+   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
+  </div>
+ </div>
+</div>
+
+<!-- COMMENT FOR AGENT: real, conditional banner — only renders when no provider is configured in Settings. Tapping "Configure in Settings" deep-links straight to the Provider block inside Screen 2, not just the settings root. -->
+<div class="notice">
+ <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+ <div>No AI provider configured. Running in local mode. <a data-component-id="reqy-configure-settings-link" role="button" aria-label="Jump to provider configuration in settings">Configure in Settings.</a></div>
+</div>
+
+<div class="chatbody">
+
+ <div class="msg-row ai">
+  <div class="msg-bubble ai">
+   <div class="ai-head"><div class="ai-avatar">R</div><span class="ai-name">Reqy</span></div>
+   Hey! I'm Reqy, requestr's built-in assistant. I can help you with API testing, interception, flows, and tools. What do you need?
+  </div>
+  <!-- COMMENT FOR AGENT: copy icon copies this exact message's raw text to clipboard. Time is real message timestamp, not a placeholder. -->
+  <div class="msg-foot"><div class="foot-copy" data-component-id="msg-copy-1" role="button" aria-label="Copy message"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></div><span class="foot-time">6:00 PM</span></div>
+  <!-- COMMENT FOR AGENT: extra quick-action chips specific to AI replies (regenerate / more) — long-pressing the bubble opens the fuller lock panel with the same + additional options (Share, Report), see Screen with pinned lock panel below for full set. -->
+  <div class="msg-actions-row">
+   <div class="act-chip" data-component-id="msg-regenerate-1" role="button" aria-label="Regenerate this response"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><polyline points="21 3 21 8 16 8"/></svg>Regenerate</div>
+  </div>
+ </div>
+
+ <div class="msg-row user">
+  <div class="msg-bubble user">how do I set up interception with root?</div>
+  <div class="msg-foot user"><div class="foot-copy" data-component-id="msg-copy-2" role="button" aria-label="Copy message"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></div><span class="foot-time">6:01 PM</span></div>
+ </div>
+
+ <div class="msg-row ai">
+  <div class="msg-bubble ai">
+   <div class="ai-head"><div class="ai-avatar">R</div><span class="ai-name">Reqy</span></div>
+   Root doesn't intercept traffic directly — it moves requestr's CA into the system trust store. VPN mode still does the actual capturing. Want me to open Certificate Center for you?
+  </div>
+  <div class="msg-foot"><div class="foot-copy" data-component-id="msg-copy-3" role="button" aria-label="Copy message"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></div><span class="foot-time">6:01 PM</span></div>
+  <div class="msg-actions-row">
+   <div class="act-chip" data-component-id="msg-regenerate-3" role="button" aria-label="Regenerate this response"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><polyline points="21 3 21 8 16 8"/></svg>Regenerate</div>
+   <!-- COMMENT FOR AGENT: this action-suggestion chip is a real deep-link, generated when Reqy's reply references an in-app screen — tapping it navigates there directly. -->
+   <div class="act-chip" data-component-id="msg-open-certcenter-3" role="button" aria-label="Open Certificate Center"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg>Open Cert Center</div>
+  </div>
+ </div>
+
+ <div class="msg-row user" style="position:relative">
+  <div class="msg-bubble user">yes please, and also show me the trust analysis for Chrome</div>
+  <div class="msg-foot user"><div class="foot-copy" data-component-id="msg-copy-4" role="button" aria-label="Copy message"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></div><span class="foot-time">6:02 PM</span></div>
+
+  <!-- COMMENT FOR AGENT: this panel is what appears on LONG-PRESS of a USER message bubble (shown here pinned open as a static demo — in the real app it is dismissed on outside tap / action select, not permanently visible). Anchors near the pressed bubble, not screen-center. -->
+  <div class="lockpanel" style="top:-6px; right:0">
+   <div class="lock-item" data-component-id="usermsg-copy" role="button" aria-label="Copy message text"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Copy</div>
+   <div class="lock-item" data-component-id="usermsg-edit" role="button" aria-label="Edit this message and resend"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>Edit</div>
+   <div class="lock-item" data-component-id="usermsg-reply" role="button" aria-label="Quote-reply to this message"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>Reply</div>
+   <div class="lock-div"></div>
+   <div class="lock-item danger" data-component-id="usermsg-delete" role="button" aria-label="Delete this message"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>Delete</div>
+   <div class="lock-item" data-component-id="usermsg-select" role="button" aria-label="Enter multi-select mode starting from this message"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Select</div>
+  </div>
+ </div>
+
+ <div class="msg-row ai">
+  <div class="msg-bubble ai">
+   <div class="ai-head"><div class="ai-avatar">R</div><span class="ai-name">Reqy</span></div>
+   Chrome trusts the system store, so once your CA is installed there it should work. I don't have a live device connected right now to run the actual trust check — open Cert Center and I'll walk you through it.
+  </div>
+  <div class="msg-foot"><div class="foot-copy" data-component-id="msg-copy-5" role="button" aria-label="Copy message"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></div><span class="foot-time">6:02 PM</span></div>
+  <div class="msg-actions-row">
+   <div class="act-chip" data-component-id="msg-regenerate-5" role="button" aria-label="Regenerate this response"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><polyline points="21 3 21 8 16 8"/></svg>Regenerate</div>
+  </div>
+ </div>
+
+</div>
+
+<div class="composer">
+ <!-- COMMENT FOR AGENT: opens the attachment sheet (see Screen 4). MUST dismiss/close the on-screen keyboard first if it's open, before the sheet animates in — this was named explicitly as a bug to avoid. -->
+ <div class="attach-btn" data-component-id="reqy-attach-btn" role="button" aria-label="Add attachment">
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+ </div>
+ <div class="composer-input" data-component-id="reqy-composer-input">Ask about requestr...</div>
+ <!-- COMMENT FOR AGENT: sends the composed message to the currently active provider/model (shown in the side drawer). Disabled/greyed when input is empty. -->
+ <div class="send-btn" data-component-id="reqy-send-btn" role="button" aria-label="Send message">
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+ </div>
+</div>
+
+</div>
+</div>
+
+<!-- ================= SCREEN 2: SETTINGS ================= -->
+<div class="col">
+<p class="frame-label">2 · Reqy Assistant — Settings</p>
+<p class="frame-note">Full page, not a partial sheet. Provider block supports all publicly available agents/models + free providers explicitly, plus Key, Model selection, Instructions, and Export — all in dynamic pixel-tab cards. Everything below Provider mirrors the old half-opened menu, made complete.</p>
+<div class="phone">
+<div class="sysbar mono"><span>9:41</span><span></span></div>
+
+<div class="hdr">
+ <div class="left">
+  <!-- COMMENT FOR AGENT: closes Settings, returns to the chat screen it was opened from (not necessarily Home). -->
+  <div class="ibtn" data-component-id="settings-close-btn" role="button" aria-label="Close settings">
+   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+  </div>
+  <h1>Settings</h1>
+ </div>
+</div>
+
+<div class="set-scroll">
+
+ <div class="set-sec-lbl">AI Provider</div>
+ <div class="provider-block">
+  <div class="pb-row"><span class="pb-label">Provider</span></div>
+  <!-- COMMENT FOR AGENT: this chip row lists ALL publicly available agents/models/websites + explicitly-labeled free providers — not a short hardcoded list. Selected chip shows accent border + colored dot matching that provider's brand color where known. Scrollable/wraps if the list is long. -->
+  <div class="provider-chips" data-component-id="settings-provider-chips">
+   <div class="provider-chip sel" data-component-id="provider-openai"><span class="dot" style="background:#10A37F"></span>OpenAI</div>
+   <div class="provider-chip" data-component-id="provider-anthropic"><span class="dot" style="background:#D97757"></span>Anthropic</div>
+   <div class="provider-chip" data-component-id="provider-gemini"><span class="dot" style="background:#4285F4"></span>Gemini</div>
+   <div class="provider-chip" data-component-id="provider-openrouter"><span class="dot" style="background:#8B5CF6"></span>OpenRouter</div>
+   <div class="provider-chip" data-component-id="provider-groq"><span class="dot" style="background:#F97316"></span>Groq (Free)</div>
+   <div class="provider-chip" data-component-id="provider-huggingface"><span class="dot" style="background:#FFD21E"></span>HuggingFace (Free)</div>
+   <div class="provider-chip" data-component-id="provider-ollama"><span class="dot" style="background:#000000"></span>Ollama (Local)</div>
+   <div class="provider-chip" data-component-id="provider-custom"><span class="dot" style="background:#64748B"></span>+ Custom</div>
+  </div>
+
+  <div class="pb-row" style="margin-top:12px"><span class="pb-label">API Key</span></div>
+  <!-- COMMENT FOR AGENT: real secure-storage-backed field (Android Keystore-backed or equivalent) — never plain SharedPreferences. Masked by default with a reveal toggle (not shown in this static mockup, must be added in build). -->
+  <input class="pb-field" data-component-id="settings-api-key-input" value="sk-••••••••••••••••7F2A" readonly>
+
+  <div class="pb-row" style="margin-top:12px"><span class="pb-label">Model</span></div>
+  <!-- COMMENT FOR AGENT: opens a model picker scoped to whichever provider chip above is currently selected — list must be fetched live from that provider where the provider exposes a models-list API, not hardcoded. -->
+  <div class="pb-select" data-component-id="settings-model-select" role="button" aria-label="Select model">
+   <span style="font:600 12.5px/1 ui-monospace,Menlo,monospace;color:#161311">gpt-4o-mini</span>
+   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8A7A5C" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+  </div>
+ </div>
+
+ <div class="set-sec-lbl">Instructions</div>
+ <div class="provider-block">
+  <!-- COMMENT FOR AGENT: this is the system-prompt / custom-instructions text block for Reqy specifically (separate from any per-chat instructions if those exist elsewhere) — persisted, applied to every new chat by default. -->
+  <div class="instr-area" data-component-id="settings-instructions-textarea">You are Reqy, requestr's built-in assistant. Be concise. Prefer pointing the user to the exact in-app screen over long explanations when a screen already does the job.</div>
+ </div>
+
+ <div class="set-sec-lbl">Export</div>
+ <div class="provider-block">
+  <div style="font:500 11px/1.5 -apple-system,sans-serif;color:#8A7A5C;margin-bottom:2px">Export this chat's history and settings</div>
+  <div class="export-row">
+   <!-- COMMENT FOR AGENT: exports the current chat as a real file (Markdown or JSON, user choice) via Android share sheet / SAF — must actually produce a valid file, not a placeholder toast. -->
+   <div class="export-btn" data-component-id="settings-export-chat-btn" role="button" aria-label="Export current chat"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Export Chat</div>
+   <!-- COMMENT FOR AGENT: exports provider/model/instructions config (never the raw API key value) as a shareable settings preset. -->
+   <div class="export-btn" data-component-id="settings-export-config-btn" role="button" aria-label="Export configuration"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>Export Config</div>
+  </div>
+ </div>
+
+ <div class="set-sec-lbl">General</div>
+ <div class="set-card">
+  <!-- COMMENT FOR AGENT: opens the app's real Appearance settings, scoped/anchored to whatever the current section needs (theme, accent) — shares the same theme system as the rest of requestr, not a separate Reqy-only theme. -->
+  <div class="set-row" data-component-id="settings-appearance-row" role="button" aria-label="Appearance settings">
+   <div class="set-icon" style="background:#F1EEFB"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#8B5CF6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r=".5"/><circle cx="17.5" cy="10.5" r=".5"/><circle cx="8.5" cy="7.5" r=".5"/><circle cx="6.5" cy="12.5" r=".5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></svg></div>
+   <div class="set-text"><div class="set-title">Appearance</div><div class="set-sub">Bubble colors, message density</div></div>
+   <span class="set-val">System</span><svg class="set-chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+  </div>
+  <!-- COMMENT FOR AGENT: real storage — how many local chats, cached attachments, actual MB used. Tapping opens clear-data controls with real confirmation, not instant silent wipe. -->
+  <div class="set-row" data-component-id="settings-data-storage-row" role="button" aria-label="Data and storage settings">
+   <div class="set-icon" style="background:#E3EEFB"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#3B82F6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg></div>
+   <div class="set-text"><div class="set-title">Data &amp; Storage</div><div class="set-sub">42 chats · 8.2 MB cached</div></div>
+   <svg class="set-chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+  </div>
+  <!-- COMMENT FOR AGENT: toggle drives real Android notification channel state for Reqy-specific notifications (background response ready, etc.) — must call the real permission/channel API, not just flip UI. -->
+  <div class="set-row" data-component-id="settings-notifications-row">
+   <div class="set-icon" style="background:#FDEFDA"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#B5551A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg></div>
+   <div class="set-text"><div class="set-title">Notifications</div><div class="set-sub">Response-ready alerts</div></div>
+   <div class="set-toggle on" data-component-id="settings-notifications-toggle" role="switch" aria-checked="true" aria-label="Toggle notifications"><div class="knob"></div></div>
+  </div>
+  <!-- COMMENT FOR AGENT: when ON, Reqy runs fully on-device (no network calls to any provider) using whatever local model backend requestr supports — must be a real functional mode, not a label with no behavior difference. -->
+  <div class="set-row" data-component-id="settings-localmode-row">
+   <div class="set-icon" style="background:#EAF7EC"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#16803C" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></div>
+   <div class="set-text"><div class="set-title">Local Mode</div><div class="set-sub">Run fully on-device, no network calls</div></div>
+   <div class="set-toggle" data-component-id="settings-localmode-toggle" role="switch" aria-checked="false" aria-label="Toggle local mode"><div class="knob"></div></div>
+  </div>
+  <!-- COMMENT FOR AGENT: opens Advanced sub-page — request timeout, temperature/top-p if provider supports it, retry behavior, raw request/response logging toggle for debugging Reqy itself. -->
+  <div class="set-row" data-component-id="settings-advanced-row" role="button" aria-label="Advanced settings">
+   <div class="set-icon" style="background:#FDEBEA"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#C0392B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg></div>
+   <div class="set-text"><div class="set-title">Advanced</div><div class="set-sub">Timeouts, sampling, raw logging</div></div>
+   <svg class="set-chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+  </div>
+ </div>
+
+</div>
+</div>
+</div>
+
+<!-- ================= SCREEN 3: SIDE DRAWER ================= -->
+<div class="col">
+<p class="frame-label">3 · Reqy Assistant — Side Drawer</p>
+<p class="frame-note">This is Reqy's own drawer, not the app's main navigation drawer — requestr branding removed per instruction, replaced with a Reqy-specific mark. Back button returns Home (exits the assistant entirely, distinct from just closing the drawer).</p>
+<div class="phone">
+<div class="sysbar mono"><span>9:41</span><span></span></div>
+
+<div class="hdr" style="opacity:.35;pointer-events:none">
+ <div class="left"><div class="ibtn"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></div><h1>Reqy Assistant</h1></div>
+</div>
+<div class="chatbody" style="opacity:.35;pointer-events:none">
+ <div class="msg-row user"><div class="msg-bubble user">hie</div></div>
+</div>
+
+<div class="drawer-scrim"></div>
+<div class="drawer">
+ <div class="drw-top">
+  <!-- COMMENT FOR AGENT: closes the drawer AND navigates fully back to requestr Home (not just back to the chat screen — explicitly "go home" per instruction). -->
+  <div class="drw-back" data-component-id="drawer-gohome-btn" role="button" aria-label="Go back to requestr Home">
+   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>Home
+  </div>
+  <div class="drw-brand">
+   <!-- COMMENT FOR AGENT: Reqy-specific mark, deliberately NOT the requestr wordmark/logo — placeholder gradient glyph shown here, real mark to be designed separately. -->
+   <div class="drw-brand-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect x="4" y="12" width="8" height="8" rx="1"/><path d="m20 4-4.9 4.9"/><path d="M20 12v8h-8"/></svg></div>
+   <div class="drw-brand-text"><div class="n">Reqy</div><div class="t">requestr's assistant</div></div>
+  </div>
+ </div>
+
+ <div class="drw-body">
+  <!-- COMMENT FOR AGENT: opens the full chat-history list (all past Reqy conversations, searchable) — this is the "first two options" the user referenced. -->
+  <div class="drw-item" data-component-id="drawer-ai-history" role="button" aria-label="View chat history"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><polyline points="3 3 3 8 8 8"/><polyline points="12 7 12 12 16 14"/></svg>AI History</div>
+  <!-- COMMENT FOR AGENT: same real action as the header's new-chat icon (Screen 1) — creates and opens a fresh empty chat immediately. -->
+  <div class="drw-item" data-component-id="drawer-new-chat" role="button" aria-label="Start new chat"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>New Chat</div>
+
+  <div class="drw-div"></div>
+  <div class="drw-lbl">Tools</div>
+  <!-- COMMENT FOR AGENT: opens requestr's real Collections (saved API groups) — Reqy can reference/attach these in conversation, this is a genuine cross-section link, not a Reqy-only mock list. -->
+  <div class="drw-item" data-component-id="drawer-collections" role="button" aria-label="Open Collections"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg>Collections</div>
+  <!-- COMMENT FOR AGENT: opens the real Flow section's All Flows picker (per the earlier Flow spec) — same underlying screen as accessed from bottom nav, not a duplicate. -->
+  <div class="drw-item" data-component-id="drawer-flows" role="button" aria-label="Open Flows"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>Flows</div>
+  <!-- COMMENT FOR AGENT: opens the real Environments feature from API Testr (already confirmed working per prior audit) — Reqy can read/reference active environment variables in conversation. -->
+  <div class="drw-item" data-component-id="drawer-environments" role="button" aria-label="Open Environments"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>Environments</div>
+
+  <div class="drw-div"></div>
+  <!-- COMMENT FOR AGENT: live status card — currently selected model + which provider/router is actually serving it (e.g. direct vs OpenRouter passthrough). Real data from the same source Settings' Model row (Screen 2) reads from — single source of truth, must never disagree with Screen 2. -->
+  <div class="drw-modelcard" data-component-id="drawer-model-status">
+   <div class="drw-mc-top"><span class="drw-mc-dot"></span><span class="drw-mc-name">gpt-4o-mini</span></div>
+   <div class="drw-mc-router">via OpenAI · direct · 340ms avg</div>
+  </div>
+ </div>
+
+ <div class="drw-bottom">
+  <!-- COMMENT FOR AGENT: detached settings shortcut — separate from the header's settings icon on Screen 1, but opens the exact same Settings screen (Screen 2). Two entry points, one destination, per instruction. -->
+  <div class="drw-settings-icon" data-component-id="drawer-settings-btn" role="button" aria-label="Open Reqy Assistant settings">
+   <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
+  </div>
+  <span class="drw-settings-text">Settings</span>
+ </div>
+</div>
+
+</div>
+</div>
+
+<!-- ================= SCREEN 4: ATTACHMENT MENU ================= -->
+<div class="col">
+<p class="frame-label">4 · Reqy Assistant — Attachment Menu</p>
+<p class="frame-note">Opened from the composer's attach icon (Screen 1). Keyboard must close before/as this sheet opens — this was named explicitly as a bug to fix, not optional polish. All 5 options visible without scrolling.</p>
+<div class="phone">
+<div class="sysbar mono"><span>9:41</span><span></span></div>
+
+<div class="hdr" style="opacity:.35;pointer-events:none">
+ <div class="left"><div class="ibtn"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></div><h1>Reqy Assistant</h1></div>
+</div>
+<div class="chatbody" style="opacity:.35;pointer-events:none">
+ <div class="msg-row user"><div class="msg-bubble user">hie</div></div>
+</div>
+
+<div class="attach-scrim"></div>
+<div class="attach-sheet">
+ <div class="sheet-handle"></div>
+ <div class="sheet-title">Add to message</div>
+ <div class="attach-grid">
+  <!-- COMMENT FOR AGENT: opens system gallery/photo picker — selected image attaches to the next sent message, real multipart upload to the provider if it supports vision input, otherwise a clear "this provider doesn't support images" inline warning before send. -->
+  <div class="attach-opt" data-component-id="attach-image" role="button" aria-label="Upload image from gallery">
+   <div class="attach-icon" style="background:#FCE7EF"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#C0296B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg></div>
+   <div class="attach-text"><div class="t">Image</div><div class="s">Upload from gallery</div></div>
+  </div>
+  <!-- COMMENT FOR AGENT: opens system file picker (SAF), any file type — real file, size-limited per provider's actual upload constraints, shown to user before send. -->
+  <div class="attach-opt" data-component-id="attach-file" role="button" aria-label="Upload any file">
+   <div class="attach-icon" style="background:#E3EEFB"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#3B82F6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg></div>
+   <div class="attach-text"><div class="t">File</div><div class="s">Upload any file</div></div>
+  </div>
+  <!-- COMMENT FOR AGENT: opens a code-paste/language-picker modal — attaches as a real formatted code block in the message, not a plain-text dump, with syntax highlighting preserved in the sent message. -->
+  <div class="attach-opt" data-component-id="attach-code" role="button" aria-label="Share code snippet">
+   <div class="attach-icon" style="background:#EAF7EC"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#16803C" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></div>
+   <div class="attach-text"><div class="t">Code Snippet</div><div class="s">Share code</div></div>
+  </div>
+  <!-- COMMENT FOR AGENT: opens a picker over real saved API Testr history/collections — user picks an actual past request/response, attaches its real data (method, URL, headers, body, response) as structured context, not a screenshot. -->
+  <div class="attach-opt" data-component-id="attach-request-response" role="button" aria-label="Share from request or response history">
+   <div class="attach-icon" style="background:#FDF0DC"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#B5551A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17V5a2 2 0 0 1 2-2h8.5L20 8.5V19a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-2z"/><polyline points="14 3 14 9 20 9"/></svg></div>
+   <div class="attach-text"><div class="t">Request/Response</div><div class="s">Share from history</div></div>
+  </div>
+  <!-- COMMENT FOR AGENT: launches a real in-app screen-capture flow (system screenshot API or in-app canvas capture) — not a stub that just closes the sheet with no result. -->
+  <div class="attach-opt" data-component-id="attach-screenshot" role="button" aria-label="Capture screenshot">
+   <div class="attach-icon" style="background:#F1EEFB"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#8B5CF6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v4"/><path d="M21 15v4a2 2 0 0 1-2 2h-4"/><path d="M9 21H5a2 2 0 0 1-2-2v-4"/><path d="M3 9V5a2 2 0 0 1 2-2h4"/></svg></div>
+   <div class="attach-text"><div class="t">Screenshot</div><div class="s">Capture &amp; share</div></div>
+  </div>
+ </div>
+</div>
+
+</div>
+</div>
+
+<div class="legend">
+ <div class="legend-title">Cross-screen notes</div>
+ <div class="legend-item">Every actionable element above carries an HTML comment directly above it in the source — read those first if a button's real behavior isn't obvious from its label</div>
+ <div class="legend-item">Settings (Screen 2) is one single real destination — both the header icon (Screen 1) and the drawer's detached icon (Screen 3) open it, never two different settings surfaces</div>
+ <div class="legend-item">User and AI message bubbles use distinct dynamic-theme colors (blue user / white-card AI in this Editorial Light pass) — must re-derive correctly per theme, not stay hardcoded blue</div>
+ <div class="legend-item">The old "New Chat" naming-modal concept is fully removed — new chat is instant; AI-message long-press now owns that space instead (Regenerate/Share/Report/Delete)</div>
+</div>
+
+</body>
+</html>

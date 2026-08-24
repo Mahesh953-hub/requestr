@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>requestr — 3 Brand & Logo Concepts</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #090D16;
+      --card-bg: rgba(22, 27, 44, 0.75);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --text: #F1F5F9;
+      --text-muted: #94A3B8;
+      --font-sans: 'Plus Jakarta Sans', sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: radial-gradient(circle at 50% 0%, #151E32 0%, #090D16 70%);
+      color: var(--text);
+      font-family: var(--font-sans);
+      min-height: 100vh;
+      padding: 40px 20px 100px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .container { max-width: 860px; width: 100%; display: flex; flex-direction: column; gap: 28px; }
+    h1 { font-size: 32px; font-weight: 800; letter-spacing: -0.8px; }
+    p.sub { color: var(--text-muted); font-size: 14px; margin-top: 4px; }
+    .concept-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 24px;
+      padding: 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+    .logo-row { display: flex; align-items: center; gap: 24px; }
+    .logo-symbol-box {
+      width: 84px;
+      height: 84px;
+      border-radius: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .concept-meta { flex: 1; }
+    .concept-tag {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 8px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+    .concept-title { font-size: 22px; font-weight: 800; }
+    .concept-desc { font-size: 13px; color: var(--text-muted); line-height: 1.4; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div>
+      <h1>Logo & Brand Identity Concepts</h1>
+      <p class="sub">3 distinct design directions for the next-generation developer packet client.</p>
+    </div>
+
+    <!-- Concept 1 -->
+    <div class="concept-card">
+      <div class="logo-row">
+        <div class="logo-symbol-box" style="background: linear-gradient(135deg, #10B981, #059669); box-shadow: 0 10px 28px rgba(16, 185, 129, 0.4);">
+          <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#FFF" stroke-width="2.2" stroke-linecap="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+        </div>
+        <div class="concept-meta">
+          <span class="concept-tag" style="background: rgba(16, 185, 129, 0.2); color: #34D399;">CONCEPT 01 · RECOMMENDED</span>
+          <div class="concept-title">requestr<span style="color:#10B981;">.</span></div>
+          <p class="concept-desc"><strong>The Kinetic Request Route:</strong> Integrates the lowercase "r" with bidirectional packet flow curves and terminal anchor nodes. Modern, developer-native, highly scalable down to 16px favicon.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Concept 2 -->
+    <div class="concept-card">
+      <div class="logo-row">
+        <div class="logo-symbol-box" style="background: linear-gradient(135deg, #F97316, #EA580C); box-shadow: 0 10px 28px rgba(249, 115, 22, 0.4);">
+          <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#FFF" stroke-width="2.2"><circle cx="12" cy="12" r="10"/><path d="m10 15 5-3-5-3v6z"/><path d="M12 2a10 10 0 0 1 10 10"/></svg>
+        </div>
+        <div class="concept-meta">
+          <span class="concept-tag" style="background: rgba(249, 115, 22, 0.2); color: #FB923C;">CONCEPT 02 · HIGH ENERGY</span>
+          <div class="concept-title">ReqPulse</div>
+          <p class="concept-desc"><strong>The Telemetry Loop:</strong> Merges an oscilloscope heartbeat waveform with an active packet interception aperture ring. Represents real-time speed and precision.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Concept 3 -->
+    <div class="concept-card">
+      <div class="logo-row">
+        <div class="logo-symbol-box" style="background: linear-gradient(135deg, #6366F1, #4F46E5); box-shadow: 0 10px 28px rgba(99, 102, 241, 0.4);">
+          <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#FFF" stroke-width="2.2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+        </div>
+        <div class="concept-meta">
+          <span class="concept-tag" style="background: rgba(99, 102, 241, 0.2); color: #818CF8;">CONCEPT 03 · PROTOCOL STACK</span>
+          <div class="concept-title">HexaFlow</div>
+          <p class="concept-desc"><strong>The Layered OSI Stack:</strong> Represents the multi-layer inspection of packets from L3 network socket through L7 HTTP payloads. Structured, robust, and architectural.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tools · Combined Mockup · Editorial Light · requestr</title>
+<meta name="description" content="requestr Tools section rebrand — Tool Library (searchable, categorized, scrollable grid) plus two individual tool screen patterns: JWT Token Decoder (single input/output) and Base64 Encoder/Decoder (dual pixel-tab Encode/Decode). Dynamic floating pill headers, copy/paste/delete icons, scrollable input/output for large payloads. Editorial Light theme.">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-text-size-adjust:100%}
+body{background:#E7E4DA;min-height:100vh;display:flex;flex-wrap:wrap;justify-content:center;gap:40px;
+ padding:26px 16px 50px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.col{display:flex;flex-direction:column;align-items:center}
+.frame-label{font:700 10px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:1.4px;
+ text-transform:uppercase;color:#555555;margin-bottom:8px;text-align:center}
+.frame-note{font:400 10px/1.5 -apple-system,sans-serif;color:#6B6152;max-width:390px;text-align:center;margin-bottom:12px}
+.phone{width:390px;height:844px;background:#F4F2EC;color:#111111;border:1px solid #E5E2D8;border-radius:36px;
+ overflow:hidden;position:relative;box-shadow:0 22px 60px rgba(17,17,17,0.20);display:flex;flex-direction:column}
+.sysbar{height:28px;flex:0 0 28px;display:flex;align-items:center;justify-content:space-between;padding:0 18px;
+ font:600 11px/1 ui-monospace,Menlo,monospace;color:#111111;opacity:.85}
+
+/* ===== DYNAMIC FLOATING PILL HEADER — shared pattern ===== */
+.hdr-float{flex:0 0 auto;display:flex;align-items:center;gap:10px;padding:14px 14px 8px;position:relative;z-index:20}
+.pill-icon{width:44px;height:44px;border-radius:22px;background:rgba(255,255,255,0.78);backdrop-filter:blur(16px);
+ border:1px solid #E5E2D8;display:flex;align-items:center;justify-content:center;color:#B5551A;cursor:pointer;
+ flex:0 0 44px;box-shadow:0 6px 18px rgba(30,20,5,0.10);transition:box-shadow .15s ease,transform .15s ease}
+.pill-icon:hover{box-shadow:0 0 0 4px rgba(242,140,40,0.16),0 6px 18px rgba(30,20,5,0.10);transform:translateY(-1px)}
+.pill-icon:active{transform:scale(0.94)}
+.pill-title{flex:1;background:rgba(255,255,255,0.78);backdrop-filter:blur(16px);border:1px solid #E5E2D8;
+ border-radius:20px;padding:10px 16px;box-shadow:0 6px 18px rgba(30,20,5,0.10);min-width:0}
+.pill-title h1{font:800 15.5px/1.25 -apple-system,sans-serif;letter-spacing:-.2px;color:#161311;white-space:nowrap;
+ overflow:hidden;text-overflow:ellipsis}
+.pill-title .sub{font:500 10px/1.3 -apple-system,sans-serif;color:#8A7A5C;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* ===== LIBRARY: search + category tabs ===== */
+.searchwrap{padding:6px 16px 8px}
+.searchbar{display:flex;align-items:center;gap:9px;height:44px;border-radius:16px;background:#FFFFFF;
+ border:1px solid #E3D2A9;padding:0 14px;color:#8A7A5C;font:500 13px/1 -apple-system,sans-serif}
+.cattabs{display:flex;gap:6px;padding:2px 16px 10px;overflow-x:auto;scrollbar-width:none}
+.cattabs::-webkit-scrollbar{display:none}
+.cattab{flex:0 0 auto;padding:8px 15px;border-radius:20px;font:700 12px/1 -apple-system,sans-serif;
+ background:#EFE3CC;color:#8A7A5C;cursor:pointer;white-space:nowrap;transition:all .15s ease}
+.cattab.on{background:#F28C28;color:#FFFFFF;box-shadow:0 6px 14px rgba(242,140,40,0.32)}
+
+/* ===== LIBRARY: scrollable tool grid ===== */
+.toolgrid-scroll{flex:1;overflow-y:auto;padding:4px 16px 100px}
+.toolgrid-scroll::-webkit-scrollbar{width:0}
+.toolgrid{display:grid;grid-template-columns:1fr 1fr;gap:11px}
+.toolcard{background:#FFFFFF;border:1px solid #E3D2A9;border-radius:18px;padding:18px 14px 16px;text-align:center;
+ cursor:pointer;transition:transform .15s ease,box-shadow .15s ease}
+.toolcard:hover{transform:translateY(-2px);box-shadow:0 10px 22px rgba(30,20,5,0.12)}
+.toolcard:active{transform:scale(0.97)}
+.toolcard .ic{width:46px;height:46px;border-radius:14px;background:#FDEFDA;display:flex;align-items:center;
+ justify-content:center;color:#C4531B;margin:0 auto 11px}
+.toolcard .name{font:700 12.5px/1.3 -apple-system,sans-serif;color:#161311}
+
+/* nav pill reused from prior specs, condensed */
+.navpill{position:absolute;left:14px;right:14px;bottom:12px;background:rgba(250,248,243,0.85);backdrop-filter:blur(20px);
+ border:1px solid #E5E2D8;border-radius:24px;box-shadow:0 10px 26px rgba(30,20,5,0.14);display:flex;
+ align-items:center;padding:8px 6px;gap:2px}
+.navitem{display:flex;flex-direction:column;align-items:center;gap:2px;padding:6px 11px;border-radius:14px;
+ color:#8A7A5C;cursor:pointer;flex:1}
+.navitem span{font:700 8.5px/1 -apple-system,sans-serif}
+.navitem.on{background:#FDEFDA;color:#C4531B;flex-direction:row;gap:6px;flex:1.6;padding:8px 12px}
+.navitem.on span{font:800 11px/1 -apple-system,sans-serif}
+
+/* ===== INDIVIDUAL TOOL SCREEN — shared ===== */
+.toolbody{flex:1;overflow-y:auto;padding:6px 16px 30px}
+.toolbody::-webkit-scrollbar{width:0}
+.tool-desc{font:500 12px/1.55 -apple-system,sans-serif;color:#6B6152;padding:8px 2px 14px}
+
+.pixeltabs{display:flex;background:#EFE3CC;border-radius:14px;padding:3px;margin-bottom:12px}
+.pixeltab{flex:1;text-align:center;padding:9px 0;border-radius:11px;font:800 12.5px/1 -apple-system,sans-serif;
+ color:#8A7A5C;cursor:pointer;transition:all .18s cubic-bezier(.3,.7,.4,1)}
+.pixeltab.on{background:#F28C28;color:#FFFFFF;box-shadow:0 6px 14px rgba(242,140,40,0.34)}
+
+.field-block{margin-bottom:14px}
+.field-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:7px;padding:0 2px}
+.field-lbl{font:700 12.5px/1 -apple-system,sans-serif;color:#5B4E3A}
+.field-acts{display:flex;gap:4px}
+.fa-btn{width:30px;height:30px;border-radius:9px;display:flex;align-items:center;justify-content:center;
+ color:#8A7A5C;cursor:pointer;transition:background .13s ease,color .13s ease}
+.fa-btn:hover{background:#F2E3CE;color:#B5551A}
+.fa-btn.danger:hover{background:#FCE7E4;color:#C0392B}
+
+/* scrollable input/output for large payloads */
+.textfield{background:#FFFFFF;border:1px solid #E3D2A9;border-radius:16px;padding:14px;font:500 13px/1.6 ui-monospace,Menlo,monospace;
+ color:#161311;max-height:150px;overflow-y:auto;min-height:64px}
+.textfield::-webkit-scrollbar{width:5px}
+.textfield::-webkit-scrollbar-thumb{background:#D9C9A3;border-radius:3px}
+.textfield.placeholder{color:#B7A98A;font-family:ui-monospace,Menlo,monospace}
+.textfield.output{background:#161210;color:#E8DFC8;border-color:#2A241C;max-height:220px}
+.textfield.output.empty{color:#6B6152;display:flex;align-items:center;justify-content:center;font-style:italic}
+.jk{color:#7EC8E3}.js{color:#B8E3A0}.jn{color:#E3B98A}.jp{color:#E8DFC8}
+
+.err-note{display:flex;align-items:center;gap:7px;margin-top:8px;padding:9px 11px;background:#FCE7E4;
+ border:1px solid #F3B9AE;border-radius:11px;font:600 11px/1.4 -apple-system,sans-serif;color:#A93226}
+
+.execute-btn{display:flex;align-items:center;justify-content:center;gap:8px;height:48px;border-radius:15px;
+ background:#C4531B;color:#FFFFFF;font:700 13.5px/1 -apple-system,sans-serif;cursor:pointer;margin-top:4px;
+ box-shadow:0 10px 22px rgba(196,83,27,0.32);transition:transform .15s ease}
+.execute-btn:hover{transform:translateY(-1px)}
+.execute-btn:active{transform:scale(0.97)}
+
+.legend{margin-top:12px;padding:0 2px;width:390px}
+.legend-title{font:700 10px/1 ui-monospace,Menlo,monospace;letter-spacing:1.4px;text-transform:uppercase;
+ color:#555555;margin-bottom:6px}
+.legend-item{font:400 10.5px/1.55 -apple-system,sans-serif;color:#555555;padding-left:12px;position:relative}
+.legend-item:before{content:"\2022";position:absolute;left:0;color:#C4531B}
+</style>
+</head>
+<body>
+
+<!-- ================= SCREEN 1: TOOL LIBRARY ================= -->
+<div class="col">
+<p class="frame-label">1 · Tool Library — Rebranded</p>
+<p class="frame-note">Dynamic floating pill header (no flat toolbar). Search + horizontally scrollable category pill-tabs. Grid scrolls independently of the header/search/tabs, which stay pinned.</p>
+<div class="phone">
+<div class="sysbar mono"><span>9:41</span><span></span></div>
+
+<div class="hdr-float">
+ <!-- COMMENT FOR AGENT: no back icon here — Library is a top-level section (reached from bottom nav), so this pill holds title only, settings pill on the right. -->
+ <div class="pill-title">
+  <h1>Tool Library</h1>
+  <div class="sub">35+ tools · Decoders, ciphers &amp; hashes</div>
+ </div>
+ <!-- COMMENT FOR AGENT: opens Tools section settings (favorite tools reorder, default AES mode, default hash algorithm, show/hide descriptions — per established Settings spec). -->
+ <div class="pill-icon" data-component-id="library-settings-btn" role="button" aria-label="Tools settings">
+  <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
+ </div>
+</div>
+
+<div class="searchwrap">
+ <!-- COMMENT FOR AGENT: real live-filter search across tool names AND descriptions, not name-only — updates the grid below as-you-type, no submit button needed. -->
+ <div class="searchbar" data-component-id="library-search-input">
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+  Search tools...
+ </div>
+</div>
+
+<!-- COMMENT FOR AGENT: tapping a category filters the grid to that category only; "All" always present as the reset state. Row scrolls horizontally when tabs overflow — never wraps to a second line. -->
+<div class="cattabs" data-component-id="library-category-tabs">
+ <div class="cattab on" data-component-id="cat-all">All</div>
+ <div class="cattab" data-component-id="cat-decoders">Decoders</div>
+ <div class="cattab" data-component-id="cat-ciphers">Ciphers &amp; Crypt</div>
+ <div class="cattab" data-component-id="cat-hashes">Hashes &amp; Checksums</div>
+ <div class="cattab" data-component-id="cat-formatters">Formatters</div>
+ <div class="cattab" data-component-id="cat-network">Network</div>
+ <div class="cattab" data-component-id="cat-custom">Custom</div>
+</div>
+
+<div class="toolgrid-scroll">
+ <div class="toolgrid" data-component-id="library-tool-grid">
+
+  <!-- COMMENT FOR AGENT: each card opens its dedicated tool screen (see Screens 2 & 3 for the two underlying layout patterns every tool in this grid follows — single-field tools use Screen 2's pattern, tools with a mode switch like Encode/Decode use Screen 3's pattern). -->
+  <div class="toolcard" data-component-id="tool-jwt-decoder" role="button" aria-label="Open JWT Token Decoder">
+   <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg></div>
+   <div class="name">JWT Token Decoder</div>
+  </div>
+
+  <div class="toolcard" data-component-id="tool-base64" role="button" aria-label="Open Base64 Encoder/Decoder">
+   <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 18l6-6-6-6"/><path d="M8 6l-6 6 6 6"/></svg></div>
+   <div class="name">Base64 Encoder / Decoder</div>
+  </div>
+
+  <div class="toolcard" data-component-id="tool-url" role="button" aria-label="Open URL/URI Percent Encoder">
+   <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></div>
+   <div class="name">URL / URI Percent Encoder</div>
+  </div>
+
+  <div class="toolcard" data-component-id="tool-hex" role="button" aria-label="Open Hex to String Converter">
+   <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7l9 5 9-5-9-5z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/></svg></div>
+   <div class="name">Hex ↔ String Converter</div>
+  </div>
+
+  <div class="toolcard" data-component-id="tool-html-entity" role="button" aria-label="Open HTML Entity Escape">
+   <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></div>
+   <div class="name">HTML Entity Escape</div>
+  </div>
+
+  <div class="toolcard" data-component-id="tool-morse" role="button" aria-label="Open Morse Code Converter">
+   <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg></div>
+   <div class="name">Morse Code Converter</div>
+  </div>
+
+  <div class="toolcard" data-component-id="tool-aes" role="button" aria-label="Open AES Encrypt/Decrypt">
+   <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
+   <div class="name">AES Encrypt / Decrypt</div>
+  </div>
+
+  <div class="toolcard" data-component-id="tool-xor" role="button" aria-label="Open XOR Stream Cipher">
+   <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m3 7 4 4"/></svg></div>
+   <div class="name">XOR Stream Cipher</div>
+  </div>
+
+  <div class="toolcard" data-component-id="tool-sha256" role="button" aria-label="Open SHA-256 Hash">
+   <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12c0-1 3-1 3-4s-3-3-3-4 3-1 3-4"/><path d="M2 20c0-1 3-1 3-4s-3-3-3-4"/><circle cx="19" cy="6" r="2"/><circle cx="19" cy="18" r="2"/><path d="M14 6h3"/><path d="M14 18h3"/></svg></div>
+   <div class="name">SHA-256 Hash</div>
+  </div>
+
+  <div class="toolcard" data-component-id="tool-sha1" role="button" aria-label="Open SHA-1 Hash">
+   <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12c0-1 3-1 3-4s-3-3-3-4 3-1 3-4"/><path d="M2 20c0-1 3-1 3-4s-3-3-3-4"/><circle cx="19" cy="6" r="2"/><circle cx="19" cy="18" r="2"/><path d="M14 6h3"/><path d="M14 18h3"/></svg></div>
+   <div class="name">SHA-1 Hash</div>
+  </div>
+
+  <div class="toolcard" data-component-id="tool-md5" role="button" aria-label="Open MD5 Hash">
+   <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12c0-1 3-1 3-4s-3-3-3-4 3-1 3-4"/><path d="M2 20c0-1 3-1 3-4s-3-3-3-4"/><circle cx="19" cy="6" r="2"/><circle cx="19" cy="18" r="2"/><path d="M14 6h3"/><path d="M14 18h3"/></svg></div>
+   <div class="name">MD5 Hash</div>
+  </div>
+
+  <div class="toolcard" data-component-id="tool-hmac" role="button" aria-label="Open HMAC-SHA256 Signer">
+   <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
+   <div class="name">HMAC-SHA256 Signer</div>
+  </div>
+
+ </div>
+</div>
+
+<div class="navpill">
+ <div class="navitem" data-component-id="nav-home"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div>
+ <div class="navitem" data-component-id="nav-intercept"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/></svg></div>
+ <div class="navitem" data-component-id="nav-apis"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="3" y1="12" x2="21" y2="12"/><path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18"/></svg></div>
+ <div class="navitem on" data-component-id="nav-tools"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/></svg><span>Tools</span></div>
+ <div class="navitem" data-component-id="nav-flow"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></div>
+ <div class="navitem" data-component-id="nav-music"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>
+</div>
+
+</div>
+</div>
+
+<!-- ================= SCREEN 2: JWT DECODER (single-field pattern) ================= -->
+<div class="col">
+<p class="frame-label">2 · JWT Token Decoder — Single-Field Pattern</p>
+<p class="frame-note">Reusable layout for any tool with one input → one output (URL Encoder, Hex Converter, Hash tools, HMAC Signer, etc.). Input and output each scroll independently and are capped in height so a large payload never pushes the Decode button off-screen.</p>
+<div class="phone">
+<div class="sysbar mono"><span>9:41</span><span></span></div>
+
+<div class="hdr-float">
+ <!-- COMMENT FOR AGENT: returns to Tool Library, preserving prior scroll position and active category tab. -->
+ <div class="pill-icon" data-component-id="jwt-back-btn" role="button" aria-label="Back to Tool Library">
+  <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+ </div>
+ <div class="pill-title">
+  <h1>JWT Token Decoder</h1>
+  <div class="sub">Decoders · Header, Payload &amp; Signature</div>
+ </div>
+</div>
+
+<div class="toolbody">
+ <div class="tool-desc">Paste a JWT token to decode its header, payload, and signature. Decoding happens fully on-device — nothing is sent anywhere.</div>
+
+ <div class="field-block">
+  <div class="field-hdr">
+   <span class="field-lbl">Token</span>
+   <div class="field-acts">
+    <!-- COMMENT FOR AGENT: pastes clipboard content directly into this field, replacing current content — real clipboard read, not a stub. -->
+    <div class="fa-btn" data-component-id="jwt-paste-btn" role="button" aria-label="Paste from clipboard"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg></div>
+    <!-- COMMENT FOR AGENT: clears the input field only (leaves prior Decoded output on screen until next decode runs, or clears both — decide one behavior and keep it consistent across every tool using this pattern). -->
+    <div class="fa-btn danger" data-component-id="jwt-clear-btn" role="button" aria-label="Clear input"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></div>
+   </div>
+  </div>
+  <!-- COMMENT FOR AGENT: input decodes live/as-you-type (debounced) OR requires explicit Decode tap — pick one interaction model per tool type; JWT is short enough for live-decode, larger-payload tools (e.g. big JSON formatter) should use explicit-button instead to avoid re-processing huge input on every keystroke. -->
+  <div class="textfield" data-component-id="jwt-token-input" contenteditable="true">eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c</div>
+ </div>
+
+ <div class="field-block">
+  <div class="field-hdr">
+   <span class="field-lbl">Decoded</span>
+   <div class="field-acts">
+    <!-- COMMENT FOR AGENT: copies the full decoded output (all three sections — header/payload/signature) as formatted JSON to clipboard. Disabled/greyed when output is empty. -->
+    <div class="fa-btn" data-component-id="jwt-copy-btn" role="button" aria-label="Copy decoded output"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></div>
+   </div>
+  </div>
+  <!-- COMMENT FOR AGENT: real decoded output, syntax-highlighted JSON, scrollable independently if the payload is large. Signature section shows raw bytes/base64 (cannot be "decoded" meaningfully, only verified against a key if the user provides one — a future Verify mode, not built in this pass). -->
+  <div class="textfield output" data-component-id="jwt-decoded-output"><span class="jk">"header"</span>: {<br>
+&nbsp;&nbsp;<span class="jk">"alg"</span>: <span class="js">"HS256"</span><br>
+},<br>
+<span class="jk">"payload"</span>: {<br>
+&nbsp;&nbsp;<span class="jk">"sub"</span>: <span class="js">"1234567890"</span>,<br>
+&nbsp;&nbsp;<span class="jk">"name"</span>: <span class="js">"John Doe"</span>,<br>
+&nbsp;&nbsp;<span class="jk">"iat"</span>: <span class="jn">1516239022</span><br>
+},<br>
+<span class="jk">"signature"</span>: <span class="js">"SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"</span></div>
+ </div>
+
+</div>
+</div>
+</div>
+
+<!-- ================= SCREEN 3: BASE64 (dual pixel-tab pattern) ================= -->
+<div class="col">
+<p class="frame-label">3 · Base64 Encoder/Decoder — Pixel-Tab Mode Pattern</p>
+<p class="frame-note">Reusable layout for any tool with a mode switch (Encode/Decode, Compress/Decompress, Sign/Verify). Pixel-tab switch swaps the field labels and processing direction — input/output fields stay in place, only their role and placeholder text change.</p>
+<div class="phone">
+<div class="sysbar mono"><span>9:41</span><span></span></div>
+
+<div class="hdr-float">
+ <div class="pill-icon" data-component-id="b64-back-btn" role="button" aria-label="Back to Tool Library">
+  <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+ </div>
+ <div class="pill-title">
+  <h1>Base64 Encoder / Decoder</h1>
+  <div class="sub">Decoders · RFC 4648 text &amp; binary converter</div>
+ </div>
+</div>
+
+<div class="toolbody">
+ <div class="tool-desc">Convert text or binary data to and from Base64. Switch modes below — input and output swap roles automatically.</div>
+
+ <!-- COMMENT FOR AGENT: pixel-tab switch — tapping the inactive tab animates the accent fill sliding to it (spring-based, not instant) and immediately swaps: input placeholder, output placeholder, and reverses the actual encode/decode operation direction. Whatever text is currently in the input field is NOT auto-reprocessed on switch — the user must re-trigger, avoiding surprise output changes. -->
+ <div class="pixeltabs" data-component-id="b64-mode-tabs">
+  <div class="pixeltab on" data-component-id="b64-tab-encode">Encode</div>
+  <div class="pixeltab" data-component-id="b64-tab-decode">Decode</div>
+ </div>
+
+ <div class="field-block">
+  <div class="field-hdr">
+   <span class="field-lbl">Input</span>
+   <div class="field-acts">
+    <div class="fa-btn" data-component-id="b64-paste-btn" role="button" aria-label="Paste from clipboard"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg></div>
+    <div class="fa-btn danger" data-component-id="b64-clear-btn" role="button" aria-label="Clear input"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></div>
+   </div>
+  </div>
+  <!-- COMMENT FOR AGENT: placeholder/expected content type flips with the tab — "Paste or type text..." in Encode mode, "Paste Base64 string..." in Decode mode. Also accepts a file-drop/file-picker for binary input (not shown in this static mockup — flag as a real gap to design if binary-file Base64 is in scope). -->
+  <div class="textfield placeholder" data-component-id="b64-input-field" contenteditable="true">Paste or type...</div>
+ </div>
+
+ <div class="field-block">
+  <div class="field-hdr">
+   <span class="field-lbl">Output</span>
+   <div class="field-acts">
+    <div class="fa-btn" data-component-id="b64-copy-btn" role="button" aria-label="Copy output"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></div>
+    <!-- COMMENT FOR AGENT: swaps output into the input field and switches the active tab to the opposite mode — lets a user immediately round-trip/verify a decode by re-encoding, or vice versa. Genuinely useful chained action, not decorative. -->
+    <div class="fa-btn" data-component-id="b64-swap-btn" role="button" aria-label="Use output as new input, switch mode"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg></div>
+   </div>
+  </div>
+  <div class="textfield output empty" data-component-id="b64-output-field">Output will appear here...</div>
+ </div>
+
+ <!-- COMMENT FOR AGENT: only renders when Decode mode receives genuinely invalid Base64 input — real validation error, not a generic catch-all message. Hidden entirely in Encode mode (encoding arbitrary text can't fail the same way). -->
+ <div class="err-note" style="display:none" data-component-id="b64-error-note">
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+  Invalid Base64 — input contains characters outside the standard alphabet.
+ </div>
+
+</div>
+</div>
+</div>
+
+<div class="legend">
+ <div class="legend-title">How this maps to the rest of the Tool Library</div>
+ <div class="legend-item">Screen 2's layout (single input → single output) covers: URL Encoder, Hex Converter, HTML Entity Escape, Morse Converter, every Hash tool, HMAC Signer</div>
+ <div class="legend-item">Screen 3's layout (pixel-tab mode switch) covers: Base64, AES Encrypt/Decrypt (tabs become Encrypt/Decrypt, with extra Key/IV/Mode fields inserted above Input), XOR Cipher</div>
+ <div class="legend-item">Both patterns share the same field-header action-icon row (paste/clear on input, copy on output) — implement once as a shared component, not per-tool</div>
+ <div class="legend-item">Header pill is identical across every tool screen: back pill + title/subtitle pill — only the title text changes</div>
+</div>
+
+</body>
+</html>
