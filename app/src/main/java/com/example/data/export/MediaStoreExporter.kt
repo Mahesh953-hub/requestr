@@ -6,9 +6,14 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import java.io.OutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Shared "write a file the user can actually find in Downloads/requestr/" helper.
@@ -94,4 +99,56 @@ object MediaStoreExporter {
     /** Writes [text] in one shot to a new Downloads/requestr/[displayName] entry. */
     fun writeText(context: Context, displayName: String, mimeType: String, text: String): ExportTarget? =
         writeBytes(context, displayName, mimeType, text.toByteArray())
+
+    /**
+     * Export response body with automatic filename extension and beautification based on
+     * contentType and url — the MediaStore-safe replacement for main's raw-File writer
+     * (complaint #5: scoped storage makes raw Downloads `File` writes a silent no-op on
+     * API 29+). Writes through [writeText] (MediaStore on API 29+, File fallback pre-29).
+     *
+     * Returns the [ExportTarget] the body was written to (for sharing via
+     * [FileExporter.shareFile]) and the resolved MIME type, or null if the file could not
+     * be created at all.
+     */
+    suspend fun writeResponseBody(
+        context: Context,
+        body: String,
+        contentType: String,
+        url: String,
+        isHex: Boolean = false
+    ): Pair<ExportTarget, String>? = withContext(Dispatchers.IO) {
+        val safeHost = try {
+            java.net.URI(url).host?.replace(Regex("[^a-zA-Z0-9.-]"), "_")?.take(24) ?: "api"
+        } catch (_: Exception) {
+            "api"
+        }
+        val ct = contentType.lowercase()
+        val (extension, mimeType) = when {
+            isHex -> "txt" to "text/plain"
+            ct.contains("json") || body.trimStart().startsWith("{") || body.trimStart().startsWith("[") -> "json" to "application/json"
+            ct.contains("html") || body.trimStart().startsWith("<!doctype", ignoreCase = true) || body.trimStart().startsWith("<html", ignoreCase = true) -> "html" to "text/html"
+            ct.contains("xml") || body.trimStart().startsWith("<?xml", ignoreCase = true) -> "xml" to "application/xml"
+            ct.contains("javascript") || ct.contains("ecmascript") -> "js" to "application/javascript"
+            ct.contains("css") -> "css" to "text/css"
+            ct.contains("csv") -> "csv" to "text/csv"
+            else -> "txt" to "text/plain"
+        }
+
+        val formattedContent = if (!isHex && extension == "json") {
+            try {
+                com.example.data.repository.ToolsRepository.formatJson(body)
+            } catch (_: Exception) {
+                body
+            }
+        } else {
+            body
+        }
+
+        val displayName = "response-${safeHost}-${timestamp()}.$extension"
+        val target = writeText(context, displayName, mimeType, formattedContent) ?: return@withContext null
+        Pair(target, mimeType)
+    }
+
+    private fun timestamp(): String =
+        SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
 }
