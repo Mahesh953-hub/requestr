@@ -220,6 +220,27 @@ object StackFingerprinter {
     enum class Confidence { DETECTED, LIKELY, POSSIBLE, UNKNOWN }
 
     /**
+     * Ranks two verdicts for the *same* stack so a session can keep one representative, real verdict
+     * per candidate (see [HttpStackDetector.analyzeSession] and the Settings fingerprint panel's
+     * evidence drill-in).
+     *
+     * Stronger confidence always wins; equal confidence breaks on how many independent signals
+     * actually fired. Deliberately strict: a candidate that observed no more than the [incumbent]
+     * never replaces it, so the retained verdict is stable across rows instead of flip-flopping
+     * between equally-evidenced ones. A null [incumbent] means "nothing retained yet", so any real
+     * verdict is an improvement.
+     *
+     * [Confidence] is declared strongest-first, so a *lower* ordinal is better.
+     */
+    fun isBetterEvidenced(candidate: StackVerdict, incumbent: StackVerdict?): Boolean {
+        if (incumbent == null) return true
+        if (candidate.confidence != incumbent.confidence) {
+            return candidate.confidence.ordinal < incumbent.confidence.ordinal
+        }
+        return candidate.signals.size > incumbent.signals.size
+    }
+
+    /**
      * Issues one identical request per HTTP stack actually present on requestr's own classpath
      * against [com.example.api.LocalApiServer]'s loopback `/api/ping`, tagged with
      * [com.example.api.LocalApiServer.CALIBRATION_STACK_HEADER] so the server can record that

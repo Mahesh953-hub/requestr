@@ -116,6 +116,80 @@ class BrowserStorageObserverTest {
         assertTrue(observer.stateFlow.value.localStorage.isEmpty())
     }
 
+    // ---- v6.1 Domain B: bounded live localStorage change events ----
+
+    @Test
+    fun `live deltas are recorded as bounded, newest-first change events`() {
+        val client = CdpClient("localhost", 9222)
+        val observer = buildObserver(client)
+
+        client.dispatchForTest(
+            JSONObject().apply {
+                put("method", "DOMStorage.domStorageItemAdded")
+                put("params", itemEvent("auth.token", newValue = "abc"))
+            }.toString(),
+        )
+        client.dispatchForTest(
+            JSONObject().apply {
+                put("method", "DOMStorage.domStorageItemUpdated")
+                put("params", itemEvent("cart.count", newValue = "4", oldValue = "3"))
+            }.toString(),
+        )
+
+        val events = observer.stateFlow.value.recentEvents
+        assertEquals(2, events.size)
+        // Newest first, so the card's stream reads like the mockup's event list.
+        assertEquals("cart.count", events[0].key)
+        assertEquals(BrowserStorageObserver.DomStorageEventKind.UPDATED, events[0].kind)
+        assertEquals("3", events[0].oldValue)
+        assertEquals("4", events[0].newValue)
+        assertEquals("auth.token", events[1].key)
+        assertEquals(BrowserStorageObserver.DomStorageEventKind.ADDED, events[1].kind)
+    }
+
+    @Test
+    fun `retained change events are capped at MAX_RETAINED_EVENTS`() {
+        val client = CdpClient("localhost", 9222)
+        val observer = buildObserver(client)
+
+        repeat(BrowserStorageObserver.MAX_RETAINED_EVENTS + 7) { i ->
+            client.dispatchForTest(
+                JSONObject().apply {
+                    put("method", "DOMStorage.domStorageItemAdded")
+                    put("params", itemEvent("k$i", newValue = "v$i"))
+                }.toString(),
+            )
+        }
+
+        val events = observer.stateFlow.value.recentEvents
+        assertEquals(BrowserStorageObserver.MAX_RETAINED_EVENTS, events.size)
+        assertEquals("k${BrowserStorageObserver.MAX_RETAINED_EVENTS + 6}", events.first().key)
+    }
+
+    @Test
+    fun `a removal event records the previous value it actually observed`() {
+        val client = CdpClient("localhost", 9222)
+        val observer = buildObserver(client)
+
+        client.dispatchForTest(
+            JSONObject().apply {
+                put("method", "DOMStorage.domStorageItemAdded")
+                put("params", itemEvent("k1", newValue = "v1"))
+            }.toString(),
+        )
+        client.dispatchForTest(
+            JSONObject().apply {
+                put("method", "DOMStorage.domStorageItemRemoved")
+                put("params", itemEvent("k1"))
+            }.toString(),
+        )
+
+        val removal = observer.stateFlow.value.recentEvents.first()
+        assertEquals(BrowserStorageObserver.DomStorageEventKind.REMOVED, removal.kind)
+        assertEquals("v1", removal.oldValue)
+        assertEquals(null, removal.newValue)
+    }
+
     // ---- IndexedDB.requestData parsing into records ----
 
     @Test

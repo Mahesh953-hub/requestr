@@ -90,6 +90,58 @@ class CdpClientRoutingTest {
     }
 
     @Test
+    fun `dropping the socket clears every attached target and notifies each detach`() {
+        val client = CdpClient("localhost", 9222)
+        val detached = mutableListOf<String>()
+        client.onTargetDetached = { detached.add(it) }
+
+        listOf("S1" to "T1", "S2" to "T2").forEach { (session, target) ->
+            client.dispatchForTest(
+                """
+                {
+                  "method": "Target.attachedToTarget",
+                  "params": {
+                    "sessionId": "$session",
+                    "targetInfo": {"targetId": "$target", "type": "page", "title": "t", "url": "https://example.com/"}
+                  }
+                }
+                """.trimIndent(),
+            )
+        }
+        assertEquals(2, client.targets.value.size)
+
+        // A flattened CDP session cannot survive its socket, so a drop must invalidate all of them.
+        client.dropAllTargets()
+
+        assertTrue(client.targets.value.isEmpty())
+        assertEquals(listOf("S1", "S2"), detached)
+        assertEquals(null, client.targetInfo.value)
+    }
+
+    @Test
+    fun `retryActive is false until a retry loop runs and is cleared by disconnect`() {
+        val client = CdpClient("localhost", 9222)
+        // A fresh client has no pending retry, so nothing may report it as reconnecting.
+        assertFalse(client.retryActive.value)
+        assertEquals(0, client.reconnectAttempt.value)
+        assertEquals(0L, client.nextRetryDelayMs.value)
+
+        client.disconnect()
+
+        assertFalse(client.retryActive.value)
+        assertEquals(0, client.reconnectAttempt.value)
+        assertEquals(0L, client.nextRetryDelayMs.value)
+        assertEquals(CdpClient.State.DISCONNECTED, client.state)
+    }
+
+    @Test
+    fun `backoffScheduleMs exposes the real bounded retry ladder`() {
+        val schedule = CdpClient.backoffScheduleMs()
+        assertEquals(CdpClient.MAX_RECONNECT_ATTEMPTS, schedule.size)
+        assertEquals(listOf(1_000L, 2_000L, 4_000L, 8_000L, 16_000L, 16_000L), schedule)
+    }
+
+    @Test
     fun `targetDestroyed removes the target matched by targetId`() {
         val client = CdpClient("localhost", 9222)
 

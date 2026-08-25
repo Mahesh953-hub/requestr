@@ -68,7 +68,11 @@ class CdpClient(
         /** Base delay for attempt 1; doubles each subsequent attempt, capped at [MAX_BACKOFF_MS]. */
         private const val BASE_BACKOFF_MS = 1_000L
         private const val MAX_BACKOFF_MS = 16_000L
-        private const val MAX_RECONNECT_ATTEMPTS = 6
+        /**
+         * Hard cap on retries before the client stays FAILED. Public so the Settings UI can show
+         * the real "attempt N/M" bound instead of the mockup's illustrative "N/\u221e".
+         */
+        const val MAX_RECONNECT_ATTEMPTS = 6
 
         /**
          * Pure exponential backoff schedule: attempt 1 -> 1s, 2 -> 2s, 3 -> 4s, 4 -> 8s,
@@ -82,6 +86,14 @@ class CdpClient(
             val raw = BASE_BACKOFF_MS shl shifted
             return raw.coerceAtMost(MAX_BACKOFF_MS)
         }
+
+        /**
+         * The full, real retry ladder this client will use: [computeBackoffDelayMs] evaluated for
+         * every attempt it is willing to make. Rendered as the backoff strip in the Settings card,
+         * so the UI shows the shipped schedule (1s, 2s, 4s, 8s, 16s, 16s) rather than a designed one.
+         */
+        fun backoffScheduleMs(): List<Long> =
+            (1..MAX_RECONNECT_ATTEMPTS).map { computeBackoffDelayMs(it) }
 
         /**
          * Builds one CDP JSON-RPC message. `sessionId` is included at the top level only when
@@ -131,6 +143,17 @@ class CdpClient(
 
     private val _nextRetryDelayMs = MutableStateFlow(0L)
     val nextRetryDelayMs: StateFlow<Long> = _nextRetryDelayMs.asStateFlow()
+
+    /**
+     * True only while the retry loop in [scheduleReconnect] is genuinely alive. This is what makes
+     * "reconnecting" an honest state: once the loop exhausts [MAX_RECONNECT_ATTEMPTS] (or is
+     * cancelled) it flips back to false, [nextRetryDelayMs] is cleared, and the client is simply
+     * FAILED -- previously a non-zero [reconnectAttempt] made an exhausted client keep claiming it
+     * was still about to retry, forever. [reconnectAttempt] is deliberately NOT reset on exhaustion
+     * so callers can still report how many attempts were actually made.
+     */
+    private val _retryActive = MutableStateFlow(false)
+    val retryActive: StateFlow<Boolean> = _retryActive.asStateFlow()
 
     /** Fired on `Target.attachedToTarget` with the new [TargetInfo]; used to spin up per-target adapters. */
     var onTargetAttached: (TargetInfo) -> Unit = {}
@@ -182,6 +205,7 @@ class CdpClient(
         }
         explicitlyDisconnected = false
         reconnectJob?.cancel()
+        _retryActive.value = false
         _reconnectAttempt.value = 0
         _nextRetryDelayMs.value = 0L
         _state.value = State.CONNECTING
@@ -191,14 +215,26 @@ class CdpClient(
             try {
                 val wsUrl = discoverBrowserEndpoint()
                 if (wsUrl == null) {
+                    // Retrying an initial discovery failure is intentional and matches the
+                    // reconnecting mockup: "nothing listening on 9222 yet" is the same recoverable
+                    // condition as a dropped socket (the user is expected to launch Chrome with
+                    // --remote-debugging-port while the card is already toggled on), so it routes
+                    // through the same backoff loop as openSocket()'s onFailure/onClosed rather than
+                    // parking in a terminal FAILED that no retry would ever leave.
+                    // markRetryPlanned() first, so the FAILED that fail() publishes is never observed
+                    // with retryActive == false (that ordering is what caused a one-frame FAILED flash).
+                    markRetryPlanned()
                     fail("No CDP browser endpoint found at http://$host:$port/json/version — is Chrome running with --remote-debugging-port=$port?")
                     onResult(false, _lastError.value)
+                    scheduleReconnect(onResult)
                     return@launch
                 }
                 openSocket(wsUrl, onResult)
             } catch (e: Exception) {
+                markRetryPlanned()
                 fail("Connect failed: ${e.message}")
                 onResult(false, _lastError.value)
+                scheduleReconnect(onResult)
             }
         }
     }
@@ -220,6 +256,7 @@ class CdpClient(
         webSocket = wsClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 _state.value = State.CONNECTED
+                _retryActive.value = false
                 _reconnectAttempt.value = 0
                 _nextRetryDelayMs.value = 0L
                 Log.i(TAG, "CDP connected: $wsUrl")
@@ -237,18 +274,15 @@ class CdpClient(
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 if (code == 1000) {
-                    _state.value = State.DISCONNECTED
+                    handleSocketLost(errorMessage = null, retry = false, onResult = onResult)
                 } else {
-                    _lastError.value = "Socket closed: $code $reason"
-                    _state.value = State.FAILED
-                    scheduleReconnect(onResult)
+                    handleSocketLost("Socket closed: $code $reason", retry = true, onResult = onResult)
                 }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                fail("Socket failure: ${t.message}")
+                handleSocketLost("Socket failure: ${t.message}", retry = true, onResult = onResult)
                 onResult(false, _lastError.value)
-                scheduleReconnect(onResult)
             }
         })
     }
@@ -302,10 +336,73 @@ class CdpClient(
         if (sessionId != null) handleDetached(sessionId)
     }
 
+    /**
+     * The single path every dead socket takes: publish the real state/error, invalidate the sessions
+     * that died with it ([dropAllTargets]), and start the retry loop when the loss was not a clean
+     * client-initiated close. Centralised so the three listener callbacks cannot drift apart on which
+     * of those three steps they remember to do.
+     *
+     * [markRetryPlanned] runs *before* the FAILED publish, so a collector never observes FAILED while
+     * [retryActive] is still false.
+     */
+    private fun handleSocketLost(
+        errorMessage: String?,
+        retry: Boolean,
+        onResult: (Boolean, String?) -> Unit,
+    ) {
+        if (retry) markRetryPlanned()
+        if (errorMessage != null) {
+            Log.w(TAG, errorMessage)
+            _lastError.value = errorMessage
+        }
+        _state.value = if (errorMessage == null) State.DISCONNECTED else State.FAILED
+        dropAllTargets()
+        if (retry) scheduleReconnect(onResult)
+    }
+
+    /**
+     * Publishes "a retry is coming" before the FAILED state that precedes it.
+     *
+     * Ordering matters because [retryActive] is what [com.example.data.models.toCdpPhase] uses to tell
+     * a reconnect from a terminal failure: publishing FAILED first meant every drop emitted one state
+     * where FAILED and `retryActive == false` were both true, so the Settings card flashed a terminal
+     * FAILED pill for a frame before flipping to RECONNECTING. Returns false (and marks nothing) when
+     * the client was explicitly disconnected, since no retry will actually run then.
+     */
+    private fun markRetryPlanned(): Boolean {
+        if (explicitlyDisconnected) return false
+        _retryActive.value = true
+        return true
+    }
+
+    /**
+     * v6.1 Domain B: a flattened CDP session cannot outlive its socket — every `sessionId` handed out
+     * by `Target.setAutoAttach` is invalid the moment the connection drops, and a reconnect issues
+     * brand-new ones. Previously [targets] kept reporting the pre-drop sessions as attached (and a
+     * reconnect then accumulated duplicates), so a dropped connection looked live. Clearing here and
+     * firing [onTargetDetached] per session makes the drop honest: the manager tears the per-target
+     * adapters down, and the UI shows the retained last-known set as explicitly stale instead.
+     */
+    internal fun dropAllTargets() {
+        val sessionIds = _targets.value.keys.toList()
+        if (sessionIds.isEmpty()) return
+        _targets.value = emptyMap()
+        _targetInfo.value = null
+        for (sessionId in sessionIds) {
+            runCatching { onTargetDetached(sessionId) }
+                .onFailure { Log.w(TAG, "onTargetDetached($sessionId) threw: ${it.message}") }
+        }
+    }
+
     private fun scheduleReconnect(onResult: (Boolean, String?) -> Unit) {
-        if (explicitlyDisconnected) return
+        if (explicitlyDisconnected) {
+            // Nothing will retry, so a planned-retry flag set by markRetryPlanned must not linger.
+            _retryActive.value = false
+            return
+        }
         reconnectJob?.cancel()
         reconnectJob = scope.launch {
+            _retryActive.value = true
             var attempt = _reconnectAttempt.value
             while (!explicitlyDisconnected && attempt < MAX_RECONNECT_ATTEMPTS) {
                 attempt++
@@ -323,6 +420,14 @@ class CdpClient(
                 _state.value = State.FAILED
                 _lastError.value = "Reconnect attempt $attempt failed: no CDP browser endpoint at http://$host:$port/json/version"
             }
+            // Falling out of the loop here (as opposed to the early `return@launch` above, which
+            // means a socket was successfully re-opened) is genuine exhaustion: no attempt is pending
+            // any more. Clearing [retryActive] and the pending delay is what makes the terminal state
+            // honest -- without it the Settings card sat on "RECONNECTING ... next retry in 16s"
+            // forever. [reconnectAttempt] is deliberately retained so the UI can say how many attempts
+            // were actually made ("gave up after 6") instead of collapsing that into a bare failure.
+            _retryActive.value = false
+            _nextRetryDelayMs.value = 0L
         }
     }
 
@@ -396,6 +501,7 @@ class CdpClient(
         explicitlyDisconnected = true
         connectJob?.cancel()
         reconnectJob?.cancel()
+        _retryActive.value = false
         webSocket?.close(1000, "client disconnect")
         webSocket = null
         pending.clear()

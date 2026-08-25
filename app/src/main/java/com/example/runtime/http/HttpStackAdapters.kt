@@ -34,6 +34,19 @@ class OkHttpAdapter : InstrumentationAdapter {
 
     override fun isActive() = active
 
+    /**
+     * Real one-line status for the Settings "RUNTIME INSTRUMENTATION" card: which capture path this
+     * adapter actually covers plus the live queue depth. Overridden (rather than inheriting the bare
+     * `active`/`inactive` default) so the adapter row reports its genuine scope, matching the
+     * approved `runtime-instrumentation-*` mockups' per-adapter status line.
+     */
+    override fun status(): String =
+        if (active) {
+            "requestr outbound · OkHttpProxyInterceptor · queued=${OkHttpProxyInterceptor.pendingEvents.size}"
+        } else {
+            "inactive"
+        }
+
     override fun pollEvents(): List<InstrumentationEvent> {
         if (!active) return emptyList()
         return OkHttpProxyInterceptor.drainEvents().map { call ->
