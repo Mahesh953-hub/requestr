@@ -2,6 +2,7 @@ package com.example.runtime.http
 
 import com.example.interception.http.Http2Parser
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -156,4 +157,51 @@ class StackFingerprinterTest {
 
     private fun hex(s: String): ByteArray =
         s.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+
+    // ── representative-verdict ranking (v6.1 Domain B) ────────────────────────
+
+    private fun verdictWith(
+        confidence: StackFingerprinter.Confidence,
+        signalCount: Int,
+        stack: HttpStack = HttpStack.OKHTTP,
+    ) = StackFingerprinter.StackVerdict(
+        stack = stack,
+        confidence = confidence,
+        reason = "reason",
+        signals = (0 until signalCount).map { StackFingerprinter.StackSignal("signal-$it", "detail") },
+    )
+
+    @Test
+    fun `any real verdict beats having nothing retained yet`() {
+        assertTrue(
+            StackFingerprinter.isBetterEvidenced(
+                verdictWith(StackFingerprinter.Confidence.UNKNOWN, signalCount = 0),
+                incumbent = null,
+            ),
+        )
+    }
+
+    @Test
+    fun `stronger confidence wins regardless of signal count`() {
+        val detectedWithOneSignal = verdictWith(StackFingerprinter.Confidence.DETECTED, signalCount = 1)
+        val likelyWithFourSignals = verdictWith(StackFingerprinter.Confidence.LIKELY, signalCount = 4)
+        assertTrue(StackFingerprinter.isBetterEvidenced(detectedWithOneSignal, likelyWithFourSignals))
+        assertFalse(StackFingerprinter.isBetterEvidenced(likelyWithFourSignals, detectedWithOneSignal))
+    }
+
+    @Test
+    fun `equal confidence breaks on how many signals actually fired`() {
+        val threeSignals = verdictWith(StackFingerprinter.Confidence.LIKELY, signalCount = 3)
+        val twoSignals = verdictWith(StackFingerprinter.Confidence.LIKELY, signalCount = 2)
+        assertTrue(StackFingerprinter.isBetterEvidenced(threeSignals, twoSignals))
+        assertFalse(StackFingerprinter.isBetterEvidenced(twoSignals, threeSignals))
+    }
+
+    @Test
+    fun `an equally evidenced verdict does not displace the incumbent`() {
+        // Keeps the retained verdict stable across rows instead of flip-flopping between ties.
+        val incumbent = verdictWith(StackFingerprinter.Confidence.POSSIBLE, signalCount = 2)
+        val tie = verdictWith(StackFingerprinter.Confidence.POSSIBLE, signalCount = 2)
+        assertFalse(StackFingerprinter.isBetterEvidenced(tie, incumbent))
+    }
 }

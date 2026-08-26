@@ -56,6 +56,11 @@ import javax.net.ssl.X509TrustManager
 object WebViewInstrumentation {
     private const val TAG = "WebViewInstrumentation"
     private const val MAX_QUEUED_EVENTS = 500
+    private const val MAX_RECENT_CAPTURES = 5
+
+    /** Which of the two real capture paths produced an event (see [CapturedSummary.source]). */
+    const val SOURCE_INTERCEPT = "shouldInterceptRequest"
+    const val SOURCE_BRIDGE = "MAIN-world bridge"
     private const val BRIDGE_NAME = "requestrBridge"
     private const val HOOK_ASSET_PATH = "webview_hook.js"
 
@@ -71,6 +76,37 @@ object WebViewInstrumentation {
     private val _cookies = MutableStateFlow<List<String>>(emptyList())
     val cookies: StateFlow<List<String>> = _cookies.asStateFlow()
 
+    /**
+     * v6.1 Domain B: one request this offscreen WebView genuinely captured, retained only so the
+     * Settings card's "RECENT CAPTURES" peek can show real rows. Bounded to [MAX_RECENT_CAPTURES];
+     * the authoritative event stream is still the drained [InstrumentationEvent] queue.
+     */
+    data class CapturedSummary(
+        val method: String?,
+        val url: String?,
+        val statusCode: Int?,
+        /** Which capture path produced it: `shouldInterceptRequest` or the MAIN-world JS bridge. */
+        val source: String,
+        val atMs: Long,
+    )
+
+    /**
+     * Live capture-session telemetry for the Settings "OFFSCREEN WEBVIEW CAPTURE" control. Every
+     * field is measured: [requestedUrl]/[startedAtMs] are set by the real [loadUrl] call the user
+     * triggered, and [requestCount]/[responseBytes] accumulate from actually-captured events. A
+     * null [requestedUrl] honestly means no capture session has been started in this process.
+     */
+    data class CaptureStatus(
+        val requestedUrl: String? = null,
+        val startedAtMs: Long? = null,
+        val requestCount: Int = 0,
+        val responseBytes: Long = 0,
+        val recentCaptures: List<CapturedSummary> = emptyList(),
+    )
+
+    private val _captureStatus = MutableStateFlow(CaptureStatus())
+    val captureStatus: StateFlow<CaptureStatus> = _captureStatus.asStateFlow()
+
     // Reused across every shouldInterceptRequest call and the WebView's own proxy override --
     // built once, lazily, once we know a real proxy port (or lack of one).
     private val interceptClient: OkHttpClient by lazy { buildInterceptClient() }
@@ -85,14 +121,40 @@ object WebViewInstrumentation {
     /** Loads a URL into the offscreen WebView (must already be started). Posts to main thread. */
     fun loadUrl(url: String) {
         mainHandler.post {
-            runCatching { webView?.loadUrl(url) }
+            val wv = webView
+            if (wv == null) {
+                // No live WebView means no capture session exists: publishing one anyway made the
+                // Settings control report "Capturing" for a page nothing was loading.
+                lastFailureReason = "WebView not started — cannot load $url"
+                Log.w(TAG, "loadUrl($url) ignored: no offscreen WebView is running")
+                return@post
+            }
+            // A new URL is a new capture session: real counters restart from zero rather than carrying
+            // the previous page's totals forward under a new URL label.
+            _captureStatus.value = CaptureStatus(requestedUrl = url, startedAtMs = System.currentTimeMillis())
+            runCatching { wv.loadUrl(url) }
                 .onFailure { lastFailureReason = it.message ?: "loadUrl failed" }
+        }
+    }
+
+    /**
+     * Ends the current capture session without tearing down the WebView itself: the adapter
+     * ([com.example.runtime.http.WebViewAdapter]) owns the instance's lifecycle via [start]/[stop],
+     * so the Settings "Stop" control navigates away and clears session telemetry instead of
+     * destroying an engine-owned object behind the engine's back.
+     */
+    fun stopCapture() {
+        _captureStatus.value = CaptureStatus()
+        mainHandler.post {
+            runCatching { webView?.stopLoading() }
+            runCatching { webView?.loadUrl("about:blank") }
         }
     }
 
     fun isActive(): Boolean = webView != null
 
     fun stop() {
+        _captureStatus.value = CaptureStatus()
         mainHandler.post {
             runCatching { scriptHandle?.remove() }
             runCatching { webView?.stopLoading() }
@@ -193,7 +255,7 @@ object WebViewInstrumentation {
     /** Parses a `webview_hook.js` payload into an [InstrumentationEvent]. Never throws. */
     internal fun onBridgeMessage(raw: String) {
         val event = parseBridgePayload(raw) ?: return
-        enqueue(event)
+        enqueue(event, SOURCE_BRIDGE)
         // Cookies for the captured URL, if we can resolve one -- surfaced to the Settings card.
         event.url?.let { url ->
             runCatching { CookieManager.getInstance().getCookie(url) }
@@ -269,7 +331,8 @@ object WebViewInstrumentation {
                     latencyMs = System.currentTimeMillis() - startedAt,
                     protocol = response.protocol.toString(),
                     host = request.url.host,
-                )
+                ),
+                SOURCE_INTERCEPT,
             )
             WebResourceResponse(
                 mimeType,
@@ -289,7 +352,8 @@ object WebViewInstrumentation {
                     errorMessage = e.message,
                     latencyMs = System.currentTimeMillis() - startedAt,
                     host = request.url.host,
-                )
+                ),
+                SOURCE_INTERCEPT,
             )
         }.getOrNull()
     }
@@ -307,9 +371,31 @@ object WebViewInstrumentation {
         return builder.build()
     }
 
-    private fun enqueue(event: InstrumentationEvent) {
+    private fun enqueue(event: InstrumentationEvent, source: String) {
         pendingEvents.add(event)
         while (pendingEvents.size > MAX_QUEUED_EVENTS) pendingEvents.poll()
+        recordCaptureTelemetry(event, source)
+    }
+
+    /**
+     * Accumulates the real per-session counters the Settings card renders. Kept separate from
+     * [pendingEvents] because that queue is *drained* by the engine's poll loop, so it cannot double
+     * as "what has this capture session seen so far".
+     */
+    private fun recordCaptureTelemetry(event: InstrumentationEvent, source: String) {
+        val summary = CapturedSummary(
+            method = event.method,
+            url = event.url,
+            statusCode = event.statusCode,
+            source = source,
+            atMs = event.timestamp,
+        )
+        val current = _captureStatus.value
+        _captureStatus.value = current.copy(
+            requestCount = current.requestCount + 1,
+            responseBytes = current.responseBytes + event.responseSizeBytes,
+            recentCaptures = (listOf(summary) + current.recentCaptures).take(MAX_RECENT_CAPTURES),
+        )
     }
 
     private class AllTrustManager : X509TrustManager {

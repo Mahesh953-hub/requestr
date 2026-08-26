@@ -74,7 +74,18 @@ class CdpFetchAdapter(
         private set
     @Volatile var blockedCount: Int = 0
         private set
+
+    /** Request-stage MODIFY_REQUEST enforcement only; see [redirectedCount] / [responseModifiedCount]. */
     @Volatile var modifiedCount: Int = 0
+        private set
+
+    /**
+     * v6.1 Domain B: REDIRECT enforcement counted separately from [modifiedCount] so the Settings
+     * card's three rule-enforcement tiles (Blocked / Modified / Redirected) each report a real,
+     * stage-attributed number instead of folding redirects into "modified". Both are request-stage
+     * only; response-stage enforcement is [responseModifiedCount].
+     */
+    @Volatile var redirectedCount: Int = 0
         private set
     @Volatile var responseModifiedCount: Int = 0
         private set
@@ -153,7 +164,7 @@ class CdpFetchAdapter(
                         Log.i(TAG, "BLOCK $url (rule=${rule?.name})")
                     }
                     RuleAction.REDIRECT -> {
-                        modifiedCount++
+                        redirectedCount++
                         notifyCountersChanged()
                         val target = rule?.replacementValue?.takeIf { it.isNotBlank() } ?: url
                         client.send(

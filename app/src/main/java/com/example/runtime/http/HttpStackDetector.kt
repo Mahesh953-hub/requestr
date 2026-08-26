@@ -114,6 +114,7 @@ object HttpStackDetector {
         val counts = linkedMapOf<HttpStack, Int>()
         val confidenceHistogram = linkedMapOf<StackFingerprinter.Confidence, Int>()
         val unresolvedReasons = mutableListOf<String>()
+        val representative = linkedMapOf<HttpStack, StackFingerprinter.StackVerdict>()
         for (row in rows) {
             val connectionSignals = row.connectionIdOrNull()?.let { StackSignalStore.get(it) }
             val verdict = StackFingerprinter.classify(
@@ -123,6 +124,12 @@ object HttpStackDetector {
             )
             counts[verdict.stack] = (counts[verdict.stack] ?: 0) + 1
             confidenceHistogram[verdict.confidence] = (confidenceHistogram[verdict.confidence] ?: 0) + 1
+            // v6.1 Domain B: keep the single best-evidenced *real* verdict per stack so the Settings
+            // fingerprint panel can drill into actual per-signal evidence. Never merged or averaged
+            // across rows -- one row's genuine evidence, chosen by StackFingerprinter's ranking.
+            if (StackFingerprinter.isBetterEvidenced(verdict, representative[verdict.stack])) {
+                representative[verdict.stack] = verdict
+            }
             if (verdict.confidence == StackFingerprinter.Confidence.UNKNOWN && unresolvedReasons.size < 20) {
                 unresolvedReasons.add(verdict.reason)
             }
@@ -135,8 +142,10 @@ object HttpStackDetector {
             confidenceHistogram = confidenceHistogram,
             calibrated = calibration != null,
             unresolvedReasons = unresolvedReasons,
+            representativeVerdicts = representative,
         )
     }
+
 }
 
 /**
@@ -168,4 +177,10 @@ data class StackDetectionReport(
     val confidenceHistogram: Map<StackFingerprinter.Confidence, Int> = emptyMap(),
     val calibrated: Boolean = false,
     val unresolvedReasons: List<String> = emptyList(),
+    /**
+     * v6.1 Domain B: per stack, the best-evidenced real [StackFingerprinter.StackVerdict] observed in
+     * this session, carrying that verdict's own per-signal evidence for the Settings fingerprint
+     * panel's drill-in. Empty for a session with no captured rows -- never back-filled with samples.
+     */
+    val representativeVerdicts: Map<HttpStack, StackFingerprinter.StackVerdict> = emptyMap(),
 )

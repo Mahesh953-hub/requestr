@@ -101,8 +101,10 @@ import com.example.interception.CapabilityProbe
 import com.example.interception.CertificateAuthority
 import kotlinx.coroutines.launch
 import com.example.ui.components.BadgePill
+import com.example.ui.components.CdpCard
 import com.example.ui.components.GlassCard
 import com.example.ui.components.RequestrWordmark
+import com.example.ui.components.RuntimeInstrumentationCard
 import com.example.ui.components.SectionHeader
 import com.example.ui.theme.AppAccent
 import com.example.ui.theme.AppThemeMode
@@ -950,338 +952,105 @@ fun SettingsScreen(
             }
 
 
-            // Section 5.5b: Runtime Instrumentation (R1+R3) — honest status for the adapter
-            // pattern engine. Started automatically at app launch (see MainActivity); this
-            // card just surfaces real state instead of leaving the whole subsystem invisible.
+            // Section 5.5b: Runtime Instrumentation (R1+R3) — v6.1 Phase A / Domain B.
+            // The card itself is ui/components/RuntimeInstrumentationCard.kt (per-adapter rows,
+            // offscreen WebView capture control, HTTP-stack fingerprint verdicts with per-signal
+            // evidence drill-in), rendered from the one authoritative state source,
+            // RuntimeInstrumentationStateProvider. This screen owns no derivation and no engine
+            // lifecycle: the instrumentation engine is still started by MainActivity, and the
+            // offscreen WebView instance stays owned by WebViewAdapter.
             item {
                 SettingsSectionHeader("RUNTIME INSTRUMENTATION")
-                GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surface) {
-                    val instrumentationState by com.example.runtime.RuntimeInstrumentationEngine.stateFlow.collectAsState()
-                    val adapterStatuses by com.example.runtime.RuntimeInstrumentationEngine.adapterStatuses.collectAsState()
-                    val eventCounts by com.example.runtime.RuntimeInstrumentationEngine.eventCounts.collectAsState()
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(imageVector = Icons.Default.Terminal, contentDescription = "Runtime", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("HTTP Stack Adapters", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
-                        }
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            when (instrumentationState) {
-                                com.example.runtime.InstrumentationState.ACTIVE -> "Active — ${com.example.runtime.RuntimeInstrumentationEngine.adapterNames().size} adapters registered, polling for real request/response events."
-                                com.example.runtime.InstrumentationState.FAILED -> "Every registered adapter failed to start — see per-adapter reasons below."
-                                com.example.runtime.InstrumentationState.INITIALIZING -> "Starting..."
-                                com.example.runtime.InstrumentationState.STOPPED -> "Stopped."
-                                com.example.runtime.InstrumentationState.NOT_STARTED -> "Not started."
-                            },
-                            fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text("ADAPTERS", fontWeight = FontWeight.Bold, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Spacer(modifier = Modifier.height(4.dp))
-                        if (adapterStatuses.isEmpty()) {
-                            Text("none registered", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        } else {
-                            adapterStatuses.forEach { (adapterName, statusText) ->
-                                val eventCount = eventCounts[adapterName] ?: 0
-                                val state = adapterStateFor(statusText, eventCount)
-                                val stateColor = Color(state.color)
-                                // vrow (runtime-instrumentation-healthy-dark.html): rounded
-                                // surface card with a 3dp state-colored left rail + a state
-                                // pill, event count, and the real status line below.
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 3.dp)
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .background(MaterialTheme.colorScheme.surface)
-                                        .drawBehind {
-                                            drawRect(
-                                                color = stateColor,
-                                                topLeft = Offset(0f, 0f),
-                                                size = Size(width = 3.dp.toPx(), height = size.height),
-                                            )
-                                        }
-                                        .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
-                                        .padding(start = 14.dp, end = 10.dp, top = 8.dp, bottom = 8.dp)
-                                ) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(adapterName, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(5.dp)
-                                        ) {
-                                            BadgePill(text = state.label, color = state.color)
-                                            Text(
-                                                String.format("%,d", eventCount),
-                                                fontSize = 11.sp,
-                                                fontFamily = FontFamily.Monospace,
-                                                fontWeight = FontWeight.Bold,
-                                                color = stateColor
-                                            )
-                                            Text("events", fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                        }
-                                    }
-                                    Text(
-                                        statusText,
-                                        fontSize = 9.sp,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.padding(top = 3.dp)
-                                    )
-                                }
-                            }
-                        }
-                        Text(
-                            "OkHttp reports requestr's own outbound calls made via OkHttpProxyInterceptor. Third-party apps need the Requestr Observer SDK (see sdk/) to report their own traffic.",
-                            fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                val runtimeState by com.example.runtime.RuntimeInstrumentationStateProvider.runtimeState
+                    .collectAsState(initial = null)
+                val stackSessionId = InterceptionStateRepository.state.collectAsState().value.sessionId
+                val fingerprintState by produceState<com.example.data.models.StackFingerprintState>(
+                    initialValue = com.example.data.models.StackFingerprintState.unavailable(
+                        "Classifying captured requests…",
+                    ),
+                    stackSessionId,
+                ) {
+                    value = com.example.runtime.RuntimeInstrumentationStateProvider
+                        .loadFingerprintState(settingsContext, stackSessionId)
+                }
+                var webViewCaptureUrl by remember { mutableStateOf("") }
+                var expandedVerdictStack by remember { mutableStateOf<String?>(null) }
 
-                        // W3: offscreen WebView capture -- URL field + Start, driven straight
-                        // from this card (DEC-2: no full in-app inspector screen).
-                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
-                        Text("OFFSCREEN WEBVIEW CAPTURE", fontWeight = FontWeight.Bold, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Spacer(modifier = Modifier.height(4.dp))
-                        var webViewCaptureUrl by remember { mutableStateOf("") }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            OutlinedTextField(
-                                value = webViewCaptureUrl,
-                                onValueChange = { webViewCaptureUrl = it },
-                                label = { Text("https://example.com", fontSize = 11.sp) },
-                                singleLine = true,
-                                modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(10.dp),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = MaterialTheme.colorScheme.primary,
-                                    unfocusedBorderColor = MaterialTheme.colorScheme.outline,
-                                    focusedTextColor = MaterialTheme.colorScheme.onSurface,
-                                    unfocusedTextColor = MaterialTheme.colorScheme.onSurface
-                                )
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Button(onClick = {
-                                if (webViewCaptureUrl.isNotBlank()) {
-                                    com.example.runtime.webview.WebViewInstrumentation.loadUrl(webViewCaptureUrl)
-                                }
-                            }) {
-                                Text("Start", fontSize = 12.sp)
-                            }
-                        }
-                        Spacer(modifier = Modifier.height(4.dp))
-                        val webViewCaptured = eventCounts["WebView"] ?: 0
-                        val webViewActive = com.example.runtime.webview.WebViewInstrumentation.isActive()
+                val rs = runtimeState
+                if (rs == null) {
+                    GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surface) {
                         Text(
-                            "${if (webViewActive) "Idle" else "Not started"} · $webViewCaptured captured · load a URL and start to capture page fetch/XHR through the proxy",
-                            fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                            "Reading runtime instrumentation state…",
+                            modifier = Modifier.padding(14.dp),
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-
-                        // S2: HTTP client stack auto-detection. Two independent, honestly-labelled
-                        // signals -- see HttpStackDetector.kt doc for why they can't be merged
-                        // into one number: classpath presence (requestr's own process only) and
-                        // a per-request User-Agent classification of what was actually captured
-                        // this session (ambiguous/custom UAs fall to UNKNOWN, never guessed).
-                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
-                        Text("HTTP Stack Detection", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
-                        Spacer(modifier = Modifier.height(4.dp))
-                        val classpathStacks = remember { com.example.runtime.http.HttpStackDetector.detectAvailableOnClasspath() }
-                        Text(
-                            "On requestr's classpath: " + classpathStacks.joinToString(", ") { it.label },
-                            fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        val stackDiagSessionId = InterceptionStateRepository.state.collectAsState().value.sessionId
-                        // W4: multi-signal StackFingerprinter (JA3/ALPN/H2 SETTINGS/header-order/
-                        // cache-validation shape), not just User-Agent -- calibrate() runs once
-                        // per Settings-card visit so the JA3/SETTINGS/header-order signals have a
-                        // real per-device baseline to match against instead of only ever using
-                        // the always-available User-Agent/cache-validation signals.
-                        val stackCalibration by produceState<com.example.runtime.http.StackFingerprinter.CalibrationTable?>(initialValue = null) {
-                            value = if (com.example.api.LocalApiServer.isRunning) {
-                                runCatching {
-                                    com.example.runtime.http.StackFingerprinter.calibrate(settingsContext, com.example.api.LocalApiServer.port)
-                                }.getOrNull()
-                            } else {
-                                // calibrate() probes LocalApiServer's own loopback route -- with
-                                // no server running there is nothing to probe against, so this
-                                // honestly stays uncalibrated rather than failing.
-                                null
-                            }
-                        }
-                        val stackReport by produceState<com.example.runtime.http.StackDetectionReport?>(initialValue = null, stackDiagSessionId, stackCalibration) {
-                            value = if (stackDiagSessionId != null) {
-                                runCatching {
-                                    com.example.runtime.http.HttpStackDetector.analyzeSession(settingsContext, stackDiagSessionId, stackCalibration)
-                                }.getOrNull()
-                            } else {
-                                null
-                            }
-                        }
-                        val sr = stackReport
-                        when {
-                            stackDiagSessionId == null -> {
-                                Text("No active/recorded capture session to classify yet.", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            sr == null -> {
-                                Text("Classifying session $stackDiagSessionId…", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            sr.totalRequests == 0 -> {
-                                Text("Session ${sr.sessionId}: no requests captured yet.", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            else -> {
-                                Text(
-                                    "Session ${sr.sessionId} (${sr.totalRequests} req" +
-                                        (if (sr.calibrated) ", calibrated" else ", not calibrated yet") + "): " +
-                                        sr.countsByStack.entries.joinToString(", ") { (stack, count) -> "${stack.label}=$count" },
-                                    fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                Text(
-                                    "Confidence: " + sr.confidenceHistogram.entries.joinToString(", ") { (c, n) -> "${c.name}=$n" },
-                                    fontSize = 9.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                if (sr.unresolvedReasons.isNotEmpty()) {
-                                    Text(
-                                        "UNKNOWN reasons (first ${sr.unresolvedReasons.size}): " + sr.unresolvedReasons.distinct().joinToString(" | "),
-                                        fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                                Text(
-                                    "Signals: JA3+ALPN (TLS ClientHello), HTTP/2 SETTINGS multiset, request header order, User-Agent, cache-validation shape (Volley vs HttpURLConnection). DETECTED requires a calibrated JA3 match or a direct runtime-adapter observation; UNKNOWN always names its missing signals above.",
-                                    fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
                     }
+                } else {
+                    RuntimeInstrumentationCard(
+                        state = rs,
+                        fingerprint = fingerprintState,
+                        webViewUrlInput = webViewCaptureUrl,
+                        onWebViewUrlInputChange = { webViewCaptureUrl = it },
+                        onStartWebViewCapture = {
+                            if (webViewCaptureUrl.isNotBlank()) {
+                                com.example.runtime.webview.WebViewInstrumentation.loadUrl(webViewCaptureUrl)
+                            }
+                        },
+                        onStopWebViewCapture = {
+                            com.example.runtime.webview.WebViewInstrumentation.stopCapture()
+                        },
+                        expandedVerdictStack = expandedVerdictStack,
+                        onToggleVerdictStack = { stack ->
+                            expandedVerdictStack = if (expandedVerdictStack == stack) null else stack
+                        },
+                    )
                 }
             }
 
-            // Section 5.5c: Browser Bridge (B1-B7) -- CDP connect/disconnect toggle + live
-            // connection state, mirroring the Runtime Instrumentation card above. This is the
-            // only user-reachable entry point for B1 (CdpClient)/B2 (CdpNetworkAdapter)/B3
-            // (CdpFetchAdapter)/B4 (InitiatorResolver, used inside B2)/B5 (ServiceWorkerObserver)
-            // /B6 (BrowserStorageObserver) -- BrowserBridgeManager owns all of their lifecycles.
+            // Section 5.5c: Browser Bridge (B1-B7) — v6.1 Phase A / Domain B. The card is
+            // ui/components/CdpCard.kt (multi-target attach rows, stage-split rule-enforcement
+            // tiles, live storage streams, service workers, reconnect/backoff with stale
+            // last-known targets), rendered from RuntimeInstrumentationStateProvider.cdpState.
+            // BrowserBridgeManager keeps sole ownership of the CdpClient lifecycle; this screen
+            // only raises connect/disconnect and refresh-storage intents.
             item {
                 SettingsSectionHeader("BROWSER BRIDGE (CDP)")
-                GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surface) {
-                    val cdpState by com.example.browser.BrowserBridgeManager.connectionState.collectAsState()
-                    val cdpStatus by com.example.browser.BrowserBridgeManager.statusMessage.collectAsState()
-                    val cdpEventsIngested by com.example.browser.BrowserBridgeManager.eventsIngested.collectAsState()
-                    val swState by com.example.browser.BrowserBridgeManager.serviceWorkerState.collectAsState()
-                    val storageState by com.example.browser.BrowserBridgeManager.storageState.collectAsState()
-                    var cdpHostPortInput by remember { mutableStateOf(com.example.browser.BrowserBridgeManager.DEFAULT_HOST_PORT) }
+                val cdpCardState by com.example.runtime.RuntimeInstrumentationStateProvider.cdpState
+                    .collectAsState(initial = null)
+                var cdpHostPortInput by remember {
+                    mutableStateOf(com.example.browser.BrowserBridgeManager.DEFAULT_HOST_PORT)
+                }
+                var expandedCdpTarget by remember { mutableStateOf<String?>(null) }
 
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(imageVector = Icons.Default.Language, contentDescription = "Browser Bridge", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Chrome DevTools Protocol", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
-                        }
-                        Spacer(modifier = Modifier.height(4.dp))
-
-                        // Live connection-state indicator, same DISCONNECTED/CONNECTING/CONNECTED/
-                        // FAILED vocabulary as CdpClient.State.
-                        val (stateLabel, stateColor) = when (cdpState) {
-                            com.example.browser.CdpClient.State.CONNECTED -> "Connected" to Color(0xFF10B981)
-                            com.example.browser.CdpClient.State.CONNECTING -> "Connecting..." to Color(0xFFF59E0B)
-                            com.example.browser.CdpClient.State.FAILED -> "Failed" to MaterialTheme.colorScheme.error
-                            com.example.browser.CdpClient.State.DISCONNECTED -> "Disconnected" to MaterialTheme.colorScheme.onSurfaceVariant
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(modifier = Modifier.size(8.dp).background(stateColor, CircleShape))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(stateLabel, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = stateColor)
-                        }
-                        Text(cdpStatus, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-
-                        Spacer(modifier = Modifier.height(8.dp))
-                        OutlinedTextField(
-                            value = cdpHostPortInput,
-                            onValueChange = { cdpHostPortInput = it },
-                            label = { Text("CDP host:port", fontSize = 11.sp) },
-                            singleLine = true,
-                            enabled = cdpState != com.example.browser.CdpClient.State.CONNECTED && cdpState != com.example.browser.CdpClient.State.CONNECTING,
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(10.dp),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = MaterialTheme.colorScheme.primary,
-                                unfocusedBorderColor = MaterialTheme.colorScheme.outline,
-                                focusedTextColor = MaterialTheme.colorScheme.onSurface,
-                                unfocusedTextColor = MaterialTheme.colorScheme.onSurface
-                            )
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                "Requires Chrome/Chromium running with --remote-debugging-port",
-                                fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.weight(1f)
-                            )
-                            Switch(
-                                checked = cdpState == com.example.browser.CdpClient.State.CONNECTED || cdpState == com.example.browser.CdpClient.State.CONNECTING,
-                                onCheckedChange = { checked ->
-                                    if (checked) {
-                                        com.example.browser.BrowserBridgeManager.connect(cdpHostPortInput)
-                                    } else {
-                                        com.example.browser.BrowserBridgeManager.disconnect()
-                                    }
-                                }
-                            )
-                        }
-
-                        if (cdpState == com.example.browser.CdpClient.State.CONNECTED) {
-                            Spacer(modifier = Modifier.height(10.dp))
-                            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
-                            Spacer(modifier = Modifier.height(8.dp))
-
-                            // B2+B4: real correlated network events, not a placeholder count.
-                            Text(
-                                "Network events correlated: $cdpEventsIngested",
-                                fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurface
-                            )
-
-                            // B5: live service worker registrations observed via CDP.
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text("Service Workers: ${swState.size} observed", fontSize = 11.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
-                            swState.values.take(3).forEach { reg ->
-                                Text(
-                                    "· ${reg.scriptUrl ?: reg.scopeUrl} — ${reg.status ?: "unknown"}",
-                                    fontSize = 9.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-
-                            // B6: cookies/localStorage/IndexedDB snapshot + manual refresh.
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    "Storage: ${storageState.cookies.size} cookies · ${storageState.localStorage.size} localStorage keys · ${storageState.indexedDbDatabases.size} IndexedDB DBs",
-                                    fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                IconButton(onClick = { com.example.browser.BrowserBridgeManager.refreshStorage() }, modifier = Modifier.size(28.dp)) {
-                                    Icon(imageVector = Icons.Default.Refresh, contentDescription = "Refresh storage", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
-                                }
-                            }
-                            storageState.lastError?.let { err ->
-                                Text("Storage fetch error: $err", fontSize = 9.sp, color = MaterialTheme.colorScheme.error)
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(8.dp))
+                val cs = cdpCardState
+                if (cs == null) {
+                    GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surface) {
                         Text(
-                            "Extension bridge: load browser-extension/ (unpacked) in chrome://extensions to relay page-context fetch/XHR data CDP can't see to http://localhost:9876/api/observe.",
-                            fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                            "Reading browser bridge state…",
+                            modifier = Modifier.padding(14.dp),
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
+                } else {
+                    CdpCard(
+                        state = cs,
+                        hostPortInput = cdpHostPortInput,
+                        onHostPortInputChange = { cdpHostPortInput = it },
+                        onToggleConnection = { checked ->
+                            if (checked) {
+                                com.example.browser.BrowserBridgeManager.connect(cdpHostPortInput)
+                            } else {
+                                com.example.browser.BrowserBridgeManager.disconnect()
+                            }
+                        },
+                        onRefreshStorage = { com.example.browser.BrowserBridgeManager.refreshStorage() },
+                        expandedTargetSessionId = expandedCdpTarget,
+                        onToggleTarget = { sessionId ->
+                            expandedCdpTarget = if (expandedCdpTarget == sessionId) null else sessionId
+                        },
+                    )
                 }
             }
 
@@ -2183,27 +1952,6 @@ private data class ProxyTierVisual(
     val color: Long,
     val backing: com.example.data.prefs.CaptureTierPreference,
 )
-
-/**
- * Visual state for a runtime instrumentation adapter row
- * (runtime-instrumentation-healthy-dark.html .pill + .vrow left rail).
- */
-private enum class AdapterState(val label: String, val color: Long) {
-    CAPTURING("CAPTURING", 0xFF10B981),
-    IDLE("IDLE", 0xFF64748B),
-    UNAVAILABLE("UNAVAILABLE", 0xFFEF4444),
-}
-
-/**
- * Derive an adapter's visual state honestly from its real status text and event count —
- * never guessed. An adapter that has captured events is CAPTURING; one whose status text
- * reports a failure is UNAVAILABLE; everything else (registered but no events yet) is IDLE.
- */
-private fun adapterStateFor(statusText: String, eventCount: Int): AdapterState = when {
-    eventCount > 0 -> AdapterState.CAPTURING
-    statusText.contains("failed", ignoreCase = true) -> AdapterState.UNAVAILABLE
-    else -> AdapterState.IDLE
-}
 
 // B3: TokenPlaceholders() (Typography/Surfaces/Borders/Icons/States inert label list)
 // removed — see call-site comment above for rationale.

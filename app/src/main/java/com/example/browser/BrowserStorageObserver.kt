@@ -43,7 +43,30 @@ class BrowserStorageObserver(
 
         /** Max IndexedDB records fetched per object store per refresh -- avoids unbounded pulls. */
         private const val INDEXEDDB_PAGE_SIZE = 100
+
+        /**
+         * v6.1 Domain B: how many of the most recent `DOMStorage` change events are retained for
+         * the Settings card's live localStorage stream. Bounded on purpose -- a busy page can write
+         * thousands of keys, and this list exists to show *recent* activity, not to be a log.
+         */
+        internal const val MAX_RETAINED_EVENTS = 20
     }
+
+    /** Which `DOMStorage.domStorageItem*` event produced a [DomStorageEvent]. */
+    enum class DomStorageEventKind { ADDED, UPDATED, REMOVED, CLEARED }
+
+    /**
+     * v6.1 Domain B: one real, observed localStorage change. Recorded only from a genuine CDP
+     * `DOMStorage` event -- never synthesised from a snapshot diff, so an empty list honestly means
+     * "the page has not written to localStorage since we attached".
+     */
+    data class DomStorageEvent(
+        val key: String?,
+        val kind: DomStorageEventKind,
+        val oldValue: String?,
+        val newValue: String?,
+        val atMs: Long = System.currentTimeMillis(),
+    )
 
     data class CookieInfo(
         val name: String,
@@ -63,6 +86,11 @@ class BrowserStorageObserver(
         val indexedDbRecords: Map<String, List<String>> = emptyMap(),
         /** database name -> true when more records exist past [INDEXEDDB_PAGE_SIZE] (W9). */
         val indexedDbHasMore: Map<String, Boolean> = emptyMap(),
+        /**
+         * v6.1 Domain B: most-recent-first, bounded to [MAX_RETAINED_EVENTS], live `DOMStorage`
+         * change events. Distinct from [localStorage], which is the current key/value state.
+         */
+        val recentEvents: List<DomStorageEvent> = emptyList(),
         val lastRefreshed: Long = 0L,
         val lastError: String? = null,
     )
@@ -103,14 +131,19 @@ class BrowserStorageObserver(
         val key = params.optString("key", "")
         if (key.isEmpty()) return
         val value = params.optString("newValue", "")
-        _snapshot.value = _snapshot.value.copy(localStorage = _snapshot.value.localStorage + (key to value))
+        _snapshot.value = _snapshot.value
+            .copy(localStorage = _snapshot.value.localStorage + (key to value))
+            .withEvent(DomStorageEvent(key, DomStorageEventKind.ADDED, null, value))
     }
 
     /** `DOMStorage.domStorageItemRemoved`: `{"storageId":{...},"key":"..."}`. */
     private fun applyItemRemoved(params: JSONObject) {
         val key = params.optString("key", "")
         if (key.isEmpty()) return
-        _snapshot.value = _snapshot.value.copy(localStorage = _snapshot.value.localStorage - key)
+        val previous = _snapshot.value.localStorage[key]
+        _snapshot.value = _snapshot.value
+            .copy(localStorage = _snapshot.value.localStorage - key)
+            .withEvent(DomStorageEvent(key, DomStorageEventKind.REMOVED, previous, null))
     }
 
     /** `DOMStorage.domStorageItemUpdated`: `{"storageId":{...},"key":"...","oldValue":"...","newValue":"..."}`. */
@@ -118,13 +151,22 @@ class BrowserStorageObserver(
         val key = params.optString("key", "")
         if (key.isEmpty()) return
         val value = params.optString("newValue", "")
-        _snapshot.value = _snapshot.value.copy(localStorage = _snapshot.value.localStorage + (key to value))
+        val old = params.optString("oldValue", "").ifEmpty { _snapshot.value.localStorage[key] }
+        _snapshot.value = _snapshot.value
+            .copy(localStorage = _snapshot.value.localStorage + (key to value))
+            .withEvent(DomStorageEvent(key, DomStorageEventKind.UPDATED, old, value))
     }
 
     /** `DOMStorage.domStorageItemsCleared`: `{"storageId":{...}}` -- the whole store was cleared. */
     private fun applyItemsCleared(params: JSONObject) {
-        _snapshot.value = _snapshot.value.copy(localStorage = emptyMap())
+        _snapshot.value = _snapshot.value
+            .copy(localStorage = emptyMap())
+            .withEvent(DomStorageEvent(null, DomStorageEventKind.CLEARED, null, null))
     }
+
+    /** Prepends [event] to [StorageSnapshot.recentEvents], bounded to [MAX_RETAINED_EVENTS]. */
+    private fun StorageSnapshot.withEvent(event: DomStorageEvent): StorageSnapshot =
+        copy(recentEvents = (listOf(event) + recentEvents).take(MAX_RETAINED_EVENTS))
 
     // ── Snapshot fetches ────────────────────────────────────────────────
 
