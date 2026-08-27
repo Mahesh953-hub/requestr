@@ -1,5 +1,6 @@
 package com.example.data.local
 
+import com.example.data.models.ApiKeyLocation
 import com.example.data.models.ApiRequestItem
 import com.example.data.models.Assertion
 import com.example.data.models.AssertionOperator
@@ -29,6 +30,7 @@ internal fun SavedApiRequestEntity.toApiRequestItem(): ApiRequestItem = ApiReque
     basicPassword = basicPassword,
     apiKeyHeader = apiKeyHeader,
     apiKeyValue = apiKeyValue,
+    apiKeyLocation = runCatching { ApiKeyLocation.valueOf(apiKeyLocation) }.getOrDefault(ApiKeyLocation.HEADER),
     bodyType = runCatching { RequestBodyType.valueOf(bodyType) }.getOrDefault(RequestBodyType.NONE),
     bodyContent = bodyContent,
     formData = formData.map { it.toKeyValueItem() },
@@ -38,6 +40,12 @@ internal fun SavedApiRequestEntity.toApiRequestItem(): ApiRequestItem = ApiReque
     updatedAt = updatedAt,
     chainExtractions = chainExtractions.map { it.toChainExtractionRule() },
     assertions = assertions.map { it.toAssertion() },
+    mockEnabled = mockEnabled,
+    mockStatusCode = mockStatusCode,
+    mockStatusMessage = mockStatusMessage,
+    mockHeaders = mockHeaders.map { it.toKeyValueItem() },
+    mockBody = mockBody,
+    mockDelayMs = mockDelayMs,
 )
 
 internal fun ApiRequestItem.toEntity(): SavedApiRequestEntity = SavedApiRequestEntity(
@@ -54,6 +62,7 @@ internal fun ApiRequestItem.toEntity(): SavedApiRequestEntity = SavedApiRequestE
     basicPassword = basicPassword,
     apiKeyHeader = apiKeyHeader,
     apiKeyValue = apiKeyValue,
+    apiKeyLocation = apiKeyLocation.name,
     bodyType = bodyType.name,
     bodyContent = bodyContent,
     formData = formData.map { it.toSavedKeyValue() },
@@ -63,6 +72,12 @@ internal fun ApiRequestItem.toEntity(): SavedApiRequestEntity = SavedApiRequestE
     updatedAt = updatedAt,
     chainExtractions = chainExtractions.map { it.toSavedChainExtractionRule() },
     assertions = assertions.map { it.toSavedAssertion() },
+    mockEnabled = mockEnabled,
+    mockStatusCode = mockStatusCode,
+    mockStatusMessage = mockStatusMessage,
+    mockHeaders = mockHeaders.map { it.toSavedKeyValue() },
+    mockBody = mockBody,
+    mockDelayMs = mockDelayMs,
 )
 
 private fun SavedKeyValue.toKeyValueItem(): KeyValueItem = KeyValueItem(

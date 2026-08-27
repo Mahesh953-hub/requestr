@@ -88,7 +88,19 @@ data class CaptureSessionEntity(
     val errorText: String? = null,
 )
 
-enum class RuleAction { BLOCK, REDIRECT, MODIFY_REQUEST, MODIFY_RESPONSE, LOG_ONLY, FORCE_MITM }
+/**
+ * What a matching [InterceptRuleEntity] does to a transaction.
+ *
+ * [MOCK_RESPONSE] (master plan §1.5) is the only action that never dials the real upstream
+ * server: every other action — including [MODIFY_RESPONSE], which rewrites only *after* the
+ * real round trip completes — performs the network call first. Its `replacementValue` reuses
+ * the existing `{"statusCode","addHeaders","bodyReplace"}` schema already understood by
+ * [com.example.interception.RuleEnforcer.applyResponseModification].
+ *
+ * Persisted by name via [RequestrTypeConverters.ruleActionToName], so adding a member needs no
+ * schema migration — unknown/legacy names decode to [LOG_ONLY].
+ */
+enum class RuleAction { BLOCK, REDIRECT, MODIFY_REQUEST, MODIFY_RESPONSE, LOG_ONLY, FORCE_MITM, MOCK_RESPONSE }
 
 /**
  * User-defined intercept rules. The "Block this domain" long-press action must be gated on a
@@ -133,6 +145,8 @@ data class SavedApiRequestEntity(
     val basicPassword: String = "",
     val apiKeyHeader: String = "X-API-Key",
     val apiKeyValue: String = "",
+    /** Master plan §2.13 — [com.example.data.models.ApiKeyLocation] name. */
+    val apiKeyLocation: String = "HEADER",
     val bodyType: String = "NONE",
     val bodyContent: String = "",
     val formData: List<SavedKeyValue> = emptyList(),
@@ -144,6 +158,15 @@ data class SavedApiRequestEntity(
     val chainExtractions: List<SavedChainExtractionRule> = emptyList(),
     /** v3.3 Part C — C3 (Test assertions): see [com.example.data.models.Assertion]. */
     val assertions: List<SavedAssertion> = emptyList(),
+    /** Master plan §2.8 — per-request mock mode; see [com.example.data.models.ApiRequestItem]. */
+    val mockEnabled: Boolean = false,
+    val mockStatusCode: Int = 200,
+    val mockStatusMessage: String = "OK",
+    val mockHeaders: List<SavedKeyValue> = emptyList(),
+    /** Must stay identical to [com.example.data.models.ApiRequestItem.mockBody]'s default and to
+     *  `MIGRATION_11_12`'s `DEFAULT` clause -- see that field's KDoc for why. */
+    val mockBody: String = "{\"mocked\": true}",
+    val mockDelayMs: Long = 0L,
 )
 
 /**

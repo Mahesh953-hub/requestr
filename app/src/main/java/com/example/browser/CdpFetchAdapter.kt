@@ -89,6 +89,16 @@ class CdpFetchAdapter(
         private set
     @Volatile var responseModifiedCount: Int = 0
         private set
+
+    /**
+     * Master plan §1.5: request-stage MOCK_RESPONSE enforcement -- requests answered from a
+     * rule via `Fetch.fulfillRequest` with no upstream connection at all. Counted separately
+     * from [blockedCount] (which fails the request) and [modifiedCount] (which still dials
+     * upstream), because "served a synthetic 200" and "failed with BlockedByClient" are very
+     * different things to see in the Settings card.
+     */
+    @Volatile var mockedCount: Int = 0
+        private set
     @Volatile var bodiesCapturedCount: Int = 0
         private set
 
@@ -183,6 +193,41 @@ class CdpFetchAdapter(
                         val continueParams = buildModifiedContinueParams(fetchRequestId, request, rule?.replacementValue)
                         client.send("Fetch.continueRequest", continueParams, sessionId = sessionId)
                         Log.i(TAG, "MODIFY_REQUEST $url")
+                    }
+                    RuleAction.MOCK_RESPONSE -> {
+                        // Master plan §1.5. CDP has a first-class primitive for this:
+                        // Fetch.fulfillRequest answers the paused request from the debugger
+                        // without the browser ever opening an upstream connection, which is
+                        // exactly the "skip the real call, synthesize a response instead"
+                        // semantic Gap #11 describes. Contrast MODIFY_RESPONSE, handled in
+                        // handleResponseStagePaused, which necessarily runs after the real
+                        // response has already arrived.
+                        mockedCount++
+                        notifyCountersChanged()
+                        val mock = RuleEnforcer.buildMockResponse(rule?.replacementValue, url)
+                        client.send(
+                            "Fetch.fulfillRequest",
+                            JSONObject().apply {
+                                put("requestId", fetchRequestId)
+                                put("responseCode", mock.statusCode)
+                                put(
+                                    "responseHeaders",
+                                    org.json.JSONArray().also { arr ->
+                                        mock.headers.forEach { (name, value) ->
+                                            arr.put(JSONObject().apply { put("name", name); put("value", value) })
+                                        }
+                                    },
+                                )
+                                // CDP requires the body base64-encoded, always.
+                                put(
+                                    "body",
+                                    Base64.getEncoder()
+                                        .encodeToString(mock.body.toByteArray(Charsets.UTF_8)),
+                                )
+                            },
+                            sessionId = sessionId,
+                        )
+                        Log.i(TAG, "MOCK_RESPONSE $url -> ${mock.statusCode} (rule=${rule?.name})")
                     }
                     // MODIFY_RESPONSE is applied at the response-stage pause of this same
                     // request (handleResponseStagePaused), not here -- the request stage has

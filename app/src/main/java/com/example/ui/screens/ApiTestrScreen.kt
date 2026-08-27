@@ -72,6 +72,8 @@ import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.TabRowDefaults.SecondaryIndicator
@@ -100,6 +102,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
@@ -113,6 +116,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.models.ApiKeyLocation
 import com.example.data.models.ApiRequestItem
 import com.example.data.models.ApiResponseData
 import com.example.data.models.Assertion
@@ -395,6 +399,8 @@ fun ApiTestrScreen(
                     "Scripts",
                     "Chain (${reqState.chainExtractions.count { it.enabled }})",
                     "Tests (${reqState.assertions.count { it.enabled }})",
+                    // Master plan §2.8 — per-saved-request mock mode editor tab.
+                    "Mock" + if (reqState.mockEnabled) " (On)" else "",
                 )
             }
             // Clamp tab index when switching between WS and HTTP tab sets
@@ -489,9 +495,11 @@ fun ApiTestrScreen(
                             HttpRequestBodyTab(
                                 bodyType = reqState.bodyType,
                                 bodyContent = reqState.bodyContent,
+                                formData = reqState.formData,
                                 isDark = isDark,
                                 onBodyTypeChanged = { reqState = reqState.copy(bodyType = it) },
                                 onBodyContentChanged = { reqState = reqState.copy(bodyContent = it) },
+                                onFormDataChanged = { reqState = reqState.copy(formData = it) },
                                 onBeautify = {
                                     reqState = reqState.copy(bodyContent = ToolsRepository.formatJson(reqState.bodyContent))
                                     performHaptic(HapticFeedbackType.TextHandleMove)
@@ -509,12 +517,14 @@ fun ApiTestrScreen(
                             basicPassword = reqState.basicPassword,
                             apiKeyHeader = reqState.apiKeyHeader,
                             apiKeyValue = reqState.apiKeyValue,
+                            apiKeyLocation = reqState.apiKeyLocation,
                             onAuthTypeChanged = { reqState = reqState.copy(authType = it) },
                             onBearerChanged = { reqState = reqState.copy(bearerToken = it) },
                             onBasicUsernameChanged = { reqState = reqState.copy(basicUsername = it) },
                             onBasicPasswordChanged = { reqState = reqState.copy(basicPassword = it) },
                             onApiKeyHeaderChanged = { reqState = reqState.copy(apiKeyHeader = it) },
-                            onApiKeyValueChanged = { reqState = reqState.copy(apiKeyValue = it) }
+                            onApiKeyValueChanged = { reqState = reqState.copy(apiKeyValue = it) },
+                            onApiKeyLocationChanged = { reqState = reqState.copy(apiKeyLocation = it) }
                         )
                     }
                     4 -> {
@@ -540,6 +550,26 @@ fun ApiTestrScreen(
                         AssertionEditor(
                             assertions = reqState.assertions,
                             onAssertionsChanged = { reqState = reqState.copy(assertions = it) }
+                        )
+                    }
+                    7 -> {
+                        // Master plan §2.8 — per-saved-request mock mode: when enabled, Send
+                        // returns these canned fields from ApiTestrRepository.executeRequest
+                        // instead of dialing the network at all.
+                        MockModeEditor(
+                            mockEnabled = reqState.mockEnabled,
+                            mockStatusCode = reqState.mockStatusCode,
+                            mockStatusMessage = reqState.mockStatusMessage,
+                            mockHeaders = reqState.mockHeaders,
+                            mockBody = reqState.mockBody,
+                            mockDelayMs = reqState.mockDelayMs,
+                            isDark = isDark,
+                            onMockEnabledChanged = { reqState = reqState.copy(mockEnabled = it) },
+                            onMockStatusCodeChanged = { reqState = reqState.copy(mockStatusCode = it) },
+                            onMockStatusMessageChanged = { reqState = reqState.copy(mockStatusMessage = it) },
+                            onMockHeadersChanged = { reqState = reqState.copy(mockHeaders = it) },
+                            onMockBodyChanged = { reqState = reqState.copy(mockBody = it) },
+                            onMockDelayMsChanged = { reqState = reqState.copy(mockDelayMs = it) }
                         )
                     }
                 }
@@ -2208,9 +2238,14 @@ private fun KeyValueTableRow(
 private fun HttpRequestBodyTab(
     bodyType: RequestBodyType,
     bodyContent: String,
+    // Master plan §2.9 — key/value pairs sent as real FormBody/MultipartBody parts for
+    // RequestBodyType.FORM / RequestBodyType.MULTIPART, instead of the free-text bodyContent
+    // editor used by every other body type.
+    formData: List<KeyValueItem>,
     isDark: Boolean,
     onBodyTypeChanged: (RequestBodyType) -> Unit,
     onBodyContentChanged: (String) -> Unit,
+    onFormDataChanged: (List<KeyValueItem>) -> Unit,
     onBeautify: () -> Unit
 ) {
     val primaryColor = MaterialTheme.colorScheme.primary
@@ -2263,6 +2298,14 @@ private fun HttpRequestBodyTab(
                     )
                 }
             }
+        } else if (bodyType == RequestBodyType.FORM || bodyType == RequestBodyType.MULTIPART) {
+            // Master plan §2.9 — reuse the same KeyValueEditorTable pattern already used for
+            // query params / headers, rather than inventing a new UI language for form fields.
+            KeyValueEditorTable(
+                title = if (bodyType == RequestBodyType.MULTIPART) "Form Data (multipart/form-data)" else "Form Data (x-www-form-urlencoded)",
+                items = formData,
+                onItemsChanged = onFormDataChanged
+            )
         } else {
             // Body Editor Surface
             Surface(
@@ -2322,12 +2365,15 @@ private fun AuthSettingsTab(
     basicPassword: String,
     apiKeyHeader: String,
     apiKeyValue: String,
+    // Master plan §2.13 — where the API-key credential is placed on the wire.
+    apiKeyLocation: ApiKeyLocation,
     onAuthTypeChanged: (AuthType) -> Unit,
     onBearerChanged: (String) -> Unit,
     onBasicUsernameChanged: (String) -> Unit,
     onBasicPasswordChanged: (String) -> Unit,
     onApiKeyHeaderChanged: (String) -> Unit,
-    onApiKeyValueChanged: (String) -> Unit
+    onApiKeyValueChanged: (String) -> Unit,
+    onApiKeyLocationChanged: (ApiKeyLocation) -> Unit
 ) {
     val primaryColor = MaterialTheme.colorScheme.primary
 
@@ -2417,9 +2463,189 @@ private fun AuthSettingsTab(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(10.dp)
                 )
+                Spacer(modifier = Modifier.height(10.dp))
+                // Master plan §2.13 — Header vs Query Param placement toggle.
+                Text("Send as", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    ApiKeyLocation.values().forEach { loc ->
+                        val isSel = apiKeyLocation == loc
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (isSel) primaryColor else MaterialTheme.colorScheme.surfaceVariant)
+                                .clickable { onApiKeyLocationChanged(loc) }
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = if (loc == ApiKeyLocation.HEADER) "Header" else "Query Param",
+                                color = if (isSel) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
             }
             else -> {
                 Text("No authentication headers will be added to this request.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+            }
+        }
+    }
+}
+
+// ====================================================================
+// Master plan §2.8 — per-saved-request mock mode editor. When mockEnabled is
+// on, ApiTestrRepository.executeRequest() short-circuits before dialing the
+// network and returns these canned fields instead (see buildMockResponse()).
+// ====================================================================
+
+// Visibility note: was `private fun`. Widened to `internal` (not `public`) so the Robolectric
+// Compose UI test added for the height-starvation fix below (MockModeEditorUiTest, in the
+// app/src/test source set of this same Gradle module) can call this composable directly instead
+// of re-implementing/duplicating its body in test code. `internal` keeps it out of any public
+// API surface while still being visible across files within this module and its test source
+// set (test compilation is a friend of the main compilation), matching the same rationale
+// already used for `SourceLiteralEscape` in ApiTestrRepository.kt.
+@Composable
+internal fun MockModeEditor(
+    mockEnabled: Boolean,
+    mockStatusCode: Int,
+    mockStatusMessage: String,
+    mockHeaders: List<KeyValueItem>,
+    mockBody: String,
+    mockDelayMs: Long,
+    isDark: Boolean,
+    onMockEnabledChanged: (Boolean) -> Unit,
+    onMockStatusCodeChanged: (Int) -> Unit,
+    onMockStatusMessageChanged: (String) -> Unit,
+    onMockHeadersChanged: (List<KeyValueItem>) -> Unit,
+    onMockBodyChanged: (String) -> Unit,
+    onMockDelayMsChanged: (Long) -> Unit
+) {
+    val primaryColor = MaterialTheme.colorScheme.primary
+
+    // Bug fix (device smoke test, Android 15) -- this was Modifier.fillMaxSize() with no scroll.
+    // KeyValueEditorTable's internal LazyColumn has no height bound of its own, so inside a
+    // Column(Modifier.fillMaxSize()) it always claims 100% of whatever height is left when it's
+    // measured -- regardless of how few "Mock Headers" rows it actually holds. Every other
+    // KeyValueEditorTable call site (query params, headers, form data) happens to place the
+    // table last in its own Column (or as an unrelated Box sibling for query params/headers),
+    // so nothing after it ever gets starved -- this is the one call site with more content
+    // below the table ("Mock Body"), so it's the one place this latent behavior turned into a
+    // real bug: "Mock Body" was silently given zero height and never rendered.
+    // Fixed locally here (not inside KeyValueEditorTable) by (a) capping the "Mock Headers"
+    // table's own height below so the LazyColumn has room to be small instead of huge, and (b)
+    // making the whole editor scroll so "Mock Body" is reachable regardless of viewport size --
+    // reproduced identically at 720x1600 and a resized 720x2600 in the report, so this isn't a
+    // small-screen-only fix, it's this genuine unbounded-height claim.
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Mock Response", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                Text(
+                    "When enabled, Send returns these canned fields instead of dialing the network.",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Switch(
+                checked = mockEnabled,
+                onCheckedChange = onMockEnabledChanged,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = primaryColor
+                )
+            )
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedTextField(
+                value = mockStatusCode.toString(),
+                onValueChange = { onMockStatusCodeChanged(it.toIntOrNull() ?: 0) },
+                label = { Text("Status Code") },
+                textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface),
+                // testTag added for MockModeEditorUiTest (Robolectric Compose test) so the field
+                // can be located deterministically instead of relying on fuzzy text matching.
+                modifier = Modifier.weight(1f).testTag("mockStatusCodeField"),
+                shape = RoundedCornerShape(10.dp)
+            )
+            OutlinedTextField(
+                value = mockStatusMessage,
+                onValueChange = onMockStatusMessageChanged,
+                label = { Text("Status Message") },
+                textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface),
+                modifier = Modifier.weight(1f).testTag("mockStatusMessageField"),
+                shape = RoundedCornerShape(10.dp)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedTextField(
+            value = mockDelayMs.toString(),
+            onValueChange = { onMockDelayMsChanged(it.toLongOrNull() ?: 0L) },
+            label = { Text("Simulated Delay (ms)") },
+            textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface),
+            modifier = Modifier.fillMaxWidth().testTag("mockDelayMsField"),
+            shape = RoundedCornerShape(10.dp)
+        )
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        // heightIn(max) here (not inside the shared KeyValueEditorTable) is what actually fixes
+        // this call site: it gives KeyValueEditorTable's own Modifier.fillMaxSize() root a
+        // bounded height to fill instead of the ambient-unbounded one this verticalScroll
+        // Column's content-measurement pass would otherwise hand it (which a LazyColumn cannot
+        // lay out against at all -- Compose requires a bounded max-height constraint for a
+        // lazy list). A handful of mock header rows render at their natural height well under
+        // this cap; a long list still scrolls, just within this bounded region instead of
+        // devouring the rest of the editor the way it did before this fix.
+        Box(modifier = Modifier.heightIn(max = 280.dp)) {
+            KeyValueEditorTable(
+                title = "Mock Headers",
+                items = mockHeaders,
+                onItemsChanged = onMockHeadersChanged
+            )
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        Text("Mock Body", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+        Spacer(modifier = Modifier.height(8.dp))
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            color = if (isDark) Color(0xFF060911) else MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                BasicTextField(
+                    value = mockBody,
+                    onValueChange = onMockBodyChanged,
+                    textStyle = TextStyle(
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        lineHeight = 18.sp
+                    ),
+                    cursorBrush = SolidColor(primaryColor),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 140.dp, max = 240.dp)
+                        .verticalScroll(rememberScrollState())
+                        .testTag("mockBodyField")
+                )
             }
         }
     }

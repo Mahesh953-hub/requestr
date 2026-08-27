@@ -761,6 +761,32 @@ object ApiCollectionsRepository {
     )
     val folders: StateFlow<List<ApiFolderItem>> = _folders.asStateFlow()
 
+    /**
+     * Master plan §1.6 — [ApiFolderItem] has no backing Room table yet (unlike, e.g.,
+     * [NotesRepository]'s `note_folders`), so [_folders] has always been a session-scoped,
+     * in-memory-only list (the four seed folders above never persisted across a process death
+     * either). This merges [newFolders] into it -- skipping any id already present, so calling
+     * this twice with the exact same [ApiFolderItem]s (e.g. a caller re-running the same merge)
+     * is a no-op the second time -- so that a
+     * [com.example.data.export.PostmanCollectionCodec.import] result's requests (already
+     * carrying a `folderId` pointing at one of [newFolders]) resolve to a real folder in this
+     * repository for the rest of the session: the "N folder(s)" the import UI reports actually
+     * exist afterward, `SavedApisScreen`'s folder filter/display works, and exporting again
+     * looks up the real folder name instead of falling back to the opaque folder id. Note this
+     * does NOT deduplicate across two separate imports of the same source file -- the codec
+     * assigns each parsed folder a fresh random id per [PostmanCollectionCodec.import] call, by
+     * design (mirrors how it has no way to know a "Users" folder in one import is "the same"
+     * folder as a "Users" folder from a previous one).
+     */
+    fun addFolders(newFolders: List<ApiFolderItem>) {
+        if (newFolders.isEmpty()) return
+        val existingIds = _folders.value.mapTo(mutableSetOf()) { it.id }
+        val toAdd = newFolders.filter { it.id !in existingIds }
+        if (toAdd.isNotEmpty()) {
+            _folders.value = _folders.value + toAdd
+        }
+    }
+
     // No seed data by design.
     //
     // v2.1 shipped sample requests (HttpBin JSON Echo, GitHub User Profile, Post JSON Payload)
@@ -909,14 +935,54 @@ object ApiCollectionsRepository {
      * a request earlier in the list can feed variables the next one consumes), running its
      * chain-extraction rules on success, then evaluating its assertions via [AssertionRunner].
      * Returns a [com.example.data.models.CollectionTestReport] summarizing pass/fail counts.
+     *
+     * Master plan §2.12 (ReVoman-style execution control): [haltOnFailure] defaults to `false`
+     * so this compiles and behaves exactly as before at every existing call site (including
+     * `SavedApisScreen.kt`'s "Run All Tests" button) with no source change required. When set,
+     * the run stops at the first request that either fails to execute at all or has at least
+     * one failing assertion; every later candidate is reported back rather than silently
+     * dropped, so the report always accounts for all of [candidates] — it is just marked
+     * "skipped" instead of run. [isSkippedResult] is the one place that encodes what "skipped"
+     * means for a [com.example.data.models.RequestTestResult]: this workstream does not touch
+     * `AppModels.kt` (owned by a parallel workstream), so rather than adding a new field there,
+     * a skipped row reuses the one (response, requestFailed, results) combination normal runs
+     * never produce — a request that actually executes is always either `requestFailed = true`
+     * (response null) or has a non-empty `results` list (every candidate here has at least one
+     * enabled assertion, and [AssertionRunner.run] only ever returns one result per enabled
+     * assertion) — so `response == null && requestFailed == false && results.isEmpty()` is
+     * unambiguous and already impossible from any other code path in this function.
+     *
+     * [executor] is a seam for tests only: production callers should never pass it. It defaults
+     * to the real network call so behavior is identical to before this change.
      */
-    suspend fun runCollectionTests(folderId: String?): com.example.data.models.CollectionTestReport {
+    suspend fun runCollectionTests(
+        folderId: String?,
+        haltOnFailure: Boolean = false,
+        executor: suspend (ApiRequestItem) -> com.example.data.models.ApiResponseData? = { req ->
+            runCatching { ApiTestrRepository.executeRequest(req) }.getOrNull()
+        },
+    ): com.example.data.models.CollectionTestReport {
         val candidates = _requests.value
             .filter { folderId == null || it.folderId == folderId }
             .filter { it.assertions.any { a -> a.enabled } }
             .sortedBy { it.updatedAt }
 
-        val results = candidates.map { request ->
+        val results = mutableListOf<com.example.data.models.RequestTestResult>()
+        var halted = false
+
+        for (request in candidates) {
+            if (halted) {
+                results.add(
+                    com.example.data.models.RequestTestResult(
+                        request = request,
+                        response = null,
+                        results = emptyList(),
+                        requestFailed = false,
+                    )
+                )
+                continue
+            }
+
             val env = com.example.data.env.EnvironmentRepository.active()
             fun sub(s: String) = com.example.data.env.EnvironmentRepository.substitute(s, env)
             val substituted = request.copy(
@@ -927,28 +993,44 @@ object ApiCollectionsRepository {
                 bearerToken = sub(request.bearerToken),
                 apiKeyValue = sub(request.apiKeyValue),
             )
-            val resp = runCatching { ApiTestrRepository.executeRequest(substituted) }.getOrNull()
+            val resp = executor(substituted)
             if (resp == null) {
-                com.example.data.models.RequestTestResult(
-                    request = request,
-                    response = null,
-                    results = emptyList(),
-                    requestFailed = true,
+                results.add(
+                    com.example.data.models.RequestTestResult(
+                        request = request,
+                        response = null,
+                        results = emptyList(),
+                        requestFailed = true,
+                    )
                 )
+                if (haltOnFailure) halted = true
             } else {
                 if (resp.isSuccess && request.chainExtractions.isNotEmpty()) {
                     runChainExtractions(request, resp.body)
                 }
-                com.example.data.models.RequestTestResult(
-                    request = request,
-                    response = resp,
-                    results = AssertionRunner.run(request.assertions, resp),
-                    requestFailed = false,
+                val assertionResults = AssertionRunner.run(request.assertions, resp)
+                results.add(
+                    com.example.data.models.RequestTestResult(
+                        request = request,
+                        response = resp,
+                        results = assertionResults,
+                        requestFailed = false,
+                    )
                 )
+                if (haltOnFailure && assertionResults.any { !it.passed }) halted = true
             }
         }
         return com.example.data.models.CollectionTestReport(folderId = folderId, requestResults = results)
     }
+
+    /**
+     * Master plan §2.12: true for a [com.example.data.models.RequestTestResult] produced by
+     * [runCollectionTests]'s halt-on-failure skip path (a candidate that was never run because
+     * an earlier candidate in the same run already failed). See [runCollectionTests]'s KDoc for
+     * why this specific field combination is the unambiguous "skipped" encoding.
+     */
+    fun isSkippedResult(result: com.example.data.models.RequestTestResult): Boolean =
+        !result.requestFailed && result.response == null
 }
 
 // ==========================================
