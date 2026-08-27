@@ -90,15 +90,6 @@ class CdpFetchAdapter(
     @Volatile var responseModifiedCount: Int = 0
         private set
 
-    /**
-     * Master plan §1.5: request-stage MOCK_RESPONSE enforcement -- requests answered from a
-     * rule via `Fetch.fulfillRequest` with no upstream connection at all. Counted separately
-     * from [blockedCount] (which fails the request) and [modifiedCount] (which still dials
-     * upstream), because "served a synthetic 200" and "failed with BlockedByClient" are very
-     * different things to see in the Settings card.
-     */
-    @Volatile var mockedCount: Int = 0
-        private set
     @Volatile var bodiesCapturedCount: Int = 0
         private set
 
@@ -202,8 +193,6 @@ class CdpFetchAdapter(
                         // semantic Gap #11 describes. Contrast MODIFY_RESPONSE, handled in
                         // handleResponseStagePaused, which necessarily runs after the real
                         // response has already arrived.
-                        mockedCount++
-                        notifyCountersChanged()
                         val mock = RuleEnforcer.buildMockResponse(rule?.replacementValue, url)
                         client.send(
                             "Fetch.fulfillRequest",

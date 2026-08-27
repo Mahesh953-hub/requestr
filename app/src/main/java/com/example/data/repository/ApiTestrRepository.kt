@@ -615,9 +615,19 @@ object ApiTestrRepository {
         } else {
             null
         }
-        val exportHeaders = autoContentType
+        val exportHeadersWithAutoContentType = autoContentType
             ?.let { withApiKeyHeader + KeyValueItem(key = "Content-Type", value = it) }
             ?: withApiKeyHeader
+        // For MULTIPART specifically, every branch below builds its own real Content-Type
+        // (with a boundary) via that language's own idiomatic body-building mechanism, so the
+        // shared, boundary-less auto "Content-Type: multipart/form-data" header above would be
+        // unparseable by any server and is dropped here, unconditionally, for every branch.
+        val exportHeaders = if (req.bodyType == RequestBodyType.MULTIPART) {
+            exportHeadersWithAutoContentType.filterNot { it.key.equals("Content-Type", ignoreCase = true) }
+        } else {
+            exportHeadersWithAutoContentType
+        }
+        val enabledFormFields = req.formData.filter { it.isEnabled && it.key.isNotBlank() }
 
         return when {
             language.contains("Python - Requests", ignoreCase = true) -> {
@@ -628,13 +638,7 @@ object ApiTestrRepository {
                 // let the library compute the real Content-Type (with a correct boundary for
                 // multipart) instead of the hand-written, boundary-less one this file would
                 // otherwise show, so that header is dropped here for MULTIPART specifically.
-                val enabledFormFields = req.formData.filter { it.isEnabled && it.key.isNotBlank() }
-                val pythonHeaders = if (req.bodyType == RequestBodyType.MULTIPART) {
-                    exportHeaders.filterNot { it.key.equals("Content-Type", ignoreCase = true) }
-                } else {
-                    exportHeaders
-                }
-                val headersDict = pythonHeaders.joinToString(",\n    ") {
+                val headersDict = exportHeaders.joinToString(",\n    ") {
                     "${SourceLiteralEscape.doubleQuoted(it.key)}: ${SourceLiteralEscape.doubleQuoted(it.value)}"
                 }
                 val dataLine = when (req.bodyType) {
@@ -691,13 +695,7 @@ with httpx.Client() as client:
                 // its own with a real boundary only when it sees the body is a FormData instance,
                 // and a manually-set header would remove that boundary, so the boundary-less auto
                 // Content-Type this file would otherwise show is dropped here for MULTIPART only.
-                val enabledFormFields = req.formData.filter { it.isEnabled && it.key.isNotBlank() }
-                val jsHeaders = if (req.bodyType == RequestBodyType.MULTIPART) {
-                    exportHeaders.filterNot { it.key.equals("Content-Type", ignoreCase = true) }
-                } else {
-                    exportHeaders
-                }
-                val headersJson = jsHeaders.joinToString(",\n    ") {
+                val headersJson = exportHeaders.joinToString(",\n    ") {
                     "${SourceLiteralEscape.doubleQuoted(it.key)}: ${SourceLiteralEscape.doubleQuoted(it.value)}"
                 }
                 val bodyDecl = when (req.bodyType) {
@@ -745,12 +743,6 @@ fetch(${SourceLiteralEscape.jsQuoted(exportUrl)}, options)
                 // boundary-less auto Content-Type header -- MultipartBody.Builder computes a real
                 // one (with a boundary) once built, so a hand-set header here would be redundant
                 // and misleading, mirroring the same fix in every other language branch.
-                val enabledFormFields = req.formData.filter { it.isEnabled && it.key.isNotBlank() }
-                val kotlinHeaders = if (req.bodyType == RequestBodyType.MULTIPART) {
-                    exportHeaders.filterNot { it.key.equals("Content-Type", ignoreCase = true) }
-                } else {
-                    exportHeaders
-                }
                 val bodyDecl = if (req.method == HttpMethod.GET) {
                     ""
                 } else {
@@ -786,7 +778,7 @@ fetch(${SourceLiteralEscape.jsQuoted(exportUrl)}, options)
 val client = OkHttpClient()
 ${bodyDecl}val request = Request.Builder()
     .url(${SourceLiteralEscape.kotlinQuoted(exportUrl)})
-    ${kotlinHeaders.joinToString("\n    ") { ".addHeader(${SourceLiteralEscape.kotlinQuoted(it.key)}, ${SourceLiteralEscape.kotlinQuoted(it.value)})" }}
+    ${exportHeaders.joinToString("\n    ") { ".addHeader(${SourceLiteralEscape.kotlinQuoted(it.key)}, ${SourceLiteralEscape.kotlinQuoted(it.value)})" }}
     $methodCall
     .build()
 
@@ -807,13 +799,7 @@ println(response.body?.string())
                 // `boundary=` parameter, which is unparseable by any server. `--form` makes curl
                 // generate a real Content-Type with a valid boundary itself, so the auto
                 // Content-Type this file would otherwise show is dropped for this one case only.
-                val enabledFormFields = req.formData.filter { it.isEnabled && it.key.isNotBlank() }
-                val curlHeaders = if (req.bodyType == RequestBodyType.MULTIPART) {
-                    exportHeaders.filterNot { it.key.equals("Content-Type", ignoreCase = true) }
-                } else {
-                    exportHeaders
-                }
-                val h = curlHeaders.joinToString(" ") { "-H ${ShellEscape.singleQuote("${it.key}: ${it.value}")}" }
+                val h = exportHeaders.joinToString(" ") { "-H ${ShellEscape.singleQuote("${it.key}: ${it.value}")}" }
                 val b = when (req.bodyType) {
                     RequestBodyType.NONE -> ""
                     RequestBodyType.FORM -> enabledFormFields.joinToString(" ") {
@@ -837,13 +823,7 @@ println(response.body?.string())
                 // rather than a literal -- the shared, boundary-less auto Content-Type header
                 // this file would otherwise show is dropped here, same as every other branch,
                 // since it would either be redundant with or contradict the real one.
-                val enabledFormFields = req.formData.filter { it.isEnabled && it.key.isNotBlank() }
-                val goHeaders = if (req.bodyType == RequestBodyType.MULTIPART) {
-                    exportHeaders.filterNot { it.key.equals("Content-Type", ignoreCase = true) }
-                } else {
-                    exportHeaders
-                }
-                val headerLines = goHeaders.joinToString("\n    ") {
+                val headerLines = exportHeaders.joinToString("\n    ") {
                     "req.Header.Set(${SourceLiteralEscape.doubleQuoted(it.key)}, ${SourceLiteralEscape.doubleQuoted(it.value)})"
                 }
                 val methodLit = SourceLiteralEscape.doubleQuoted(req.method.name)

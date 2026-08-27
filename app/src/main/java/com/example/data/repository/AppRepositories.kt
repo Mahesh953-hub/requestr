@@ -945,12 +945,11 @@ object ApiCollectionsRepository {
      * "skipped" instead of run. [isSkippedResult] is the one place that encodes what "skipped"
      * means for a [com.example.data.models.RequestTestResult]: this workstream does not touch
      * `AppModels.kt` (owned by a parallel workstream), so rather than adding a new field there,
-     * a skipped row reuses the one (response, requestFailed, results) combination normal runs
-     * never produce — a request that actually executes is always either `requestFailed = true`
-     * (response null) or has a non-empty `results` list (every candidate here has at least one
-     * enabled assertion, and [AssertionRunner.run] only ever returns one result per enabled
-     * assertion) — so `response == null && requestFailed == false && results.isEmpty()` is
-     * unambiguous and already impossible from any other code path in this function.
+     * a skipped row reuses the one (response, requestFailed) combination normal runs never
+     * produce — a request that actually executes is always either `requestFailed = true`
+     * (response null) or has a non-null `response` — so `response == null &&
+     * requestFailed == false` is unambiguous and already impossible from any other code path
+     * in this function.
      *
      * [executor] is a seam for tests only: production callers should never pass it. It defaults
      * to the real network call so behavior is identical to before this change.

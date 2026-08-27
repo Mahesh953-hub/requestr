@@ -103,8 +103,6 @@ object HttpParser {
             consumedBytes = totalNeeded,
             rawHeaderNames = rawHeaderNames,
             isBodyBinary = decoded.isBinary,
-            bodyEncoding = normalizeContentEncoding(headers["content-encoding"]),
-            bodyContentEncodingConsumed = decoded.encodingConsumed,
             rawBodyBytes = rawBodyBytes,
         )
     }
@@ -207,8 +205,6 @@ object HttpParser {
             contentType = contentType,
             consumedBytes = totalNeeded,
             isBodyBinary = decoded.isBinary,
-            bodyEncoding = normalizeContentEncoding(headers["content-encoding"]),
-            bodyContentEncodingConsumed = decoded.encodingConsumed,
             rawBodyBytes = rawBodyBytes,
         )
     }
@@ -249,16 +245,6 @@ object HttpParser {
         if (total > Int.MAX_VALUE) return null
         return total.toInt()
     }
-
-    /**
-     * §1.4: [ParsedHttpMessage.bodyEncoding] stores the *declared* Content-Encoding token
-     * (lowercased, "identity" when absent) rather than [HttpBodyDecoder.Encoding]'s coarser
-     * classification -- callers care whether a body was "br" vs "zstd" (both classify as
-     * [HttpBodyDecoder.Encoding.UNDECODABLE]), and this is the one place that distinction is
-     * still available.
-     */
-    private fun normalizeContentEncoding(header: String?): String =
-        header?.trim()?.lowercase()?.ifEmpty { "identity" } ?: "identity"
 
     private fun parseHttpMethod(s: String): HttpMethod? {
         return when (s.uppercase()) {
@@ -455,20 +441,6 @@ data class ParsedHttpMessage(
      * place of every image/protobuf/undecodable response.
      */
     var isBodyBinary: Boolean = false,
-    /**
-     * §1.4: the Content-Encoding this message declared, lowercase (see
-     * [HttpBodyDecoder.Encoding]) -- "identity" when absent. Independent of whether decoding
-     * actually happened; see [bodyContentEncodingConsumed] for that.
-     */
-    var bodyEncoding: String = "identity",
-    /**
-     * True iff [body] was produced by successfully decompressing a declared Content-Encoding
-     * (gzip/deflate), meaning it no longer matches that header. This field is no longer
-     * consulted by MitmProxyEngine's serializeRequest/serializeResponse (see [bodyReplaced]);
-     * it remains for callers (e.g. UI/export) that only care about *why* [body] looks the way
-     * it does, not for wire re-serialization.
-     */
-    var bodyContentEncodingConsumed: Boolean = false,
     /**
      * MUST-FIX 1: the exact post-de-chunking, pre-decode wire bytes this message's body was
      * built from -- i.e. what actually arrived on the wire, before any Content-Encoding

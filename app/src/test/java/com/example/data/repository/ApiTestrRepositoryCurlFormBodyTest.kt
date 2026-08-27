@@ -74,7 +74,7 @@ class ApiTestrRepositoryCurlFormBodyTest {
     }
 
     @Test
-    fun `MULTIPART export still shows a user-set non-multipart Content-Type header untouched`() {
+    fun `MULTIPART export still shows unrelated user-set headers untouched`() {
         val item = ApiRequestItem(
             method = HttpMethod.POST,
             url = "https://example.com/api",

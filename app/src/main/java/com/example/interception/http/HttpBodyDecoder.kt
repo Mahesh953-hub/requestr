@@ -5,7 +5,7 @@ import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.nio.ByteBuffer
-import java.nio.charset.CharacterCodingException
+import java.nio.CharBuffer
 import java.nio.charset.CodingErrorAction
 import java.util.zip.GZIPInputStream
 import java.util.zip.Inflater
@@ -200,29 +200,28 @@ object HttpBodyDecoder {
      *
      * SHOULD-FIX 1: the sniff window is a raw byte-count cutoff ([UTF8_SNIFF_PREFIX_BYTES]),
      * which can land in the middle of a legitimate multi-byte UTF-8 sequence when [bytes] is
-     * longer than the window. Decoding that truncated tail strictly would throw
-     * [CharacterCodingException] and misclassify perfectly good text as binary purely because
-     * of where the cut happened to fall. [truncateToLastCompleteUtf8Boundary] walks the cut
-     * point back to the start of whatever multi-byte sequence straddles it, if any, before the
-     * strict decode ever runs.
+     * longer than the window. Decoding via [java.nio.charset.CharsetDecoder.decode] with
+     * `endOfInput = false` handles that for free: an incomplete trailing sequence caused purely
+     * by running out of input is reported as `UNDERFLOW`, not a decoding error, so a truncated
+     * multi-byte character at the sniff boundary is never misclassified as binary.
      *
      * An empty body is considered text (nothing to prove otherwise).
      */
     fun isProbablyUtf8(bytes: ByteArray): Boolean {
         if (bytes.isEmpty()) return true
-        val rawPrefixLen = bytes.size.coerceAtMost(UTF8_SNIFF_PREFIX_BYTES)
-        val prefixLen = truncateToLastCompleteUtf8Boundary(bytes, rawPrefixLen)
+        val prefixLen = bytes.size.coerceAtMost(UTF8_SNIFF_PREFIX_BYTES)
+        val decoder = Charsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+        val out = CharBuffer.allocate(prefixLen)
+        // endOfInput = false is load-bearing: it tells the decoder the sniffed prefix may be
+        // truncated mid-sequence, so a dangling lead byte at the very end yields UNDERFLOW
+        // (treated as text below) instead of a malformed-input error.
+        val result = decoder.decode(ByteBuffer.wrap(bytes, 0, prefixLen), out, false)
+        if (result.isError) return false
 
-        val decoded = try {
-            Charsets.UTF_8.newDecoder()
-                .onMalformedInput(CodingErrorAction.REPORT)
-                .onUnmappableCharacter(CodingErrorAction.REPORT)
-                .decode(ByteBuffer.wrap(bytes, 0, prefixLen))
-        } catch (_: CharacterCodingException) {
-            return false
-        }
-
-        val decodedText = decoded.toString()
+        out.flip()
+        val decodedText = out.toString()
         var i = 0
         while (i < decodedText.length) {
             val codePoint = decodedText.codePointAt(i)
@@ -230,39 +229,5 @@ object HttpBodyDecoder {
             i += Character.charCount(codePoint)
         }
         return true
-    }
-
-    /**
-     * If [cutAt] (< [bytes].size, i.e. the sniff window actually truncated something) falls in
-     * the middle of a multi-byte UTF-8 sequence, moves the cut back to that sequence's first
-     * (lead) byte so the truncated tail is excluded from strict decoding entirely, rather than
-     * feeding the decoder a guaranteed-malformed partial sequence. Only ever shrinks [cutAt];
-     * never grows it (never reads past the original window).
-     */
-    private fun truncateToLastCompleteUtf8Boundary(bytes: ByteArray, cutAt: Int): Int {
-        if (cutAt >= bytes.size) return cutAt // nothing was actually truncated
-
-        // Walk back over UTF-8 continuation bytes (10xxxxxx) to find the lead byte of the
-        // sequence straddling the cut, if any. A well-formed UTF-8 sequence is at most 4 bytes.
-        var leadIndex = cutAt - 1
-        var stepsBack = 0
-        while (leadIndex >= 0 && stepsBack < 3 && (bytes[leadIndex].toInt() and 0xC0) == 0x80) {
-            leadIndex--
-            stepsBack++
-        }
-        if (leadIndex < 0) return cutAt // no lead byte within the lookback window; leave as-is
-
-        val leadByte = bytes[leadIndex].toInt() and 0xFF
-        val sequenceLength = when {
-            leadByte and 0x80 == 0x00 -> 1 // ASCII
-            leadByte and 0xE0 == 0xC0 -> 2
-            leadByte and 0xF0 == 0xE0 -> 3
-            leadByte and 0xF8 == 0xF0 -> 4
-            else -> 1 // stray continuation byte with no valid lead -- nothing coherent to trim
-        }
-        val sequenceEnd = leadIndex + sequenceLength
-        // Only trim back if that sequence would have run past the cut (a genuine straddle);
-        // otherwise the cut already lands on a clean boundary and must be left untouched.
-        return if (sequenceEnd > cutAt) leadIndex else cutAt
     }
 }

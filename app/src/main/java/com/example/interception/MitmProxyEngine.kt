@@ -583,7 +583,8 @@ class MitmProxyEngine(
         logRequests: Boolean,
         logResponses: Boolean,
     ) {
-        when (RuleEnforcer.checkRules(db, request.url, request.host)) {
+        val rule = RuleEnforcer.getMatchingRule(db, request.url, request.host)
+        val bytesToForward: ByteArray = when (rule?.action ?: RuleAction.LOG_ONLY) {
             RuleAction.BLOCK -> {
                 Log.i(TAG, "BLOCKED (decrypted): ${request.method?.name} ${request.url.take(80)}")
                 synchronized(clientWriteLock) {
@@ -592,7 +593,10 @@ class MitmProxyEngine(
                     )
                     clientOut.flush()
                 }
-                // Dropped: never forwarded upstream, never enqueued for pairing.
+                // Dropped: never forwarded upstream, never enqueued for pairing. Returns here
+                // rather than falling through to the shared forward tail below -- this is the
+                // real exception to that otherwise-identical connect/enqueue/write/flush path.
+                return
             }
             RuleAction.MOCK_RESPONSE -> {
                 // §1.5: short-circuit here, same shape as BLOCK above -- never dials upstream,
@@ -600,7 +604,6 @@ class MitmProxyEngine(
                 // it), and writes a synthesized response straight back to the client instead.
                 // RuleEnforcer.buildMockResponse is shared with the CDP fetch-interception path
                 // (CdpFetchAdapter) -- same replacementValue schema, one config format either way.
-                val rule = RuleEnforcer.getMatchingRule(db, request.url, request.host)
                 val mockResponse = RuleEnforcer.buildMockResponse(rule?.replacementValue, request.url)
                 synchronized(clientWriteLock) {
                     clientOut.write(serializeResponse(mockResponse))
@@ -610,9 +613,11 @@ class MitmProxyEngine(
                 // Still surfaced as a captured transaction (0ms latency -- no real round trip
                 // happened) so a mocked request is not invisible in the traffic list.
                 emitTransaction(request, mockResponse, 0L, "$host:$port", logRequests, logResponses)
+                // Same reasoning as BLOCK above: return here rather than reaching the shared
+                // forward tail, since this path never forwards anything upstream.
+                return
             }
             RuleAction.REDIRECT -> {
-                val rule = RuleEnforcer.getMatchingRule(db, request.url, request.host)
                 if (rule?.replacementValue?.isNotBlank() == true) {
                     request.url = rule.replacementValue!!
                     runCatching { java.net.URI(request.url).host?.let { request.host = it } }
@@ -620,29 +625,24 @@ class MitmProxyEngine(
                     headers["host"] = request.host
                     request.headers = headers
                 }
-                // §1.5 MUST-FIX: connect (or reuse) lazily -- this is the first point in the
-                // whole client→server pipeline where a REDIRECT/MODIFY_REQUEST/LOG_ONLY request
-                // actually needs the network.
-                val upstreamOut = connectOrThrow(db, upstream, host, port)
-                pending.add(request to System.currentTimeMillis())
-                upstreamOut.write(serializeRequest(request))
-                upstreamOut.flush()
+                serializeRequest(request)
             }
             RuleAction.MODIFY_REQUEST -> {
-                val rule = RuleEnforcer.getMatchingRule(db, request.url, request.host)
                 rule?.replacementValue?.let { RuleEnforcer.applyRequestModification(request, it) }
-                val upstreamOut = connectOrThrow(db, upstream, host, port)
-                pending.add(request to System.currentTimeMillis())
-                upstreamOut.write(serializeRequest(request))
-                upstreamOut.flush()
+                serializeRequest(request)
             }
-            else -> { // LOG_ONLY — forward the exact original bytes
-                val upstreamOut = connectOrThrow(db, upstream, host, port)
-                pending.add(request to System.currentTimeMillis())
-                upstreamOut.write(raw)
-                upstreamOut.flush()
-            }
+            else -> raw // LOG_ONLY — forward the exact original bytes
         }
+
+        // §1.5 MUST-FIX: connect (or reuse) lazily -- this is the first point in the whole
+        // client→server pipeline where a REDIRECT/MODIFY_REQUEST/LOG_ONLY request actually
+        // needs the network. BLOCK and MOCK_RESPONSE both `return` above without ever reaching
+        // this shared tail -- they are the real exceptions to it, not just two more branches
+        // that happen to look similar.
+        val upstreamOut = connectOrThrow(db, upstream, host, port)
+        pending.add(request to System.currentTimeMillis())
+        upstreamOut.write(bytesToForward)
+        upstreamOut.flush()
     }
 
     private fun handleParsedResponse(
@@ -671,9 +671,9 @@ class MitmProxyEngine(
         val request = pair?.first
         var out = raw
         if (request != null) {
-            if (RuleEnforcer.checkRules(db, request.url, request.host) == RuleAction.MODIFY_RESPONSE) {
-                val rule = RuleEnforcer.getMatchingRule(db, request.url, request.host)
-                rule?.replacementValue?.let { RuleEnforcer.applyResponseModification(response, it) }
+            val rule = RuleEnforcer.getMatchingRule(db, request.url, request.host)
+            if (rule?.action == RuleAction.MODIFY_RESPONSE) {
+                rule.replacementValue?.let { RuleEnforcer.applyResponseModification(response, it) }
                 out = serializeResponse(response)
             }
         }
@@ -771,24 +771,7 @@ class MitmProxyEngine(
             putAll(request.headers)
         }
         headers.remove("Transfer-Encoding") // re-serialized with an explicit length
-        val bodyBytes: ByteArray
-        if (request.bodyReplaced) {
-            // A rule explicitly overwrote the body with plaintext (RuleEnforcer's
-            // bodyReplace). Any inherited Content-Encoding would now be a lie about bytes
-            // that are not actually gzip/br/whatever-compressed anymore.
-            bodyBytes = request.body.toByteArray(Charsets.UTF_8)
-            headers.remove("Content-Encoding")
-        } else {
-            // No rule touched the body (no match, or a header/status-only edit) -- forward
-            // the exact wire bytes HttpParser captured, never HttpBodyDecoder's (possibly
-            // lossy/empty) text rendering of them. rawBodyBytes is only null for messages
-            // that were never parsed off a real wire (e.g. hand-built test fixtures); body
-            // itself is the correct fallback there since it *is* the real content in that case.
-            bodyBytes = request.rawBodyBytes ?: request.body.toByteArray(Charsets.UTF_8)
-            // Content-Encoding is intentionally left alone here: we are not changing what is
-            // on the wire, so whatever the client already believed about the encoding is
-            // still true.
-        }
+        val bodyBytes = bodyBytesFor(request, headers)
         // Always set Content-Length to match exactly what is written, including the
         // zero-length case -- never leave a stale value (see MUST-FIX 1 above).
         headers["Content-Length"] = bodyBytes.size.toString()
@@ -807,13 +790,7 @@ class MitmProxyEngine(
             putAll(response.headers)
         }
         headers.remove("Transfer-Encoding") // parser de-chunked the body
-        val bodyBytes: ByteArray
-        if (response.bodyReplaced) {
-            bodyBytes = response.body.toByteArray(Charsets.UTF_8)
-            headers.remove("Content-Encoding")
-        } else {
-            bodyBytes = response.rawBodyBytes ?: response.body.toByteArray(Charsets.UTF_8)
-        }
+        val bodyBytes = bodyBytesFor(response, headers)
         headers["Content-Length"] = bodyBytes.size.toString()
         val sb = StringBuilder()
         sb.append(response.version.ifEmpty { "HTTP/1.1" }).append(' ')
@@ -822,6 +799,28 @@ class MitmProxyEngine(
         for ((k, v) in headers) sb.append(k).append(": ").append(v).append("\r\n")
         sb.append("\r\n")
         return sb.toString().toByteArray(Charsets.ISO_8859_1) + bodyBytes
+    }
+
+    /**
+     * Shared by [serializeRequest] and [serializeResponse]: decides the body bytes to write
+     * onto the wire for [msg], mutating [headers] to match (see [serializeRequest]'s KDoc for
+     * the full MUST-FIX 1 rationale this preserves). A rule's explicit `bodyReplace` writes the
+     * replacement plaintext and drops Content-Encoding -- any inherited value would now be a
+     * lie about bytes that are not actually gzip/br/whatever-compressed anymore. Every other
+     * message forwards [ParsedHttpMessage.rawBodyBytes] verbatim -- never
+     * [HttpBodyDecoder]'s (possibly lossy/empty) text rendering of them -- falling back to
+     * [ParsedHttpMessage.body] only for messages that were never parsed off a real wire (e.g.
+     * hand-built test fixtures), where `body` *is* the real content. Content-Encoding is left
+     * untouched in that non-replaced case: nothing about the body actually changed, so whatever
+     * the client already believed about the encoding is still true.
+     */
+    private fun bodyBytesFor(msg: ParsedHttpMessage, headers: MutableMap<String, String>): ByteArray {
+        return if (msg.bodyReplaced) {
+            headers.remove("Content-Encoding")
+            msg.body.toByteArray(Charsets.UTF_8)
+        } else {
+            msg.rawBodyBytes ?: msg.body.toByteArray(Charsets.UTF_8)
+        }
     }
 
     // ── Parse-support helpers ───────────────────────────────────────────

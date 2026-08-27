@@ -1,6 +1,7 @@
-package com.example.interception.http
+package com.example.interception
 
-import com.example.interception.MitmProxyEngine
+import com.example.interception.http.HttpBodyDecoder
+import com.example.interception.http.HttpParser
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -101,7 +102,6 @@ class MitmProxyEngineSerializeConsistencyTest {
 
         val parsed = HttpParser.tryParseResponse(wire)
         checkNotNull(parsed)
-        assertFalse(parsed.bodyContentEncodingConsumed)
         assertFalse(parsed.bodyReplaced)
 
         val reserialized = engine.serializeResponse(parsed)
@@ -136,7 +136,6 @@ class MitmProxyEngineSerializeConsistencyTest {
 
         val parsed = HttpParser.tryParseResponse(wire)
         checkNotNull(parsed)
-        assertFalse(parsed.bodyContentEncodingConsumed)
 
         val reserialized = engine.serializeResponse(parsed)
         val (headerBlock, body) = headerBlockAndBody(reserialized)
@@ -156,7 +155,14 @@ class MitmProxyEngineSerializeConsistencyTest {
 
         val parsed = HttpParser.tryParseResponse(wire)
         checkNotNull(parsed)
-        assertFalse("sanity: decompression must have failed (hit the cap)", parsed.bodyContentEncodingConsumed)
+        // Sanity precondition (not the assertion under test): decompression must have
+        // genuinely failed here (hit HttpBodyDecoder's cap), or this test would not exercise
+        // the "falls back to the still-compressed raw bytes" path it's named for. Re-derived
+        // directly from HttpBodyDecoder.decode rather than off ParsedHttpMessage, since the
+        // parser no longer carries this per-message (see MASTER-FEATURE-ADDITION-PLAN §-tracked
+        // removal of the write-only bodyContentEncodingConsumed field).
+        val decoded = HttpBodyDecoder.decode(compressed, "gzip")
+        assertFalse("sanity: decompression must have failed (hit the cap)", decoded.encodingConsumed)
 
         val reserialized = engine.serializeResponse(parsed)
         val (headerBlock, body) = headerBlockAndBody(reserialized)
@@ -177,7 +183,6 @@ class MitmProxyEngineSerializeConsistencyTest {
         // Decompression succeeded, but the decompressed content is itself binary -- body
         // becomes the empty placeholder, yet the wire bytes forwarded must still be the
         // original gzip-compressed bytes, and the header must still say so.
-        assertTrue(parsed.bodyContentEncodingConsumed)
         assertTrue(parsed.isBodyBinary)
 
         val reserialized = engine.serializeResponse(parsed)
@@ -192,7 +197,6 @@ class MitmProxyEngineSerializeConsistencyTest {
         val response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello"
         val parsed = HttpParser.tryParseResponse(response.toByteArray())
         checkNotNull(parsed)
-        assertFalse(parsed.bodyContentEncodingConsumed)
 
         val reserialized = engine.serializeResponse(parsed)
         val text = String(reserialized, Charsets.ISO_8859_1)
@@ -214,7 +218,6 @@ class MitmProxyEngineSerializeConsistencyTest {
         val parsed = HttpParser.tryParseResponse(wire)
         checkNotNull(parsed)
         assertEquals(jsonBody, parsed.body) // sanity: the parser decompressed it for display
-        assertTrue(parsed.bodyContentEncodingConsumed)
         assertFalse(parsed.bodyReplaced)
 
         val reserialized = engine.serializeResponse(parsed)

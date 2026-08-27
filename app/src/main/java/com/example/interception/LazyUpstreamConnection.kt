@@ -9,7 +9,6 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
-import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 
 /**
@@ -39,7 +38,6 @@ import javax.net.ssl.X509TrustManager
 internal class LazyUpstreamConnection(
     private val host: String,
     private val port: Int,
-    private val trustManagers: Array<TrustManager> = arrayOf(AcceptAllTrustManager),
     private val connectionFactory: (String, Int) -> Socket = { h, p -> Socket(h, p) },
     private val onFirstConnect: (Connected) -> Unit = {},
 ) {
@@ -77,7 +75,7 @@ internal class LazyUpstreamConnection(
             try {
                 val socket = connectionFactory(host, port)
                 val sslSocket = SSLContext.getInstance("TLS").apply {
-                    init(null, trustManagers, SecureRandom())
+                    init(null, arrayOf(AcceptAllTrustManager), SecureRandom())
                 }.socketFactory.createSocket(socket, host, port, true) as SSLSocket
                 sslSocket.startHandshake()
                 val result = Connected(socket, sslSocket, sslSocket.getInputStream(), sslSocket.getOutputStream())

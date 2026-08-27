@@ -1,7 +1,7 @@
-package com.example.interception.http
+package com.example.interception
 
 import android.os.Build
-import com.example.interception.RuleEnforcer
+import com.example.interception.http.ParsedHttpMessage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue

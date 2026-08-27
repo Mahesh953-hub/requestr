@@ -36,8 +36,6 @@ class HttpParserBodyDecodingTest {
         assertNotNull(parsed)
         assertEquals(jsonBody, parsed!!.body)
         assertFalse(parsed.isBodyBinary)
-        assertEquals("gzip", parsed.bodyEncoding)
-        assertTrue(parsed.bodyContentEncodingConsumed)
         // §1.4 correctness constraint: consumedBytes must reflect the raw (compressed) wire
         // size, i.e. exactly headers + compressed body -- never the decompressed length.
         assertEquals(wire.size, parsed.consumedBytes)
@@ -55,7 +53,6 @@ class HttpParserBodyDecodingTest {
 
         assertNotNull(parsed)
         assertEquals(jsonBody, parsed!!.body)
-        assertTrue(parsed.bodyContentEncodingConsumed)
         assertEquals(wire.size, parsed.consumedBytes)
     }
 
@@ -67,8 +64,6 @@ class HttpParserBodyDecodingTest {
         assertNotNull(parsed)
         assertEquals("{\"status\":\"ok\"}", parsed!!.body)
         assertFalse(parsed.isBodyBinary)
-        assertEquals("identity", parsed.bodyEncoding)
-        assertFalse(parsed.bodyContentEncodingConsumed)
     }
 
     @Test
@@ -80,9 +75,7 @@ class HttpParserBodyDecodingTest {
         val parsed = HttpParser.tryParseResponse(wire)
 
         assertNotNull(parsed)
-        assertEquals("br", parsed!!.bodyEncoding)
-        assertFalse(parsed.bodyContentEncodingConsumed)
-        assertEquals(wire.size, parsed.consumedBytes)
+        assertEquals(wire.size, parsed!!.consumedBytes)
     }
 
     @Test
@@ -94,8 +87,7 @@ class HttpParserBodyDecodingTest {
         val parsed = HttpParser.tryParseResponse(wire)
 
         assertNotNull(parsed)
-        assertFalse(parsed!!.bodyContentEncodingConsumed)
-        assertEquals(wire.size, parsed.consumedBytes)
+        assertEquals(wire.size, parsed!!.consumedBytes)
     }
 
     @Test
@@ -127,6 +119,5 @@ class HttpParserBodyDecodingTest {
 
         assertNotNull(parsed)
         assertEquals(jsonBody, parsed!!.body)
-        assertTrue(parsed.bodyContentEncodingConsumed)
     }
 }
