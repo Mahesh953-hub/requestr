@@ -63,7 +63,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
     // migrations have a real prior-version JSON snapshot to validate against instead of trusting
     // hand-written SQL alone.
     // v6.0 transplant: bumped 10 -> 11 to add FlowPipelineEntity (multi-flow persistence).
-    version = 11,
+    // Master plan Phase 1-3: bumped 11 -> 12 to add SavedApiRequestEntity's API-key placement
+    // column (§2.13) and per-request mock-mode columns (§2.8). RuleAction.MOCK_RESPONSE (§1.5)
+    // needs no schema change -- RuleAction is persisted by name.
+    version = 12,
     exportSchema = true,
 )
 @TypeConverters(RequestrTypeConverters::class)
@@ -112,7 +115,7 @@ abstract class RequestrDatabase : RoomDatabase() {
                     // real, disclosed data loss (see AUDIT_REPORT.md/TODO_v5.md) -- but it is
                     // strictly better than a crash loop, and it does not touch the v8->v9 path,
                     // which stays a real, non-destructive migration.
-                    .addMigrations(MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
+                    .addMigrations(MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
                     .fallbackToDestructiveMigrationFrom(/* dropAllTables = */ true, 1, 2, 3, 4, 5, 6, 7)
                     .build()
                     .also { INSTANCE = it }
@@ -136,6 +139,31 @@ abstract class RequestrDatabase : RoomDatabase() {
          * and this migration agree on schema instead of Room throwing
          * "Migration didn't properly handle ... connect_attempts" at database-open time.
          */
+        /**
+         * v11 -> v12 (master plan Phase 1-3). Adds the API-key placement column (§2.13) and the
+         * per-saved-request mock-mode columns (§2.8) to `saved_api_requests`. Every column is
+         * `NOT NULL DEFAULT`-ed to the value the corresponding Kotlin field already defaults to,
+         * so existing rows keep behaving exactly as before (header-placed API keys, mock off).
+         *
+         * `mockHeaders` stores a JSON array via [RequestrTypeConverters], so its default is `[]`
+         * rather than `''` — an empty string would decode to an empty list too, but `[]` keeps
+         * the on-disk value consistent with what Room writes for a fresh row.
+         */
+        val MIGRATION_11_12: Migration = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE saved_api_requests ADD COLUMN apiKeyLocation TEXT NOT NULL DEFAULT 'HEADER'")
+                db.execSQL("ALTER TABLE saved_api_requests ADD COLUMN mockEnabled INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE saved_api_requests ADD COLUMN mockStatusCode INTEGER NOT NULL DEFAULT 200")
+                db.execSQL("ALTER TABLE saved_api_requests ADD COLUMN mockStatusMessage TEXT NOT NULL DEFAULT 'OK'")
+                db.execSQL("ALTER TABLE saved_api_requests ADD COLUMN mockHeaders TEXT NOT NULL DEFAULT '[]'")
+                // The mockBody default is spelled out here to match
+                // ApiRequestItem.mockBody/SavedApiRequestEntity.mockBody exactly, so an upgraded
+                // request and a freshly-created one behave identically once mock mode is enabled.
+                db.execSQL("ALTER TABLE saved_api_requests ADD COLUMN mockBody TEXT NOT NULL DEFAULT '{\"mocked\": true}'")
+                db.execSQL("ALTER TABLE saved_api_requests ADD COLUMN mockDelayMs INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         /**
          * v10 -> v11 (transplant slice 11). Adds the `flow_pipelines` table for
          * multi-flow persistence. Existing `flow_nodes`/`flow_connections` rows

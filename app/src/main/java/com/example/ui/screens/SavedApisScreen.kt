@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -25,9 +27,12 @@ import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -37,8 +42,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Switch
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.rememberSwipeToDismissBoxState
@@ -53,11 +60,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.export.PostmanCollectionCodec
 import com.example.data.models.ApiRequestItem
 import com.example.data.models.CollectionTestReport
 import com.example.data.models.HttpMethod
@@ -79,8 +88,10 @@ fun SavedApisScreen(
     onOpenRequest: (ApiRequestItem) -> Unit
 ) {
     val allRequests by ApiCollectionsRepository.requests.collectAsState()
+    val allFolders by ApiCollectionsRepository.folders.collectAsState()
     var showSaved by remember { mutableStateOf(true) }
     val coroutineScope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     // v3.4 Part C — C3 (Test assertions / test runner): "test runner mode" — run every saved
     // request's assertions in sequence (folderId = null covers the whole collection; there is
@@ -89,6 +100,37 @@ fun SavedApisScreen(
     var isRunningTests by remember { mutableStateOf(false) }
     var testReport by remember { mutableStateOf<CollectionTestReport?>(null) }
     val testableCount = remember(allRequests) { allRequests.count { r -> r.assertions.any { it.enabled } } }
+    // Master plan §2.12 — opt-in halt-on-failure for the collection runner; defaults to off so
+    // "Run All Tests" behaves exactly as before unless the user turns this on.
+    var haltOnFailure by remember { mutableStateOf(false) }
+
+    // Master plan §1.6 — Postman Collection v2.1 export/import, following the same
+    // MediaStoreExporter/FileExporter share pattern SettingsScreen's workspace export uses.
+    val postmanImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        coroutineScope.launch {
+            val json = runCatching {
+                context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+            }.getOrNull()
+            if (json == null) {
+                android.widget.Toast.makeText(context, "Could not read the selected file.", android.widget.Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            val result = PostmanCollectionCodec.import(json)
+            // Master plan §1.6 -- imported requests already carry a folderId pointing at one of
+            // result.folders; that folder must exist in the repository BEFORE the requests are
+            // saved, or every one of those folderId values is a dangling reference to a folder
+            // that was only ever mentioned in this toast, never actually created.
+            ApiCollectionsRepository.addFolders(result.folders)
+            result.requests.forEach { ApiCollectionsRepository.saveRequest(it) }
+            val message = "Imported ${result.requests.size} request(s)" +
+                (if (result.folders.isNotEmpty()) " in ${result.folders.size} folder(s)" else "") +
+                (if (result.errors.isNotEmpty()) " (${result.errors.size} items skipped)" else "")
+            android.widget.Toast.makeText(context, message, android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
 
     val filtered = remember(allRequests, showSaved) {
         if (showSaved) allRequests
@@ -121,6 +163,39 @@ fun SavedApisScreen(
                 modifier = Modifier.weight(1f)
             )
 
+            // Master plan §1.6 — Postman Collection v2.1 export/import. Export always available
+            // (an empty collection is still a valid, if pointless, export); import is always
+            // available too since it starts from zero saved requests.
+            IconButton(
+                onClick = {
+                    coroutineScope.launch {
+                        runCatching {
+                            val json = PostmanCollectionCodec.export(
+                                collectionName = "requestr export",
+                                requests = allRequests,
+                                folders = allFolders,
+                            )
+                            val target = com.example.data.export.MediaStoreExporter.writeText(
+                                context,
+                                "requestr-collection-${System.currentTimeMillis()}.postman_collection.json",
+                                "application/json",
+                                json,
+                            ) ?: error("Failed to write Postman collection JSON")
+                            com.example.data.export.FileExporter.shareFile(
+                                context, target, "application/json", "requestr Postman Collection"
+                            )
+                        }.onFailure { e ->
+                            android.widget.Toast.makeText(context, "Export failed: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+            ) {
+                Icon(Icons.Default.Upload, "Export as Postman Collection", tint = MaterialTheme.colorScheme.onSurface)
+            }
+            IconButton(onClick = { postmanImportLauncher.launch(arrayOf("application/json")) }) {
+                Icon(Icons.Default.Download, "Import Postman Collection", tint = MaterialTheme.colorScheme.onSurface)
+            }
+
             // v3.4 Part C — C3: only shown when at least one saved request actually has an
             // enabled assertion — otherwise there is nothing to run and the button would just
             // be a dead end.
@@ -129,7 +204,10 @@ fun SavedApisScreen(
                     onClick = {
                         isRunningTests = true
                         coroutineScope.launch {
-                            testReport = ApiCollectionsRepository.runCollectionTests(folderId = null)
+                            testReport = ApiCollectionsRepository.runCollectionTests(
+                                folderId = null,
+                                haltOnFailure = haltOnFailure,
+                            )
                             isRunningTests = false
                         }
                     },
@@ -145,6 +223,31 @@ fun SavedApisScreen(
                     }
                 }
             }
+        }
+
+        // Master plan §2.12 — halt-on-failure toggle for the test runner. Kept outside the
+        // header row (which is already tight) but still above the request list so it is always
+        // visible while deciding whether to run tests.
+        if (testableCount > 0) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "Halt on first failure",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f)
+                )
+                Switch(
+                    checked = haltOnFailure,
+                    onCheckedChange = { haltOnFailure = it },
+                    colors = SwitchDefaults.colors(),
+                )
+            }
+            Spacer(modifier = Modifier.height(4.dp))
         }
 
         // Tab row: Saved / Liked
@@ -288,11 +391,18 @@ private fun TestReportContent(report: CollectionTestReport) {
 
 @Composable
 private fun RequestTestResultRow(result: RequestTestResult) {
+    // Master plan §2.12 — a row halted-out of the run renders distinctly from both a pass and
+    // a genuine failure, so the user can tell "never ran because an earlier step failed" apart
+    // from "ran and failed".
+    val skipped = ApiCollectionsRepository.isSkippedResult(result)
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+            .background(
+                if (skipped) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f)
+                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+            )
             .padding(10.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -302,25 +412,37 @@ private fun RequestTestResultRow(result: RequestTestResult) {
                 result.request.name,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 13.sp,
-                color = MaterialTheme.colorScheme.onSurface,
+                color = if (skipped) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
-            if (result.requestFailed) {
-                Icon(Icons.Default.Close, "Request failed", tint = Color(0xFFEF4444), modifier = Modifier.size(16.dp))
-            } else {
-                val passed = result.results.count { it.passed }
-                Text(
-                    "$passed/${result.results.size}",
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = if (passed == result.results.size) Color(0xFF22C55E) else Color(0xFFEF4444)
+            when {
+                skipped -> Icon(
+                    Icons.Default.SkipNext, "Skipped (halted after an earlier failure)",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp)
                 )
+                result.requestFailed -> Icon(Icons.Default.Close, "Request failed", tint = Color(0xFFEF4444), modifier = Modifier.size(16.dp))
+                else -> {
+                    val passed = result.results.count { it.passed }
+                    Text(
+                        "$passed/${result.results.size}",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (passed == result.results.size) Color(0xFF22C55E) else Color(0xFFEF4444)
+                    )
+                }
             }
         }
 
-        if (result.requestFailed) {
+        if (skipped) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                "Skipped — run halted after an earlier request failed.",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        } else if (result.requestFailed) {
             Spacer(modifier = Modifier.height(4.dp))
             Text(
                 "Request could not be executed (network/DNS error).",

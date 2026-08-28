@@ -49,6 +49,13 @@ data class ApiRequestItem(
     val basicPassword: String = "",
     val apiKeyHeader: String = "X-API-Key",
     val apiKeyValue: String = "",
+    /**
+     * Master plan §2.13 — where an [AuthType.API_KEY] credential is placed on the wire.
+     * Previously hardcoded to a request header; [apiKeyHeader] now doubles as the query
+     * parameter name when this is [ApiKeyLocation.QUERY_PARAM]. Defaults to
+     * [ApiKeyLocation.HEADER] so every already-saved request keeps its current behavior.
+     */
+    val apiKeyLocation: ApiKeyLocation = ApiKeyLocation.HEADER,
     val bodyType: RequestBodyType = RequestBodyType.NONE,
     val bodyContent: String = "{\n  \"message\": \"hello requestr\",\n  \"active\": true\n}",
     val formData: List<KeyValueItem> = emptyList(),
@@ -69,8 +76,37 @@ data class ApiRequestItem(
      * single target (status code / a response header / a top-level JSON body field / response
      * time) with a chosen comparison operator against an expected value.
      */
-    val assertions: List<Assertion> = emptyList()
+    val assertions: List<Assertion> = emptyList(),
+    /**
+     * Master plan §2.8 — per-saved-request mock mode. When true,
+     * [com.example.data.repository.ApiTestrRepository.executeRequest] returns [mockStatusCode] /
+     * [mockHeaders] / [mockBody] instead of dialing the network at all, so a screen can be
+     * driven without a live backend. Deliberately distinct from the live-MITM
+     * [com.example.data.local.RuleAction.MOCK_RESPONSE] action (§1.5), which short-circuits
+     * intercepted third-party traffic — this one is scoped to API Testr's own manual sends.
+     */
+    val mockEnabled: Boolean = false,
+    val mockStatusCode: Int = 200,
+    val mockStatusMessage: String = "OK",
+    val mockHeaders: List<KeyValueItem> = emptyList(),
+    /**
+     * Canonical default mock body. This exact string is duplicated in
+     * [com.example.data.local.SavedApiRequestEntity.mockBody] and in `MIGRATION_11_12`'s
+     * `DEFAULT` clause, and all three must stay identical: if they diverge, a request that
+     * existed before the upgrade behaves differently from an otherwise-identical request created
+     * after it, which is a bug that only surfaces on real user devices. Kept to a single line
+     * with no embedded newline so it round-trips through the migration's SQL literal unchanged.
+     */
+    val mockBody: String = "{\"mocked\": true}",
+    /** Artificial latency applied before the mock is returned, so loading states stay testable. */
+    val mockDelayMs: Long = 0L,
 )
+
+/**
+ * Master plan §2.13 — placement of an [AuthType.API_KEY] credential.
+ * Stored as its `name` in [com.example.data.local.SavedApiRequestEntity.apiKeyLocation].
+ */
+enum class ApiKeyLocation { HEADER, QUERY_PARAM }
 
 /**
  * v3.2 Part C — C2 (Request chaining): one "extract a response field into an Environment
@@ -177,7 +213,16 @@ data class ApiResponseData(
     val tlsTimeMs: Long = 38,
     val requestTimeMs: Long = 12,
     val responseTimeMs: Long = 50,
-    val error: String? = null
+    val error: String? = null,
+    /**
+     * Master plan §2.8 — true when this response was synthesized locally from a saved request's
+     * `mock*` fields instead of received over the network. This is the flag callers and the UI
+     * should branch on; [protocol] is only a human-readable display string, so matching on a
+     * `"mock"` value there would be a magic-string check that any future protocol rename would
+     * silently break. Defaults to false so every existing construction site — all of which
+     * describe real network responses — stays correct unchanged.
+     */
+    val isMocked: Boolean = false
 )
 
 data class ApiFolderItem(

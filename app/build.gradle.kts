@@ -239,6 +239,9 @@ dependencies {
   testImplementation(libs.junit)
   testImplementation(libs.kotlinx.coroutines.test)
   testImplementation(libs.robolectric)
+  // Master plan §1.9 — MockWebServer for OkHttp-backed unit tests of ApiTestrRepository
+  // (mirrors the coordinate already used by sdk/build.gradle.kts).
+  testImplementation("com.squareup.okhttp3:mockwebserver:4.10.0")
   // Task 10: MigrationTestHelper for Migration8To9Test, now that exportSchema = true gives it a
   // real prior-version (8.json) schema snapshot to migrate from.
   testImplementation(libs.androidx.room.testing)

@@ -685,6 +685,16 @@ class CaptureEngine(
                 // by the time a request reaches here the MITM decision has already been made.
                 // Nothing further to do at the per-transaction level; persist normally.
             }
+            com.example.data.local.RuleAction.MOCK_RESPONSE -> {
+                // §1.5 (plan Gap #11): MOCK_RESPONSE's whole point is answering the client
+                // BEFORE a real upstream round trip happens -- see
+                // [MitmProxyEngine.handleParsedRequest] and [com.example.browser.CdpFetchAdapter]
+                // for the two engines that actually terminate the connection live and can do
+                // that short-circuit. This tun-pipeline path only ever sees [request]/[response]
+                // after the real exchange already completed on the wire, so there is nothing
+                // left to mock post-hoc here; persist the real transaction as observed, same as
+                // LOG_ONLY.
+            }
         }
 
         // LOG_ONLY rules override the capture toggle — always persist tagged traffic

@@ -23,8 +23,6 @@ import kotlinx.coroutines.launch
 import org.bouncycastle.asn1.x500.X500Name
 import org.bouncycastle.asn1.x509.BasicConstraints
 import org.bouncycastle.asn1.x509.Extension
-import org.bouncycastle.asn1.x509.GeneralName
-import org.bouncycastle.asn1.x509.GeneralNames
 import org.bouncycastle.asn1.x509.KeyUsage
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
@@ -42,7 +40,6 @@ import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import java.util.Date
 import java.util.TreeMap
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -51,8 +48,6 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.SSLSession
 import javax.net.ssl.SSLSocket
-import javax.net.ssl.TrustManager
-import javax.net.ssl.X509TrustManager
 
 /**
  * Real MITM proxy with per-host TLS certificate generation.
@@ -102,7 +97,12 @@ class MitmProxyEngine(
     private val running = AtomicBoolean(false)
     private val packetCount = AtomicLong(0)
     private val sessionId = AtomicLong(System.currentTimeMillis())
-    private val certCache = ConcurrentHashMap<String, Pair<X509Certificate, KeyPair>>()
+    /**
+     * §3: bounded/expiring LRU (see [ExpiringLruCertCache]) instead of an unbounded map -- a
+     * long-running capture session that MITMs many distinct hosts must not retain every
+     * generated (RSA-2048 keypair + cert) forever.
+     */
+    private val certCache = ExpiringLruCertCache()
 
     val port: Int get() = serverSocket?.localPort ?: 0
 
@@ -223,10 +223,10 @@ class MitmProxyEngine(
             output.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray())
             output.flush()
 
-            // Get or create per-host certificate
-            val (cert, keyPair) = certCache.computeIfAbsent(host) {
-                generateHostCert(context, host)
-            }
+            // Get or create per-host certificate. ExpiringLruCertCache.getOrCompute (§3) keeps
+            // the same "generate at most once per host, even under concurrent callers" semantics
+            // the old computeIfAbsent call site relied on, plus a 200-entry LRU cap + TTL.
+            val (cert, keyPair) = certCache.getOrCompute(host) { h -> generateHostCert(context, h) }
 
             // Upgrade client side to TLS with our per-host cert
             val sslContext = createSslContext(keyPair, cert)
@@ -243,49 +243,54 @@ class MitmProxyEngine(
             val decryptedInput = sslSocket.getInputStream()
             val decryptedOutput = sslSocket.getOutputStream()
 
-            // Connect to real server
-            val upstream = Socket(host, port)
-            val upstreamSsl = SSLContext.getInstance("TLS").apply {
-                init(null, arrayOf(TrustAllCerts), SecureRandom())
-            }.socketFactory.createSocket(upstream, host, port, true) as SSLSocket
-            try {
-                upstreamSsl.startHandshake()
-            } catch (e: javax.net.ssl.SSLException) {
-                persistFailedMitmTlsSession(db, host, port, "upstream handshake", e)
-                return
+            // MUST-FIX (§1.5 correctness): the upstream TCP+TLS connection to the real server
+            // used to be dialed and handshaked right here, unconditionally, *before* the first
+            // decrypted request was even read or evaluated against a rule. That meant a
+            // MOCK_RESPONSE-only connection -- the whole point of which is to avoid touching
+            // the real endpoint (working offline, not calling a production side effect, ...) --
+            // still opened a real socket and completed a real TLS handshake to it.
+            // LazyUpstreamConnection defers both until something on this connection actually
+            // needs the network: the first REDIRECT / MODIFY_REQUEST / LOG_ONLY-forwarded
+            // request, or non-HTTP/1.x blind-relay bytes (see inspectClientToServer /
+            // handleParsedRequest). It connects at most once and is reused for every later
+            // request on this same client connection.
+            //
+            // W5 aliasing + M2 TLS-session persistence (previously done unconditionally right
+            // after the eager connect, below) move into onFirstConnect: they still run --
+            // exactly once, synchronously, before any caller's connect() call returns -- just
+            // deferred until an upstream socket actually exists. Normal (non-mocked) traffic
+            // still gets this on its very first request, so lineage-join behaviour for real
+            // traffic is unchanged; a fully-mocked connection simply never triggers it.
+            val upstream = LazyUpstreamConnection(host, port) { connected ->
+                // W5: the MITM proxy terminates TLS itself, so tlsSessionId/connectionId have
+                // historically been keyed as "$host:$port" -- a real key, but a different
+                // convention than the 5-tuple ConnectionLineage joins on for the VPN/tun path.
+                // client (the accepted Socket) and connected.socket (the Socket this engine
+                // itself opened) together give the real 5-tuple this MITM'd connection
+                // corresponds to, so register the host:port alias against the canonical
+                // ConnectionKey.forTcp key instead of inventing a third convention.
+                val canonicalConnectionId = runCatching {
+                    com.example.correlation.ConnectionKey.forTcp(
+                        srcIp = client.inetAddress?.hostAddress ?: return@runCatching null,
+                        srcPort = client.port,
+                        dstIp = connected.socket.inetAddress?.hostAddress ?: return@runCatching null,
+                        dstPort = port,
+                    )
+                }.getOrNull()
+                if (canonicalConnectionId != null) {
+                    com.example.correlation.ConnectionAliasRegistry.register(
+                        alias = com.example.correlation.ConnectionKey.forHostPort(host, port),
+                        canonical = canonicalConnectionId,
+                    )
+                }
+
+                // M2: persist a TlsSessionEntity for this MITM'd handshake. Unlike the
+                // undecoded/VPN path (CaptureEngine, ClientHello-only), we actually completed
+                // both TLS legs here, so we know the *negotiated* cipher/protocol/ALPN from the
+                // client-facing session and the *real* peer certificate from the upstream leg
+                // (the client-facing cert is ours, not the server's — no signal there).
+                persistMitmTlsSession(db, host, port, sslSocket, connected.sslSocket, canonicalConnectionId)
             }
-
-            val upstreamInput = upstreamSsl.getInputStream()
-            val upstreamOutput = upstreamSsl.getOutputStream()
-
-            // W5: the MITM proxy terminates TLS itself, so tlsSessionId/connectionId have
-            // historically been keyed as "$host:$port" -- a real key, but a different
-            // convention than the 5-tuple ConnectionLineage joins on for the VPN/tun path.
-            // client (the accepted Socket) and upstream (the Socket this engine itself opened)
-            // together give the real 5-tuple this MITM'd connection corresponds to, so register
-            // the host:port alias against the canonical ConnectionKey.forTcp key instead of
-            // inventing a third convention.
-            val canonicalConnectionId = runCatching {
-                com.example.correlation.ConnectionKey.forTcp(
-                    srcIp = client.inetAddress?.hostAddress ?: return@runCatching null,
-                    srcPort = client.port,
-                    dstIp = upstream.inetAddress?.hostAddress ?: return@runCatching null,
-                    dstPort = port,
-                )
-            }.getOrNull()
-            if (canonicalConnectionId != null) {
-                com.example.correlation.ConnectionAliasRegistry.register(
-                    alias = com.example.correlation.ConnectionKey.forHostPort(host, port),
-                    canonical = canonicalConnectionId,
-                )
-            }
-
-            // M2: persist a TlsSessionEntity for this MITM'd handshake. Unlike the
-            // undecoded/VPN path (CaptureEngine, ClientHello-only), we actually completed
-            // both TLS legs here, so we know the *negotiated* cipher/protocol/ALPN from the
-            // client-facing session and the *real* peer certificate from the upstream leg
-            // (the client-facing cert is ours, not the server's — no signal there).
-            persistMitmTlsSession(db, host, port, sslSocket, upstreamSsl, canonicalConnectionId)
 
             // Inspecting bidirectional relay: parse decrypted HTTP/1.x with
             // HttpParser, enforce rules on the parsed messages, persist each
@@ -305,12 +310,12 @@ class MitmProxyEngine(
             val sent = AtomicLong(0)
             val received = AtomicLong(0)
             val t1 = Thread {
-                inspectClientToServer(db, decryptedInput, upstreamOutput, decryptedOutput,
-                    clientWriteLock, host, port, pending, sent)
+                inspectClientToServer(db, decryptedInput, upstream, decryptedOutput,
+                    clientWriteLock, host, port, pending, sent, logRequests, logResponses)
             }
             val t2 = Thread {
                 inspectServerToClient(
-                    db, upstreamInput, decryptedOutput, clientWriteLock, pending, host, port, received,
+                    db, upstream, decryptedOutput, clientWriteLock, pending, host, port, received,
                     logRequests, logResponses,
                 )
             }
@@ -391,20 +396,23 @@ class MitmProxyEngine(
      * Client→server direction. Buffers decrypted bytes until [HttpParser] can
      * parse a complete request, applies request-side rules AFTER parsing
      * (BLOCK answers the client directly; REDIRECT / MODIFY_REQUEST rewrite
-     * the forwarded bytes), and enqueues each forwarded request for pairing
-     * with its response. Non-HTTP/1.x content flushes raw and switches this
-     * direction to blind relay.
+     * the forwarded bytes; MOCK_RESPONSE short-circuits with a synthesized
+     * response and never reaches upstream at all -- see [handleParsedRequest]),
+     * and enqueues each forwarded request for pairing with its response.
+     * Non-HTTP/1.x content flushes raw and switches this direction to blind relay.
      */
     private fun inspectClientToServer(
         db: RequestrDatabase,
         input: InputStream,
-        upstreamOut: OutputStream,
+        upstream: LazyUpstreamConnection,
         clientOut: OutputStream,
         clientWriteLock: Any,
         host: String,
         port: Int,
         pending: ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>,
         bytesSentToUpstream: AtomicLong,
+        logRequests: Boolean,
+        logResponses: Boolean,
     ) {
         val buffer = ByteArrayOutputStream()
         val chunk = ByteArray(BUFFER_SIZE)
@@ -415,6 +423,7 @@ class MitmProxyEngine(
                 if (n == -1) break
                 bytesSentToUpstream.addAndGet(n.toLong())
                 if (blind) {
+                    val upstreamOut = connectOrThrow(db, upstream, host, port)
                     upstreamOut.write(chunk, 0, n)
                     upstreamOut.flush()
                     continue
@@ -426,7 +435,11 @@ class MitmProxyEngine(
                     val parsed = HttpParser.tryParseRequest(bytes, host, port, true)
                     if (parsed == null) {
                         if (!couldBecomeHttpRequest(bytes) || bytes.size > MAX_UNPARSED_BUFFER) {
-                            // Not HTTP/1.x (HTTP/2 preface, WS frames, ...) — relay raw from now on.
+                            // Not HTTP/1.x (HTTP/2 preface, WS frames, ...) — relay raw from now
+                            // on. Blind-relay bytes are, by definition, never rule-evaluated
+                            // (there is no parsed request to check), so they always need
+                            // upstream -- this is a genuine "actually needs the network" case.
+                            val upstreamOut = connectOrThrow(db, upstream, host, port)
                             upstreamOut.write(bytes)
                             upstreamOut.flush()
                             buffer.reset()
@@ -436,13 +449,45 @@ class MitmProxyEngine(
                     } else {
                         val raw = bytes.copyOfRange(0, parsed.consumedBytes)
                         bytes = bytes.copyOfRange(parsed.consumedBytes, bytes.size)
-                        handleParsedRequest(db, parsed, raw, upstreamOut, clientOut, clientWriteLock, pending)
+                        handleParsedRequest(
+                            db, parsed, raw, upstream, clientOut, clientWriteLock, pending,
+                            host, port, logRequests, logResponses,
+                        )
                         buffer.reset()
                         buffer.write(bytes)
                     }
                 }
             }
-        } catch (_: Exception) { /* connection closed */ }
+        } catch (_: Exception) { /* connection closed */
+        } finally {
+            // §1.5 MUST-FIX: guarantees inspectServerToClient's awaitConnectedOrGiveUp always
+            // unblocks, however this loop ends -- normal EOF, an exception (including a
+            // failed connectOrThrow above), or falling into blind relay. A no-op if connect()
+            // already ran (successfully or not): CountDownLatch.countDown() on an
+            // already-released latch does nothing.
+            upstream.giveUp()
+        }
+    }
+
+    /**
+     * Connects (or reuses the existing connection) on demand for whichever
+     * [inspectClientToServer] direction actually needs to write to the real server. Only
+     * translates [javax.net.ssl.SSLException] into a persisted failure record -- matching the
+     * previous eager call site, which only guarded [SSLSocket.startHandshake] this way and let
+     * a raw connect failure (unknown host, connection refused, ...) propagate untouched.
+     */
+    private fun connectOrThrow(
+        db: RequestrDatabase,
+        upstream: LazyUpstreamConnection,
+        host: String,
+        port: Int,
+    ): OutputStream {
+        return try {
+            upstream.connect().output
+        } catch (e: javax.net.ssl.SSLException) {
+            persistFailedMitmTlsSession(db, host, port, "upstream handshake", e)
+            throw e
+        }
     }
 
     /**
@@ -453,7 +498,7 @@ class MitmProxyEngine(
      */
     private fun inspectServerToClient(
         db: RequestrDatabase,
-        input: InputStream,
+        upstream: LazyUpstreamConnection,
         clientOut: OutputStream,
         clientWriteLock: Any,
         pending: ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>,
@@ -463,6 +508,13 @@ class MitmProxyEngine(
         logRequests: Boolean,
         logResponses: Boolean,
     ) {
+        // §1.5 MUST-FIX: mirrors inspectClientToServer's lazy connect -- this reader has
+        // nothing to read until the upstream connection actually exists. If the whole
+        // client→server side finishes without ever needing it (e.g. every request on this
+        // connection was MOCK_RESPONSE), upstream.giveUp() unblocks this with null and this
+        // direction never touches the network either.
+        val input = upstream.awaitConnectedOrGiveUp()?.input ?: return
+
         val buffer = ByteArrayOutputStream()
         val chunk = ByteArray(BUFFER_SIZE)
         var blind = false
@@ -487,7 +539,7 @@ class MitmProxyEngine(
                         pending.peek()?.first?.url,
                         pending.peek()?.first?.method,
                     )
-                    if (response == null || !chunkedBodyComplete(bytes, response)) {
+                    if (response == null) {
                         if (!couldBecomeHttpResponse(bytes) || bytes.size > MAX_UNPARSED_BUFFER) {
                             synchronized(clientWriteLock) {
                                 clientOut.write(bytes)
@@ -511,16 +563,28 @@ class MitmProxyEngine(
 
     // ── Rule enforcement (post-parse) ───────────────────────────────────
 
-    private fun handleParsedRequest(
+    /**
+     * `internal` (not `private`), same rationale as [emitTransaction]: this is where
+     * MOCK_RESPONSE's short-circuit (§1.5) actually happens, and asserting "never dials
+     * upstream / never enqueues into `pending`" needs direct access to a fake/instrumented
+     * [LazyUpstreamConnection] and `pending` without standing up a real TLS/socket pair
+     * end-to-end.
+     */
+    internal fun handleParsedRequest(
         db: RequestrDatabase,
         request: ParsedHttpMessage,
         raw: ByteArray,
-        upstreamOut: OutputStream,
+        upstream: LazyUpstreamConnection,
         clientOut: OutputStream,
         clientWriteLock: Any,
         pending: ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>,
+        host: String,
+        port: Int,
+        logRequests: Boolean,
+        logResponses: Boolean,
     ) {
-        when (RuleEnforcer.checkRules(db, request.url, request.host)) {
+        val rule = RuleEnforcer.getMatchingRule(db, request.url, request.host)
+        val bytesToForward: ByteArray = when (rule?.action ?: RuleAction.LOG_ONLY) {
             RuleAction.BLOCK -> {
                 Log.i(TAG, "BLOCKED (decrypted): ${request.method?.name} ${request.url.take(80)}")
                 synchronized(clientWriteLock) {
@@ -529,10 +593,31 @@ class MitmProxyEngine(
                     )
                     clientOut.flush()
                 }
-                // Dropped: never forwarded upstream, never enqueued for pairing.
+                // Dropped: never forwarded upstream, never enqueued for pairing. Returns here
+                // rather than falling through to the shared forward tail below -- this is the
+                // real exception to that otherwise-identical connect/enqueue/write/flush path.
+                return
+            }
+            RuleAction.MOCK_RESPONSE -> {
+                // §1.5: short-circuit here, same shape as BLOCK above -- never dials upstream,
+                // never enqueues into `pending` (there is no real response coming to pair with
+                // it), and writes a synthesized response straight back to the client instead.
+                // RuleEnforcer.buildMockResponse is shared with the CDP fetch-interception path
+                // (CdpFetchAdapter) -- same replacementValue schema, one config format either way.
+                val mockResponse = RuleEnforcer.buildMockResponse(rule?.replacementValue, request.url)
+                synchronized(clientWriteLock) {
+                    clientOut.write(serializeResponse(mockResponse))
+                    clientOut.flush()
+                }
+                Log.i(TAG, "MOCKED (decrypted): ${request.method?.name} ${request.url.take(80)} -> ${mockResponse.statusCode}")
+                // Still surfaced as a captured transaction (0ms latency -- no real round trip
+                // happened) so a mocked request is not invisible in the traffic list.
+                emitTransaction(request, mockResponse, 0L, "$host:$port", logRequests, logResponses)
+                // Same reasoning as BLOCK above: return here rather than reaching the shared
+                // forward tail, since this path never forwards anything upstream.
+                return
             }
             RuleAction.REDIRECT -> {
-                val rule = RuleEnforcer.getMatchingRule(db, request.url, request.host)
                 if (rule?.replacementValue?.isNotBlank() == true) {
                     request.url = rule.replacementValue!!
                     runCatching { java.net.URI(request.url).host?.let { request.host = it } }
@@ -540,23 +625,24 @@ class MitmProxyEngine(
                     headers["host"] = request.host
                     request.headers = headers
                 }
-                pending.add(request to System.currentTimeMillis())
-                upstreamOut.write(serializeRequest(request))
-                upstreamOut.flush()
+                serializeRequest(request)
             }
             RuleAction.MODIFY_REQUEST -> {
-                val rule = RuleEnforcer.getMatchingRule(db, request.url, request.host)
                 rule?.replacementValue?.let { RuleEnforcer.applyRequestModification(request, it) }
-                pending.add(request to System.currentTimeMillis())
-                upstreamOut.write(serializeRequest(request))
-                upstreamOut.flush()
+                serializeRequest(request)
             }
-            else -> { // LOG_ONLY — forward the exact original bytes
-                pending.add(request to System.currentTimeMillis())
-                upstreamOut.write(raw)
-                upstreamOut.flush()
-            }
+            else -> raw // LOG_ONLY — forward the exact original bytes
         }
+
+        // §1.5 MUST-FIX: connect (or reuse) lazily -- this is the first point in the whole
+        // client→server pipeline where a REDIRECT/MODIFY_REQUEST/LOG_ONLY request actually
+        // needs the network. BLOCK and MOCK_RESPONSE both `return` above without ever reaching
+        // this shared tail -- they are the real exceptions to it, not just two more branches
+        // that happen to look similar.
+        val upstreamOut = connectOrThrow(db, upstream, host, port)
+        pending.add(request to System.currentTimeMillis())
+        upstreamOut.write(bytesToForward)
+        upstreamOut.flush()
     }
 
     private fun handleParsedResponse(
@@ -585,9 +671,9 @@ class MitmProxyEngine(
         val request = pair?.first
         var out = raw
         if (request != null) {
-            if (RuleEnforcer.checkRules(db, request.url, request.host) == RuleAction.MODIFY_RESPONSE) {
-                val rule = RuleEnforcer.getMatchingRule(db, request.url, request.host)
-                rule?.replacementValue?.let { RuleEnforcer.applyResponseModification(response, it) }
+            val rule = RuleEnforcer.getMatchingRule(db, request.url, request.host)
+            if (rule?.action == RuleAction.MODIFY_RESPONSE) {
+                rule.replacementValue?.let { RuleEnforcer.applyResponseModification(response, it) }
                 out = serializeResponse(response)
             }
         }
@@ -655,13 +741,40 @@ class MitmProxyEngine(
 
     // ── Re-serialization (only used when a rule modified the message) ───
 
-    private fun serializeRequest(request: ParsedHttpMessage): ByteArray {
-        val bodyBytes = request.body.toByteArray(Charsets.UTF_8)
+    /**
+     * `internal` (not `private`), matching [emitTransaction]'s precedent, purely so the
+     * §1.4 Content-Encoding/Content-Length self-consistency behavior below is directly
+     * unit-testable without standing up a real TLS/socket relay end-to-end.
+     *
+     * MUST-FIX 1 (severe): this used to always write `request.body.toByteArray(UTF_8)` --
+     * [HttpBodyDecoder]'s decoded/decompressed *text rendering* of the body, which is the
+     * empty [HttpBodyDecoder.BINARY_BODY_PLACEHOLDER] for any binary, undecodable
+     * (br/zstd/compress), or failed-decompression body. Since serializeRequest/serializeResponse
+     * run for every REDIRECT/MODIFY_REQUEST/MODIFY_RESPONSE/MOCK_RESPONSE-matched message --
+     * not only ones a rule actually rewrote the body of -- that meant every image, protobuf,
+     * or Brotli request/response whose connection matched *any* rule (even a header-only
+     * MODIFY_* edit) was forwarded with a zero-byte body, while a stale nonzero Content-Length
+     * from the original headers survived untouched (the old `if (bodyBytes.isNotEmpty())`
+     * guard skipped fixing it up), hanging the upstream/client waiting for a body that would
+     * never arrive.
+     *
+     * Fixed by keying entirely off [ParsedHttpMessage.bodyReplaced]: only a rule's explicit
+     * `bodyReplace` sets that flag (see RuleEnforcer.applyRequestModification), and only then
+     * is [ParsedHttpMessage.body] the real intended content. Every other case -- no rule
+     * matched, or the rule only touched headers/status -- writes [ParsedHttpMessage.rawBodyBytes]
+     * back out verbatim (the exact bytes [HttpParser] captured off the wire, before any
+     * decompression/binary-detection lossiness), and leaves Content-Encoding untouched since
+     * nothing about the body actually changed.
+     */
+    internal fun serializeRequest(request: ParsedHttpMessage): ByteArray {
         val headers = TreeMap<String, String>(String.CASE_INSENSITIVE_ORDER).apply {
             putAll(request.headers)
         }
         headers.remove("Transfer-Encoding") // re-serialized with an explicit length
-        if (bodyBytes.isNotEmpty()) headers["Content-Length"] = bodyBytes.size.toString()
+        val bodyBytes = bodyBytesFor(request, headers)
+        // Always set Content-Length to match exactly what is written, including the
+        // zero-length case -- never leave a stale value (see MUST-FIX 1 above).
+        headers["Content-Length"] = bodyBytes.size.toString()
         val sb = StringBuilder()
         sb.append(request.method?.name ?: "GET").append(' ')
             .append(request.path.ifEmpty { "/" }).append(' ')
@@ -671,12 +784,13 @@ class MitmProxyEngine(
         return sb.toString().toByteArray(Charsets.ISO_8859_1) + bodyBytes
     }
 
-    private fun serializeResponse(response: ParsedHttpMessage): ByteArray {
-        val bodyBytes = response.body.toByteArray(Charsets.UTF_8)
+    /** See [serializeRequest]'s KDoc for why this is `internal` and how body bytes are chosen. */
+    internal fun serializeResponse(response: ParsedHttpMessage): ByteArray {
         val headers = TreeMap<String, String>(String.CASE_INSENSITIVE_ORDER).apply {
             putAll(response.headers)
         }
         headers.remove("Transfer-Encoding") // parser de-chunked the body
+        val bodyBytes = bodyBytesFor(response, headers)
         headers["Content-Length"] = bodyBytes.size.toString()
         val sb = StringBuilder()
         sb.append(response.version.ifEmpty { "HTTP/1.1" }).append(' ')
@@ -685,6 +799,28 @@ class MitmProxyEngine(
         for ((k, v) in headers) sb.append(k).append(": ").append(v).append("\r\n")
         sb.append("\r\n")
         return sb.toString().toByteArray(Charsets.ISO_8859_1) + bodyBytes
+    }
+
+    /**
+     * Shared by [serializeRequest] and [serializeResponse]: decides the body bytes to write
+     * onto the wire for [msg], mutating [headers] to match (see [serializeRequest]'s KDoc for
+     * the full MUST-FIX 1 rationale this preserves). A rule's explicit `bodyReplace` writes the
+     * replacement plaintext and drops Content-Encoding -- any inherited value would now be a
+     * lie about bytes that are not actually gzip/br/whatever-compressed anymore. Every other
+     * message forwards [ParsedHttpMessage.rawBodyBytes] verbatim -- never
+     * [HttpBodyDecoder]'s (possibly lossy/empty) text rendering of them -- falling back to
+     * [ParsedHttpMessage.body] only for messages that were never parsed off a real wire (e.g.
+     * hand-built test fixtures), where `body` *is* the real content. Content-Encoding is left
+     * untouched in that non-replaced case: nothing about the body actually changed, so whatever
+     * the client already believed about the encoding is still true.
+     */
+    private fun bodyBytesFor(msg: ParsedHttpMessage, headers: MutableMap<String, String>): ByteArray {
+        return if (msg.bodyReplaced) {
+            headers.remove("Content-Encoding")
+            msg.body.toByteArray(Charsets.UTF_8)
+        } else {
+            msg.rawBodyBytes ?: msg.body.toByteArray(Charsets.UTF_8)
+        }
     }
 
     // ── Parse-support helpers ───────────────────────────────────────────
@@ -699,47 +835,6 @@ class MitmProxyEngine(
     private fun couldBecomeHttpResponse(bytes: ByteArray): Boolean {
         val head = String(bytes, 0, bytes.size.coerceAtMost(5), Charsets.ISO_8859_1)
         return "HTTP/".startsWith(head)
-    }
-
-    /**
-     * [HttpParser.tryParseResponse] emits a (possibly truncated) body for chunked
-     * responses as soon as some chunks are buffered. Walk the raw chunk structure
-     * and only accept the parse once the terminal zero-size chunk has arrived.
-     */
-    private fun chunkedBodyComplete(bytes: ByteArray, response: ParsedHttpMessage): Boolean {
-        val te = response.headers["transfer-encoding"] ?: return true
-        if (!te.contains("chunked", ignoreCase = true)) return true
-        val bodyStart = (findHeaderEnd(bytes) ?: return true) + 4
-        var pos = bodyStart
-        while (true) {
-            val crlf = findCrlf(bytes, pos) ?: return false
-            val sizeHex = String(bytes, pos, crlf - pos, Charsets.ISO_8859_1).trim()
-            val size = sizeHex.split(";")[0].toIntOrNull(16) ?: return true // unparseable → accept as-is
-            if (size == 0) {
-                val trailerEnd = findCrlf(bytes, crlf + 2) ?: return false
-                return trailerEnd + 2 <= bytes.size
-            }
-            pos = crlf + 2 + size + 2
-            if (pos > bytes.size) return false
-        }
-    }
-
-    private fun findHeaderEnd(bytes: ByteArray): Int? {
-        for (i in 0 until bytes.size - 3) {
-            if (bytes[i] == '\r'.code.toByte() && bytes[i + 1] == '\n'.code.toByte() &&
-                bytes[i + 2] == '\r'.code.toByte() && bytes[i + 3] == '\n'.code.toByte()
-            ) {
-                return i
-            }
-        }
-        return null
-    }
-
-    private fun findCrlf(bytes: ByteArray, start: Int): Int? {
-        for (i in start until bytes.size - 1) {
-            if (bytes[i] == '\r'.code.toByte() && bytes[i + 1] == '\n'.code.toByte()) return i
-        }
-        return null
     }
 
     // ── Per-host cert generation ────────────────────────────────────────
@@ -765,8 +860,7 @@ class MitmProxyEngine(
         ).apply {
             addExtension(Extension.basicConstraints, true, BasicConstraints(false))
             addExtension(Extension.keyUsage, true, KeyUsage(KeyUsage.digitalSignature or KeyUsage.keyEncipherment))
-            addExtension(Extension.subjectAlternativeName, false,
-                GeneralNames(arrayOf(GeneralName(GeneralName.dNSName, host))))
+            addExtension(Extension.subjectAlternativeName, false, HostSanGenerator.build(host))
         }
 
         val signer = JcaContentSignerBuilder("SHA256withRSA")
@@ -920,12 +1014,5 @@ class MitmProxyEngine(
             target.substring(0, colon) to (target.substring(colon + 1).toIntOrNull() ?: defaultPort)
         else target to defaultPort
     }
-
-    private object TrustAllCerts : X509TrustManager {
-        override fun checkClientTrusted(certs: Array<X509Certificate?>?, authType: String?) {}
-        override fun checkServerTrusted(certs: Array<X509Certificate?>?, authType: String?) {}
-        override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
-    }
-
 
 }

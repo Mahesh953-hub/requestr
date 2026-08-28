@@ -67,14 +67,25 @@ object HttpParser {
             }
         }
 
-        val contentLength = headers["content-length"]?.toIntOrNull() ?: 0
-        val totalNeeded = headerEnd + 4 + contentLength // +4 for \r\n\r\n
+        // MUST-FIX 2: Content-Length is attacker-controlled wire input. The old
+        // `?.toIntOrNull() ?: 0` treated a negative value like "-1" as a valid length of -1,
+        // producing `totalNeeded = headerEnd + 3` (one byte short of the real framing) and
+        // desynchronizing every subsequent parse on the stream; a huge-but-syntactically-valid
+        // value could also overflow the `headerEnd + 4 + contentLength` Int sum. Parse as Long,
+        // reject negative/overflowing values, and bail out (as "not parseable yet") instead of
+        // ever constructing a message from a bad offset.
+        val totalNeeded = computeTotalNeeded(headerEnd, headers["content-length"]) ?: return null
 
         if (bytes.size < totalNeeded) return null // body not fully received
 
-        val body = if (contentLength > 0) {
-            String(bytes, headerEnd + 4, contentLength.coerceAtMost(bytes.size - headerEnd - 4), Charsets.UTF_8)
-        } else ""
+        // §1.4/§2.7: decompress per Content-Encoding and flag non-text bodies before ever
+        // charset-decoding them. consumedBytes below is derived from totalNeeded (the raw,
+        // still-encoded wire size), never from the decoded body, so framing is unaffected.
+        val contentLength = totalNeeded - headerEnd - 4
+        val rawBodyBytes = if (contentLength > 0) {
+            bytes.copyOfRange(headerEnd + 4, totalNeeded)
+        } else ByteArray(0)
+        val decoded = HttpBodyDecoder.decode(rawBodyBytes, headers["content-encoding"])
 
         val scheme = if (isHttps) "https" else "http"
         val url = "$scheme://$host$pathAndQuery"
@@ -88,9 +99,11 @@ object HttpParser {
             port = port,
             version = version,
             headers = headers,
-            body = body,
+            body = decoded.text,
             consumedBytes = totalNeeded,
             rawHeaderNames = rawHeaderNames,
+            isBodyBinary = decoded.isBinary,
+            rawBodyBytes = rawBodyBytes,
         )
     }
 
@@ -134,7 +147,6 @@ object HttpParser {
             }
         }
 
-        val contentLength = headers["content-length"]?.toIntOrNull() ?: 0
         val transferEncoding = headers["transfer-encoding"]
         val isChunked = transferEncoding != null && transferEncoding.contains("chunked", ignoreCase = true)
 
@@ -142,26 +154,43 @@ object HttpParser {
         val bodyless = sentRequestMethod == HttpMethod.HEAD ||
             statusCode in 100..199 || statusCode == 204 || statusCode == 304
 
-        val body: String
+        // §1.4/§2.7: work in raw bytes until decompression + binary detection has run, then
+        // charset-decode. totalNeeded (returned as consumedBytes) is always derived from the
+        // raw, still-encoded wire size -- decompression never changes how many bytes were
+        // consumed from the buffer, only how the body is represented afterwards.
+        val rawBodyBytes: ByteArray
         val totalNeeded: Int
 
         if (bodyless) {
             totalNeeded = headerEnd + 4
-            body = ""
+            rawBodyBytes = ByteArray(0)
         } else if (isChunked) {
-            val (chunkedBody, consumed) = decodeChunked(bytes, headerEnd + 4)
-            body = chunkedBody
-            totalNeeded = consumed
-        } else if (contentLength > 0) {
-            totalNeeded = headerEnd + 4 + contentLength
-            if (bytes.size < totalNeeded) return null
-            body = String(bytes, headerEnd + 4, contentLength.coerceAtMost(bytes.size - headerEnd - 4), Charsets.UTF_8)
+            // MUST-FIX 3: decodeChunked's tri-state result distinguishes "not enough bytes
+            // yet" from "this framing is corrupt and will never resolve" -- both must return
+            // null here (never build a message), rather than the old behavior of silently
+            // returning whatever partial bytes had accumulated so far, which let CaptureEngine
+            // (which has no separate completeness re-check, unlike MitmProxyEngine's
+            // chunkedBodyComplete) persist a truncated response as if it were complete.
+            when (val chunkResult = decodeChunked(bytes, headerEnd + 4)) {
+                is ChunkedDecodeResult.Complete -> {
+                    rawBodyBytes = chunkResult.body
+                    totalNeeded = chunkResult.consumedBytes
+                }
+                ChunkedDecodeResult.Incomplete, ChunkedDecodeResult.Malformed -> return null
+            }
         } else {
-            // No Content-Length, no chunking — treat headers-only response
-            totalNeeded = headerEnd + 4
-            body = ""
+            // MUST-FIX 2: same negative/overflow-safe Content-Length handling as the request
+            // path -- see computeTotalNeeded's KDoc. When no Content-Length header is present
+            // at all, computeTotalNeeded treats this as a headers-only response (matching the
+            // old "no Content-Length, no chunking" fallback).
+            val computed = computeTotalNeeded(headerEnd, headers["content-length"]) ?: return null
+            if (bytes.size < computed) return null
+            totalNeeded = computed
+            val contentLength = totalNeeded - headerEnd - 4
+            rawBodyBytes = if (contentLength > 0) bytes.copyOfRange(headerEnd + 4, totalNeeded) else ByteArray(0)
         }
 
+        val decoded = HttpBodyDecoder.decode(rawBodyBytes, headers["content-encoding"])
         val contentType = headers["content-type"] ?: ""
 
         return ParsedHttpMessage(
@@ -172,9 +201,11 @@ object HttpParser {
             statusMessage = reasonPhrase,
             version = version,
             headers = headers,
-            body = body,
+            body = decoded.text,
             contentType = contentType,
             consumedBytes = totalNeeded,
+            isBodyBinary = decoded.isBinary,
+            rawBodyBytes = rawBodyBytes,
         )
     }
 
@@ -193,6 +224,28 @@ object HttpParser {
         return null
     }
 
+    /**
+     * MUST-FIX 2: validates and computes `headerEnd + 4 + Content-Length` as a safe Int, or
+     * returns null if the header is present but malformed (non-numeric, negative) or would
+     * overflow what a ByteArray index can represent.
+     *
+     * Absent header ⇒ headers-only message (`headerEnd + 4`), matching the pre-fix fallback.
+     * A malformed or overflowing Content-Length can never be satisfied by any amount of
+     * buffered data, so returning null here is indistinguishable to callers from "incomplete,
+     * wait for more bytes" -- both correctly mean "do not build a message from this buffer" --
+     * but it never throws and never desyncs the next parse by rounding a bad value into a
+     * plausible-looking-but-wrong offset (the old `?.toIntOrNull() ?: 0` treated "-1" as a
+     * valid length of -1, silently consuming one byte too few on every such message).
+     */
+    private fun computeTotalNeeded(headerEnd: Int, contentLengthHeader: String?): Int? {
+        if (contentLengthHeader == null) return headerEnd + 4
+        val contentLength = contentLengthHeader.trim().toLongOrNull() ?: return null
+        if (contentLength < 0) return null
+        val total = headerEnd.toLong() + 4 + contentLength
+        if (total > Int.MAX_VALUE) return null
+        return total.toInt()
+    }
+
     private fun parseHttpMethod(s: String): HttpMethod? {
         return when (s.uppercase()) {
             "GET" -> HttpMethod.GET
@@ -207,28 +260,100 @@ object HttpParser {
         }
     }
 
-    private fun decodeChunked(bytes: ByteArray, startOffset: Int): Pair<String, Int> {
-        val sb = StringBuilder()
-        var pos = startOffset
-        while (pos < bytes.size) {
-            // Find end of chunk-size line
-            val crlf = findCrlf(bytes, pos) ?: break
-            val sizeHex = String(bytes, pos, crlf - pos, Charsets.ISO_8859_1).trim()
-            val chunkSize = sizeHex.split(";")[0].toIntOrNull(16) ?: break
+    /**
+     * MUST-FIX 3: result of attempting to decode a chunked-transfer-encoded body from a
+     * (possibly still-arriving) byte buffer. The previous implementation returned a plain
+     * `Pair<ByteArray, Int>` and silently handed back whatever partial bytes it had
+     * accumulated when a chunk-size line, a chunk's data, or the trailer section was cut off
+     * mid-stream -- indistinguishable from a genuinely complete message. CaptureEngine has no
+     * separate completeness re-check (unlike MitmProxyEngine's own `chunkedBodyComplete`) and
+     * would happily persist that truncated body as if it were the whole response. This
+     * three-way result makes "not enough bytes yet" ([Incomplete]) and "these bytes are not
+     * valid chunked framing and never will be" ([Malformed]) both impossible to mistake for
+     * done ([Complete]) -- callers must only build a [ParsedHttpMessage] from [Complete].
+     */
+    private sealed class ChunkedDecodeResult {
+        data class Complete(val body: ByteArray, val consumedBytes: Int) : ChunkedDecodeResult()
+        object Incomplete : ChunkedDecodeResult()
+        object Malformed : ChunkedDecodeResult()
+    }
 
-            if (chunkSize == 0) {
-                // Final chunk — consume trailing CRLF
-                val trailerEnd = findCrlf(bytes, crlf + 2)
-                pos = trailerEnd?.plus(2) ?: (crlf + 2)
-                break
+    /**
+     * De-chunks the transfer-encoding, returning the reassembled raw body bytes (not yet
+     * charset-decoded). §1.4: this must hand back raw bytes rather than a decoded String --
+     * a chunked, gzip-encoded body needs every chunk's bytes concatenated before gunzip can
+     * even run, and decoding each chunk as UTF-8 independently (the old behavior) would also
+     * mis-decode any multi-byte character that happens to straddle a chunk boundary.
+     *
+     * MUST-FIX 3: only returns [ChunkedDecodeResult.Complete] once the terminal zero-size
+     * chunk AND its full trailer section (through the final blank line, RFC 7230 §4.1.2) have
+     * arrived; validates every chunk-size with checked [Long] arithmetic so an attacker-
+     * controlled hex value cannot overflow the `Int` offsets used to index [bytes]; and
+     * verifies the CRLF that must follow every chunk's data instead of assuming it is there.
+     */
+    private fun decodeChunked(bytes: ByteArray, startOffset: Int): ChunkedDecodeResult {
+        val out = java.io.ByteArrayOutputStream()
+        var pos = startOffset
+        while (true) {
+            val crlf = findCrlf(bytes, pos) ?: return ChunkedDecodeResult.Incomplete
+            val sizeToken = String(bytes, pos, crlf - pos, Charsets.ISO_8859_1).trim().split(";")[0].trim()
+            val chunkSize = parseChunkSizeHex(sizeToken) ?: return ChunkedDecodeResult.Malformed
+
+            val chunkDataStart = crlf + 2
+            if (chunkSize == 0L) {
+                // Last-chunk: consume zero-or-more trailer field lines through the final
+                // blank line. The old code only consumed the FIRST trailer line (or the
+                // terminator itself, when there were none), leaving any additional trailer
+                // lines in the buffer to be misparsed as the start of the next message.
+                val trailerEnd = findTrailerEnd(bytes, chunkDataStart) ?: return ChunkedDecodeResult.Incomplete
+                return ChunkedDecodeResult.Complete(out.toByteArray(), trailerEnd)
             }
 
-            pos = crlf + 2
-            val chunkEnd = (pos + chunkSize).coerceAtMost(bytes.size)
-            sb.append(String(bytes, pos, chunkEnd - pos, Charsets.UTF_8))
-            pos = chunkEnd + 2 // skip trailing CRLF
+            // Checked arithmetic: chunkSize is attacker-controlled hex from the wire. A value
+            // large enough to overflow Int index arithmetic must be rejected outright -- it
+            // can never be satisfied by any buffer size we would ever actually hold -- not
+            // treated as "just needs more bytes".
+            val chunkDataEndLong = chunkDataStart.toLong() + chunkSize
+            if (chunkDataEndLong + 2 > Int.MAX_VALUE) return ChunkedDecodeResult.Malformed
+            val chunkDataEnd = chunkDataEndLong.toInt()
+            val afterCrlf = chunkDataEnd + 2
+            if (afterCrlf > bytes.size) return ChunkedDecodeResult.Incomplete // need more bytes
+
+            // RFC 7230 §4.1: every chunk's data must be immediately followed by CRLF. Verify
+            // it rather than assuming, so a corrupted stream is caught here instead of
+            // silently eating/dropping bytes and desyncing everything after it.
+            if (bytes[chunkDataEnd] != '\r'.code.toByte() || bytes[chunkDataEnd + 1] != '\n'.code.toByte()) {
+                return ChunkedDecodeResult.Malformed
+            }
+
+            out.write(bytes, chunkDataStart, chunkSize.toInt())
+            pos = afterCrlf
         }
-        return sb.toString() to pos
+    }
+
+    /**
+     * A chunk-size token (chunk-ext already stripped by the caller) must be pure hex digits.
+     * Rejecting anything else outright matters because `String.toLongOrNull(16)` alone would
+     * happily parse a token like "-5" as a negative number, which would then need its own
+     * separate negative-size check -- simpler and safer to refuse non-hex-digit input up front.
+     */
+    private fun parseChunkSizeHex(token: String): Long? {
+        if (token.isEmpty() || token.any { it !in '0'..'9' && it !in 'a'..'f' && it !in 'A'..'F' }) return null
+        return token.toLongOrNull(16)
+    }
+
+    /**
+     * Scans trailer field lines starting at [start] until the final blank-line terminator (an
+     * empty line immediately at a line boundary) and returns the index just past it, or null
+     * if the buffer runs out before that terminator arrives.
+     */
+    private fun findTrailerEnd(bytes: ByteArray, start: Int): Int? {
+        var pos = start
+        while (true) {
+            val crlf = findCrlf(bytes, pos) ?: return null
+            if (crlf == pos) return crlf + 2 // blank line: trailer section (maybe empty) is done
+            pos = crlf + 2
+        }
     }
 
     private fun findCrlf(bytes: ByteArray, start: Int): Int? {
@@ -300,4 +425,62 @@ data class ParsedHttpMessage(
      * it is lost -- never populated for responses, and empty when the request had no headers.
      */
     val rawHeaderNames: List<String> = emptyList(),
+    /**
+     * §2.7: true when [HttpBodyDecoder.isProbablyUtf8] flagged the (post-decompression) body
+     * bytes as binary. When true, [body] is [HttpBodyDecoder.BINARY_BODY_PLACEHOLDER], which
+     * today is literally the empty string -- NOT a sentinel that marks "this was binary" while
+     * still carrying the real bytes somehow. The original bytes are gone from [body]; they
+     * are only recoverable from [rawBodyBytes]. (The same empty-placeholder fallback also
+     * fires when UTF-8 decoding of a non-binary-flagged body throws, or when decompression
+     * fails outright -- see [HttpBodyDecoder.decode].) Do not "fix" [HttpBodyDecoder]'s
+     * placeholder into some human-readable string without also checking every place that
+     * writes [body] back onto the wire: MitmProxyEngine's serializeRequest/serializeResponse
+     * key off [bodyReplaced] (not [isBodyBinary]) specifically so a non-replaced binary body is
+     * re-serialized from [rawBodyBytes] verbatim, never from this lossy text rendering -- if
+     * that ever became a non-empty string, it would start appearing as literal wire content in
+     * place of every image/protobuf/undecodable response.
+     */
+    var isBodyBinary: Boolean = false,
+    /**
+     * MUST-FIX 1: the exact post-de-chunking, pre-decode wire bytes this message's body was
+     * built from -- i.e. what actually arrived on the wire, before any Content-Encoding
+     * decompression or [HttpBodyDecoder.isProbablyUtf8] sniffing touched it. Null only for
+     * messages that were never parsed off a real wire (e.g. RuleEnforcer.buildMockResponse's
+     * synthesized MOCK_RESPONSE, or hand-built test fixtures) -- both [HttpParser] entry points
+     * always populate it, including with an empty array for a bodyless message.
+     *
+     * This exists because [body] is a *rendering* of the bytes (UTF-8 text, or
+     * [HttpBodyDecoder.BINARY_BODY_PLACEHOLDER] for anything [isBodyBinary] flagged, or for a
+     * failed decode) -- lossy or empty in exactly the cases where byte-for-byte fidelity
+     * matters most. Serializers must fall back to re-encoding [body] only when [rawBodyBytes]
+     * is null (the synthesized-message case above, where [body] *is* the real content).
+     *
+     * EQUALITY NOTE: [ParsedHttpMessage] is a Kotlin `data class`, so this `ByteArray`
+     * property silently downgrades the generated `equals`/`hashCode` to array *identity*
+     * comparison (two messages with byte-for-byte-identical but distinct raw body arrays
+     * compare unequal), and `copy()` shares the same array instance between the original and
+     * the copy rather than cloning it. As of this writing nothing compares whole
+     * [ParsedHttpMessage] instances or mutates a [rawBodyBytes] array after construction --
+     * it is set once at parse time and only ever read (at serialization time) -- so this
+     * aliasing is safe today. If that ever changes (e.g. a future test asserts
+     * `parsedA == parsedB`, or something mutates a shared array in place), this field needs to
+     * move out of the generated equality contract deliberately (wrapper class, or explicit
+     * `equals`/`hashCode` overrides) rather than being trusted to just work.
+     */
+    val rawBodyBytes: ByteArray? = null,
+    /**
+     * MUST-FIX 1: true only when a rule actually overwrote [body] via the `bodyReplace` config
+     * key -- set at the exact two sites in RuleEnforcer.kt (`applyRequestModification` /
+     * `applyResponseModification`) that perform that assignment, nowhere else. Re-serialization
+     * (MitmProxyEngine's serializeRequest/serializeResponse) uses this single bit to decide
+     * what bytes to write for the body:
+     *  - `true`: [body] (re-encoded as UTF-8) is the real, intended content -- a rule
+     *    explicitly replaced it with plaintext -- and any inherited Content-Encoding header
+     *    must be dropped (the replacement is not actually gzip/br/whatever the header claims).
+     *  - `false` (default): no rule touched the body (no rule matched, or it only edited
+     *    headers/status) -- write [rawBodyBytes] back out verbatim and leave Content-Encoding
+     *    alone, so a header-only edit stays byte-transparent for the body no matter whether
+     *    HttpBodyDecoder could decompress/decode it as text.
+     */
+    var bodyReplaced: Boolean = false,
 )
