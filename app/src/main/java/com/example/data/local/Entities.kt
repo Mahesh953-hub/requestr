@@ -99,8 +99,17 @@ data class CaptureSessionEntity(
  *
  * Persisted by name via [RequestrTypeConverters.ruleActionToName], so adding a member needs no
  * schema migration — unknown/legacy names decode to [LOG_ONLY].
+ *
+ * [SCRIPT_REWRITE] (master plan §1.11) runs a real JavaScript `pm.*` script -- via
+ * [com.example.interception.RuleEnforcer.applyScriptRewrite] -- against the live request or
+ * response, the same engine ApiTestr's pre/post scripts use
+ * ([com.example.scripting.JsScriptEngine]/[com.example.scripting.PmPrelude]). Its
+ * `replacementValue` is `{"script": "<js source>", "variables": {"key":"value"}}` rather than the
+ * fixed `{"addHeaders",...}` schema [MODIFY_REQUEST]/[MODIFY_RESPONSE] use -- kept as a distinct
+ * action (not a replacement for them) so existing fixed-modification rules keep working
+ * unchanged for users who don't need scripting.
  */
-enum class RuleAction { BLOCK, REDIRECT, MODIFY_REQUEST, MODIFY_RESPONSE, LOG_ONLY, FORCE_MITM, MOCK_RESPONSE }
+enum class RuleAction { BLOCK, REDIRECT, MODIFY_REQUEST, MODIFY_RESPONSE, LOG_ONLY, FORCE_MITM, MOCK_RESPONSE, SCRIPT_REWRITE, CHAOS }
 
 /**
  * User-defined intercept rules. The "Block this domain" long-press action must be gated on a
@@ -167,6 +176,13 @@ data class SavedApiRequestEntity(
      *  `MIGRATION_11_12`'s `DEFAULT` clause -- see that field's KDoc for why. */
     val mockBody: String = "{\"mocked\": true}",
     val mockDelayMs: Long = 0L,
+    /** Master plan §2.x LOW-ADD — async 202-polling; see [com.example.data.models.ApiRequestItem]. */
+    val pollingEnabled: Boolean = false,
+    val pollingIntervalMs: Long = 2000L,
+    val pollingMaxAttempts: Int = 10,
+    val pollingLocationHeader: String = "Location",
+    /** P2 fix — see [com.example.data.models.ApiRequestItem.pollingAllowCrossOriginRedirect]. */
+    val pollingAllowCrossOriginRedirect: Boolean = false,
 )
 
 /**

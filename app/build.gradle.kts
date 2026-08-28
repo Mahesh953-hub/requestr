@@ -2,6 +2,8 @@ import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesS
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.util.Collections
+import java.util.Properties
+import org.gradle.api.tasks.Exec
 
 plugins {
   alias(libs.plugins.android.application)
@@ -233,6 +235,11 @@ dependencies {
   implementation(libs.okhttp)
   // implementation(libs.play.services.location)
   implementation(libs.retrofit)
+  // Master plan §1.8/§1.11 — embeddable ECMAScript engine backing both ApiTestr pre/post
+  // scripts (com.example.scripting.ApiTestrScriptRunner) and live RuleEnforcer
+  // SCRIPT_REWRITE rules. See the `rhino` version-catalog entry for the Android-compatibility
+  // note (must run interpreted; JsScriptEngine enforces this).
+  implementation(libs.rhino)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)
@@ -257,4 +264,148 @@ dependencies {
   debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)
   "ksp"(libs.moshi.kotlin.codegen)
+}
+
+// ---- Gap #1 Approach A: native tun2proxy bridge (native/tun2proxy-bridge) --------------------
+//
+// Cross-compiles the Rust crate for every ABI via `cargo ndk` and packages the resulting
+// `librequestr_tun2proxy.so` as this module's jniLibs. Deliberately NOT wired into
+// `testDebugUnitTest`/`testReleaseUnitTest` -- Robolectric/plain-JVM unit tests never load a
+// native `.so` (see NativeTun2ProxyTest's doc comment: `isAvailable()` is expected to be false
+// there), so requiring a Rust toolchain just to run `./gradlew testDebugUnitTest` would be an
+// unnecessary and unrelated build dependency. Only APK-producing variants need it, wired below
+// via the `merge*JniLibFolders` tasks Android's own jniLibs packaging already runs through.
+val tun2proxyBridgeDir = file("$rootDir/native/tun2proxy-bridge")
+val tun2proxyBridgeOutDir = layout.buildDirectory.dir("rustJniLibs/tun2proxy").get().asFile
+
+/**
+ * Resolves the Android NDK root the same way the Android Gradle Plugin itself does: an
+ * explicit `ndk.dir` in `local.properties` first, then `ANDROID_NDK_HOME`/`ANDROID_NDK_ROOT`
+ * (what this task's own toolchain setup already exports), then falling back to the newest
+ * `<sdk>/ndk/<version>` directory installed via the SDK manager. Returns null (never a guess)
+ * if none of those resolve to a real, existing directory -- the task itself fails loudly in
+ * that case rather than silently skipping native packaging.
+ */
+fun resolveAndroidNdkDir(): File? {
+  val localProperties = file("$rootDir/local.properties")
+  val props = if (localProperties.exists()) {
+    Properties().apply { localProperties.inputStream().use { load(it) } }
+  } else {
+    null
+  }
+  props?.getProperty("ndk.dir")?.let { dir ->
+    val f = file(dir)
+    if (f.isDirectory) return f
+  }
+  System.getenv("ANDROID_NDK_HOME")?.let { dir ->
+    val f = file(dir)
+    if (f.isDirectory) return f
+  }
+  System.getenv("ANDROID_NDK_ROOT")?.let { dir ->
+    val f = file(dir)
+    if (f.isDirectory) return f
+  }
+  fun newestNdkUnder(sdkDir: String?): File? {
+    if (sdkDir == null) return null
+    val ndkRoot = file("$sdkDir/ndk")
+    return ndkRoot.listFiles()?.filter { it.isDirectory }?.maxByOrNull { it.name }
+  }
+  // Same resolution order AGP itself uses for the SDK location: env vars first, then the
+  // sdk.dir this project's own local.properties already points at.
+  newestNdkUnder(System.getenv("ANDROID_SDK_ROOT"))?.let { return it }
+  newestNdkUnder(System.getenv("ANDROID_HOME"))?.let { return it }
+  newestNdkUnder(props?.getProperty("sdk.dir"))?.let { return it }
+  return null
+}
+
+val cargoNdkAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+val tun2proxyBridgeOutDirPath = tun2proxyBridgeOutDir.absolutePath
+val cargoBinPath = "${System.getProperty("user.home")}/.cargo/bin/cargo"
+
+/**
+ * A real, standalone class (not a lambda) so the configuration cache can serialize it as a
+ * plain bean with two serializable fields -- a `doLast { ... }` lambda here would instead
+ * compile as an inner class of the enclosing script's task-registration lambda, which drags in
+ * an implicit reference back to the whole build script object (a disallowed type for the
+ * configuration cache; see the comment on [cargoBuildTun2ProxyBridge] below for how this was
+ * diagnosed).
+ *
+ * cargo-ndk's `*.so` glob also copies a stray `libtun2proxy-<hash>.so` per ABI -- a byproduct of
+ * the `tun2proxy` crate dependency's own `crate-type=["staticlib","cdylib","lib"]` declaration,
+ * not anything `native/tun2proxy-bridge` itself exports. Only `librequestr_tun2proxy.so` is a
+ * real, intended artifact; this deletes anything else so it never ends up packaged into the APK.
+ */
+class DeleteStrayCargoNdkArtifacts(
+  private val outDirPath: String,
+  private val abis: List<String>,
+) : org.gradle.api.Action<org.gradle.api.Task> {
+  override fun execute(task: org.gradle.api.Task) {
+    abis.forEach { abi ->
+      val abiDir = File(outDirPath, abi)
+      abiDir.listFiles { f -> f.extension == "so" && f.name != "librequestr_tun2proxy.so" }
+        ?.forEach { stray -> stray.delete() }
+    }
+  }
+}
+
+// Directory creation is idempotent and needs no build-graph tracking, so it happens right here
+// at configuration time -- not inside a task action -- rather than needing its own
+// config-cache-safe closure.
+tun2proxyBridgeOutDir.mkdirs()
+
+val cargoBuildTun2ProxyBridge = tasks.register<Exec>("cargoBuildTun2ProxyBridge") {
+  group = "native"
+  description = "Cross-compiles native/tun2proxy-bridge for every Android ABI via cargo-ndk " +
+    "and packages librequestr_tun2proxy.so into jniLibs (Gap #1 Approach A)."
+
+  inputs.dir(file("$tun2proxyBridgeDir/src"))
+  inputs.file(file("$tun2proxyBridgeDir/Cargo.toml"))
+  inputs.file(file("$tun2proxyBridgeDir/Cargo.lock"))
+  outputs.dir(tun2proxyBridgeOutDir)
+
+  // Resolved eagerly here (configuration time, only when this task is actually part of the
+  // requested task graph -- `tasks.register` is lazy) rather than inside a task action: the
+  // configuration cache cannot serialize a task-action lambda that references anything
+  // declared inside this outer registration lambda -- doing so drags in an implicit reference
+  // back to the whole build script object (a disallowed type). `environment`/`commandLine`
+  // below are plain task-configuration calls, not stored actions, so this is safe here.
+  val ndkDir: File = resolveAndroidNdkDir()
+    ?: throw GradleException(
+      "cargoBuildTun2ProxyBridge: could not resolve an Android NDK directory. Set ndk.dir " +
+        "in local.properties, or export ANDROID_NDK_HOME/ANDROID_NDK_ROOT, or install an " +
+        "NDK via the SDK manager."
+    )
+  environment("ANDROID_NDK_HOME", ndkDir.absolutePath)
+  environment("ANDROID_NDK_ROOT", ndkDir.absolutePath)
+
+  // cargo-ndk 4.1.2 ignores `--manifest-path` for its own internal `cargo metadata` lookup (a
+  // known upstream quirk: https://github.com/bbqsrc/cargo-ndk/issues/11) -- passing it still
+  // runs that lookup relative to the Exec task's process working directory and fails with
+  // "could not find Cargo.toml in <cwd> or any parent directory" even though the flag is
+  // accepted and not rejected. The only reliable fix is to set the *process* working directory
+  // to the crate root itself and drop `--manifest-path` entirely; verified working directly via
+  // `cd native/tun2proxy-bridge && cargo ndk -t <abi> -o <dir> build --release`.
+  workingDir(tun2proxyBridgeDir)
+
+  commandLine(
+    listOf(cargoBinPath, "ndk") +
+      cargoNdkAbis.flatMap { listOf("-t", it) } +
+      listOf("-o", tun2proxyBridgeOutDirPath) +
+      listOf("build", "--release")
+  )
+
+  doLast(DeleteStrayCargoNdkArtifacts(tun2proxyBridgeOutDirPath, cargoNdkAbis))
+}
+
+android {
+  sourceSets.getByName("main").jniLibs.srcDir(tun2proxyBridgeOutDir)
+}
+
+// Only APK-producing variants need the native bridge -- hook cargoBuildTun2ProxyBridge into
+// Android's own jniLibs-merging tasks (which run for assembleDebug/assembleRelease and any APK
+// packaging) rather than into `preBuild`/`assemble` broadly, so `testDebugUnitTest` and other
+// non-packaging tasks never pick up an implicit Rust-toolchain dependency they don't need.
+afterEvaluate {
+  tasks.matching { it.name.startsWith("merge") && it.name.endsWith("JniLibFolders") }
+    .configureEach { dependsOn(cargoBuildTun2ProxyBridge) }
 }

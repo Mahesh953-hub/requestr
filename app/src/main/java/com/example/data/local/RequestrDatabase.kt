@@ -66,7 +66,16 @@ import androidx.sqlite.db.SupportSQLiteDatabase
     // Master plan Phase 1-3: bumped 11 -> 12 to add SavedApiRequestEntity's API-key placement
     // column (§2.13) and per-request mock-mode columns (§2.8). RuleAction.MOCK_RESPONSE (§1.5)
     // needs no schema change -- RuleAction is persisted by name.
-    version = 12,
+    // Master plan §2.x LOW-ADD: bumped 12 -> 13 to add SavedApiRequestEntity's async 202-polling
+    // columns (pollingEnabled/pollingIntervalMs/pollingMaxAttempts/pollingLocationHeader).
+    // RuleAction.SCRIPT_REWRITE (§1.11) needs no schema change either, for the same
+    // persisted-by-name reason as MOCK_RESPONSE above.
+    // P2 review fix (async-polling credential leak): bumped 13 -> 14 to add
+    // SavedApiRequestEntity.pollingAllowCrossOriginRedirect, the explicit opt-in gate for
+    // following a poll Location that resolves to a different origin (see
+    // ApiTestrRepository.executeRequestWithScripts). RuleAction.CHAOS needs no schema change,
+    // for the same persisted-by-name reason as every other RuleAction value.
+    version = 14,
     exportSchema = true,
 )
 @TypeConverters(RequestrTypeConverters::class)
@@ -115,7 +124,7 @@ abstract class RequestrDatabase : RoomDatabase() {
                     // real, disclosed data loss (see AUDIT_REPORT.md/TODO_v5.md) -- but it is
                     // strictly better than a crash loop, and it does not touch the v8->v9 path,
                     // which stays a real, non-destructive migration.
-                    .addMigrations(MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
+                    .addMigrations(MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14)
                     .fallbackToDestructiveMigrationFrom(/* dropAllTables = */ true, 1, 2, 3, 4, 5, 6, 7)
                     .build()
                     .also { INSTANCE = it }
@@ -149,6 +158,38 @@ abstract class RequestrDatabase : RoomDatabase() {
          * rather than `''` — an empty string would decode to an empty list too, but `[]` keeps
          * the on-disk value consistent with what Room writes for a fresh row.
          */
+        /**
+         * v12 -> v13. Adds SavedApiRequestEntity's async 202-polling columns (master plan §2.x
+         * LOW-ADD). Same discipline as MIGRATION_11_12 immediately below: every `NOT NULL`
+         * column gets a `DEFAULT` that textually matches
+         * [com.example.data.models.ApiRequestItem]'s corresponding Kotlin default exactly, so an
+         * upgraded row and a freshly-created row behave identically. `RuleAction.SCRIPT_REWRITE`
+         * needs no schema change -- `RuleAction` is persisted by name (see [RuleAction]'s KDoc).
+         */
+        /**
+         * v13 -> v14. P2 review fix (async-polling credential leak): adds
+         * `pollingAllowCrossOriginRedirect`, the explicit opt-in gate for
+         * [com.example.data.repository.ApiTestrRepository.executeRequestWithScripts]'s 202-poll
+         * loop to follow a `Location` that resolves to a different origin than the original
+         * request. Defaults to `0` (false) so every existing saved request keeps today's now-
+         * fixed same-origin-only behavior; `RuleAction.CHAOS` needs no schema change, same
+         * persisted-by-name reason as every other `RuleAction` value.
+         */
+        val MIGRATION_13_14: Migration = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE saved_api_requests ADD COLUMN pollingAllowCrossOriginRedirect INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        val MIGRATION_12_13: Migration = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE saved_api_requests ADD COLUMN pollingEnabled INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE saved_api_requests ADD COLUMN pollingIntervalMs INTEGER NOT NULL DEFAULT 2000")
+                db.execSQL("ALTER TABLE saved_api_requests ADD COLUMN pollingMaxAttempts INTEGER NOT NULL DEFAULT 10")
+                db.execSQL("ALTER TABLE saved_api_requests ADD COLUMN pollingLocationHeader TEXT NOT NULL DEFAULT 'Location'")
+            }
+        }
+
         val MIGRATION_11_12: Migration = object : Migration(11, 12) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE saved_api_requests ADD COLUMN apiKeyLocation TEXT NOT NULL DEFAULT 'HEADER'")

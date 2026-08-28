@@ -204,6 +204,28 @@ object Http2Parser {
     val PREFACE_LENGTH: Int get() = PREFACE.toByteArray().size
 
     /**
+     * Strips RFC 7540 §6.1 DATA-frame padding from [frame]'s payload, returning only the real
+     * data octets. [decodeHeaders] already strips padding inline for HEADERS/PUSH_PROMISE
+     * frames; DATA frames need the equivalent applied by the caller *before* the bytes reach
+     * HTTP/gRPC body reassembly ([Http2Session.onDataFrame]) -- padding is attacker/server
+     * controlled filler (RFC 7540 §10.7 notes it exists purely to obscure payload sizes), not
+     * part of the body, and letting it flow into `requestBody`/`responseBody`/gRPC framing
+     * would corrupt the decoded body and (for gRPC) desync the 5-byte length-prefix framing.
+     *
+     * No-op (returns [H2Frame.payload] unchanged) when `FLAG_PADDED` is not set. Never throws:
+     * a malformed pad-length (claiming more bytes than the frame actually holds) degrades to an
+     * empty result rather than an out-of-bounds read.
+     */
+    fun stripDataPadding(frame: H2Frame): ByteArray {
+        val payload = frame.payload
+        if ((frame.flags and FLAG_PADDED) == 0 || payload.isEmpty()) return payload
+        val padLen = payload[0].toInt() and 0xFF
+        val dataEnd = payload.size - padLen
+        if (dataEnd < 1) return ByteArray(0)
+        return payload.copyOfRange(1, dataEnd)
+    }
+
+    /**
      * Heuristic: do these bytes begin with a plausible first HTTP/2 frame?
      * RFC 7540 §3.5 mandates SETTINGS (stream 0) as the first frame each
      * endpoint sends — used to spot h2 when the preface was already consumed

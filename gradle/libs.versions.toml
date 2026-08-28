@@ -31,6 +31,15 @@ cameraView = "1.5.0"
 cameraCore = "1.5.0"
 loggingInterceptor = "4.10.0"
 okhttp = "4.10.0"
+# Master plan §1.8/§1.11 — Mozilla Rhino, a pure-Java (no JNI, no Truffle/GraalVM) ECMAScript
+# engine. Actively maintained at github.com/mozilla/rhino; 1.7.15 is the latest 1.7.x release
+# on Maven Central (org.mozilla:rhino). Confirmed ART-compatible *only* when the interpreter is
+# forced into interpreted mode (Context.optimizationLevel = -1, set in JsScriptEngine) — Rhino's
+# default "compiled" mode dynamically emits real JVM class bytecode via an internal codegen
+# pass, which ART cannot load (`ClassFormatError` and friends), a known/documented Rhino-on-
+# Android pitfall. GraalJS/Truffle was rejected per plan §1.8 (needs JDK 25 + Truffle, not
+# Android-embeddable).
+rhino = "1.7.15"
 moshiKotlin = "1.15.2"
 moshiKotlinCodegen = "1.15.2"
 datastorePreferences = "1.1.7"
@@ -46,6 +55,8 @@ shizuku = "13.1.5"
 bouncycastle = "1.78.1"
 cronetEmbedded = "143.7445.0"
 androidxWebkit = "1.14.0"
+grpc = "1.68.2"
+protobuf = "3.25.5"
 
 
 [libraries]
@@ -88,6 +99,7 @@ androidx-camera-view = { group = "androidx.camera", name = "camera-view", versio
 androidx-camera-core = { group = "androidx.camera", name = "camera-core", version.ref = "cameraCore" }
 logging-interceptor = { group = "com.squareup.okhttp3", name = "logging-interceptor", version.ref = "loggingInterceptor" }
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
+rhino = { group = "org.mozilla", name = "rhino", version.ref = "rhino" }
 moshi-kotlin = { group = "com.squareup.moshi", name = "moshi-kotlin", version.ref = "moshiKotlin" }
 moshi-kotlin-codegen = { group = "com.squareup.moshi", name = "moshi-kotlin-codegen", version.ref = "moshiKotlinCodegen" }
 androidx-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastorePreferences" }
@@ -111,6 +123,9 @@ bouncycastle-bcpkix = { group = "org.bouncycastle", name = "bcpkix-jdk18on", ver
 bouncycastle-bcprov = { group = "org.bouncycastle", name = "bcprov-jdk18on", version.ref = "bouncycastle" }
 cronet-embedded = { group = "org.chromium.net", name = "cronet-embedded", version.ref = "cronetEmbedded" }
 androidx-webkit = { group = "androidx.webkit", name = "webkit", version.ref = "androidxWebkit" }
+grpc-api = { group = "io.grpc", name = "grpc-api", version.ref = "grpc" }
+protobuf-java = { group = "com.google.protobuf", name = "protobuf-java", version.ref = "protobuf" }
+protobuf-java-util = { group = "com.google.protobuf", name = "protobuf-java-util", version.ref = "protobuf" }
 
 
 [plugins]

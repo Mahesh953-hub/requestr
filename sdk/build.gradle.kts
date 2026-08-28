@@ -56,6 +56,12 @@ dependencies {
   // simply reference classes that never get loaded.
   compileOnly("io.ktor:ktor-client-core:2.3.0")
   compileOnly("com.google.android.gms:play-services-cronet:18.1.0")
+  // Phase 6: gRPC capture (GrpcInterceptor.kt). Same compileOnly shape as Cronet/Ktor above --
+  // an app that never touches gRPC never pays for (or crashes on) a missing class. Note there
+  // is deliberately NO protobuf dependency here, not even compileOnly: GrpcMessageRenderer
+  // reaches `com.google.protobuf.util.JsonFormat` purely via reflection so this module never
+  // forces a specific protobuf-java(-util) version onto a host app that may pin its own.
+  compileOnly(libs.grpc.api)
 
   testImplementation(libs.junit)
   testImplementation(libs.kotlinx.coroutines.test)
@@ -74,4 +80,16 @@ dependencies {
   // SslSecretExtractor's real-world behavior against this build's real internal class shapes,
   // confirmed via decompilation -- see the test's kdoc.
   testImplementation("org.conscrypt:conscrypt-openjdk-uber:2.5.2")
+  // GrpcInterceptorTest needs the real io.grpc.* API types (ClientCall/Channel/Metadata/Status/
+  // MethodDescriptor) to exercise RequestrGrpcInterceptor against a hand-rolled fake Channel --
+  // same "real API types, fake delegate, no native/network layer" shape as CronetInterceptorTest.
+  // compileOnly above is not visible to the test source set.
+  testImplementation(libs.grpc.api)
+  // Only used by GrpcInterceptorTest to prove the reflective protobuf-JSON path in
+  // GrpcMessageRenderer actually activates when protobuf-java-util IS on the classpath (the
+  // common case for a real gRPC host app) -- com.google.protobuf.StringValue is a
+  // pre-generated well-known-type message from protobuf-java itself, so no protoc step is
+  // needed just to exercise this.
+  testImplementation(libs.protobuf.java)
+  testImplementation(libs.protobuf.java.util)
 }

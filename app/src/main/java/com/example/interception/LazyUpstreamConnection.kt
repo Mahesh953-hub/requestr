@@ -39,6 +39,15 @@ internal class LazyUpstreamConnection(
     private val host: String,
     private val port: Int,
     private val connectionFactory: (String, Int) -> Socket = { h, p -> Socket(h, p) },
+    /**
+     * ALPN protocols to offer the upstream server, in preference order. Mirrors whatever the
+     * client-facing leg actually negotiated (see [MitmProxyEngine.handleClient]) rather than
+     * offering something independently -- if the client asked for `h2` and got it, this engine
+     * must speak `h2` upstream too, or the two legs of the MITM'd connection would disagree
+     * about framing. Empty (the default) means "no ALPN offer", matching every call site before
+     * this parameter existed.
+     */
+    private val preferredAlpnProtocols: List<String> = emptyList(),
     private val onFirstConnect: (Connected) -> Unit = {},
 ) {
 
@@ -77,6 +86,20 @@ internal class LazyUpstreamConnection(
                 val sslSocket = SSLContext.getInstance("TLS").apply {
                     init(null, arrayOf(AcceptAllTrustManager), SecureRandom())
                 }.socketFactory.createSocket(socket, host, port, true) as SSLSocket
+                // Offer the same ALPN protocol the client-facing leg negotiated (§4 ALPN
+                // negotiation) -- see the KDoc on [preferredAlpnProtocols]. Best-effort: an
+                // upstream server that doesn't understand ALPN, or a platform too old to expose
+                // SSLParameters.applicationProtocols, just proceeds without it exactly as before
+                // this parameter existed.
+                if (preferredAlpnProtocols.isNotEmpty() &&
+                    android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q
+                ) {
+                    runCatching {
+                        val params = sslSocket.sslParameters
+                        params.applicationProtocols = preferredAlpnProtocols.toTypedArray()
+                        sslSocket.sslParameters = params
+                    }
+                }
                 sslSocket.startHandshake()
                 val result = Connected(socket, sslSocket, sslSocket.getInputStream(), sslSocket.getOutputStream())
                 connected = result

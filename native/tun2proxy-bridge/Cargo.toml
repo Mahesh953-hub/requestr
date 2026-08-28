@@ -1,0 +1,47 @@
+[package]
+name = "requestr-tun2proxy-bridge"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "JNI/NDK bridge that routes RequestrVpnService's tun fd through tun2proxy into MitmProxyEngine's local CONNECT listener (Gap #1 Approach A)."
+license = "MIT"
+publish = false
+
+# cdylib is what Android's jniLibs/<abi>/lib*.so packaging needs; rlib is kept so
+# `cargo test` can exercise the config/state modules on the host without touching JNI.
+[lib]
+name = "requestr_tun2proxy"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+# Exact pin (not a caret range) so every ABI is built from byte-identical tun2proxy
+# source, per the reproducible-pin requirement. Cargo.lock (checked in) pins the full
+# transitive graph (ipstack, socks5-impl, tun, tproxy-config, etc.) on top of this.
+tun2proxy = { version = "=0.8.3", default-features = false, features = ["udpgw"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+# Used directly (not just transitively through tun2proxy) to build/drive our own dedicated
+# Tokio runtime + CancellationToken in `lib.rs::run_bridge_thread`, matching the exact
+# versions tun2proxy itself depends on so only one copy of each is ever linked in.
+tokio = { version = "=1.53.1", features = ["rt-multi-thread", "time"] }
+tokio-util = "=0.7.19"
+# Only for `tproxy_config::IpCidr::from_str` in `config.rs` (bypass CIDRs / virtual DNS pool
+# parsing) -- `default-features = false` because the routing/interface-setup machinery in this
+# crate is Linux/macOS/Windows-only and unused on Android (`args.setup` is always forced false).
+tproxy-config = { version = "=7.0.7", default-features = false }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# Independent of tun2proxy's own internal `jni = "0.22.4"` (used only by its
+# `android.rs`, which this bridge does not call into) -- Cargo happily compiles two
+# non-conflicting major versions of the same crate side by side. 0.21 is used here
+# for its stable, widely-documented classic `JNIEnv<'local>` API.
+jni = "=0.21.1"
+android_logger = "=0.15.1"
+
+[profile.release]
+# Every shipped ABI is a release build; panics abort into the caller (nativeStart
+# returns an error code) rather than unwinding across the FFI boundary, which is UB.
+panic = "abort"
+lto = true

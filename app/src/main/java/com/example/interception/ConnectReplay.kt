@@ -2,6 +2,7 @@ package com.example.interception
 
 import android.content.Context
 import android.os.Build
+import com.example.data.interception.CaState
 import com.example.data.interception.CaptureMethod
 import com.example.data.interception.InterceptionStateRepository
 import java.net.Socket
@@ -11,6 +12,8 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
+import kotlin.random.Random
+import kotlinx.coroutines.delay
 
 /**
  * Re-issues a captured CONNECT (Task 5 "Iter" -- CONNECT replay) so a user inspecting the
@@ -36,6 +39,46 @@ object ConnectReplay {
         val alpn: String?,
         val error: String?,
     )
+
+    /**
+     * Master plan §3 LOW-ADD — advanced repeat with count+jitter. Runs [replay] [count] times
+     * sequentially (each call reuses the same [targetHost]/[targetPort]/[forceMitm] arguments),
+     * sleeping a random `[0, jitterMs]` delay between attempts so a burst of replays doesn't look
+     * like a synchronized retry storm to the target/proxy. `count <= 1` runs exactly once with no
+     * delay. Returns every [ReplayResult] in call order (including failures — callers see the
+     * full attempt history, not just the last one).
+     */
+    suspend fun replayRepeated(
+        context: Context,
+        targetHost: String,
+        targetPort: Int,
+        forceMitm: Boolean = false,
+        count: Int = 1,
+        jitterMs: Long = 0L,
+        random: Random = Random.Default,
+    ): List<ReplayResult> {
+        val attempts = count.coerceAtLeast(1)
+        val maxJitter = jitterMs.coerceAtLeast(0L)
+        return buildList {
+            repeat(attempts) { attemptIndex ->
+                add(replay(context, targetHost, targetPort, forceMitm))
+                if (attemptIndex < attempts - 1 && maxJitter > 0) {
+                    delay(random.nextLong(0, maxJitter + 1))
+                }
+            }
+        }
+    }
+
+    /**
+     * Master plan §3 LOW-ADD — per-CONNECT CA trust recheck. A [forceMitm] replay's
+     * `MITM_DECRYPTED` outcome only means the *proxy* tunneled the CONNECT through; it says
+     * nothing about whether this device's trust store still trusts the requestr CA at the moment
+     * of the check (the user may have removed it, or a work-profile policy may have dropped it,
+     * since the last [CapabilityProbe.probeAll] refresh). Calling this immediately before/after a
+     * [forceMitm] replay gives an up-to-the-second answer instead of relying on
+     * [InterceptionStateRepository]'s possibly-stale cached capability snapshot.
+     */
+    suspend fun recheckCaTrust(): CaState = CapabilityProbe.probeCaInstalled()
 
     private const val SOCKET_TIMEOUT_MS = 10_000
 

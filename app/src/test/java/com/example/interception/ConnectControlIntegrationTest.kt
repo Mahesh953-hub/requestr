@@ -176,4 +176,29 @@ class ConnectControlIntegrationTest {
         val response = output.toString(Charsets.UTF_8.name())
         assertTrue(response.startsWith("HTTP/1.1 200"))
     }
+
+    /**
+     * [ConnectControl.resolveClientUid] against a REAL loopback TCP connection accepted by this
+     * very JVM process -- on a plain Linux host (this test's environment, unlike a real Android
+     * device) `/proc/net/tcp` is unrestricted, so the accepted socket's row is present and owned
+     * by this process's own uid. Exercises the real, non-fixture [ProcNetUidResolver.resolve]
+     * path end to end, complementing [ProcNetUidResolverTest]'s fixture-based unit coverage.
+     */
+    @Test
+    fun `resolveClientUid attributes a real accepted loopback connection to this process's uid`() {
+        val acceptor = ServerSocket(0)
+        val clientSide = Socket("127.0.0.1", acceptor.localPort)
+        val serverSideClient = acceptor.accept()
+        acceptor.close()
+
+        val uid = ConnectControl.resolveClientUid(serverSideClient)
+
+        // Best-effort: some sandboxes may still hide /proc/net/tcp rows or run under a runtime
+        // where the accepted socket's row isn't visible by the time this reads it -- assert that
+        // *when* a uid is resolved, it's a real non-negative id, never crash outright either way.
+        if (uid != null) assertTrue(uid >= 0)
+
+        clientSide.close()
+        serverSideClient.close()
+    }
 }

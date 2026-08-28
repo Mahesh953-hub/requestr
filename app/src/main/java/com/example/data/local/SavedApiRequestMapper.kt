@@ -46,6 +46,11 @@ internal fun SavedApiRequestEntity.toApiRequestItem(): ApiRequestItem = ApiReque
     mockHeaders = mockHeaders.map { it.toKeyValueItem() },
     mockBody = mockBody,
     mockDelayMs = mockDelayMs,
+    pollingEnabled = pollingEnabled,
+    pollingIntervalMs = pollingIntervalMs,
+    pollingMaxAttempts = pollingMaxAttempts,
+    pollingLocationHeader = pollingLocationHeader,
+    pollingAllowCrossOriginRedirect = pollingAllowCrossOriginRedirect,
 )
 
 internal fun ApiRequestItem.toEntity(): SavedApiRequestEntity = SavedApiRequestEntity(
@@ -78,6 +83,11 @@ internal fun ApiRequestItem.toEntity(): SavedApiRequestEntity = SavedApiRequestE
     mockHeaders = mockHeaders.map { it.toSavedKeyValue() },
     mockBody = mockBody,
     mockDelayMs = mockDelayMs,
+    pollingEnabled = pollingEnabled,
+    pollingIntervalMs = pollingIntervalMs,
+    pollingMaxAttempts = pollingMaxAttempts,
+    pollingLocationHeader = pollingLocationHeader,
+    pollingAllowCrossOriginRedirect = pollingAllowCrossOriginRedirect,
 )
 
 private fun SavedKeyValue.toKeyValueItem(): KeyValueItem = KeyValueItem(

@@ -404,4 +404,68 @@ REOF
         java.io.File(context.cacheDir, "requestr_ca_key.pkcs8").delete()
         getOrCreate(context)
     }
+
+    // ── Remote-certificate mirroring ────────────────────────────────────
+
+    /**
+     * Issues a per-host MITM leaf signed by this CA whose subject/SANs/validity mirror [host]'s
+     * REAL certificate (fetched via an independent direct handshake -- see
+     * [RemoteCertificateMirror.fetchRemoteLeaf]) instead of the plain `CN=<host>` +
+     * exact/wildcard-SAN leaf [MitmProxyEngine.generateHostCert] issues today.
+     *
+     * Returns null -- never throws -- when the remote cert can't be fetched (host unreachable,
+     * handshake failure, timeout), so a caller can fall back to its existing plain per-host leaf
+     * generation exactly as before. This function does not touch [MitmProxyEngine] itself.
+     *
+     * Surfacing note: this is intentionally NOT wired into [MitmProxyEngine.generateHostCert]
+     * today. Doing so would fetch the real upstream cert at CONNECT time, before the engine has
+     * decided whether the request will be mock-short-circuited — re-opening a real upstream
+     * connection for every first-seen `FORCE_MITM` host, including all-mock/offline connections,
+     * which is the exact "mock-only connections must never dial the real endpoint" regression
+     * [MitmProxyEngine]'s lazy-upstream path (§1.5) fixes (and which `MitmProxyEngineLazyUpstreamTest`
+     * guards with `acceptCount` assertions). Surfacing it is a discrete opt-in feature, not a
+     * default-path change.
+     */
+    suspend fun issueMirroredLeaf(
+        context: Context,
+        host: String,
+        port: Int = 443,
+    ): Pair<X509Certificate, KeyPair>? = withContext(Dispatchers.IO) {
+        val remote = RemoteCertificateMirror.fetchRemoteLeaf(host, port) ?: return@withContext null
+        val profile = RemoteCertificateMirror.profileFrom(remote)
+        issueLeafFromProfile(context, host, profile)
+    }
+
+    /**
+     * Pure(r) half of [issueMirroredLeaf], split out so the cert-building logic is unit-testable
+     * against an in-test [RemoteCertificateMirror.MirroredProfile] without a real network fetch.
+     */
+    internal suspend fun issueLeafFromProfile(
+        context: Context,
+        host: String,
+        profile: RemoteCertificateMirror.MirroredProfile,
+    ): Pair<X509Certificate, KeyPair> {
+        val ca = getOrCreate(context)
+        val bcProvider = org.bouncycastle.jce.provider.BouncyCastleProvider()
+        val keyPair = KeyPairGenerator.getInstance("RSA", bcProvider)
+            .apply { initialize(2048, SecureRandom()) }
+            .genKeyPair()
+        val serial = BigInteger(64, SecureRandom())
+        val issuer = X500Name.getInstance(ca.certificate.subjectX500Principal.encoded)
+        // A mirrored subject with no CN at all (unusual, but some leaves rely purely on SAN) is
+        // still a valid X500Name -- BouncyCastle's builder doesn't require a CN RDN.
+        val san = profile.subjectAltNames ?: HostSanGenerator.build(host)
+
+        val builder = JcaX509v3CertificateBuilder(
+            issuer, serial, profile.notBefore, profile.notAfter, profile.subject, keyPair.public,
+        ).apply {
+            addExtension(Extension.basicConstraints, true, BasicConstraints(false))
+            addExtension(Extension.keyUsage, true, KeyUsage(KeyUsage.digitalSignature or KeyUsage.keyEncipherment))
+            addExtension(Extension.subjectAlternativeName, false, san)
+        }
+
+        val signer = JcaContentSignerBuilder("SHA256withRSA").setProvider(bcProvider).build(ca.keyPair.private)
+        val cert = JcaX509CertificateConverter().getCertificate(builder.build(signer))
+        return cert to keyPair
+    }
 }

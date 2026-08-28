@@ -61,6 +61,14 @@ object RequestrSdk {
      *   [KtorInterceptor.installRequestrPlugin] onto the host app's own Ktor
      *   `HttpClientConfig`. Opt-in and false by default for the same reason as [captureCronet]
      *   (`io.ktor:ktor-client-core` is `compileOnly`).
+     * @param captureGrpc when true, exposes [grpcChannelBuilder] to wire
+     *   [RequestrGrpcInterceptor] onto the host app's own `ManagedChannelBuilder`. Opt-in and
+     *   false by default for the same reason as [captureCronet]/[captureKtor] (`io.grpc:grpc-api`
+     *   is `compileOnly` -- see `sdk/build.gradle.kts`).
+     * @param captureWebSocket when true, exposes [newWebSocket] as the way to open a captured
+     *   OkHttp WebSocket. Unlike [captureGrpc]/[captureCronet]/[captureKtor], `okhttp3.WebSocket`
+     *   is already part of this module's regular `okhttp` dependency (see [WebSocketInterceptor]
+     *   for why), so this defaults to true rather than false.
      * @param enableKeyLog when true, configures [KeyLogProducer]'s PRIMARY producer path --
      *   authenticated `POST /api/keylog` calls to requestr's `LocalApiServer` carrying the same
      *   `pairingToken` as [RequestrObserver] -- and starts [KeyLogProducer.startCronetKeyLogMonitor]
@@ -83,6 +91,8 @@ object RequestrSdk {
         val captureHttpUrlConnection: Boolean = true,
         val captureCronet: Boolean = false,
         val captureKtor: Boolean = false,
+        val captureGrpc: Boolean = false,
+        val captureWebSocket: Boolean = true,
         val enableKeyLog: Boolean = true,
         val requestrApiBase: String = "http://127.0.0.1:9876",
     )
@@ -137,6 +147,7 @@ object RequestrSdk {
             "RequestrSdk initialized (okHttp=${options.captureOkHttp}, " +
                 "httpUrlConnection=${options.captureHttpUrlConnection}, " +
                 "cronet=${options.captureCronet}, ktor=${options.captureKtor}, " +
+                "grpc=${options.captureGrpc}, webSocket=${options.captureWebSocket}, " +
                 "keyLog=${options.enableKeyLog}, apiBase=${options.requestrApiBase})",
         )
     }
@@ -186,6 +197,38 @@ object RequestrSdk {
         }
         if (!options.captureKtor) return
         config.installRequestrPlugin(RequestrObserver)
+    }
+
+    /**
+     * Returns [builder] wired with requestr's gRPC [RequestrGrpcInterceptor] if
+     * [Options.captureGrpc] was true at [init] time, or [builder] unmodified otherwise -- always
+     * source-compatible, so a host app can call this unconditionally right after building its
+     * `ManagedChannelBuilder` and let the [Options] flag decide the behavior. Only usable if the
+     * host app itself depends on `io.grpc:grpc-api` (and a transport like `grpc-okhttp`/
+     * `grpc-android`) -- see [Options.captureGrpc].
+     */
+    fun <T : io.grpc.ManagedChannelBuilder<T>> grpcChannelBuilder(builder: io.grpc.ManagedChannelBuilder<T>): io.grpc.ManagedChannelBuilder<T> {
+        if (!initialized) {
+            Log.w(TAG, "grpcChannelBuilder() called before init() -- returning builder unmodified")
+            return builder
+        }
+        if (!options.captureGrpc) return builder
+        return builder.addRequestrInterceptor(RequestrObserver)
+    }
+
+    /**
+     * Opens a captured WebSocket via [WebSocketInterceptor.newRequestrWebSocket] if
+     * [Options.captureWebSocket] was true at [init] time, or an uncaptured
+     * `client.newWebSocket(request, listener)` otherwise -- always source-compatible. See
+     * [RequestrWebSocketListener]/[RequestrWebSocket] for exactly what gets captured.
+     */
+    fun newWebSocket(client: okhttp3.OkHttpClient, request: okhttp3.Request, listener: okhttp3.WebSocketListener): okhttp3.WebSocket {
+        if (!initialized) {
+            Log.w(TAG, "newWebSocket() called before init() -- opening an uncaptured WebSocket")
+            return client.newWebSocket(request, listener)
+        }
+        if (!options.captureWebSocket) return client.newWebSocket(request, listener)
+        return client.newRequestrWebSocket(request, listener, RequestrObserver)
     }
 
     /** True once [init] has been called successfully. Exposed for [VerificationHarness] and

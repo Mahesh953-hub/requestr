@@ -16,13 +16,17 @@ import com.example.MainActivity
 import com.example.data.interception.ActiveTier
 import com.example.data.interception.CaptureMethod
 import com.example.data.interception.InterceptionStateRepository
+import com.example.data.interception.WatcherStatus
 import com.example.data.local.CaptureSessionEntity
 import com.example.data.local.CaptureTier
 import com.example.data.local.RequestrDatabase
 import com.example.data.prefs.AppFilterMode
 import com.example.data.prefs.SettingsDataStore
 import com.example.interception.tls.TlsKeyLogRegistry
+import com.example.interception.tun.NativeTun2Proxy
 import com.example.interception.tun.ProtectHook
+import com.example.interception.tun.Tun2ProxyBridge
+import com.example.interception.tun.Tun2ProxyConfig
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import kotlinx.coroutines.CoroutineScope
@@ -57,6 +61,26 @@ class RequestrVpnService : VpnService() {
     private var filterObserverJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO)
     private var sessionId: Long? = null
+
+    /**
+     * Gap #1 Approach A: true once the native tun2proxy bridge has genuinely taken over the
+     * tun fd for the current session (feeding [activeMitmEngine] via literal `CONNECT`), i.e.
+     * [Tun2ProxyBridge.start] returned [Tun2ProxyBridge.StartResult.Started]. False for the
+     * entire session whenever the native path was unavailable/failed to start -- in that case
+     * capture falls back to the pre-existing hand-rolled [PacketPump]/[TunRelay] pipeline for
+     * that whole session; there is never a silent mid-session switch either way.
+     */
+    private var usingNativeBridge = false
+
+    /**
+     * This service's own `MitmProxyEngine` instance (separate from [PreflightController]'s
+     * singleton, which serves the PROXY/ROOT/SHIZUKU tiers). Bound to an ephemeral port
+     * (`port = 0`) so it never collides with the user's configured proxy port. Only
+     * constructed/started when a native-bridge start is actually attempted; stopped from
+     * [cleanup] (success path) or immediately inline (failure path, since it would otherwise
+     * sit idle for the rest of the session with nothing routing traffic to it).
+     */
+    private var activeMitmEngine: MitmProxyEngine? = null
 
     /** Set once the pump is constructed, so [cleanup] can stop [PacketPump.relay] explicitly
      * (in addition to [pumpJob] cancellation) and observe [com.example.interception.tun.TunRelay.stats].
@@ -193,6 +217,64 @@ class RequestrVpnService : VpnService() {
                     method = CaptureMethod.VPN_TUN,
                 )
 
+                // Gap #1 Approach A: attempt to hand the tun fd to the native tun2proxy
+                // bridge, which issues literal CONNECT host:port to this service's own
+                // MitmProxyEngine instance -- feeding VPN-captured TCP flows into the same
+                // MITM decrypt pipeline the PROXY/ROOT/SHIZUKU tiers already use, instead of
+                // the hand-rolled TunRelay selector loop. Never pretends success: on any
+                // unavailable/failed native attempt this falls back to the pre-existing
+                // TunRelay-based pipeline for the whole session (see [usingNativeBridge]).
+                val mitmEngine = MitmProxyEngine(
+                    onDecryptedTransaction = { entity ->
+                        kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+                            db.capturedTrafficDao().insert(entity)
+                        }
+                    },
+                )
+                val mitmPort = mitmEngine.start(applicationContext, 0)
+                // MitmProxyEngine.start() unconditionally calls
+                // InterceptionStateRepository.markActive(tier = PROXY, method = MITM_PROXY,
+                // ...) itself before returning -- correct that transient global-state stomp
+                // back to this session's real tier/session id immediately below, regardless
+                // of which branch is taken next.
+                val bridgeResult = Tun2ProxyBridge.start(
+                    Tun2ProxyConfig.forMitmProxyEngine(mitmPort),
+                    tun.fd,
+                )
+                when (bridgeResult) {
+                    is Tun2ProxyBridge.StartResult.Started -> {
+                        usingNativeBridge = true
+                        activeMitmEngine = mitmEngine
+                        InterceptionStateRepository.markActive(
+                            sessionId = newId,
+                            tier = ActiveTier.VPN,
+                            port = port,
+                            method = CaptureMethod.MITM_PROXY,
+                        )
+                        Log.i(TAG, "Native tun2proxy bridge started; VPN traffic now routed through MitmProxyEngine on port $mitmPort")
+                    }
+                    is Tun2ProxyBridge.StartResult.Unavailable, is Tun2ProxyBridge.StartResult.Failed -> {
+                        usingNativeBridge = false
+                        runCatching { mitmEngine.stop() }
+                        val reason = when (bridgeResult) {
+                            is Tun2ProxyBridge.StartResult.Unavailable -> bridgeResult.reason
+                            is Tun2ProxyBridge.StartResult.Failed -> "code=${bridgeResult.code} ${bridgeResult.message}"
+                            else -> "unknown"
+                        }
+                        Log.w(TAG, "Native tun2proxy bridge unavailable/failed ($reason); falling back to legacy VPN relay path")
+                        // Restore the VPN/VPN_TUN state the un-native-bridged path already
+                        // established above (markActive resets watcherStatus to IDLE, so
+                        // setWatcherStatus(DEGRADED) below must run strictly after this).
+                        InterceptionStateRepository.markActive(
+                            sessionId = newId,
+                            tier = ActiveTier.VPN,
+                            port = port,
+                            method = CaptureMethod.VPN_TUN,
+                        )
+                        InterceptionStateRepository.setWatcherStatus(WatcherStatus.DEGRADED)
+                    }
+                }
+
                 val printUndecoded = prefs.printUndecoded.first()
                 val dumpToFile = prefs.dumpToFile.first()
                 // Task 9: read via SettingsDataStore (safe from any process/component) rather
@@ -238,6 +320,12 @@ class RequestrVpnService : VpnService() {
                         requestLogging = requestLogging,
                         responseLogging = responseLogging,
                         protectHook = protectHook,
+                        nativeBridgeMode = usingNativeBridge,
+                        nativeTrafficStatsPoll = if (usingNativeBridge) {
+                            { Tun2ProxyBridge.trafficStats() }
+                        } else {
+                            null
+                        },
                     )
                     activePump = pump
                     pump.run(this)
@@ -359,6 +447,25 @@ class RequestrVpnService : VpnService() {
         // loop is already blocked/stuck and never reaches that finally block).
         runCatching { activePump?.relay?.stop() }
         activePump = null
+        // Gap #1 Approach A: signal the native bridge to stop and give it a bounded window
+        // to actually observe the cancellation before the tun ParcelFileDescriptor is closed
+        // out from under it -- stop() itself is cooperative/async (fire-and-forget), not a
+        // blocking join, so this ordering is the mitigation for "protect native sockets/fd".
+        if (usingNativeBridge) {
+            runCatching { Tun2ProxyBridge.stop() }
+            val awaitRc = Tun2ProxyBridge.awaitStoppedOrTimeout()
+            if (awaitRc == NativeTun2Proxy.ERR_TIMEOUT) {
+                // The native thread did not provably finish within the bound. Escalate loudly and
+                // do NOT voluntarily let the fd keep getting used -- but we also must not leave the
+                // session half-torn-down. We proceed with the rest of teardown (the native thread
+                // holding the fd is the lesser of two evils vs. leaking the whole VPN session);
+                // the bridge thread itself never blocks the process exit because it is a daemon.
+                Log.e(TAG, "Native tun2proxy bridge did not confirm shutdown within ${Tun2ProxyBridge.STOP_QUIESCENCE_TIMEOUT_MS}ms; closing tun fd anyway (unsafe exit of the native thread)")
+            }
+        }
+        usingNativeBridge = false
+        runCatching { activeMitmEngine?.stop() }
+        activeMitmEngine = null
         runCatching { tunInterface?.close() }
         tunInterface = null
         // T1: stop PCAP export with the rest of this session's lifecycle -- flushes and closes

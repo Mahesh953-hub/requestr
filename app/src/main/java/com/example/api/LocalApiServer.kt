@@ -213,7 +213,13 @@ object LocalApiServer {
 
     // ── Router ────────────────────────────────────────────────────
 
-    private suspend fun route(method: String, path: String, body: String, authHeader: String? = null): Triple<Int, String, String> {
+    private suspend fun route(method: String, rawPath: String, body: String, authHeader: String? = null): Triple<Int, String, String> {
+        // Every route below was written to exact/prefix-match a bare path with no query string
+        // (the original contract -- none of the pre-existing routes ever took query params).
+        // Bulk export (below) needs `?from=&to=&cursor=&limit=&format=`, so the query string is
+        // split off here once, up front, rather than teaching every existing `path == "..."`
+        // check to also tolerate a trailing `?...` it never expected.
+        val (path, query) = splitQuery(rawPath)
         return try {
             when {
                 path == "/api/ping" -> ok("""{"status":"ok","version":"4.0"}""")
@@ -222,6 +228,10 @@ object LocalApiServer {
                 path == "/api/pairing-info" && method == "GET" -> pairingInfo()
 
                 path == "/api/captures" && method == "GET" -> listCaptures()
+                // Bulk, time-range/keyset-filtered export (master plan §2.4). Must be checked
+                // BEFORE the generic "/api/captures/{id}" prefix match below, since
+                // "/api/captures/export" would otherwise be parsed as id="export".
+                path == "/api/captures/export" && method == "GET" -> exportCaptures(query)
                 path.startsWith("/api/captures/") && method == "GET" -> getCapture(path.removePrefix("/api/captures/"))
 
                 path == "/api/flows" && method == "GET" -> listFlows()
@@ -245,6 +255,23 @@ object LocalApiServer {
                     } else {
                         listRules()
                     }
+                }
+
+                // Rules CRUD (master plan §2.16 — the LAN dashboard's in-browser rules editor
+                // needs create/update/delete, not just the read-only GET above). Gated by the
+                // exact same pairing-Bearer check as the GET, since a rule can rewrite/mock/
+                // block live traffic -- at least as sensitive as reading the rule list.
+                path == "/api/rules" && method == "POST" -> {
+                    if (!isAuthorized(authHeader)) err(401, "missing or invalid Authorization: Bearer <pairing token>")
+                    else createRule(body)
+                }
+                path.startsWith("/api/rules/") && method == "PUT" -> {
+                    if (!isAuthorized(authHeader)) err(401, "missing or invalid Authorization: Bearer <pairing token>")
+                    else updateRule(path.removePrefix("/api/rules/"), body)
+                }
+                path.startsWith("/api/rules/") && method == "DELETE" -> {
+                    if (!isAuthorized(authHeader)) err(401, "missing or invalid Authorization: Bearer <pairing token>")
+                    else deleteRule(path.removePrefix("/api/rules/"))
                 }
 
                 path == "/api/observe" && method == "POST" -> {
@@ -284,6 +311,33 @@ object LocalApiServer {
 
     private fun ok(json: String) = Triple(200, "application/json", json)
     private fun err(code: Int, msg: String) = Triple(code, "application/json", """{"error":"${msg.replace("\"","'")}"}""")
+
+    /**
+     * Splits a raw HTTP request-line target (e.g. `/api/captures/export?from=1&to=2&limit=500`)
+     * into its bare path and a decoded `key -> value` query-param map. Percent-decodes both key
+     * and value (`URLDecoder`, `+` treated as a literal space per `application/x-www-form-urlencoded`,
+     * matching every browser's own `URLSearchParams` encoding for a GET query string); a
+     * malformed escape sequence falls back to the raw (undecoded) token rather than throwing, so
+     * one bad param never 500s the whole request. A key with no `=` (e.g. `?debug`) maps to `""`.
+     */
+    private fun splitQuery(rawPath: String): Pair<String, Map<String, String>> {
+        val qIdx = rawPath.indexOf('?')
+        if (qIdx < 0) return rawPath to emptyMap()
+        val path = rawPath.substring(0, qIdx)
+        val query = rawPath.substring(qIdx + 1)
+        val params = mutableMapOf<String, String>()
+        for (pair in query.split('&')) {
+            if (pair.isEmpty()) continue
+            val eq = pair.indexOf('=')
+            val rawKey = if (eq >= 0) pair.substring(0, eq) else pair
+            val rawValue = if (eq >= 0) pair.substring(eq + 1) else ""
+            fun decode(s: String) = runCatching {
+                java.net.URLDecoder.decode(s, "UTF-8")
+            }.getOrDefault(s)
+            params[decode(rawKey)] = decode(rawValue)
+        }
+        return path to params
+    }
 
     private fun statusText(code: Int) = when (code) {
         200 -> "OK"; 201 -> "Created"; 400 -> "Bad Request"; 404 -> "Not Found"; 500 -> "Internal Server Error"
@@ -373,6 +427,182 @@ object LocalApiServer {
             val resH = JSONObject(log.responseHeaders).toString()
             ok("""{"id":${log.id},"method":"${log.method}","url":"${log.url.replace("\"","\\\"")}","host":"${log.host.replace("\"","\\\"")}","requestHeaders":$reqH,"requestBody":${JSONObject.quote(log.requestBody ?: "")},"status":${log.statusCode},"responseHeaders":$resH,"responseBody":${JSONObject.quote(log.responseBody ?: "")}}""")
         } catch (_: Exception) { err(500, "query failed") }
+    }
+
+    /** Hard ceiling on `?limit=` for [exportCaptures], independent of whatever the caller asks
+     *  for -- mirrors [MAX_KEYLOG_LINES_PER_REQUEST]'s rationale: one export request must not be
+     *  able to force an unbounded query/response regardless of client input. */
+    private const val MAX_EXPORT_PAGE_SIZE = 5000
+    private const val DEFAULT_EXPORT_PAGE_SIZE = 500
+
+    /**
+     * `GET /api/captures/export` — master plan §2.4 ("bulk, time-range-filtered network-log
+     * export endpoint"): unlike [listCaptures] (hardcoded `.take(50)` over the *entire* loaded
+     * table), this bounds the query itself via [com.example.data.local.CapturedTrafficDao]'s
+     * keyset-pagination queries and accepts real filters:
+     *
+     *  - `from`, `to` — inclusive epoch-millisecond timestamp range (defaults: `0`..now)
+     *  - `sessionId` — restrict to one capture session (omit for all sessions)
+     *  - `cursor` — opaque `"<timestamp>:<id>"` pair naming the last row of the previous page
+     *    (the exact value this handler put in the previous response's `"nextCursor"`); omit for
+     *    the first page
+     *  - `limit` — page size, default [DEFAULT_EXPORT_PAGE_SIZE], hard-capped at
+     *    [MAX_EXPORT_PAGE_SIZE]
+     *  - `format` — `json` (default) or `har`; `har` renders a real multi-entry HAR 1.2 document
+     *    (`log.entries`, one per row) rather than the single-entry-only shape
+     *    [com.example.data.interception.TrafficExporter.toHar] produces for one UI-model item.
+     *
+     * Response (`format=json`) includes `"nextCursor"` (null once the range is exhausted) so a
+     * client can keep paging without ever loading more than `limit` rows into memory at once.
+     */
+    private suspend fun exportCaptures(query: Map<String, String>): Triple<Int, String, String> {
+        return try {
+            val dao = db()?.capturedTrafficDao() ?: return err(500, "db unavailable")
+            val fromTs = query["from"]?.toLongOrNull() ?: 0L
+            val toTs = query["to"]?.toLongOrNull() ?: System.currentTimeMillis()
+            if (fromTs > toTs) return err(400, "'from' must be <= 'to'")
+            val sessionId = query["sessionId"]?.toLongOrNull()
+            val limit = (query["limit"]?.toIntOrNull() ?: DEFAULT_EXPORT_PAGE_SIZE)
+                .coerceIn(1, MAX_EXPORT_PAGE_SIZE)
+            val format = query["format"]?.lowercase() ?: "json"
+
+            val cursorRaw = query["cursor"]
+            var beforeTimestamp: Long? = null
+            var beforeId: Long? = null
+            if (!cursorRaw.isNullOrBlank()) {
+                val parts = cursorRaw.split(':')
+                beforeTimestamp = parts.getOrNull(0)?.toLongOrNull() ?: return err(400, "invalid cursor")
+                beforeId = parts.getOrNull(1)?.toLongOrNull() ?: return err(400, "invalid cursor")
+            }
+
+            val rows = if (sessionId != null) {
+                dao.getSessionRangePageBeforeCursor(sessionId, fromTs, toTs, beforeTimestamp, beforeId, limit)
+            } else {
+                dao.getRangePageBeforeCursor(fromTs, toTs, beforeTimestamp, beforeId, limit)
+            }
+
+            val nextCursor = if (rows.size >= limit) {
+                rows.lastOrNull()?.let { "${it.timestamp}:${it.id}" }
+            } else null
+
+            if (format == "har") {
+                ok(rowsToHar(rows, nextCursor))
+            } else {
+                val arr = org.json.JSONArray()
+                for (log in rows) {
+                    arr.put(
+                        JSONObject()
+                            .put("id", log.id)
+                            .put("sessionId", log.sessionId)
+                            .put("method", log.method)
+                            .put("url", log.url)
+                            .put("host", log.host)
+                            .put("status", log.statusCode ?: JSONObject.NULL)
+                            .put("requestHeaders", JSONObject(log.requestHeaders))
+                            .put("responseHeaders", JSONObject(log.responseHeaders))
+                            .put("requestBody", log.requestBody ?: JSONObject.NULL)
+                            .put("responseBody", log.responseBody ?: JSONObject.NULL)
+                            .put("requestSizeBytes", log.requestSizeBytes)
+                            .put("responseSizeBytes", log.responseSizeBytes)
+                            .put("latencyMs", log.latencyMs)
+                            .put("timestamp", log.timestamp)
+                            .put("wasDecrypted", log.wasDecrypted)
+                    )
+                }
+                ok(
+                    JSONObject()
+                        .put("items", arr)
+                        .put("nextCursor", nextCursor ?: JSONObject.NULL)
+                        .put("count", rows.size)
+                        .toString()
+                )
+            }
+        } catch (e: Exception) {
+            err(500, e.message ?: "export failed")
+        }
+    }
+
+    /**
+     * Renders a real multi-entry HAR 1.2 document from [rows] — one `log.entries[]` element per
+     * captured transaction, following the exact same field mapping as
+     * [com.example.data.interception.TrafficExporter.toHar] (unknown sizes/timings as HAR's own
+     * `-1` "not available" sentinel, never a fabricated number), just over a list of
+     * [com.example.data.local.CapturedTrafficEntity] rows instead of one UI-model item.
+     *
+     * [nextCursor] (the same opaque `"<timestamp>:<id>"` cursor [exportCaptures]'s `format=json`
+     * response puts in `"nextCursor"`) is embedded as `log._nextCursor`, a `_`-prefixed extension
+     * field per the HAR spec's convention for vendor/tool-specific additions (e.g. Chrome DevTools'
+     * `_initiator`) -- conformant HAR consumers ignore unknown `_`-prefixed fields, so a caller
+     * paging through a large HAR export can still discover where to resume without the format
+     * ceasing to be valid HAR 1.2.
+     */
+    private fun rowsToHar(rows: List<com.example.data.local.CapturedTrafficEntity>, nextCursor: String?): String {
+        val iso = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", java.util.Locale.US).apply {
+            timeZone = java.util.TimeZone.getTimeZone("UTC")
+        }
+        fun headerArray(headers: Map<String, String>): org.json.JSONArray {
+            val arr = org.json.JSONArray()
+            headers.forEach { (k, v) -> arr.put(JSONObject().put("name", k).put("value", v)) }
+            return arr
+        }
+        val entries = org.json.JSONArray()
+        for (log in rows) {
+            val request = JSONObject()
+                .put("method", log.method)
+                .put("url", log.url)
+                .put("httpVersion", log.protocol.ifBlank { "HTTP/1.1" })
+                .put("headers", headerArray(log.requestHeaders))
+                .put("queryString", org.json.JSONArray())
+                .put("headersSize", -1)
+                .put("bodySize", if (log.requestSizeBytes > 0) log.requestSizeBytes else -1)
+            if (!log.requestBody.isNullOrBlank()) {
+                request.put(
+                    "postData",
+                    JSONObject()
+                        .put(
+                            "mimeType",
+                            log.requestHeaders.entries.firstOrNull { it.key.equals("content-type", ignoreCase = true) }
+                                ?.value ?: "application/octet-stream",
+                        )
+                        .put("text", log.requestBody),
+                )
+            }
+            val content = JSONObject()
+                .put("size", if (log.responseSizeBytes > 0) log.responseSizeBytes else -1)
+                .put(
+                    "mimeType",
+                    log.responseHeaders.entries.firstOrNull { it.key.equals("content-type", ignoreCase = true) }?.value ?: "",
+                )
+            if (!log.responseBody.isNullOrBlank()) content.put("text", log.responseBody)
+            val response = JSONObject()
+                .put("status", log.statusCode ?: 0)
+                .put("statusText", "")
+                .put("httpVersion", log.protocol.ifBlank { "HTTP/1.1" })
+                .put("headers", headerArray(log.responseHeaders))
+                .put("cookies", org.json.JSONArray())
+                .put("content", content)
+                .put("redirectURL", "")
+                .put("headersSize", -1)
+                .put("bodySize", if (log.responseSizeBytes > 0) log.responseSizeBytes else -1)
+            entries.put(
+                JSONObject()
+                    .put("startedDateTime", iso.format(java.util.Date(log.timestamp)))
+                    .put("time", log.latencyMs)
+                    .put("request", request)
+                    .put("response", response)
+                    .put("cache", JSONObject())
+                    .put(
+                        "timings",
+                        JSONObject().put("send", -1).put("wait", log.latencyMs).put("receive", -1),
+                    ),
+            )
+        }
+        val logObj = JSONObject()
+            .put("version", "1.2")
+            .put("creator", JSONObject().put("name", "requestr").put("version", "export-bulk"))
+            .put("entries", entries)
+            .put("_nextCursor", nextCursor ?: JSONObject.NULL)
+        return JSONObject().put("log", logObj).toString(2)
     }
 
     /**
@@ -501,6 +731,92 @@ object LocalApiServer {
             }
             ok(arr.toString())
         } catch (_: Exception) { ok("[]") }
+    }
+
+    /** Serializes one [com.example.data.local.InterceptRuleEntity] with the exact same field set
+     *  [listRules] emits per-entry — shared so create/update responses match the GET shape. */
+    private fun ruleToJson(rule: com.example.data.local.InterceptRuleEntity): JSONObject =
+        JSONObject()
+            .put("id", rule.id)
+            .put("name", rule.name)
+            .put("pattern", rule.pattern)
+            .put("domain", rule.domain)
+            .put("action", rule.action.name)
+            .put("enabled", rule.enabled)
+            .put("replacementValue", rule.replacementValue ?: JSONObject.NULL)
+
+    /**
+     * `POST /api/rules` — creates a new [com.example.data.local.InterceptRuleEntity]. Body:
+     * `{"name","pattern","domain","action","enabled","replacementValue"}`, all optional except
+     * `action` must be one of [com.example.data.local.RuleAction]'s names when present (defaults
+     * to `LOG_ONLY`, the same safe default the entity itself declares, when absent or
+     * unrecognized) — added for the LAN dashboard's rules editor (master plan §2.16) and for any
+     * other authenticated local caller.
+     */
+    private suspend fun createRule(body: String): Triple<Int, String, String> {
+        return try {
+            val dao = db()?.interceptRuleDao() ?: return err(500, "db unavailable")
+            val json = JSONObject(body)
+            val action = runCatching {
+                com.example.data.local.RuleAction.valueOf(json.optString("action", "LOG_ONLY").uppercase())
+            }.getOrDefault(com.example.data.local.RuleAction.LOG_ONLY)
+            val rule = com.example.data.local.InterceptRuleEntity(
+                name = json.optString("name", ""),
+                pattern = json.optString("pattern", ""),
+                domain = json.optString("domain", ""),
+                action = action,
+                enabled = json.optBoolean("enabled", true),
+                replacementValue = json.optNullableString("replacementValue"),
+            )
+            val id = dao.insert(rule)
+            ok(ruleToJson(rule.copy(id = id)).toString())
+        } catch (e: Exception) {
+            err(400, e.message ?: "bad request")
+        }
+    }
+
+    /**
+     * `PUT /api/rules/{id}` — partial update: every field in the JSON body overwrites the
+     * matching column, any field the caller omits keeps its existing stored value (so a
+     * dashboard "toggle enabled" click can PUT `{"enabled":false}` alone without having to
+     * resend the whole rule).
+     */
+    private suspend fun updateRule(idRaw: String, body: String): Triple<Int, String, String> {
+        val id = idRaw.toLongOrNull() ?: return err(400, "invalid id")
+        return try {
+            val dao = db()?.interceptRuleDao() ?: return err(500, "db unavailable")
+            val existing = dao.getById(id) ?: return err(404, "rule not found")
+            val json = JSONObject(body)
+            val action = if (json.has("action")) {
+                runCatching { com.example.data.local.RuleAction.valueOf(json.getString("action").uppercase()) }
+                    .getOrDefault(existing.action)
+            } else existing.action
+            val updated = existing.copy(
+                name = if (json.has("name")) json.optString("name", existing.name) else existing.name,
+                pattern = if (json.has("pattern")) json.optString("pattern", existing.pattern) else existing.pattern,
+                domain = if (json.has("domain")) json.optString("domain", existing.domain) else existing.domain,
+                action = action,
+                enabled = if (json.has("enabled")) json.optBoolean("enabled", existing.enabled) else existing.enabled,
+                replacementValue = if (json.has("replacementValue")) json.optNullableString("replacementValue") else existing.replacementValue,
+            )
+            dao.update(updated)
+            ok(ruleToJson(updated).toString())
+        } catch (e: Exception) {
+            err(400, e.message ?: "bad request")
+        }
+    }
+
+    /** `DELETE /api/rules/{id}`. Idempotent: deleting an already-absent id is a 200, not a 404 —
+     *  the end state ("this id no longer exists") is identical either way. */
+    private suspend fun deleteRule(idRaw: String): Triple<Int, String, String> {
+        val id = idRaw.toLongOrNull() ?: return err(400, "invalid id")
+        return try {
+            val dao = db()?.interceptRuleDao() ?: return err(500, "db unavailable")
+            dao.deleteById(id)
+            ok("""{"status":"deleted","id":$id}""")
+        } catch (e: Exception) {
+            err(500, e.message ?: "delete failed")
+        }
     }
 
     /** Returns [key]'s string value, or null if the key is absent/JSON-null -- unlike

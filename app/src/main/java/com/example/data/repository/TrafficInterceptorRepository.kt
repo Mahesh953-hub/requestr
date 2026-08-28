@@ -9,6 +9,14 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 
 /**
+ * Pure logic for [TrafficInterceptorRepository.loadInstalledApps]'s launcher-label fallback:
+ * a label PackageManager resolution "failed" for our purposes if it's blank or is literally the
+ * package name (i.e. resolution silently fell back to the identifier instead of a real label).
+ */
+fun isUnusableLabel(label: String, packageName: String): Boolean =
+    label.isBlank() || label == packageName
+
+/**
  * Holds runtime state that has no persistent equivalent.
  *
  * v2.1 had this object fabricate interception state (root/Shizuku/VPN all hardcoded true),
@@ -33,20 +41,40 @@ object TrafficInterceptorRepository {
     /**
      * Enumerates genuinely installed, launchable apps for the capture filter.
      * Requires QUERY_ALL_PACKAGES for Android 11+ visibility.
+     *
+     * Master plan §3 LOW-ADD — INTERNET app-picker filter + launcher-label fallback:
+     *  - When [internetOnly] is true (default), apps that don't hold the `INTERNET` permission
+     *    are excluded — such an app cannot make network requests, so it has nothing for a traffic
+     *    interceptor to ever capture; showing it just adds noise to the picker. The permission
+     *    check fails open (an app is kept, not hidden) if the check itself throws, so a
+     *    PackageManager quirk on some OEM build never silently disappears a real app.
+     *  - [pm.getApplicationLabel] occasionally returns the raw package name instead of a real
+     *    display label for apps with a broken/missing `android:label` resolution. When that
+     *    happens ([isUnusableLabel]), this falls back to the label of that package's launcher
+     *    `ResolveInfo` (queried once for the whole picker via [buildLauncherLabelMap], not once
+     *    per app) before finally falling back to the package name itself.
      */
-    suspend fun loadInstalledApps(context: android.content.Context) {
+    suspend fun loadInstalledApps(context: android.content.Context, internetOnly: Boolean = true) {
         val apps = withContext(Dispatchers.IO) {
             val pm = context.packageManager
             runCatching {
+                val launcherLabels = buildLauncherLabelMap(pm)
                 pm.getInstalledApplications(android.content.pm.PackageManager.GET_META_DATA)
                     .asSequence()
                     .filter { pm.getLaunchIntentForPackage(it.packageName) != null }
                     .filter { it.packageName != context.packageName }
+                    .filter { !internetOnly || hasInternetPermission(pm, it.packageName) }
                     .map { info ->
+                        val rawLabel = runCatching { pm.getApplicationLabel(info).toString() }
+                            .getOrDefault(info.packageName)
+                        val label = if (isUnusableLabel(rawLabel, info.packageName)) {
+                            launcherLabels[info.packageName] ?: rawLabel
+                        } else {
+                            rawLabel
+                        }
                         AppPackageItem(
                             packageName = info.packageName,
-                            appName = runCatching { pm.getApplicationLabel(info).toString() }
-                                .getOrDefault(info.packageName),
+                            appName = label,
                             isInterceptEnabled = false,
                             isSystemApp = (info.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0,
                         )
@@ -57,6 +85,26 @@ object TrafficInterceptorRepository {
         }
         _installedApps.value = apps
     }
+
+    /** One `queryIntentActivities` call for every launchable activity's package -> display label. */
+    private fun buildLauncherLabelMap(pm: android.content.pm.PackageManager): Map<String, String> =
+        runCatching {
+            val launcherIntent = android.content.Intent(android.content.Intent.ACTION_MAIN)
+                .addCategory(android.content.Intent.CATEGORY_LAUNCHER)
+            pm.queryIntentActivities(launcherIntent, 0)
+                .associate { it.activityInfo.packageName to it.loadLabel(pm).toString() }
+        }.getOrDefault(emptyMap())
+
+    /**
+     * `INTERNET` is a normal (not runtime-granted) permission, so [PackageManager.checkPermission]
+     * reflects the manifest declaration directly without needing a `GET_PERMISSIONS` query.
+     * Fails open (returns true) on any error, so a check failure never hides a real app.
+     */
+    private fun hasInternetPermission(pm: android.content.pm.PackageManager, packageName: String): Boolean =
+        runCatching {
+            pm.checkPermission(android.Manifest.permission.INTERNET, packageName) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+        }.getOrDefault(true)
 
     // ── traffic rules (in-memory mirror) ───────────────────────────────
 

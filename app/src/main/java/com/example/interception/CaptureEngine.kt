@@ -695,6 +695,20 @@ class CaptureEngine(
                 // left to mock post-hoc here; persist the real transaction as observed, same as
                 // LOG_ONLY.
             }
+            com.example.data.local.RuleAction.SCRIPT_REWRITE -> {
+                // Same rationale as MOCK_RESPONSE above: SCRIPT_REWRITE (master plan §1.11) runs
+                // against the live request/response inside the engines that terminate the
+                // connection (RuleEnforcer.applyScriptRewrite from MitmProxyEngine). This
+                // tun-pipeline path only observes the transaction after the fact; persist as
+                // observed, same as LOG_ONLY.
+            }
+            com.example.data.local.RuleAction.CHAOS -> {
+                // CHAOS (fault injection, see ChaosInjector) is not wired into this
+                // tun-pipeline path -- same rationale as SCRIPT_REWRITE/MOCK_RESPONSE above:
+                // this path only observes the transaction after the real exchange already
+                // completed on the wire, so there is no live request/response left to inject
+                // a fault into here; persist as observed, same as LOG_ONLY.
+            }
         }
 
         // LOG_ONLY rules override the capture toggle — always persist tagged traffic

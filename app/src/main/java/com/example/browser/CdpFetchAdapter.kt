@@ -225,7 +225,13 @@ class CdpFetchAdapter(
                     // meaning at the Fetch.requestPaused stage -- CDP already observes decrypted
                     // browser traffic, so there's nothing further to MITM here. Treat it the same
                     // as LOG_ONLY: allow the request through unmodified.
-                    RuleAction.MODIFY_RESPONSE, RuleAction.LOG_ONLY, RuleAction.FORCE_MITM -> {
+                    // SCRIPT_REWRITE (master plan §1.11) is only wired into the TLS-MITM path
+                    // (see RuleEnforcer.applyScriptRewrite / MitmProxyEngine) -- the CDP/browser
+                    // capture path does not yet run it, so it falls through to plain allow here.
+                    // CHAOS (fault injection) is only wired into the TLS-MITM path (see
+                    // ChaosInjector / MitmProxyEngine) -- the CDP/browser capture path does not
+                    // yet run it, so it falls through to plain allow here, same as SCRIPT_REWRITE.
+                    RuleAction.MODIFY_RESPONSE, RuleAction.LOG_ONLY, RuleAction.FORCE_MITM, RuleAction.SCRIPT_REWRITE, RuleAction.CHAOS -> {
                         allowedCount++
                         notifyCountersChanged()
                         client.send(

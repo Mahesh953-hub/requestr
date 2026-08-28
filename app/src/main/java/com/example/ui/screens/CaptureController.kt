@@ -13,6 +13,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.platform.LocalContext
+import com.example.api.LanDashboardServer
 import com.example.data.interception.InterceptionStateRepository
 import com.example.data.prefs.SettingsDataStore
 import com.example.interception.CapabilityProbe
@@ -179,6 +180,24 @@ class CaptureController(
     fun refreshCapabilities() {
         scope.launch { CapabilityProbe.probeAll(context) }
     }
+
+    /**
+     * Starts the LAN dashboard (master plan §2.16) — a browsable dashboard separate from
+     * [com.example.api.LocalApiServer]'s localhost-only pairing API. [lanBinding] controls
+     * whether the server binds `127.0.0.1` (default) or `0.0.0.0` (explicit opt-in for other
+     * devices on the LAN); auth (pairing token) applies either way. Deliberately not tied to
+     * capture start/stop: a user may want the dashboard open to review already-captured traffic
+     * or edit rules even while capture itself is stopped.
+     */
+    fun startDashboard(port: Int = LanDashboardServer.DEFAULT_PORT, lanBinding: Boolean = false) {
+        LanDashboardServer.start(context, port, lanBinding)
+    }
+
+    fun stopDashboard() {
+        LanDashboardServer.stop()
+    }
+
+    val isDashboardRunning: Boolean get() = LanDashboardServer.isRunning
 
     /** Cancels the mode/tier-preference observer. Called when the owning composable leaves. */
     fun dispose() {

@@ -12,8 +12,17 @@ import com.example.data.local.RequestrDatabase
 import com.example.data.local.RuleAction
 import com.example.data.models.HttpMethod
 import com.example.data.prefs.SettingsDataStore
+import com.example.interception.grpc.GrpcDetector
+import com.example.interception.grpc.ProtobufDecoder
+import com.example.interception.http.GrpcEvent
+import com.example.interception.http.Http2Parser
+import com.example.interception.http.Http2Session
 import com.example.interception.http.HttpParser
 import com.example.interception.http.ParsedHttpMessage
+import com.example.interception.http.WebSocketParser
+import com.example.interception.http.WsMessageAssembler
+import com.example.interception.tls.ClientHelloCapture
+import com.example.interception.tls.TlsClientHello
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -228,17 +237,49 @@ class MitmProxyEngine(
             // the old computeIfAbsent call site relied on, plus a 200-entry LRU cap + TTL.
             val (cert, keyPair) = certCache.getOrCompute(host) { h -> generateHostCert(context, h) }
 
+            // Real JA3 (M6): peek the raw ClientHello record directly off the accepted socket
+            // BEFORE handing it to JSSE -- by the time startHandshake() below returns, JSSE has
+            // consumed those bytes and there is no supported way to read them back. peeked.socket
+            // replays the exact same bytes to JSSE (see ClientHelloCapture's KDoc), so the
+            // handshake itself is completely unaffected by this.
+            val peeked = ClientHelloCapture.peekClientHello(client)
+            val clientHello: TlsClientHello? = peeked.clientHello
+
             // Upgrade client side to TLS with our per-host cert
             val sslContext = createSslContext(keyPair, cert)
             val sslSocket = sslContext.socketFactory
-                .createSocket(client, host, port, true) as SSLSocket
+                .createSocket(peeked.socket, host, port, true) as SSLSocket
             sslSocket.useClientMode = false
+            // Client/server ALPN negotiation (§4): offer both h2 and http/1.1, exactly what a
+            // real server behind this proxy would offer. The client's choice (read back below,
+            // once the handshake completes) decides which relay mode this whole connection uses
+            // -- see the h2-vs-HTTP/1.x dispatch further down.
+            //
+            // `SSLParameters.setApplicationProtocols` is API 24 (N), and the negotiated result is
+            // read back via `SSLSocket.getHandshakeApplicationProtocol()` -- also API 24 -- rather
+            // than the API 29 `getApplicationProtocol()`. This makes the h2 path reachable on
+            // Android 7.0/8.x (API 24-28), where Android's Conscrypt JSSE provider already
+            // supports ALPN even though the newer `applicationProtocol` getter does not exist yet.
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                runCatching {
+                    val params = sslSocket.sslParameters
+                    params.applicationProtocols = arrayOf("h2", "http/1.1")
+                    sslSocket.sslParameters = params
+                }
+            }
             try {
                 sslSocket.startHandshake()
             } catch (e: javax.net.ssl.SSLException) {
+                ConnectControl.PinningFailureRegistry.recordFailure(host)
                 persistFailedMitmTlsSession(db, host, port, "client-facing handshake", e)
                 return
             }
+
+            val negotiatedAlpn = runCatching {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                    sslSocket.handshakeApplicationProtocol?.ifBlank { null }
+                } else null
+            }.getOrNull()
 
             val decryptedInput = sslSocket.getInputStream()
             val decryptedOutput = sslSocket.getOutputStream()
@@ -261,7 +302,10 @@ class MitmProxyEngine(
             // deferred until an upstream socket actually exists. Normal (non-mocked) traffic
             // still gets this on its very first request, so lineage-join behaviour for real
             // traffic is unchanged; a fully-mocked connection simply never triggers it.
-            val upstream = LazyUpstreamConnection(host, port) { connected ->
+            val upstream = LazyUpstreamConnection(
+                host, port,
+                preferredAlpnProtocols = negotiatedAlpn?.let { listOf(it) } ?: emptyList(),
+            ) { connected ->
                 // W5: the MITM proxy terminates TLS itself, so tlsSessionId/connectionId have
                 // historically been keyed as "$host:$port" -- a real key, but a different
                 // convention than the 5-tuple ConnectionLineage joins on for the VPN/tun path.
@@ -289,7 +333,10 @@ class MitmProxyEngine(
                 // both TLS legs here, so we know the *negotiated* cipher/protocol/ALPN from the
                 // client-facing session and the *real* peer certificate from the upstream leg
                 // (the client-facing cert is ours, not the server's — no signal there).
-                persistMitmTlsSession(db, host, port, sslSocket, connected.sslSocket, canonicalConnectionId)
+                persistMitmTlsSession(
+                    db, host, port, sslSocket, connected.sslSocket, canonicalConnectionId,
+                    ja3Hash = clientHello?.ja3Hash(),
+                )
             }
 
             // Inspecting bidirectional relay: parse decrypted HTTP/1.x with
@@ -305,30 +352,55 @@ class MitmProxyEngine(
             val logRequests = settingsPrefs.requestLogging.first()
             val logResponses = settingsPrefs.responseLogging.first()
 
-            val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>()
-            val clientWriteLock = Any()
             val sent = AtomicLong(0)
             val received = AtomicLong(0)
-            val t1 = Thread {
-                inspectClientToServer(db, decryptedInput, upstream, decryptedOutput,
-                    clientWriteLock, host, port, pending, sent, logRequests, logResponses)
-            }
-            val t2 = Thread {
-                inspectServerToClient(
-                    db, upstream, decryptedOutput, clientWriteLock, pending, host, port, received,
-                    logRequests, logResponses,
+
+            if (negotiatedAlpn == "h2") {
+                // §3/§5: HTTP/2 is decided once, upfront, from the ALPN result -- this
+                // connection never falls into the HTTP/1.x buffering loop or its blind-relay
+                // fallback at all. Every byte is forwarded immediately in both directions (h2
+                // frames are never rule-evaluated -- that only applies to the HTTP/1.x path);
+                // Http2Session is handed a copy of each parsed frame purely to explain what it
+                // means (HPACK decode, per-stream pairing, gRPC message framing).
+                val h2Session = Http2Session(
+                    onTransaction = { tx ->
+                        emitTransaction(tx.request, tx.response, tx.latencyMs, "$host:$port", logRequests, logResponses)
+                    },
+                    onGrpcMessage = { event -> emitGrpcMessage(event, host, port, logRequests, logResponses) },
                 )
+                val t1 = Thread {
+                    inspectH2ClientToServer(db, decryptedInput, upstream, host, port, h2Session, sent)
+                }
+                val t2 = Thread {
+                    inspectH2ServerToClient(upstream, decryptedOutput, host, port, h2Session, received)
+                }
+                t1.start(); t2.start()
+                t1.join(60_000); t2.join(60_000)
+            } else {
+                // HTTP/1.x, with an in-place switch to WebSocket framing the moment a 101
+                // upgrade response is observed -- see handleParsedResponse and
+                // ConnectionProtocolState. Genuinely unrecognized protocols still fall back to
+                // the pre-existing blind relay inside inspectClientToServer/inspectServerToClient.
+                val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>()
+                val clientWriteLock = Any()
+                val wsState = ConnectionProtocolState()
+                val t1 = Thread {
+                    inspectClientToServer(db, decryptedInput, upstream, decryptedOutput,
+                        clientWriteLock, host, port, pending, sent, logRequests, logResponses, wsState)
+                }
+                val t2 = Thread {
+                    inspectServerToClient(
+                        db, upstream, decryptedOutput, clientWriteLock, pending, host, port, received,
+                        logRequests, logResponses, wsState,
+                    )
+                }
+                t1.start(); t2.start()
+                t1.join(60_000); t2.join(60_000)
             }
-            t1.start(); t2.start()
-            t1.join(60_000); t2.join(60_000)
 
             persistConnectAttempt(
                 context, client, db, host, port, "MITM_DECRYPTED",
-                negotiatedAlpn = runCatching {
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-                        sslSocket.applicationProtocol?.ifBlank { null }
-                    } else null
-                }.getOrNull(),
+                negotiatedAlpn = negotiatedAlpn,
                 bytesToUpstream = sent.get(), bytesToClient = received.get(),
             )
 
@@ -363,6 +435,12 @@ class MitmProxyEngine(
         bytesToClient: Long = 0,
     ) {
         runCatching {
+            // UID attribution has two independent, never-throw paths: the API 29+
+            // ConnectivityManager owner-UID lookup (works only while requestr is itself the
+            // active VPN), and ConnectControl.resolveClientUid's /proc/net/tcp fallback (covers
+            // pre-29 or non-VPN contexts, subject to Android's per-app socket visibility on
+            // stock N+ devices where it legitimately returns null). Try the former, fall back
+            // to the latter rather than silently recording null when a fallback was available.
             val clientUid = runCatching {
                 if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) return@runCatching null
                 val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
@@ -372,7 +450,7 @@ class MitmProxyEngine(
                 val remote = client.remoteSocketAddress as? java.net.InetSocketAddress
                     ?: return@runCatching null
                 cm.getConnectionOwnerUid(android.system.OsConstants.IPPROTO_TCP, local, remote).takeIf { it != -1 }
-            }.getOrNull()
+            }.getOrNull() ?: ConnectControl.resolveClientUid(client)
             val entity = ConnectAttemptEntity(
                 sessionId = sessionId.get(),
                 targetHost = host,
@@ -388,6 +466,31 @@ class MitmProxyEngine(
             )
             kotlinx.coroutines.runBlocking { db.connectAttemptDao().insert(entity) }
         }.onFailure { e -> Log.w(TAG, "Failed to persist CONNECT attempt for $host: ${e.message}") }
+    }
+
+    // ── WebSocket mode switch (§4/§5) ────────────────────────────────────
+
+    /**
+     * Per-connection state shared by [inspectClientToServer]/[inspectServerToClient] for the
+     * HTTP/1.x relay path: once a 101 upgrade response is observed (see [handleParsedResponse]),
+     * [webSocketMode] flips to `true` and every subsequent byte on both directions is parsed as
+     * WebSocket frames instead of HTTP/1.x -- this is what removes the old blind-relay fallback
+     * for WebSocket traffic (§5). [clientAssembler]/[serverAssembler] reassemble fragmented
+     * messages (RFC 6455 §5.4) independently per direction, matching the per-direction
+     * [Http2Parser.HpackDecoder] convention used for HTTP/2.
+     */
+    private class ConnectionProtocolState {
+        val webSocketMode = AtomicBoolean(false)
+        @Volatile var wsUrl: String = ""
+        val clientAssembler = WsMessageAssembler()
+        val serverAssembler = WsMessageAssembler()
+    }
+
+    /** `"https://host/path"` → `"wss://host/path"`, `"http://"` → `"ws://"`. */
+    private fun buildWsUrl(url: String): String = when {
+        url.startsWith("https://") -> "wss://" + url.removePrefix("https://")
+        url.startsWith("http://") -> "ws://" + url.removePrefix("http://")
+        else -> url
     }
 
     // ── Inspecting relay ────────────────────────────────────────────────
@@ -413,8 +516,10 @@ class MitmProxyEngine(
         bytesSentToUpstream: AtomicLong,
         logRequests: Boolean,
         logResponses: Boolean,
+        wsState: ConnectionProtocolState,
     ) {
         val buffer = ByteArrayOutputStream()
+        val wsBuffer = ByteArrayOutputStream()
         val chunk = ByteArray(BUFFER_SIZE)
         var blind = false
         try {
@@ -422,6 +527,27 @@ class MitmProxyEngine(
                 val n = input.read(chunk)
                 if (n == -1) break
                 bytesSentToUpstream.addAndGet(n.toLong())
+                if (wsState.webSocketMode.get()) {
+                    // §4/§5: WebSocket frame parsing after upgrade — forward raw immediately
+                    // (WS frames are never rule-evaluated, same posture as h2), then feed a
+                    // side-buffer through the frame parser purely to explain/emit what was sent.
+                    val upstreamOut = connectOrThrow(db, upstream, host, port)
+                    upstreamOut.write(chunk, 0, n)
+                    upstreamOut.flush()
+                    wsBuffer.write(chunk, 0, n)
+                    val wsBytes = wsBuffer.toByteArray()
+                    val (consumed, frames) = WebSocketParser.parseFrames(wsBytes)
+                    if (consumed > 0) {
+                        wsBuffer.reset()
+                        wsBuffer.write(wsBytes, consumed, wsBytes.size - consumed)
+                    }
+                    for (frame in frames) {
+                        wsState.clientAssembler.offer(frame)?.let { complete ->
+                            emitWsFrame(complete, isClient = true, wsState.wsUrl, host, port, logRequests, logResponses)
+                        }
+                    }
+                    continue
+                }
                 if (blind) {
                     val upstreamOut = connectOrThrow(db, upstream, host, port)
                     upstreamOut.write(chunk, 0, n)
@@ -507,6 +633,7 @@ class MitmProxyEngine(
         bytesReceivedFromUpstream: AtomicLong,
         logRequests: Boolean,
         logResponses: Boolean,
+        wsState: ConnectionProtocolState,
     ) {
         // §1.5 MUST-FIX: mirrors inspectClientToServer's lazy connect -- this reader has
         // nothing to read until the upstream connection actually exists. If the whole
@@ -516,6 +643,7 @@ class MitmProxyEngine(
         val input = upstream.awaitConnectedOrGiveUp()?.input ?: return
 
         val buffer = ByteArrayOutputStream()
+        val wsBuffer = ByteArrayOutputStream()
         val chunk = ByteArray(BUFFER_SIZE)
         var blind = false
         try {
@@ -523,6 +651,25 @@ class MitmProxyEngine(
                 val n = input.read(chunk)
                 if (n == -1) break
                 bytesReceivedFromUpstream.addAndGet(n.toLong())
+                if (wsState.webSocketMode.get()) {
+                    synchronized(clientWriteLock) {
+                        clientOut.write(chunk, 0, n)
+                        clientOut.flush()
+                    }
+                    wsBuffer.write(chunk, 0, n)
+                    val wsBytes = wsBuffer.toByteArray()
+                    val (consumed, frames) = WebSocketParser.parseFrames(wsBytes)
+                    if (consumed > 0) {
+                        wsBuffer.reset()
+                        wsBuffer.write(wsBytes, consumed, wsBytes.size - consumed)
+                    }
+                    for (frame in frames) {
+                        wsState.serverAssembler.offer(frame)?.let { complete ->
+                            emitWsFrame(complete, isClient = false, wsState.wsUrl, host, port, logRequests, logResponses)
+                        }
+                    }
+                    continue
+                }
                 if (blind) {
                     synchronized(clientWriteLock) {
                         clientOut.write(chunk, 0, n)
@@ -552,13 +699,120 @@ class MitmProxyEngine(
                     } else {
                         val raw = bytes.copyOfRange(0, response.consumedBytes)
                         bytes = bytes.copyOfRange(response.consumedBytes, bytes.size)
-                        handleParsedResponse(db, response, raw, clientOut, clientWriteLock, pending, host, port, logRequests, logResponses)
+                        handleParsedResponse(
+                            db, response, raw, clientOut, clientWriteLock, pending, host, port,
+                            logRequests, logResponses, wsState,
+                        )
                         buffer.reset()
                         buffer.write(bytes)
                     }
                 }
             }
         } catch (_: Exception) { /* connection closed */ }
+    }
+
+    // ── HTTP/2 relay (§3/§5) ──────────────────────────────────────────────
+
+    /**
+     * Client→server HTTP/2 relay. Unlike [inspectClientToServer]'s HTTP/1.x path, every byte is
+     * forwarded upstream immediately, unmodified -- h2 frames are never rule-evaluated here (a
+     * deliberate scope decision: BLOCK/REDIRECT/MODIFY_REQUEST/MODIFY_RESPONSE/MOCK_RESPONSE for
+     * h2 traffic is not part of this task). [session] is handed a *copy* of each parsed frame
+     * purely so it can emit [Http2Transaction]/[GrpcEvent]s for display -- it never influences
+     * what is sent on the wire.
+     *
+     * The client connection preface (RFC 7540 §3.5, `Http2Parser.PREFACE_LENGTH` bytes) is
+     * stripped from the frame-parsing side-buffer exactly once before the first
+     * [Http2Parser.parseFrames] call; buffering (rather than checking as soon as any bytes
+     * arrive) avoids misinterpreting a preface that arrived split across TCP segments as a
+     * bogus frame header.
+     */
+    private fun inspectH2ClientToServer(
+        db: RequestrDatabase,
+        input: InputStream,
+        upstream: LazyUpstreamConnection,
+        host: String,
+        port: Int,
+        session: Http2Session,
+        bytesSentToUpstream: AtomicLong,
+    ) {
+        val frameBuffer = ByteArrayOutputStream()
+        val chunk = ByteArray(BUFFER_SIZE)
+        var prefaceStripped = false
+        try {
+            while (true) {
+                val n = input.read(chunk)
+                if (n == -1) break
+                bytesSentToUpstream.addAndGet(n.toLong())
+                val upstreamOut = connectOrThrow(db, upstream, host, port)
+                upstreamOut.write(chunk, 0, n)
+                upstreamOut.flush()
+
+                frameBuffer.write(chunk, 0, n)
+                var bytes = frameBuffer.toByteArray()
+                if (!prefaceStripped) {
+                    if (bytes.size < Http2Parser.PREFACE_LENGTH) continue // wait for the full preface
+                    if (Http2Parser.isPreface(bytes)) {
+                        bytes = bytes.copyOfRange(Http2Parser.PREFACE_LENGTH, bytes.size)
+                    }
+                    prefaceStripped = true
+                }
+                val frames = Http2Parser.parseFrames(bytes)
+                session.onClientFrames(frames)
+                val consumed = frames.sumOf { 9 + it.length }
+                frameBuffer.reset()
+                frameBuffer.write(bytes, consumed, bytes.size - consumed)
+            }
+        } catch (_: Exception) { /* connection closed */
+        } finally {
+            // Mirrors inspectClientToServer's finally -- guarantees inspectH2ServerToClient's
+            // awaitConnectedOrGiveUp always unblocks, however this loop ends.
+            upstream.giveUp()
+            // P1 fix: whichever h2 relay direction ends first, this connection is over --
+            // discard every still-tracked stream (session.close() is idempotent/thread-safe,
+            // see its KDoc) instead of relying solely on GOAWAY, which a client/server that
+            // simply drops the TCP connection may never send.
+            session.close()
+        }
+    }
+
+    /**
+     * Server→client HTTP/2 relay. No preface handling (a server never sends the client
+     * connection preface) and no `clientWriteLock` (unlike the HTTP/1.x path, h2 has no
+     * BLOCK/MOCK_RESPONSE short-circuit that writes to the client from the other thread).
+     */
+    private fun inspectH2ServerToClient(
+        upstream: LazyUpstreamConnection,
+        clientOut: OutputStream,
+        host: String,
+        port: Int,
+        session: Http2Session,
+        bytesReceivedFromUpstream: AtomicLong,
+    ) {
+        val input = upstream.awaitConnectedOrGiveUp()?.input ?: return
+        val frameBuffer = ByteArrayOutputStream()
+        val chunk = ByteArray(BUFFER_SIZE)
+        try {
+            while (true) {
+                val n = input.read(chunk)
+                if (n == -1) break
+                bytesReceivedFromUpstream.addAndGet(n.toLong())
+                clientOut.write(chunk, 0, n)
+                clientOut.flush()
+
+                frameBuffer.write(chunk, 0, n)
+                val bytes = frameBuffer.toByteArray()
+                val frames = Http2Parser.parseFrames(bytes)
+                session.onServerFrames(frames)
+                val consumed = frames.sumOf { 9 + it.length }
+                frameBuffer.reset()
+                frameBuffer.write(bytes, consumed, bytes.size - consumed)
+            }
+        } catch (_: Exception) { /* connection closed */ } finally {
+            // P1 fix: same cleanup trigger as inspectH2ClientToServer's finally -- whichever
+            // direction's loop ends first tears down the shared session's stream state.
+            session.close()
+        }
     }
 
     // ── Rule enforcement (post-parse) ───────────────────────────────────
@@ -631,7 +885,11 @@ class MitmProxyEngine(
                 rule?.replacementValue?.let { RuleEnforcer.applyRequestModification(request, it) }
                 serializeRequest(request)
             }
-            else -> raw // LOG_ONLY — forward the exact original bytes
+            RuleAction.SCRIPT_REWRITE -> {
+                RuleEnforcer.applyScriptRewrite(request, rule?.replacementValue)
+                serializeRequest(request)
+            }
+            else -> raw // LOG_ONLY / response-only actions — forward the exact original bytes
         }
 
         // §1.5 MUST-FIX: connect (or reuse) lazily -- this is the first point in the whole
@@ -656,6 +914,7 @@ class MitmProxyEngine(
         port: Int,
         logRequests: Boolean,
         logResponses: Boolean,
+        wsState: ConnectionProtocolState,
     ) {
         // Interim 1xx responses (e.g. 100 Continue) precede the final response:
         // forward them without consuming the request pairing. 101 is terminal
@@ -675,6 +934,9 @@ class MitmProxyEngine(
             if (rule?.action == RuleAction.MODIFY_RESPONSE) {
                 rule.replacementValue?.let { RuleEnforcer.applyResponseModification(response, it) }
                 out = serializeResponse(response)
+            } else if (rule?.action == RuleAction.SCRIPT_REWRITE) {
+                RuleEnforcer.applyScriptRewrite(response, rule.replacementValue)
+                out = serializeResponse(response)
             }
         }
         synchronized(clientWriteLock) {
@@ -684,6 +946,18 @@ class MitmProxyEngine(
         if (request != null) {
             val latencyMs = System.currentTimeMillis() - pair!!.second
             emitTransaction(request, response, latencyMs, "$host:$port", logRequests, logResponses)
+            // §4/§5: a successful WebSocket upgrade handshake is terminal for HTTP/1.x framing
+            // on this connection -- everything from here on is WS frames, in both directions.
+            // Switching modes here (rather than, say, only in inspectClientToServer) means both
+            // relay threads see the flip at the same logical point: right after the 101 that
+            // caused it, before either side's next read.
+            if (response.statusCode == 101 &&
+                WebSocketParser.looksLikeUpgrade(request.headers, true) &&
+                WebSocketParser.looksLikeUpgrade(response.headers, false)
+            ) {
+                wsState.wsUrl = buildWsUrl(request.url)
+                wsState.webSocketMode.set(true)
+            }
         }
     }
 
@@ -705,7 +979,6 @@ class MitmProxyEngine(
         logRequests: Boolean,
         logResponses: Boolean,
     ) {
-        val callback = onDecryptedTransaction ?: return
         val entity = CapturedTrafficEntity(
             sessionId = sessionId.get(),
             method = (request.method ?: HttpMethod.GET).name,
@@ -730,11 +1003,106 @@ class MitmProxyEngine(
             // two-step lookup already handles.
             connectionId = connectionId,
         )
+        deliverEntity(entity)
+    }
+
+    /**
+     * §4/§5: emit one reassembled WebSocket message (see [WsMessageAssembler]) as a
+     * [CapturedTrafficEntity], matching [com.example.interception.CaptureEngine.persistWsFrame]'s
+     * field convention exactly (`method`/`protocol`/`url` shape) so the traffic list renders
+     * MITM'd and VPN-captured WebSocket frames identically.
+     */
+    internal fun emitWsFrame(
+        frame: WebSocketParser.WsFrame,
+        isClient: Boolean,
+        wsUrl: String,
+        host: String,
+        port: Int,
+        logRequests: Boolean,
+        logResponses: Boolean,
+    ) {
+        val entity = CapturedTrafficEntity(
+            sessionId = sessionId.get(),
+            method = if (isClient) "WS→" else "WS←",
+            url = "$wsUrl (${frame.opcodeName})",
+            host = host,
+            path = "/",
+            statusCode = null,
+            protocol = "WEBSOCKET",
+            requestHeaders = emptyMap(),
+            responseHeaders = emptyMap(),
+            requestBody = if (isClient && logRequests) frame.payloadText else null,
+            responseBody = if (!isClient && logResponses) frame.payloadText else null,
+            requestSizeBytes = if (isClient) frame.totalLength.toLong() else 0L,
+            responseSizeBytes = if (!isClient) frame.totalLength.toLong() else 0L,
+            latencyMs = 0L,
+            timestamp = System.currentTimeMillis(),
+            wasDecrypted = true,
+            connectionId = "$host:$port",
+        )
+        deliverEntity(entity)
+    }
+
+    /**
+     * §3/§5: emit one gRPC message (request or response direction) as a [CapturedTrafficEntity],
+     * matching [com.example.interception.CaptureEngine.persistGrpcMessage]'s field convention
+     * exactly (`metaHeaders`, hex/decoded body rendering, per-direction size accounting) so a
+     * gRPC call MITM'd here renders identically to one observed on the VPN-capture path.
+     */
+    internal fun emitGrpcMessage(
+        event: GrpcEvent,
+        host: String,
+        port: Int,
+        logRequests: Boolean,
+        logResponses: Boolean,
+    ) {
+        val call = event.call
+        val msg = event.message
+        val hexDump = ProtobufDecoder.hexDump(msg.payload)
+        val decoded = if (!msg.compressed) ProtobufDecoder.decodeToString(msg.payload) else null
+        val metaHeaders = buildMap {
+            put("x-grpc-encoding", call.encoding)
+            put("x-grpc-stream-id", call.streamId.toString())
+            if (call.messageType.isNotEmpty()) put("x-grpc-message-type", call.messageType)
+            if (msg.compressed) put("x-grpc-compressed", "true")
+            if (event.grpcStatus != null) put("x-grpc-status", event.grpcStatus.toString())
+            if (decoded != null) put("x-protobuf-decoded", decoded)
+        }
+        val entity = CapturedTrafficEntity(
+            sessionId = sessionId.get(),
+            method = call.httpMethod, // :method — POST for real gRPC
+            url = call.url,
+            host = call.authority.ifEmpty { host },
+            path = call.grpcMethod, // :path — e.g. /my.Service/GetUser
+            statusCode = null,
+            protocol = "gRPC",
+            requestHeaders = if (event.isClient) {
+                if (logRequests) call.headers + metaHeaders else metaHeaders
+            } else metaHeaders,
+            responseHeaders = metaHeaders,
+            requestBody = if (event.isClient && logRequests) hexDump else null,
+            responseBody = if (!event.isClient && logResponses) hexDump else null,
+            requestSizeBytes = if (event.isClient) (msg.length + GrpcDetector.MESSAGE_HEADER_SIZE).toLong() else 0L,
+            responseSizeBytes = if (!event.isClient) (msg.length + GrpcDetector.MESSAGE_HEADER_SIZE).toLong() else 0L,
+            latencyMs = 0L,
+            timestamp = System.currentTimeMillis(),
+            wasDecrypted = true,
+            connectionId = "$host:$port",
+        )
+        deliverEntity(entity)
+    }
+
+    /**
+     * Shared tail for [emitTransaction]/[emitWsFrame]/[emitGrpcMessage]: hands [entity] to
+     * [onDecryptedTransaction], bumping [packetCount] on success. Never throws -- a failed
+     * callback must not break the relay that already forwarded the underlying bytes.
+     */
+    private fun deliverEntity(entity: CapturedTrafficEntity) {
+        val callback = onDecryptedTransaction ?: return
         runCatching { callback(entity) }
             .onSuccess {
                 packetCount.incrementAndGet()
                 InterceptionStateRepository.updateCounters(packetCount = packetCount.get().toInt())
-                Log.d(TAG, "Decrypted: ${response.statusCode} ${request.method?.name} ${request.url.take(120)}")
             }
             .onFailure { Log.w(TAG, "onDecryptedTransaction failed: ${it.message}") }
     }
@@ -894,6 +1262,7 @@ class MitmProxyEngine(
         clientFacingSocket: SSLSocket,
         upstreamSocket: SSLSocket,
         canonicalConnectionId: String?,
+        ja3Hash: String? = null,
     ) {
         runCatching {
             val clientSession: SSLSession = clientFacingSocket.session
@@ -912,7 +1281,7 @@ class MitmProxyEngine(
                         clientFacingSocket.applicationProtocol?.ifBlank { null }
                     } else null
                 }.getOrNull(),
-                ja3Hash = null, // JA3 needs the raw ClientHello, which SSLSocket already consumed
+                ja3Hash = ja3Hash, // real fingerprint (§1/M6) — see ClientHelloCapture
                 handshakeState = com.example.interception.tls.TlsHandshakeState.ESTABLISHED.name,
                 wasDecrypted = true,
                 peerCertSubject = peerCert?.subjectX500Principal?.name,

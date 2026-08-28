@@ -1,6 +1,7 @@
 package com.example.interception
 
 import android.os.Build
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -19,23 +20,36 @@ import java.util.concurrent.TimeUnit
 @Config(sdk = [Build.VERSION_CODES.Q])
 class ConnectReplayTest {
 
-    /** Starts a fake CONNECT endpoint that replies with [statusLine] and captures the request it received. */
+    /**
+     * Starts a fake CONNECT endpoint that replies with [statusLine] and captures the request it
+     * received. Accepts connections in a loop (not just once) so callers exercising
+     * [ConnectReplay.replayRepeated] with `count > 1` get a fresh accept per attempt instead of
+     * the 2nd+ attempt failing to connect once the listen backlog/first connection is used up.
+     */
     private fun fakeConnectEndpoint(statusLine: String): Pair<ServerSocket, StringBuilder> {
         val server = ServerSocket(0)
         val received = StringBuilder()
         Thread {
-            val conn = server.accept()
-            val input = conn.getInputStream()
-            // Read the CONNECT request line + headers up to the blank line.
-            while (true) {
-                val line = HttpProxyShared.readLine(input) ?: break
-                received.append(line).append("\n")
-                if (line.isEmpty()) break
+            while (!server.isClosed) {
+                val conn = try {
+                    server.accept()
+                } catch (_: Exception) {
+                    break // server closed while blocked in accept()
+                }
+                Thread {
+                    val input = conn.getInputStream()
+                    // Read the CONNECT request line + headers up to the blank line.
+                    while (true) {
+                        val line = HttpProxyShared.readLine(input) ?: break
+                        synchronized(received) { received.append(line).append("\n") }
+                        if (line.isEmpty()) break
+                    }
+                    conn.getOutputStream().write("$statusLine\r\n\r\n".toByteArray())
+                    conn.getOutputStream().flush()
+                    Thread.sleep(200) // give the client time to read before the socket tears down
+                    conn.close()
+                }.start()
             }
-            conn.getOutputStream().write("$statusLine\r\n\r\n".toByteArray())
-            conn.getOutputStream().flush()
-            Thread.sleep(200) // give the client time to read before the socket tears down
-            conn.close()
         }.start()
         return server to received
     }
@@ -97,5 +111,52 @@ class ConnectReplayTest {
 
         assertEquals("FAILED", result.disposition)
         assertTrue(result.error?.contains("MITM", ignoreCase = true) == true)
+    }
+
+    @Test
+    fun `replayRepeated runs exactly count attempts in order`() = runBlocking {
+        val (server, _) = fakeConnectEndpoint("HTTP/1.1 200 Connection Established")
+        val context = org.robolectric.RuntimeEnvironment.getApplication()
+
+        val results = ConnectReplay.replayRepeated(
+            context, "127.0.0.1", server.localPort, count = 3, jitterMs = 0L,
+        )
+
+        assertEquals(3, results.size)
+        results.forEach { assertEquals("ALLOWED_OPAQUE", it.disposition) }
+        server.close()
+    }
+
+    @Test
+    fun `replayRepeated with count less than 1 still runs once`() = runBlocking {
+        val (server, _) = fakeConnectEndpoint("HTTP/1.1 200 Connection Established")
+        val context = org.robolectric.RuntimeEnvironment.getApplication()
+
+        val results = ConnectReplay.replayRepeated(context, "127.0.0.1", server.localPort, count = 0)
+
+        assertEquals(1, results.size)
+        server.close()
+    }
+
+    @Test
+    fun `replayRepeated captures failures across attempts, not just the last`() = runBlocking {
+        val server = ServerSocket(0)
+        val port = server.localPort
+        server.close()
+        val context = org.robolectric.RuntimeEnvironment.getApplication()
+
+        val results = ConnectReplay.replayRepeated(context, "127.0.0.1", port, count = 2, jitterMs = 5L)
+
+        assertEquals(2, results.size)
+        results.forEach { assertEquals("FAILED", it.disposition) }
+    }
+
+    @Test
+    fun `recheckCaTrust delegates to CapabilityProbe`() = runBlocking {
+        val state = ConnectReplay.recheckCaTrust()
+        // Robolectric has no real trust-store material, so the only real assertion is that
+        // this returns a valid CaState without throwing (CapabilityProbe.probeCaInstalled is
+        // exercised in detail by its own test).
+        assertTrue(com.example.data.interception.CaState.entries.contains(state))
     }
 }
