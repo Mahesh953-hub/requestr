@@ -100,6 +100,30 @@ data class ApiRequestItem(
     val mockBody: String = "{\"mocked\": true}",
     /** Artificial latency applied before the mock is returned, so loading states stay testable. */
     val mockDelayMs: Long = 0L,
+    /**
+     * Master plan §2.x LOW-ADD — async polling for long-running operations that answer `202
+     * Accepted` with a `Location` header instead of the final result right away. When enabled,
+     * [com.example.data.repository.ApiTestrRepository.executeRequestWithScripts] follows a `202`
+     * response's [pollingLocationHeader] header with repeated GETs (every [pollingIntervalMs],
+     * up to [pollingMaxAttempts] times) until a non-202 (terminal) status is returned or the
+     * attempt budget runs out, returning whichever response ended the loop.
+     */
+    val pollingEnabled: Boolean = false,
+    val pollingIntervalMs: Long = 2000L,
+    val pollingMaxAttempts: Int = 10,
+    val pollingLocationHeader: String = "Location",
+    /**
+     * P2 fix (async-polling credential leak) — same-origin (scheme+host+port) is enforced by
+     * default: [com.example.data.repository.ApiTestrRepository.executeRequestWithScripts] will
+     * NOT follow a poll [Location] that resolves to a different origin than the original
+     * request unless this is explicitly set. When it IS set, the poll request is still
+     * sanitized -- credential-bearing headers (`Authorization`, `Cookie`, `Proxy-Authorization`,
+     * the configured API-key header) and this request's auth/query-param state are stripped
+     * rather than blindly resent to a third-party host, since a `Location` redirect legitimately
+     * lands on a different origin (e.g. a signed cloud-storage URL) that must not receive the
+     * original request's credentials.
+     */
+    val pollingAllowCrossOriginRedirect: Boolean = false,
 )
 
 /**

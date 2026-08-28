@@ -56,6 +56,104 @@ interface CapturedTrafficDao {
     @Query("SELECT COUNT(*) FROM captured_traffic")
     fun observeCount(): Flow<Int>
 
+    // ── Keyset ("cursor") pagination (master-plan §3 "keyset-cursor pagination") ──────────
+    //
+    // Every read above (`observeAll`, `getAll`, `observeBySession`) is an unbounded
+    // `SELECT * ... ORDER BY timestamp DESC` with no LIMIT at all — fine for a Flow the UI
+    // collects incrementally, but wrong for a one-shot bulk export (LocalApiServer's old
+    // `/api/captures` loaded the *entire* table into memory and only capped the response at
+    // `.take(50)` afterwards). These queries bound the query itself and page via a
+    // (timestamp, id) cursor rather than SQL `OFFSET`, which would otherwise re-walk and
+    // discard every already-returned row on each subsequent page — an O(n²) cost across a
+    // multi-thousand-row capture log. `beforeTimestamp`/`beforeId` name the cursor of the last
+    // row already returned by the previous page (both null for the first page); rows strictly
+    // older than that cursor are returned, newest-first, bounded by `limit`. Ties on `timestamp`
+    // are broken by `id` so no row is ever skipped or duplicated across a page boundary.
+
+    /** First/next page of the whole log, newest-first, keyset-paginated. */
+    @Query(
+        "SELECT * FROM captured_traffic " +
+            "WHERE (:beforeTimestamp IS NULL OR timestamp < :beforeTimestamp " +
+            "OR (timestamp = :beforeTimestamp AND id < :beforeId)) " +
+            "ORDER BY timestamp DESC, id DESC LIMIT :limit"
+    )
+    suspend fun getPageBeforeCursor(beforeTimestamp: Long?, beforeId: Long?, limit: Int): List<CapturedTrafficEntity>
+
+    /** Same as [getPageBeforeCursor], scoped to one capture session. */
+    @Query(
+        "SELECT * FROM captured_traffic WHERE sessionId = :sessionId " +
+            "AND (:beforeTimestamp IS NULL OR timestamp < :beforeTimestamp " +
+            "OR (timestamp = :beforeTimestamp AND id < :beforeId)) " +
+            "ORDER BY timestamp DESC, id DESC LIMIT :limit"
+    )
+    suspend fun getSessionPageBeforeCursor(
+        sessionId: Long,
+        beforeTimestamp: Long?,
+        beforeId: Long?,
+        limit: Int,
+    ): List<CapturedTrafficEntity>
+
+    /**
+     * Bulk, time-range-filtered export query (master plan §2.4 — "bulk, time-range-filtered
+     * network-log export endpoint"). Every row with `timestamp` in `[fromTs, toTs]`, newest
+     * first, keyset-paginated exactly like [getPageBeforeCursor] so a caller (e.g.
+     * [com.example.api.LocalApiServer]'s `/api/captures/export`) can walk an arbitrarily large
+     * range in bounded pages instead of the old unbounded-load-then-`.take(50)` approach.
+     */
+    @Query(
+        "SELECT * FROM captured_traffic WHERE timestamp BETWEEN :fromTs AND :toTs " +
+            "AND (:beforeTimestamp IS NULL OR timestamp < :beforeTimestamp " +
+            "OR (timestamp = :beforeTimestamp AND id < :beforeId)) " +
+            "ORDER BY timestamp DESC, id DESC LIMIT :limit"
+    )
+    suspend fun getRangePageBeforeCursor(
+        fromTs: Long,
+        toTs: Long,
+        beforeTimestamp: Long?,
+        beforeId: Long?,
+        limit: Int,
+    ): List<CapturedTrafficEntity>
+
+    /** Total row count in `[fromTs, toTs]`, so an export caller can report how much remains. */
+    @Query("SELECT COUNT(*) FROM captured_traffic WHERE timestamp BETWEEN :fromTs AND :toTs")
+    suspend fun countInRange(fromTs: Long, toTs: Long): Int
+
+    /**
+     * Session-scoped + time-range-filtered export query, keyset-paginated exactly like
+     * [getRangePageBeforeCursor]. `LocalApiServer.exportCaptures` used to combine
+     * [getSessionPageBeforeCursor] with an in-memory `.filter { it.timestamp in fromTs..toTs }`
+     * on the caller side, which is wrong on two counts: (1) `nextCursor` was computed from the
+     * *filtered* list's size/last row rather than the raw page's, so a page containing mostly
+     * out-of-range rows for that session under-reported how many rows were fetched and could
+     * point the next request's cursor at a row that skips back over already-scanned-but-discarded
+     * rows on every subsequent page -- if a session has a run of more than `limit` consecutive
+     * out-of-range rows, the export never makes forward progress past that run; (2) it can never
+     * return more matching rows in a page than the filtered subset of one `limit`-sized raw scan,
+     * so a page can come back short even when far more matching rows exist further back. Doing
+     * the range filter in SQL alongside the session filter fixes both: every returned row is
+     * already in range, the raw `LIMIT` and the returned count agree, and the cursor always names
+     * the actual last row scanned.
+     */
+    @Query(
+        "SELECT * FROM captured_traffic WHERE sessionId = :sessionId " +
+            "AND timestamp BETWEEN :fromTs AND :toTs " +
+            "AND (:beforeTimestamp IS NULL OR timestamp < :beforeTimestamp " +
+            "OR (timestamp = :beforeTimestamp AND id < :beforeId)) " +
+            "ORDER BY timestamp DESC, id DESC LIMIT :limit"
+    )
+    suspend fun getSessionRangePageBeforeCursor(
+        sessionId: Long,
+        fromTs: Long,
+        toTs: Long,
+        beforeTimestamp: Long?,
+        beforeId: Long?,
+        limit: Int,
+    ): List<CapturedTrafficEntity>
+
+    /** Total row count in `[fromTs, toTs]` for one session, mirroring [countInRange]. */
+    @Query("SELECT COUNT(*) FROM captured_traffic WHERE sessionId = :sessionId AND timestamp BETWEEN :fromTs AND :toTs")
+    suspend fun countInSessionRange(sessionId: Long, fromTs: Long, toTs: Long): Int
+
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insert(item: CapturedTrafficEntity): Long
 
@@ -170,6 +268,10 @@ interface InterceptRuleDao {
 
     @Query("SELECT * FROM intercept_rules WHERE enabled = 1")
     suspend fun getEnabledRules(): List<InterceptRuleEntity>
+
+    /** Single-row lookup backing the LAN dashboard's/local API's rules CRUD (PUT/DELETE by id). */
+    @Query("SELECT * FROM intercept_rules WHERE id = :id")
+    suspend fun getById(id: Long): InterceptRuleEntity?
 
     /**
      * Real existence check backing the "Block this domain" long-press action.

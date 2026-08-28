@@ -957,8 +957,14 @@ object ApiCollectionsRepository {
     suspend fun runCollectionTests(
         folderId: String?,
         haltOnFailure: Boolean = false,
+        // Master plan §1.8 — collection runs execute each request's pre/post `pm.*` scripts too
+        // (ApiTestrRepository.executeRequestWithScripts), not just the fixed network call, so a
+        // pre-script that sets an env var chain-fed by an earlier request in the same folder
+        // behaves the same in a collection run as it does for a single manual Send. This
+        // `executor` seam is unchanged for tests: they still inject their own fake and never see
+        // the real scripting engine.
         executor: suspend (ApiRequestItem) -> com.example.data.models.ApiResponseData? = { req ->
-            runCatching { ApiTestrRepository.executeRequest(req) }.getOrNull()
+            runCatching { ApiTestrRepository.executeRequestWithScripts(req).response }.getOrNull()
         },
     ): com.example.data.models.CollectionTestReport {
         val candidates = _requests.value

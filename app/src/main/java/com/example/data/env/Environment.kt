@@ -147,10 +147,18 @@ object EnvironmentRepository {
 
     fun substitute(template: String, env: Environment = active()): String {
         var result = template
-        // Built-in variables
+        // Built-in variables (kept for backward compatibility with requests saved before the
+        // richer `{{$name}}` generator table below existed).
         result = result.replace("{{TIMESTAMP}}", System.currentTimeMillis().toString())
         result = result.replace("{{RANDOM}}", (1000..99999).random().toString())
         result = result.replace("{{UUID}}", java.util.UUID.randomUUID().toString())
+        // Master plan §3 LOW-ADD — ~20+ Postman-style `{{$name}}` dynamic generators (guid,
+        // randomEmail, randomInt, isoTimestamp, ...), see [com.example.scripting.DynamicVariables]
+        // for the full table. Applied before plain environment variables so a `{{$name}}` token
+        // can never be shadowed by a same-named environment variable (dynamic tokens always
+        // start with `$`, environment variable names never do, so there is no real collision
+        // risk either way -- this ordering is just the more intuitive precedence).
+        result = com.example.scripting.DynamicVariables.substitute(result)
         // Environment variables
         env.variables.forEach { (key, value) ->
             result = result.replace("{{$key}}", value)

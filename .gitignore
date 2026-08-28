@@ -19,3 +19,7 @@ debug.keystore
 *.pem
 cli/build/
 sdk/build/
+sdk-noop/build/
+
+# Rust/NDK build outputs
+native/**/target/

@@ -95,4 +95,85 @@ class ConnectControlTest {
         assertTrue(ConnectControl.evaluate(db, "b.example", 443) is ConnectControl.Disposition.AllowOpaque)
         assertTrue(ConnectControl.evaluate(db, "c.example", 443) is ConnectControl.Disposition.AllowOpaque)
     }
+
+    // ── PinningFailureRegistry auto-bypass ────────────────────────────────────────────────
+
+    @org.junit.Before
+    fun resetPinningRegistry() {
+        ConnectControl.PinningFailureRegistry.clearAll()
+    }
+
+    @Test
+    fun `FORCE_MITM rule stays ForceMitm below the pinning-failure threshold`() {
+        insertRule("pinned.example", RuleAction.FORCE_MITM)
+        ConnectControl.PinningFailureRegistry.recordFailure("pinned.example", threshold = 3)
+        ConnectControl.PinningFailureRegistry.recordFailure("pinned.example", threshold = 3)
+        assertTrue(ConnectControl.evaluate(db, "pinned.example", 443) is ConnectControl.Disposition.ForceMitm)
+    }
+
+    @Test
+    fun `FORCE_MITM rule downgrades to AllowOpaque once the pinning-failure threshold trips`() {
+        insertRule("pinned.example", RuleAction.FORCE_MITM)
+        repeat(3) { ConnectControl.PinningFailureRegistry.recordFailure("pinned.example", threshold = 3) }
+        assertTrue(ConnectControl.evaluate(db, "pinned.example", 443) is ConnectControl.Disposition.AllowOpaque)
+    }
+
+    @Test
+    fun `pinning bypass is host-scoped and case-insensitive, does not leak to other hosts`() {
+        insertRule("pinned.example", RuleAction.FORCE_MITM)
+        insertRule("other.example", RuleAction.FORCE_MITM)
+        repeat(3) { ConnectControl.PinningFailureRegistry.recordFailure("Pinned.Example", threshold = 3) }
+        assertTrue(ConnectControl.evaluate(db, "pinned.example", 443) is ConnectControl.Disposition.AllowOpaque)
+        assertTrue(ConnectControl.evaluate(db, "other.example", 443) is ConnectControl.Disposition.ForceMitm)
+    }
+
+    @Test
+    fun `pinning bypass does not affect BLOCK or REDIRECT dispositions`() {
+        insertRule("blocked.example", RuleAction.BLOCK)
+        insertRule("old.example", RuleAction.REDIRECT, replacementValue = "new.example:8443")
+        repeat(3) {
+            ConnectControl.PinningFailureRegistry.recordFailure("blocked.example", threshold = 3)
+            ConnectControl.PinningFailureRegistry.recordFailure("old.example", threshold = 3)
+        }
+        assertTrue(ConnectControl.evaluate(db, "blocked.example", 443) is ConnectControl.Disposition.Block)
+        assertTrue(ConnectControl.evaluate(db, "old.example", 443) is ConnectControl.Disposition.Redirect)
+    }
+
+    @Test
+    fun `recordFailure returns true only on the call that trips the bypass`() {
+        val tripped = (1..4).map {
+            ConnectControl.PinningFailureRegistry.recordFailure("x.example", threshold = 3)
+        }
+        assertEquals(listOf(false, false, true, false), tripped)
+    }
+
+    @Test
+    fun `failures outside the window do not accumulate towards the threshold`() {
+        val base = 1_000_000L
+        ConnectControl.PinningFailureRegistry.recordFailure("stale.example", at = base, threshold = 3, windowMs = 1000)
+        ConnectControl.PinningFailureRegistry.recordFailure("stale.example", at = base + 500, threshold = 3, windowMs = 1000)
+        // Third failure lands well outside the 1000ms window relative to the first two --
+        // they should have aged out, so this alone must not trip a threshold of 3.
+        val tripped = ConnectControl.PinningFailureRegistry.recordFailure(
+            "stale.example", at = base + 5000, threshold = 3, windowMs = 1000,
+        )
+        assertTrue(!tripped)
+        assertTrue(!ConnectControl.PinningFailureRegistry.shouldBypass("stale.example", now = base + 5000))
+    }
+
+    @Test
+    fun `bypass expires after its duration`() {
+        val base = 1_000_000L
+        repeat(3) { ConnectControl.PinningFailureRegistry.recordFailure("expiring.example", at = base, threshold = 3, bypassDurationMs = 500) }
+        assertTrue(ConnectControl.PinningFailureRegistry.shouldBypass("expiring.example", now = base + 100))
+        assertTrue(!ConnectControl.PinningFailureRegistry.shouldBypass("expiring.example", now = base + 1000))
+    }
+
+    @Test
+    fun `clear removes tracked state for a host`() {
+        repeat(3) { ConnectControl.PinningFailureRegistry.recordFailure("clearme.example", threshold = 3) }
+        assertTrue(ConnectControl.PinningFailureRegistry.shouldBypass("clearme.example"))
+        ConnectControl.PinningFailureRegistry.clear("clearme.example")
+        assertTrue(!ConnectControl.PinningFailureRegistry.shouldBypass("clearme.example"))
+    }
 }

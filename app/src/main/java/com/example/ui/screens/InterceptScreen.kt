@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -46,6 +47,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ClearAll
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.FilterList
@@ -64,6 +66,7 @@ import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -85,6 +88,7 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.TabRowDefaults.SecondaryIndicator
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -291,6 +295,11 @@ fun InterceptScreen(
     // used for the other capture-related sheets on this screen.
     var showConnectionsSheet by remember { mutableStateOf(false) }
 
+    // Paste-cURL: reuses ApiTestrRepository.parseCurl (read-only call into that file) to build a
+    // real ApiRequestItem from a pasted command, then routes it to API Testr the same way a
+    // captured transaction's "Send to API Testr" action does.
+    var showPasteCurlSheet by remember { mutableStateOf(false) }
+
     val filteredTraffic = remember(capturedTraffic, searchQuery, selectedMethodFilter) {
         val baseFiltered = if (selectedMethodFilter == null) capturedTraffic
             else capturedTraffic.filter { it.method == selectedMethodFilter }
@@ -329,6 +338,13 @@ fun InterceptScreen(
                         Icon(
                             imageVector = Icons.Default.SettingsInputAntenna,
                             contentDescription = "Connections",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    IconButton(onClick = { showPasteCurlSheet = true }) {
+                        Icon(
+                            imageVector = Icons.Default.ContentPaste,
+                            contentDescription = "Paste cURL",
                             tint = MaterialTheme.colorScheme.primary
                         )
                     }
@@ -996,6 +1012,16 @@ fun InterceptScreen(
         )
     }
 
+    if (showPasteCurlSheet) {
+        PasteCurlDialog(
+            onDismiss = { showPasteCurlSheet = false },
+            onParsed = { apiItem ->
+                showPasteCurlSheet = false
+                onSendToTestr(apiItem)
+            },
+        )
+    }
+
     // Full Request/Response Detail Sheet
     selectedItemForDetail?.let { item ->
         CapturedDetailBottomSheet(
@@ -1016,6 +1042,66 @@ fun InterceptScreen(
             }
         )
     }
+}
+
+/**
+ * Paste a raw `curl ...` command and route the parsed request straight to API Testr. Parsing
+ * itself is delegated to the existing, out-of-scope [com.example.data.repository.ApiTestrRepository.parseCurl]
+ * (called read-only, never edited) so this dialog is purely a thin UI wrapper + validation.
+ */
+@Composable
+private fun PasteCurlDialog(
+    onDismiss: () -> Unit,
+    onParsed: (ApiRequestItem) -> Unit,
+) {
+    var curlText by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Paste cURL", fontWeight = FontWeight.Bold) },
+        text = {
+            Column {
+                Text(
+                    "Paste a curl command to send it to API Testr.",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = curlText,
+                    onValueChange = { curlText = it; error = null },
+                    label = { Text("curl -X POST ...") },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 120.dp),
+                )
+                error?.let {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(it, fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val trimmed = curlText.trim()
+                    if (trimmed.isEmpty() || !trimmed.contains("curl")) {
+                        error = "Enter a curl command."
+                        return@Button
+                    }
+                    runCatching { com.example.data.repository.ApiTestrRepository.parseCurl(trimmed) }
+                        .onSuccess { onParsed(it) }
+                        .onFailure { error = it.message ?: "Could not parse this curl command." }
+                },
+            ) {
+                Text("Send to API Testr")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
 }
 
 @Composable
@@ -1105,12 +1191,12 @@ fun FridaScriptsBottomSheet(
             CapabilityStatusCard(
                 title = "frida-server on 127.0.0.1:27042",
                 description = when (fridaState) {
-                    FridaState.RUNNING -> "frida-server detected on port 27042. Note: in-app injection is not yet implemented — use Frida CLI from your workstation."
+                    FridaState.RUNNING -> "frida-server detected on port 27042. Inject requestr's reflection-only OkHttp capture hook into a target app below."
                     FridaState.NOT_RUNNING -> "Not reachable. Push and start frida-server on this device (requires root), then re-check."
                     FridaState.UNKNOWN -> "Not probed yet."
                 },
                 statusLabel = when (fridaState) {
-                    FridaState.RUNNING -> "Detected (CLI only)"
+                    FridaState.RUNNING -> "Detected"
                     FridaState.NOT_RUNNING -> "Not running"
                     FridaState.UNKNOWN -> "Unknown"
                 },
@@ -1129,6 +1215,76 @@ fun FridaScriptsBottomSheet(
                 Icon(imageVector = Icons.Default.Refresh, contentDescription = "Refresh", modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(if (isProbing) "Checking..." else "Re-check frida-server", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            }
+
+            // In-app injection: requestr injects its own reflection-only OkHttp Builder.build
+            // capture hook (see com.example.runtime.frida.FridaOkHttpAdapter) into a target app,
+            // feeding real request/response events into the runtime-instrumentation engine. This
+            // makes the Frida capture tier reachable end to end (the old sheet could only report
+            // the probe result and told the user to run Frida CLI from a workstation).
+            val context = LocalContext.current
+            var targetPackage by remember { mutableStateOf("") }
+            var targetPid by remember { mutableStateOf("") }
+            var injectBusy by remember { mutableStateOf(false) }
+            var injectResult by remember { mutableStateOf<String?>(null) }
+            val injectScope = rememberCoroutineScope()
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            OutlinedTextField(
+                value = targetPackage,
+                onValueChange = { targetPackage = it },
+                label = { Text("Target package (spawn, e.g. com.example.app)", fontSize = 12.sp) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            OutlinedTextField(
+                value = targetPid,
+                onValueChange = { targetPid = it },
+                label = { Text("Target PID (attach, optional)", fontSize = 12.sp) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Button(
+                onClick = {
+                    val pkg = targetPackage.trim()
+                    val pid = targetPid.trim().toIntOrNull()
+                    if (pkg.isEmpty() && pid == null) {
+                        injectResult = "Enter a target package or PID."
+                        return@Button
+                    }
+                    injectBusy = true
+                    injectResult = null
+                    injectScope.launch {
+                        val outcome = withContext(Dispatchers.IO) {
+                            runCatching {
+                                val target = pid?.let { com.example.runtime.frida.FridaClient.FridaTarget.Pid(it) }
+                                    ?: com.example.runtime.frida.FridaClient.FridaTarget.Spawn(pkg)
+                                com.example.runtime.frida.FridaRuntimeWiring.registerAndStart(context, target)
+                            }
+                        }
+                        injectBusy = false
+                        injectResult = outcome.fold(
+                            onSuccess = { adapter ->
+                                if (adapter.isActive()) "Armed — ${adapter.status()}" else "Not armed — ${adapter.status()}"
+                            },
+                            onFailure = { "Injection failed: ${it.message}" },
+                        )
+                    }
+                },
+                enabled = !injectBusy,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+            ) {
+                Text(if (injectBusy) "Injecting…" else "Inject OkHttp capture hook", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            }
+
+            injectResult?.let {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(it, fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -2201,6 +2357,10 @@ fun ConnectAttemptDetailSheet(
     var forceMitm by remember(item.id) { mutableStateOf(false) }
     var replaying by remember(item.id) { mutableStateOf(false) }
     var replayResult by remember(item.id) { mutableStateOf<com.example.interception.ConnectReplay.ReplayResult?>(null) }
+    var repeatCount by remember(item.id) { mutableStateOf("3") }
+    var repeatJitterMs by remember(item.id) { mutableStateOf("0") }
+    var repeating by remember(item.id) { mutableStateOf(false) }
+    var repeatResults by remember(item.id) { mutableStateOf<List<com.example.interception.ConnectReplay.ReplayResult>?>(null) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -2312,6 +2472,81 @@ fun ConnectAttemptDetailSheet(
                         }
                         result.error?.let {
                             Text(it, fontSize = 10.sp, color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Text("Repeat replay", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                OutlinedTextField(
+                    value = repeatCount,
+                    onValueChange = { input -> repeatCount = input.filter { it.isDigit() } },
+                    label = { Text("Count") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+                OutlinedTextField(
+                    value = repeatJitterMs,
+                    onValueChange = { input -> repeatJitterMs = input.filter { it.isDigit() } },
+                    label = { Text("Max jitter (ms)") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+            Button(
+                onClick = {
+                    val port = targetPort.toIntOrNull() ?: item.targetPort
+                    val count = repeatCount.toIntOrNull()?.coerceAtLeast(1) ?: 1
+                    val jitter = repeatJitterMs.toLongOrNull()?.coerceAtLeast(0L) ?: 0L
+                    repeating = true
+                    repeatResults = null
+                    scope.launch {
+                        val results = withContext(Dispatchers.IO) {
+                            com.example.interception.ConnectReplay.replayRepeated(
+                                context, targetHost, port, forceMitm, count, jitter,
+                            )
+                        }
+                        repeatResults = results
+                        repeating = false
+                    }
+                },
+                enabled = !repeating,
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Default.Refresh, contentDescription = "Repeat", modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(if (repeating) "Replaying..." else "Replay ${repeatCount.toIntOrNull()?.coerceAtLeast(1) ?: 1}x", fontSize = 13.sp)
+            }
+
+            repeatResults?.let { results ->
+                Spacer(modifier = Modifier.height(10.dp))
+                val successCount = results.count { it.disposition == "ALLOWED_OPAQUE" }
+                Text(
+                    "$successCount/${results.size} succeeded",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    results.forEachIndexed { index, result ->
+                        GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)) {
+                            Row(
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                            ) {
+                                Text("#${index + 1} ${result.disposition}", fontSize = 11.sp)
+                                Text("${result.latencyMs}ms", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                         }
                     }
                 }
@@ -3163,6 +3398,51 @@ fun RulesConfigBottomSheet(
     }
 }
 
+/**
+ * Content-type-gated body rendering for [CapturedDetailBottomSheet]'s Body tab. Renders JSON
+ * pretty-printed (falling back to raw text on a parse failure), skips inline rendering for
+ * images/unrenderable binary bodies with an explanatory note instead, and gates any body over
+ * [MAX_RENDERABLE_BODY_BYTES] behind a "Show anyway" button so a multi-MB response body never
+ * hangs the detail sheet's layout pass.
+ */
+@Composable
+private fun CaptureBodySection(label: String, body: String, contentType: String?, labelColor: Color) {
+    var showAnyway by remember(body) { mutableStateOf(false) }
+    val kind = remember(contentType, body) { detectBodyRenderKind(contentType, body) }
+    val bodyBytes = remember(body) { body.toByteArray(Charsets.UTF_8).size }
+
+    Text("$label:", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = labelColor)
+    when {
+        kind == BodyRenderKind.IMAGE -> {
+            Text(
+                "Image response (${contentType ?: "unknown type"}, $bodyBytes bytes) -- not rendered inline here; see the image gallery.",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+            )
+        }
+        kind == BodyRenderKind.UNRENDERABLE_BINARY -> {
+            Text(
+                "Binary body (${contentType ?: "unknown type"}, $bodyBytes bytes) -- not rendered.",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+            )
+        }
+        shouldGateBodyRendering(bodyBytes) && !showAnyway -> {
+            Text(
+                "Body is ${bodyBytes / 1024}KB -- larger than ${MAX_RENDERABLE_BODY_BYTES / 1024}KB, not rendered by default.",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+            )
+            Button(onClick = { showAnyway = true }) { Text("Show anyway", fontSize = 11.sp) }
+        }
+        else -> {
+            val displayText = if (kind == BodyRenderKind.JSON) prettyPrintJsonOrFallback(body) else body
+            Text(displayText, fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface)
+        }
+    }
+    Spacer(modifier = Modifier.height(10.dp))
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CapturedDetailBottomSheet(
@@ -3294,13 +3574,20 @@ fun CapturedDetailBottomSheet(
                         2 -> item { // Body
                             Column {
                                 if (item.responseBody.isNotBlank()) {
-                                    Text("RESPONSE BODY:", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
-                                    Text(item.responseBody, fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface)
-                                    Spacer(modifier = Modifier.height(10.dp))
+                                    CaptureBodySection(
+                                        label = "RESPONSE BODY",
+                                        body = item.responseBody,
+                                        contentType = contentTypeOf(item.responseHeaders),
+                                        labelColor = MaterialTheme.colorScheme.primary,
+                                    )
                                 }
                                 if (item.requestBody.isNotBlank()) {
-                                    Text("REQUEST BODY:", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = MaterialTheme.colorScheme.secondary)
-                                    Text(item.requestBody, fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface)
+                                    CaptureBodySection(
+                                        label = "REQUEST BODY",
+                                        body = item.requestBody,
+                                        contentType = contentTypeOf(item.requestHeaders),
+                                        labelColor = MaterialTheme.colorScheme.secondary,
+                                    )
                                 }
                                 if (item.requestBody.isBlank() && item.responseBody.isBlank()) {
                                     Text("(Empty)", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))

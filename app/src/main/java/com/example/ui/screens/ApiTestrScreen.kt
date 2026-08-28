@@ -53,6 +53,8 @@ import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -110,6 +112,8 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
@@ -197,6 +201,14 @@ fun ApiTestrScreen(
     // results are never shown next to a response they didn't evaluate.
     var testResults by remember { mutableStateOf<List<AssertionResult>?>(null) }
 
+    // Script-engine wiring (master plan §1.10/§1.11): pm.test() results recorded by the
+    // pre-/post-request Rhino scripts, plus any script/polling error surfaced from
+    // ApiTestrRepository.executeRequestWithScripts. Kept separate from `testResults`
+    // (the declarative AssertionResult list above) since they come from a different
+    // engine and are rendered in their own rows (see PmTestResultRow).
+    var scriptTestResults by remember { mutableStateOf<List<com.example.scripting.PmTestResult>?>(null) }
+    var scriptError by remember { mutableStateOf<String?>(null) }
+
     var selectedViewMode by remember { mutableIntStateOf(0) } // 0: Request, 1: Response
     var followRedirects by remember { mutableStateOf(true) }
     var requestTab by remember { mutableIntStateOf(0) } // 0: Query, 1: Headers, 2: Body, 3: Auth, 4: Scripts, 5: Chain, 6: Tests
@@ -251,25 +263,20 @@ fun ApiTestrScreen(
         }
         isLoading = true
         coroutineScope.launch {
-            // v3.2 Part C — C2 (Request chaining): substitute {{variableName}}
-            // in URL, headers, and body — not just the URL as before — so a
-            // value extracted from an earlier chained request's response can
-            // be referenced anywhere in this request, per the plan's spec.
-            val env = com.example.data.env.EnvironmentRepository.active()
-            fun sub(s: String) = com.example.data.env.EnvironmentRepository.substitute(s, env)
-            val substitutedState = reqState.copy(
-                url = sub(reqState.url),
-                headers = reqState.headers.map { it.copy(value = sub(it.value)) },
-                queryParams = reqState.queryParams.map { it.copy(value = sub(it.value)) },
-                bodyContent = sub(reqState.bodyContent),
-                bearerToken = sub(reqState.bearerToken),
-                apiKeyValue = sub(reqState.apiKeyValue),
-            )
-            val resp = ApiTestrRepository.executeRequest(substitutedState, followRedirects)
+            // Master plan §1.10/§1.11: {{var}} substitution, pre-/post-request pm.* scripts,
+            // and 202-polling are now all sequenced centrally in
+            // ApiTestrRepository.executeRequestWithScripts (pre-script runs BEFORE
+            // substitution, so a pre-script's pm.environment.set(...) is visible in the SAME
+            // send) — pass the original, un-substituted reqState here rather than
+            // pre-substituting it ourselves, to avoid double-applying substitution.
+            val outcome = ApiTestrRepository.executeRequestWithScripts(reqState, followRedirects)
+            val resp = outcome.response
             responseData = resp
             // v3.4 Part C — C3: clear any previous run's pass/fail results —
             // they belong to a different response, not this one.
             testResults = null
+            scriptTestResults = outcome.testResults.ifEmpty { null }
+            scriptError = outcome.preScriptError ?: outcome.postScriptError
             isLoading = false
             selectedViewMode = 1 // auto toggle to response
 
@@ -401,6 +408,8 @@ fun ApiTestrScreen(
                     "Tests (${reqState.assertions.count { it.enabled }})",
                     // Master plan §2.8 — per-saved-request mock mode editor tab.
                     "Mock" + if (reqState.mockEnabled) " (On)" else "",
+                    // Master plan §1.10 — async polling for 202/in-progress operations.
+                    "Polling" + if (reqState.pollingEnabled) " (On)" else "",
                 )
             }
             // Clamp tab index when switching between WS and HTTP tab sets
@@ -531,7 +540,9 @@ fun ApiTestrScreen(
                         // v6.0 transplant (manifest §5.5): Scripts tab extracted into ScriptsTabContent
                         ScriptsTabContent(
                             preScript = reqState.preScript,
-                            onPreScriptChanged = { reqState = reqState.copy(preScript = it) }
+                            onPreScriptChanged = { reqState = reqState.copy(preScript = it) },
+                            postScript = reqState.postScript,
+                            onPostScriptChanged = { reqState = reqState.copy(postScript = it) }
                         )
                     }
                     5 -> {
@@ -570,6 +581,21 @@ fun ApiTestrScreen(
                             onMockHeadersChanged = { reqState = reqState.copy(mockHeaders = it) },
                             onMockBodyChanged = { reqState = reqState.copy(mockBody = it) },
                             onMockDelayMsChanged = { reqState = reqState.copy(mockDelayMs = it) }
+                        )
+                    }
+                    8 -> {
+                        // Master plan §1.10 — per-saved-request async polling for 202/
+                        // in-progress operations, consumed by
+                        // ApiTestrRepository.executeRequestWithScripts.
+                        PollingEditor(
+                            pollingEnabled = reqState.pollingEnabled,
+                            pollingIntervalMs = reqState.pollingIntervalMs,
+                            pollingMaxAttempts = reqState.pollingMaxAttempts,
+                            pollingLocationHeader = reqState.pollingLocationHeader,
+                            onPollingEnabledChanged = { reqState = reqState.copy(pollingEnabled = it) },
+                            onPollingIntervalMsChanged = { reqState = reqState.copy(pollingIntervalMs = it) },
+                            onPollingMaxAttemptsChanged = { reqState = reqState.copy(pollingMaxAttempts = it) },
+                            onPollingLocationHeaderChanged = { reqState = reqState.copy(pollingLocationHeader = it) }
                         )
                     }
                 }
@@ -728,8 +754,16 @@ fun ApiTestrScreen(
                     Spacer(modifier = Modifier.height(10.dp))
 
                     // Response Subtabs (Body, Headers, Metrics, Tests)
-                    val responseTabTitles = if (reqState.assertions.any { it.enabled }) {
-                        listOf("Body", "Headers (${resp.headers.size})", "Timeline Metrics", "Tests${testResults?.let { " (${it.count { r -> r.passed }}/${it.size})" } ?: ""}")
+                    // Master plan §1.10/§1.11: the Tests tab now also covers pm.test() results
+                    // recorded by the pre-/post-request scripts (scriptTestResults), not just
+                    // the declarative AssertionResult list -- either one alone is enough to show
+                    // the tab, and both render inside its content below.
+                    val hasScriptTests = !scriptTestResults.isNullOrEmpty()
+                    val responseTabTitles = if (reqState.assertions.any { it.enabled } || hasScriptTests) {
+                        val passed = (testResults?.count { it.passed } ?: 0) + (scriptTestResults?.count { it.passed } ?: 0)
+                        val total = (testResults?.size ?: 0) + (scriptTestResults?.size ?: 0)
+                        val suffix = if (testResults != null || scriptTestResults != null) " ($passed/$total)" else ""
+                        listOf("Body", "Headers (${resp.headers.size})", "Timeline Metrics", "Tests$suffix")
                     } else {
                         listOf("Body", "Headers (${resp.headers.size})", "Timeline Metrics")
                     }
@@ -829,8 +863,12 @@ fun ApiTestrScreen(
                             }
                             3 -> {
                                 // v3.4 Part C — C3: pass/fail per assertion, actual vs expected.
+                                // Master plan §1.10/§1.11: also renders pm.test() results from the
+                                // pre-/post-request scripts (scriptTestResults), plus any script
+                                // execution error (scriptError), interleaved after the assertions.
                                 val results = testResults
-                                if (results == null) {
+                                val scriptResults = scriptTestResults
+                                if (results == null && scriptResults == null) {
                                     Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
                                         Text(
                                             "Tap \"Run Tests\" above to evaluate this request's assertions against this response.",
@@ -843,17 +881,44 @@ fun ApiTestrScreen(
                                         modifier = Modifier.fillMaxSize(),
                                         verticalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
-                                        item {
-                                            val passedCount = results.count { it.passed }
-                                            Text(
-                                                "$passedCount / ${results.size} assertions passed",
-                                                fontWeight = FontWeight.Bold,
-                                                color = if (passedCount == results.size) Color(0xFF22C55E) else Color(0xFFEF4444),
-                                                fontSize = 13.sp
-                                            )
-                                            Spacer(modifier = Modifier.height(4.dp))
+                                        if (results != null) {
+                                            item {
+                                                val passedCount = results.count { it.passed }
+                                                Text(
+                                                    "$passedCount / ${results.size} assertions passed",
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = if (passedCount == results.size) Color(0xFF22C55E) else Color(0xFFEF4444),
+                                                    fontSize = 13.sp
+                                                )
+                                                Spacer(modifier = Modifier.height(4.dp))
+                                            }
+                                            items(results) { result -> AssertionResultRow(result) }
                                         }
-                                        items(results) { result -> AssertionResultRow(result) }
+                                        if (scriptResults != null) {
+                                            item {
+                                                if (results != null) Spacer(modifier = Modifier.height(10.dp))
+                                                val passedCount = scriptResults.count { it.passed }
+                                                Text(
+                                                    "$passedCount / ${scriptResults.size} pm.test() checks passed",
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = if (passedCount == scriptResults.size) Color(0xFF22C55E) else Color(0xFFEF4444),
+                                                    fontSize = 13.sp
+                                                )
+                                                Spacer(modifier = Modifier.height(4.dp))
+                                            }
+                                            items(scriptResults) { result -> PmTestResultRow(result) }
+                                        }
+                                        if (scriptError != null) {
+                                            item {
+                                                Spacer(modifier = Modifier.height(10.dp))
+                                                Text(
+                                                    "Script error: $scriptError",
+                                                    color = Color(0xFFEF4444),
+                                                    fontSize = 11.sp,
+                                                    fontFamily = FontFamily.Monospace
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1562,6 +1627,46 @@ fun AssertionResultRow(result: AssertionResult) {
                 fontSize = 11.sp,
                 color = if (result.passed) TextSecondary else Color(0xFFEF4444)
             )
+        }
+    }
+}
+
+/**
+ * Master plan §1.10/§1.11: one row of a `pm.test(name, fn)` result recorded by a pre-/
+ * post-request script, analogous to [AssertionResultRow] but for [com.example.scripting.PmTestResult]
+ * (the script engine's own record type, distinct from the declarative [AssertionResult]).
+ */
+@Composable
+fun PmTestResultRow(result: com.example.scripting.PmTestResult) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .padding(10.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Icon(
+            imageVector = if (result.passed) Icons.Default.Check else Icons.Default.Close,
+            contentDescription = if (result.passed) "Passed" else "Failed",
+            tint = if (result.passed) Color(0xFF22C55E) else Color(0xFFEF4444),
+            modifier = Modifier.size(16.dp)
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                result.name,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
+            )
+            if (result.message.isNotBlank()) {
+                Text(
+                    result.message,
+                    fontSize = 11.sp,
+                    color = if (result.passed) TextSecondary else Color(0xFFEF4444)
+                )
+            }
         }
     }
 }
@@ -2436,12 +2541,28 @@ private fun AuthSettingsTab(
                     shape = RoundedCornerShape(10.dp)
                 )
                 Spacer(modifier = Modifier.height(8.dp))
+                // Basic Auth polish: password now defaults to masked, with a show/hide toggle --
+                // previously this field had no visualTransformation at all, so the password was
+                // always rendered in plain text.
+                var showBasicPassword by remember { mutableStateOf(false) }
                 OutlinedTextField(
                     value = basicPassword,
                     onValueChange = onBasicPasswordChanged,
                     label = { Text("Password") },
                     textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface),
-                    modifier = Modifier.fillMaxWidth(),
+                    visualTransformation = if (showBasicPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(
+                            onClick = { showBasicPassword = !showBasicPassword },
+                            modifier = Modifier.testTag("toggleBasicPasswordVisibility")
+                        ) {
+                            Icon(
+                                imageVector = if (showBasicPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                contentDescription = if (showBasicPassword) "Hide password" else "Show password"
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().testTag("basicPasswordField"),
                     shape = RoundedCornerShape(10.dp)
                 )
             }
@@ -2652,26 +2773,143 @@ internal fun MockModeEditor(
 }
 
 // ====================================================================
+// Master plan §1.10 — per-saved-request async polling editor. When
+// pollingEnabled is on and a Send comes back 202, ApiTestrRepository
+// .executeRequestWithScripts polls [pollingLocationHeader]'s URL every
+// [pollingIntervalMs] up to [pollingMaxAttempts] times before returning.
+// ====================================================================
+
+@Composable
+internal fun PollingEditor(
+    pollingEnabled: Boolean,
+    pollingIntervalMs: Long,
+    pollingMaxAttempts: Int,
+    pollingLocationHeader: String,
+    onPollingEnabledChanged: (Boolean) -> Unit,
+    onPollingIntervalMsChanged: (Long) -> Unit,
+    onPollingMaxAttemptsChanged: (Int) -> Unit,
+    onPollingLocationHeaderChanged: (String) -> Unit
+) {
+    val primaryColor = MaterialTheme.colorScheme.primary
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Async Polling", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                Text(
+                    "When Send returns 202, follow the location header until it stops returning 202.",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Switch(
+                checked = pollingEnabled,
+                onCheckedChange = onPollingEnabledChanged,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = primaryColor
+                ),
+                modifier = Modifier.testTag("pollingEnabledSwitch")
+            )
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        OutlinedTextField(
+            value = pollingLocationHeader,
+            onValueChange = onPollingLocationHeaderChanged,
+            label = { Text("Location Header") },
+            textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface),
+            modifier = Modifier.fillMaxWidth().testTag("pollingLocationHeaderField"),
+            shape = RoundedCornerShape(10.dp)
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedTextField(
+                value = pollingIntervalMs.toString(),
+                onValueChange = { onPollingIntervalMsChanged(it.toLongOrNull() ?: 0L) },
+                label = { Text("Interval (ms)") },
+                textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface),
+                modifier = Modifier.weight(1f).testTag("pollingIntervalMsField"),
+                shape = RoundedCornerShape(10.dp)
+            )
+            OutlinedTextField(
+                value = pollingMaxAttempts.toString(),
+                onValueChange = { onPollingMaxAttemptsChanged(it.toIntOrNull() ?: 0) },
+                label = { Text("Max Attempts") },
+                textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface),
+                modifier = Modifier.weight(1f).testTag("pollingMaxAttemptsField"),
+                shape = RoundedCornerShape(10.dp)
+            )
+        }
+    }
+}
+
+// ====================================================================
 // v6.0 transplant (manifest §5.5): Scripts tab with styled editor.
 // ====================================================================
 
 @Composable
 private fun ScriptsTabContent(
     preScript: String,
-    onPreScriptChanged: (String) -> Unit
+    onPreScriptChanged: (String) -> Unit,
+    postScript: String,
+    onPostScriptChanged: (String) -> Unit
 ) {
-    Column(modifier = Modifier.fillMaxSize()) {
-        Text("Pre-request & Sandbox Scripts", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+    // Master plan §1.10: both fields now run against a real Rhino `pm.*` engine
+    // (see ApiTestrScriptRunner / JsScriptEngine / PmPrelude) -- pre-request runs before the
+    // request is sent (and before {{var}} substitution), post-response runs after the response
+    // (and any 202-polling) completes, with `pm.test(name, fn)` results shown in the Tests tab.
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+    ) {
+        Text("Pre-request Script", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
         Spacer(modifier = Modifier.height(8.dp))
 
         OutlinedTextField(
             value = preScript,
             onValueChange = onPreScriptChanged,
-            placeholder = { Text("// JavaScript sandbox (e.g. request.headers['X-Timestamp'] = Date.now())", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)) },
+            placeholder = { Text("// pm.environment.set('token', pm.request.headers.get('X-Api-Key'))", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)) },
             textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.5.sp, color = MaterialTheme.colorScheme.onSurface),
             modifier = Modifier
                 .fillMaxWidth()
-                .height(160.dp),
+                .height(160.dp)
+                .testTag("preScriptField"),
+            shape = RoundedCornerShape(12.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
+                focusedContainerColor = MaterialTheme.colorScheme.surface,
+                unfocusedContainerColor = MaterialTheme.colorScheme.surface
+            )
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Text("Post-response Script", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedTextField(
+            value = postScript,
+            onValueChange = onPostScriptChanged,
+            placeholder = { Text("// pm.test('status is 200', function () { pm.expect(pm.response.statusCode).to.equal(200) })", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)) },
+            textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.5.sp, color = MaterialTheme.colorScheme.onSurface),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(160.dp)
+                .testTag("postScriptField"),
             shape = RoundedCornerShape(12.dp),
             colors = OutlinedTextFieldDefaults.colors(
                 focusedBorderColor = MaterialTheme.colorScheme.primary,

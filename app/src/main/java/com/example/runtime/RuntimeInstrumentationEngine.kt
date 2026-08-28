@@ -43,6 +43,17 @@ object RuntimeInstrumentationEngine {
     private val sinks = mutableListOf<RuntimeCaptureSink>()
     private var running = false
     private var pollJob: Job? = null
+
+    /**
+     * The [Context] most recently passed to [start], retained ONLY so a late [registerAdapter]
+     * call (one made after the engine is already [running]) has something to hand the new
+     * adapter's own [InstrumentationAdapter.start] -- [start] itself is a no-op while already
+     * running, so without this an adapter registered after startup (e.g. a Frida target picked
+     * from the UI mid-session, see [com.example.runtime.frida.FridaRuntimeWiring]) would sit
+     * registered but never actually started. Application context only (never an Activity), same
+     * as every existing caller of [start] already passes.
+     */
+    private var runningContext: Context? = null
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
     // Compose-observable, same rationale as LocalApiServer.isRunningFlow: a plain var
@@ -61,10 +72,27 @@ object RuntimeInstrumentationEngine {
     private val _adapterStatuses = MutableStateFlow<Map<String, String>>(emptyMap())
     val adapterStatuses: StateFlow<Map<String, String>> = _adapterStatuses.asStateFlow()
 
-    /** Register an adapter (OkHttp, Cronet, WebView, etc.) */
+    /**
+     * Register an adapter (OkHttp, Cronet, WebView, etc.). If the engine is already [running],
+     * the new adapter is started immediately (using the same [Context] the engine itself was
+     * last [start]ed with) and its status/eventCounts snapshot is refreshed right away -- the
+     * common startup path (register everything, then call [start] once) is unaffected since
+     * `running` is false at that point and [start] does the starting for every adapter itself.
+     */
     fun registerAdapter(adapter: InstrumentationAdapter) {
         adapters.add(adapter)
         Log.i(TAG, "Registered adapter: ${adapter.name}")
+        val context = runningContext
+        if (running && context != null) {
+            try {
+                adapter.start(context)
+                Log.i(TAG, "Started (late registration): ${adapter.name}")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start ${adapter.name}: ${e.message}")
+            }
+            refreshAdapterStatuses()
+            if (adapters.any { it.isActive() }) state = InstrumentationState.ACTIVE
+        }
     }
 
     /**
@@ -83,6 +111,7 @@ object RuntimeInstrumentationEngine {
     fun start(context: Context) {
         if (running) return
         running = true
+        runningContext = context
         state = InstrumentationState.INITIALIZING
         for (adapter in adapters) {
             try {
@@ -115,6 +144,7 @@ object RuntimeInstrumentationEngine {
     /** Stop all adapters */
     fun stop() {
         running = false
+        runningContext = null
         pollJob?.cancel()
         pollJob = null
         for (adapter in adapters) {

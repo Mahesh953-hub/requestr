@@ -29,3 +29,4 @@ rootProject.name = "requestr"
 include(":app")
 include(":cli")
 include(":sdk")
+include(":sdk-noop")

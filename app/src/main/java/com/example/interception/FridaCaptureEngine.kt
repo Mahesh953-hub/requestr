@@ -98,6 +98,12 @@ class FridaCaptureEngine {
         "cert_pinner" -> certPinnerBypass
         "http_log" -> httpLogHook
         "jni_trace" -> jniTrace
+        // Real capture, not a bypass: the reflection-only OkHttp Builder.build hook
+        // (com.example.runtime.frida.OkHttpBuilderHookScript) that installs a capturing
+        // application interceptor and send()s post-reassembly request/response bodies --
+        // see com.example.runtime.frida.FridaOkHttpAdapter for the Kotlin-side consumer that
+        // feeds these events into RuntimeInstrumentationEngine.
+        "okhttp_capture" -> com.example.runtime.frida.OkHttpBuilderHookScript.SOURCE
         else -> "// Unknown builtin: $name"
     }
 

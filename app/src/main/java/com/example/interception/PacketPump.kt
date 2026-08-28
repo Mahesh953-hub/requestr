@@ -62,6 +62,24 @@ class PacketPump(
      * always passes a real hook.
      */
     protectHook: com.example.interception.tun.ProtectHook = com.example.interception.tun.NoOpProtectHook,
+    /**
+     * Gap #1 Approach A: true once [RequestrVpnService] has handed this session's tun fd to
+     * the native tun2proxy bridge (`librequestr_tun2proxy.so`), which reads/writes that fd
+     * directly on its own thread. When true, [run] must NOT also read [input]/write [output]
+     * on that same fd -- two independent readers of one fd number would race, duplicate, or
+     * corrupt packets -- so [run] takes the [runNativeBridgeLoop] branch instead of the normal
+     * tun-read pipeline. Plain `Boolean`/lambda params (rather than a direct dependency on
+     * [com.example.interception.tun.Tun2ProxyBridge]) keep this class loosely coupled and
+     * testable with a fake poller.
+     */
+    private val nativeBridgeMode: Boolean = false,
+    /**
+     * Polled once per flush cycle in native-bridge mode to obtain cumulative (tx, rx) byte
+     * counters from the native side. Null means no stats are available (bridge unavailable),
+     * in which case [byteCount] simply stays at its last known value rather than being
+     * fabricated.
+     */
+    private val nativeTrafficStatsPoll: (() -> Pair<Long, Long>?)? = null,
 ) {
 
     private var packetCount = 0
@@ -332,6 +350,11 @@ class PacketPump(
     }
 
     suspend fun run(scope: CoroutineScope) {
+        if (nativeBridgeMode) {
+            runNativeBridgeLoop(scope)
+            return
+        }
+
         val buffer = ByteBuffer.allocate(MAX_PACKET)
 
         // Periodic flush so the UI shows live progress without thrashing the DB per packet.
@@ -369,6 +392,39 @@ class PacketPump(
             relayJob.cancel()
             relay.stop()
             icmpRelay.stop()
+            flushNow()
+        }
+    }
+
+    /**
+     * Gap #1 Approach A: the branch [run] takes when [nativeBridgeMode] is true. The native
+     * tun2proxy bridge owns reading/writing the raw tun fd on its own thread and decrypts VPN
+     * traffic by issuing `CONNECT` to [MitmProxyEngine] directly -- this pump never touches
+     * [input]/[output] here, and never starts [relay]/[icmpRelay] (nothing would ever offer
+     * them a packet in this mode). Its only job is to keep [InterceptionStateRepository] and
+     * the session row genuinely reflecting live traffic by polling [nativeTrafficStatsPoll]
+     * on the same cadence [flushLoop] already uses, reusing the existing [flushNow] machinery
+     * unchanged.
+     *
+     * Deliberate, documented trade-off: [packetCount] stays at its initial value in this mode
+     * (tun2proxy's traffic-status callback reports byte counters only, not packet counts), and
+     * no DNS/QUIC/PCAP/flow-level detail is recorded, since all of that requires reading raw IP
+     * packets this pump never sees when the native bridge owns the fd. That is consistent with
+     * this class's stated design rule of never inventing data it did not actually observe --
+     * the task's requirement is to preserve capture/session *counters*, not to reproduce the
+     * full DPI pipeline under native mode.
+     */
+    private suspend fun runNativeBridgeLoop(scope: CoroutineScope) {
+        val flusher = scope.launch { flushLoop() }
+        try {
+            while (scope.isActive) {
+                nativeTrafficStatsPoll?.invoke()?.let { (tx, rx) ->
+                    byteCount = tx + rx
+                }
+                delay(FLUSH_INTERVAL_MS)
+            }
+        } finally {
+            flusher.cancel()
             flushNow()
         }
     }

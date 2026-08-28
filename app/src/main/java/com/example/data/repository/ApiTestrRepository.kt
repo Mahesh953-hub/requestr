@@ -1,6 +1,9 @@
 package com.example.data.repository
 
 import android.content.Context
+import android.util.Log
+import com.example.data.env.Environment
+import com.example.data.env.EnvironmentRepository
 import com.example.data.models.ApiKeyLocation
 import com.example.data.models.ApiRequestItem
 import com.example.data.models.ApiResponseData
@@ -9,6 +12,8 @@ import com.example.data.models.HttpMethod
 import com.example.data.models.KeyValueItem
 import com.example.data.models.RequestBodyType
 import com.example.interception.OkHttpProxyInterceptor
+import com.example.scripting.ApiTestrScriptRunner
+import com.example.scripting.PmTestResult
 import java.io.IOException
 import java.net.ConnectException
 import java.net.ProtocolException
@@ -282,7 +287,26 @@ object NetworkErrorMapper {
     }
 }
 
+/**
+ * Outcome of [ApiTestrRepository.executeRequestWithScripts]. [response] is the real (or mocked)
+ * response, possibly `pm.response.*`-mutated by the post-script and/or the final poll of a
+ * [ApiRequestItem.pollingEnabled] 202-poll loop. [preScriptError]/[postScriptError] surface a
+ * script exception (syntax error, thrown assertion inside `pm.test`'s own try/catch never counts
+ * -- see [com.example.scripting.PmPrelude]'s `test()` -- timeout, or instruction-limit breach)
+ * without ever preventing the request from being sent/response from being returned: a broken
+ * script degrades gracefully to "script didn't run" rather than blocking Send entirely.
+ */
+data class ScriptExecutionOutcome(
+    val response: ApiResponseData,
+    val preScriptError: String? = null,
+    val postScriptError: String? = null,
+    val testResults: List<PmTestResult> = emptyList(),
+    val pollAttempts: Int = 0,
+)
+
 object ApiTestrRepository {
+
+    private const val TAG = "ApiTestrRepository"
 
     // R3 fix: ApiTestrRepository was the most user-facing/traffic-generating OkHttpClient
     // owner in the app with no Context available to it, so OkHttpProxyInterceptor (which
@@ -558,6 +582,154 @@ object ApiTestrRepository {
                 error = e.localizedMessage ?: e.message
             )
         }
+    }
+
+    /**
+     * Master plan §1.8 — wires ApiTestr's pre/post-request `pm.*` scripts
+     * ([com.example.scripting.ApiTestrScriptRunner]) and §2.x LOW-ADD's async 202-polling around
+     * a single [executeRequest] call:
+     *  1. runs [ApiRequestItem.preScript] against the active [Environment], applying any
+     *     `pm.environment`/`pm.variables` writes and the (possibly url/method/header/body
+     *     -mutated) request it returns;
+     *  2. `{{var}}`/`{{$name}}`-substitutes every field of that (possibly script-mutated) request
+     *     exactly like the manual-send path in `ApiTestrScreen.sendCurrentRequest` already does,
+     *     so a pre-script that calls `pm.environment.set(...)` can have that value immediately
+     *     substituted into the very same send, not just the next one;
+     *  3. sends it, following `202` responses per [ApiRequestItem.pollingEnabled] if configured;
+     *  4. runs [ApiRequestItem.postScript] against the response, applying its env writes and its
+     *     `pm.test()` results.
+     *
+     * A blank pre/post script is a true no-op (see [ApiTestrScriptRunner]'s own blank-script
+     * short circuit), so a request saved before this feature existed sends exactly as before.
+     */
+    suspend fun executeRequestWithScripts(
+        requestItem: ApiRequestItem,
+        followRedirects: Boolean = true,
+    ): ScriptExecutionOutcome = withContext(Dispatchers.IO) {
+        val activeEnv = EnvironmentRepository.active()
+
+        val preOutcome = ApiTestrScriptRunner.runPreRequestScript(requestItem.preScript, requestItem, activeEnv)
+        if (preOutcome.envUpdates != activeEnv.variables) {
+            EnvironmentRepository.updateEnvironment(activeEnv.name, preOutcome.envUpdates)
+        }
+        val envAfterPre = EnvironmentRepository.active()
+
+        val substituted = preOutcome.request.copy(
+            url = EnvironmentRepository.substitute(preOutcome.request.url, envAfterPre),
+            headers = preOutcome.request.headers.map {
+                it.copy(value = EnvironmentRepository.substitute(it.value, envAfterPre))
+            },
+            // queryParams substitution mirrors the pre-script/env-write behavior above (and
+            // matches what ApiTestrScreen.sendCurrentRequest used to do inline before this
+            // function centralized substitution) -- otherwise a {{var}} in a query param would
+            // silently stop being resolved once callers switched over to this function.
+            queryParams = preOutcome.request.queryParams.map {
+                it.copy(value = EnvironmentRepository.substitute(it.value, envAfterPre))
+            },
+            bodyContent = EnvironmentRepository.substitute(preOutcome.request.bodyContent, envAfterPre),
+            bearerToken = EnvironmentRepository.substitute(preOutcome.request.bearerToken, envAfterPre),
+            apiKeyValue = EnvironmentRepository.substitute(preOutcome.request.apiKeyValue, envAfterPre),
+        )
+
+        var response = executeRequest(substituted, followRedirects)
+        var pollAttempts = 0
+        if (substituted.pollingEnabled && response.statusCode == 202) {
+            val location = response.headers.entries
+                .firstOrNull { it.key.equals(substituted.pollingLocationHeader, ignoreCase = true) }
+                ?.value
+            if (!location.isNullOrBlank()) {
+                val pollUrl = resolvePollingUrl(location, substituted.url)
+                // P2: a polling Location that resolves to a different origin than the original
+                // request could exfiltrate its credentials (Authorization / Cookie / API key) to a
+                // third-party host. Refuse to follow it unless the request explicitly opts into
+                // cross-origin polling; when it does, still strip credentials before the GET.
+                val crossOrigin = !isSameOrigin(substituted.url, pollUrl)
+                if (crossOrigin && !substituted.pollingAllowCrossOriginRedirect) {
+                    Log.w(TAG, "Skipping async polling: Location '$pollUrl' is cross-origin and pollingAllowCrossOriginRedirect is disabled")
+                } else {
+                    val pollRequest = buildPollRequest(substituted, pollUrl, stripCredentials = crossOrigin)
+                    var attempts = 0
+                    while (attempts < substituted.pollingMaxAttempts && response.statusCode == 202) {
+                        delay(substituted.pollingIntervalMs)
+                        response = executeRequest(pollRequest, followRedirects)
+                        attempts++
+                    }
+                    pollAttempts = attempts
+                }
+            }
+        }
+
+        val postOutcome = ApiTestrScriptRunner.runPostResponseScript(
+            requestItem.postScript,
+            substituted,
+            response,
+            envAfterPre,
+        )
+        if (postOutcome.envUpdates != envAfterPre.variables) {
+            EnvironmentRepository.updateEnvironment(envAfterPre.name, postOutcome.envUpdates)
+        }
+
+        ScriptExecutionOutcome(
+            response = postOutcome.response,
+            preScriptError = preOutcome.error,
+            postScriptError = postOutcome.error,
+            testResults = postOutcome.testResults,
+            pollAttempts = pollAttempts,
+        )
+    }
+
+    /** Resolves a `Location` header value that may be a relative path against [requestUrl]'s origin. */
+    private fun resolvePollingUrl(location: String, requestUrl: String): String {
+        if (location.startsWith("http://", ignoreCase = true) || location.startsWith("https://", ignoreCase = true)) {
+            return location
+        }
+        val base = requestUrl.toHttpUrlOrNull() ?: return location
+        return base.resolve(location)?.toString() ?: location
+    }
+
+    /** True iff [a] and [b] resolve to the same origin (scheme + host + port). Unparseable URLs never match. */
+    internal fun isSameOrigin(a: String, b: String): Boolean {
+        val ua = a.toHttpUrlOrNull() ?: return false
+        val ub = b.toHttpUrlOrNull() ?: return false
+        return ua.scheme.equals(ub.scheme, ignoreCase = true) &&
+            ua.host.equals(ub.host, ignoreCase = true) &&
+            ua.port == ub.port
+    }
+
+    /**
+     * Builds the polling GET for [pollUrl] from [source]. A same-origin poll is the original
+     * request re-pointed to [pollUrl] as a bodyless GET (credentials intact — it's the same
+     * host). For an allowed cross-origin poll ([stripCredentials]), credential-bearing headers
+     * (Authorization, Cookie, Proxy-Authorization, and the configured API-key header) are
+     * disabled and the request's auth/query-param/body state is blanked, so a signed or
+     * third-party `Location` target never receives the original request's credentials.
+     */
+    internal fun buildPollRequest(source: ApiRequestItem, pollUrl: String, stripCredentials: Boolean): ApiRequestItem {
+        if (!stripCredentials) {
+            return source.copy(url = pollUrl, method = HttpMethod.GET, bodyType = RequestBodyType.NONE)
+        }
+        val apiKeyHeaderName = source.apiKeyHeader.trim()
+        val sensitive: (String) -> Boolean = { key ->
+            key.equals("Authorization", ignoreCase = true) ||
+                key.equals("Cookie", ignoreCase = true) ||
+                key.equals("Proxy-Authorization", ignoreCase = true) ||
+                (apiKeyHeaderName.isNotEmpty() && key.equals(apiKeyHeaderName, ignoreCase = true))
+        }
+        return source.copy(
+            url = pollUrl,
+            method = HttpMethod.GET,
+            bodyType = RequestBodyType.NONE,
+            bodyContent = "",
+            formData = emptyList(),
+            queryParams = emptyList(),
+            headers = source.headers.map { if (sensitive(it.key.trim())) it.copy(isEnabled = false) else it },
+            authType = AuthType.NONE,
+            bearerToken = "",
+            basicUsername = "",
+            basicPassword = "",
+            apiKeyValue = "",
+            mockEnabled = false,
+        )
     }
 
     // Code-review note (§2.9 follow-up, then follow-up-of-follow-up) — every branch below now

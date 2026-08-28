@@ -33,6 +33,14 @@ object WebSocketParser {
         val isMasked: Boolean,
         val payload: ByteArray,
         val totalLength: Int,
+        /**
+         * RFC 6455 §5.2 FIN bit: true when this frame is the last (or only) fragment of a
+         * message. A `false` TEXT/BINARY frame starts a fragmented message that continues in
+         * one or more `false` CONTINUATION frames and ends with a `true` CONTINUATION frame --
+         * see [WsMessageAssembler]. Control frames (CLOSE/PING/PONG) are never fragmented in
+         * practice and always carry FIN=1.
+         */
+        val fin: Boolean = true,
     ) {
         val opcodeName: String
             get() = when (opcode) {
@@ -70,6 +78,7 @@ object WebSocketParser {
 
         val b0 = data[offset].toInt() and 0xFF
         val b1 = data[offset + 1].toInt() and 0xFF
+        val fin = (b0 and 0x80) != 0
         val opcode = b0 and 0x0F
         val isMasked = (b1 and 0x80) != 0
         var payloadLen = b1 and 0x7F
@@ -117,6 +126,7 @@ object WebSocketParser {
             isMasked = isMasked,
             payload = payload,
             totalLength = (idx + payloadLen) - offset,
+            fin = fin,
         )
     }
 
@@ -136,4 +146,66 @@ object WebSocketParser {
     /** Log-friendly one-line description of a frame. */
     fun describe(frame: WsFrame): String =
         "${frame.opcodeName} ${if (frame.isMasked) "masked" else "unmasked"} len=${frame.payload.size} ${frame.payloadText.take(80)}"
+}
+
+/**
+ * Reassembles a fragmented WebSocket message (RFC 6455 §5.4): a `FIN=0` TEXT/BINARY frame
+ * followed by zero or more `FIN=0` CONTINUATION frames, terminated by a `FIN=1` CONTINUATION
+ * frame. Control frames (CLOSE/PING/PONG) are allowed to interleave mid-fragmentation (the RFC
+ * permits this) and are always complete messages on their own -- [offer] returns them
+ * immediately without touching the in-progress fragmentation state.
+ *
+ * One instance covers a single direction of a single connection; a WebSocket connection needs
+ * two (client→server and server→client), matching the per-direction [Http2Parser.HpackDecoder]
+ * convention used for HTTP/2.
+ */
+class WsMessageAssembler {
+    private var messageOpcode = -1
+    private var buffer: java.io.ByteArrayOutputStream? = null
+
+    /**
+     * Feed one parsed [WebSocketParser.WsFrame] through the assembler.
+     *
+     * @return the complete, reassembled message the moment its final (`FIN=1`) fragment
+     *         arrives -- a control frame is returned as-is (never buffered); a non-final
+     *         data/continuation fragment returns null while assembly continues.
+     */
+    fun offer(frame: WebSocketParser.WsFrame): WebSocketParser.WsFrame? {
+        if (frame.opcode == WebSocketParser.OP_CLOSE ||
+            frame.opcode == WebSocketParser.OP_PING ||
+            frame.opcode == WebSocketParser.OP_PONG
+        ) {
+            return frame // control frames are never fragmented; pass through untouched
+        }
+
+        if (frame.opcode != WebSocketParser.OP_CONTINUATION) {
+            // Starts a (possibly single-frame) message.
+            if (frame.fin) return frame // common case: not fragmented at all
+            messageOpcode = frame.opcode
+            buffer = java.io.ByteArrayOutputStream().apply { write(frame.payload) }
+            return null
+        }
+
+        // CONTINUATION: append to whatever message is in progress. A CONTINUATION with no
+        // message in progress is a protocol violation on the wire -- tolerate it by treating
+        // the payload as a message of its own rather than throwing, so a single malformed
+        // frame never wedges the assembler for the rest of the connection.
+        val inProgress = buffer
+        if (inProgress == null) {
+            return if (frame.fin) frame else null
+        }
+        inProgress.write(frame.payload)
+        if (!frame.fin) return null
+
+        val complete = WebSocketParser.WsFrame(
+            opcode = messageOpcode,
+            isMasked = frame.isMasked,
+            payload = inProgress.toByteArray(),
+            totalLength = frame.totalLength,
+            fin = true,
+        )
+        buffer = null
+        messageOpcode = -1
+        return complete
+    }
 }
