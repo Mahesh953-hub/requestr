@@ -316,7 +316,10 @@ class MitmProxyEngineLazyUpstreamTest {
 
         val captured = mutableListOf<CapturedTrafficEntity>()
         val latch = CountDownLatch(1)
-        engine = MitmProxyEngine(onDecryptedTransaction = { entity -> captured.add(entity); latch.countDown() })
+        engine = MitmProxyEngine(
+            onDecryptedTransaction = { entity -> captured.add(entity); latch.countDown() },
+            caTrustGate = CaTrustGate(probe = { true }),
+        )
         val proxyPort = engine.start(context, 0)
 
         val sslSocket = openMitmTunnel(proxyPort, upstreamPort)
@@ -344,7 +347,10 @@ class MitmProxyEngineLazyUpstreamTest {
         val upstreamPort = upstream.serverSocket.localPort
 
         val captured = mutableListOf<CapturedTrafficEntity>()
-        engine = MitmProxyEngine(onDecryptedTransaction = { entity -> synchronized(captured) { captured.add(entity) } })
+        engine = MitmProxyEngine(
+            onDecryptedTransaction = { entity -> synchronized(captured) { captured.add(entity) } },
+            caTrustGate = CaTrustGate(probe = { true }),
+        )
         val proxyPort = engine.start(context, 0)
 
         val sslSocket = openMitmTunnel(proxyPort, upstreamPort)
@@ -385,7 +391,10 @@ class MitmProxyEngineLazyUpstreamTest {
         val upstreamPort = upstream.serverSocket.localPort
 
         val captured = mutableListOf<CapturedTrafficEntity>()
-        engine = MitmProxyEngine(onDecryptedTransaction = { entity -> synchronized(captured) { captured.add(entity) } })
+        engine = MitmProxyEngine(
+            onDecryptedTransaction = { entity -> synchronized(captured) { captured.add(entity) } },
+            caTrustGate = CaTrustGate(probe = { true }),
+        )
         val proxyPort = engine.start(context, 0)
 
         val sslSocket = openMitmTunnel(proxyPort, upstreamPort)

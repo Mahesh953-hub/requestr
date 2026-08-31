@@ -8,6 +8,7 @@ import com.example.interception.PacketPump
 import com.example.interception.tls.TlsKeyLogRegistry
 import kotlinx.coroutines.runBlocking
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -273,7 +274,7 @@ class Http3EndToEndFixtureTest {
     }
 
     @Test
-    fun `a binary response body is recorded as a byte-count marker rather than mojibake`() {
+    fun `a binary response body is stored byte-exact rather than mangled into mojibake or a text marker`() {
         val sessionId = 9007L
         val scenario = QuicConnectionScenario()
         scenario.registerSecrets()
@@ -299,8 +300,47 @@ class Http3EndToEndFixtureTest {
 
         pump.flushHttp3WritesForTest()
         val row = runBlocking { db.capturedTrafficDao().getBySession(sessionId) }.single()
-        assertEquals("<binary ${binary.size} bytes>", row.responseBody)
+        assertTrue("a binary body must be flagged, not silently treated as text", row.isResponseBodyBinary)
+        assertEquals(com.example.interception.http.HttpBodyDecoder.BINARY_BODY_PLACEHOLDER, row.responseBody)
+        assertArrayEquals(binary, row.responseBodyBytes)
+        assertFalse(row.responseBodyBytesTruncated)
         assertEquals("the real observed size is still recorded", binary.size.toLong(), row.responseSizeBytes)
+    }
+
+    @Test
+    fun `a binary response body larger than the decoder's buffering bound is not stored as a partial blob`() {
+        val sessionId = 9107L
+        val scenario = QuicConnectionScenario()
+        scenario.registerSecrets()
+        val pump = newPump(sessionId)
+        // Larger than QuicConnectionDecoder.Http3Exchange's 64 KiB per-direction buffering bound,
+        // so the decoder itself truncates -- the resulting prefix must never be persisted as if
+        // it were the complete body (see PacketPump.bodyForPersist's decoderTruncated handling).
+        val oversizedBinary = ByteArray(80 * 1024) { (it % 256).toByte() }
+
+        pump.outbound(scenario.clientInitial())
+        pump.inbound(scenario.serverInitial() + scenario.serverHandshake())
+        pump.outbound(
+            scenario.clientOneRtt(0, QuicWireFixtures.streamFrame(0, 0, QuicWireFixtures.requestHeadersFrame("GET", "/huge-binary", scenario.sni), fin = true)),
+        )
+        pump.inbound(
+            scenario.serverOneRtt(
+                0,
+                QuicWireFixtures.streamFrame(
+                    streamId = 0,
+                    offset = 0,
+                    data = QuicWireFixtures.responseHeadersFrame("200") + QuicWireFixtures.dataFrame(oversizedBinary),
+                    fin = true,
+                ),
+            ),
+        )
+
+        pump.flushHttp3WritesForTest()
+        val row = runBlocking { db.capturedTrafficDao().getBySession(sessionId) }.single()
+        assertTrue(row.isResponseBodyBinary)
+        assertNull("a decoder-truncated body must never be persisted as a partial blob", row.responseBodyBytes)
+        assertTrue(row.responseBodyBytesTruncated)
+        assertEquals(oversizedBinary.size.toLong(), row.responseSizeBytes)
     }
 
     @Test

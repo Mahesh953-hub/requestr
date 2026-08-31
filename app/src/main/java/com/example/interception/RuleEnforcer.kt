@@ -4,6 +4,7 @@ import android.util.Log
 import com.example.data.local.InterceptRuleEntity
 import com.example.data.local.RequestrDatabase
 import com.example.data.local.RuleAction
+import com.example.interception.http.HttpBodyDecoder
 import com.example.interception.http.ParsedHttpMessage
 import com.example.scripting.JsScriptEngine
 import com.example.scripting.PmBridgeBase
@@ -55,15 +56,29 @@ object RuleEnforcer {
 
     /**
      * Applies request modifications from a rule's replacementValue (JSON config).
-     * Format: {"addHeaders":{"X-Custom":"value"}, "removeHeaders":["Cookie"], "bodyReplace":"new body"}
+     * Format: {"addHeaders":{"X-Custom":"value"}, "removeHeaders":["Cookie"], "bodyReplace":"new body",
+     * "variables":{"key":"value"}}
+     *
+     * §3 (C10) — `addHeaders` values and `bodyReplace` are passed through [RuleTemplateExpander]
+     * first, so `{{...}}` placeholders (dynamic generators, `{{request.host}}`/`{{request.path}}`/
+     * `{{request.method}}`/`{{request.url}}`/`{{request.header.NAME}}`/`{{request.query.NAME}}`
+     * built-ins describing [request] itself, the legacy `{{TIMESTAMP}}`/`{{RANDOM}}`/`{{UUID}}`
+     * trio, and this rule's own `variables` map) expand before being applied. See
+     * [RuleTemplateExpander]'s KDoc for the full resolution order. A `bodyReplace` `file://<path>`
+     * reference is templated too (so the path itself may contain placeholders) before being
+     * resolved by [MockFixtureLoader].
      */
     fun applyRequestModification(request: ParsedHttpMessage, config: String) {
         runCatching {
             val json = org.json.JSONObject(config)
+            val variables = parseTemplateVariables(json)
+            val context = RuleTemplateExpander.Context.fromMessage(request)
+            fun tmpl(value: String) = RuleTemplateExpander.expand(value, variables, context)
+
             if (json.has("addHeaders")) {
                 val headers = json.getJSONObject("addHeaders")
                 val mutable = request.headers.toMutableMap()
-                headers.keys().forEach { key -> mutable[key] = headers.getString(key) }
+                headers.keys().forEach { key -> mutable[key] = tmpl(headers.getString(key)) }
                 request.headers = mutable
             }
             if (json.has("removeHeaders")) {
@@ -75,37 +90,100 @@ object RuleEnforcer {
                 request.headers = mutable
             }
             if (json.has("bodyReplace")) {
-                // §3 LOW-ADD: a `bodyReplace` value of the form `file://<path>` is resolved to
-                // that file's contents instead of used literally -- see MockFixtureLoader's
-                // KDoc. Every existing rule's plain-string bodyReplace passes through unchanged.
-                request.body = MockFixtureLoader.resolveBodyReplace(json.getString("bodyReplace")).orEmpty()
-                request.bodyReplaced = true
+                // §3 LOW-ADD / §6 binary-fixture follow-up: a `bodyReplace` value of the form
+                // `file://<path>` is resolved to that file's real contents -- byte-exact for a
+                // binary fixture (replacedBodyBytes), decoded text otherwise -- instead of used
+                // literally. See MockFixtureLoader's KDoc. A broken fixture reference is logged
+                // and leaves `request` untouched rather than producing a misleading empty body.
+                val resolution = MockFixtureLoader.resolve(tmpl(json.getString("bodyReplace")))
+                MockFixtureLoader.applyTo(request, resolution) { message ->
+                    Log.w(TAG, "bodyReplace fixture failed, request body left unchanged: $message")
+                }
             }
         }.onFailure { Log.w(TAG, "Failed to apply request modification: ${it.message}") }
     }
 
     /**
      * Applies response modifications from a rule's replacementValue (JSON config).
-     * Format: {"statusCode":200, "addHeaders":{"X-Mock":"true"}, "bodyReplace":"{}"}
+     * Format: {"statusCode":200, "addHeaders":{"X-Mock":"true"}, "bodyReplace":"{}", "variables":{"key":"value"}}
+     *
+     * §3 (C10) — same [RuleTemplateExpander] templating pass as [applyRequestModification], built
+     * from [response] itself. Note [response]'s own `{{request.host}}`/`{{request.path}}` built-ins
+     * are typically unresolved here (a parsed response has no `host`/`path` of its own -- see
+     * [ParsedHttpMessage]'s KDoc) and are left untouched rather than rendered wrong.
      */
     fun applyResponseModification(response: ParsedHttpMessage, config: String) {
         runCatching {
             val json = org.json.JSONObject(config)
+            val variables = parseTemplateVariables(json)
+            val context = RuleTemplateExpander.Context.fromMessage(response)
+            fun tmpl(value: String) = RuleTemplateExpander.expand(value, variables, context)
+
             if (json.has("statusCode")) {
                 response.statusCode = json.getInt("statusCode")
             }
             if (json.has("addHeaders")) {
                 val headers = json.getJSONObject("addHeaders")
                 val mutable = response.headers.toMutableMap()
-                headers.keys().forEach { key -> mutable[key] = headers.getString(key) }
+                headers.keys().forEach { key -> mutable[key] = tmpl(headers.getString(key)) }
                 response.headers = mutable
             }
             if (json.has("bodyReplace")) {
-                // §3 LOW-ADD: same `file://` fixture indirection as applyRequestModification.
-                response.body = MockFixtureLoader.resolveBodyReplace(json.getString("bodyReplace")).orEmpty()
-                response.bodyReplaced = true
+                // §3 LOW-ADD / §6 binary-fixture follow-up: same `file://` fixture indirection
+                // as applyRequestModification, now byte-exact for binary fixtures.
+                val resolution = MockFixtureLoader.resolve(tmpl(json.getString("bodyReplace")))
+                MockFixtureLoader.applyTo(response, resolution) { message ->
+                    Log.w(TAG, "bodyReplace fixture failed, response body left unchanged: $message")
+                }
             }
         }.onFailure { Log.w(TAG, "Failed to apply response modification: ${it.message}") }
+    }
+
+    /**
+     * §2.14(b) -- [RuleAction.BODY_ENCRYPT_AES]/[RuleAction.BODY_DECRYPT_AES]: transforms
+     * [message]'s body in place via [RequestCryptoManager], gated by [rule]'s `cryptoScope`
+     * (`"REQUEST"`/`"RESPONSE"`/`"BOTH"`, case-insensitive; anything else fails open to
+     * applying, matching [applyRequestModification]/[applyResponseModification]'s lenient
+     * config-parsing convention elsewhere in this file).
+     *
+     * [encrypt] -- true for `BODY_ENCRYPT_AES`, false for `BODY_DECRYPT_AES` -- is the caller's
+     * responsibility to derive from `rule.action`; this function never reads
+     * [InterceptRuleEntity.cryptoDirection] (informational metadata only, kept in sync by the
+     * UI, never a second source of truth that could disagree with the action that actually
+     * matched).
+     *
+     * On success, sets [ParsedHttpMessage.replacedBodyBytes] (byte-exact -- ciphertext and
+     * decrypted binary payloads both survive intact, unlike routing through [ParsedHttpMessage.body]
+     * which is UTF-8 text) and [ParsedHttpMessage.bodyReplaced]`= true` so the existing
+     * serializers ([MitmProxyEngine.bodyBytesFor]) pick it up. On failure (bad key, corrupted/
+     * foreign ciphertext, blank alias -- see [RequestCryptoManager]), the message is left
+     * completely untouched and the failure is logged -- never a silent pass-through of
+     * ciphertext as if it were plaintext, and never a broken connection either.
+     */
+    fun applyBodyCrypto(message: ParsedHttpMessage, rule: InterceptRuleEntity, encrypt: Boolean) {
+        val appliesToThisMessage = when (rule.cryptoScope.uppercase()) {
+            "REQUEST" -> message.isRequest
+            "RESPONSE" -> !message.isRequest
+            else -> true // "BOTH" or unrecognized
+        }
+        if (!appliesToThisMessage) return
+
+        val inputBytes = message.rawBodyBytes ?: message.body.toByteArray(Charsets.UTF_8)
+        val result = if (encrypt) {
+            RequestCryptoManager.encrypt(rule.cryptoKeyAlias, inputBytes, rule.cryptoAlgorithm)
+        } else {
+            RequestCryptoManager.decrypt(rule.cryptoKeyAlias, inputBytes, rule.cryptoAlgorithm)
+        }
+        when (result) {
+            is RequestCryptoManager.CryptoResult.Success -> {
+                message.replacedBodyBytes = result.bytes
+                message.bodyReplaced = true
+            }
+            is RequestCryptoManager.CryptoResult.Failure -> {
+                val op = if (encrypt) "BODY_ENCRYPT_AES" else "BODY_DECRYPT_AES"
+                Log.w(TAG, "$op rule '${rule.name}' failed: ${result.reason}")
+            }
+        }
     }
 
     /**
@@ -195,6 +273,23 @@ object RuleEnforcer {
         }.onFailure { Log.w(TAG, "Failed to apply script rewrite: ${it.message}") }
     }
 
+    /**
+     * §3 (C10) — reads a rule config's optional `"variables": {"key": "value", ...}` JSON object
+     * for [RuleTemplateExpander]. Same schema [applyScriptRewrite] already accepts for `pm.*`
+     * templating, extended to the other three rule actions here. Absent/malformed `variables`
+     * (or a malformed config overall) yields an empty map -- never a thrown exception -- matching
+     * every other lenient config-parsing convention in this file.
+     */
+    private fun parseTemplateVariables(json: org.json.JSONObject): Map<String, String> {
+        if (!json.has("variables")) return emptyMap()
+        return runCatching {
+            val varsJson = json.getJSONObject("variables")
+            val result = LinkedHashMap<String, String>()
+            varsJson.keys().forEach { key -> result[key] = varsJson.getString(key) }
+            result
+        }.getOrDefault(emptyMap())
+    }
+
     private fun headerLookup(message: ParsedHttpMessage, name: String): String? =
         message.headers.entries.firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
 
@@ -240,26 +335,54 @@ object RuleEnforcer {
         var statusCode = 200
         var statusMessage = "OK"
         var body = ""
+        var bodyBytes: ByteArray? = null
         val headers = linkedMapOf<String, String>()
 
         if (!config.isNullOrBlank()) {
             runCatching {
                 val json = org.json.JSONObject(config)
+                // §3 (C10) — same RuleTemplateExpander templating pass as
+                // applyRequestModification/applyResponseModification, built from the bare
+                // [requestUrl] string (no live ParsedHttpMessage exists yet for a mock -- the
+                // mock IS the response). `{{request.method}}` is therefore always unresolved
+                // here and left untouched, since this call site has no method to offer.
+                val variables = parseTemplateVariables(json)
+                val context = RuleTemplateExpander.Context.fromRequestUrl(requestUrl)
+                fun tmpl(value: String) = RuleTemplateExpander.expand(value, variables, context)
+
                 if (json.has("statusCode")) statusCode = json.getInt("statusCode")
                 if (json.has("statusMessage")) statusMessage = json.getString("statusMessage")
-                if (json.has("bodyReplace")) body = MockFixtureLoader.resolveBodyReplace(json.getString("bodyReplace")).orEmpty()
+                if (json.has("bodyReplace")) {
+                    // §6 binary-fixture follow-up: a binary `file://` fixture (image, protobuf,
+                    // gzip blob, ...) is served byte-exact via replacedBodyBytes below, instead
+                    // of being corrupted by a UTF-8 round trip. A broken fixture reference is
+                    // logged clearly and the mock falls back to its empty-body default -- never
+                    // a silent leak of the raw `file://...` reference string onto the wire.
+                    when (val resolution = MockFixtureLoader.resolve(tmpl(json.getString("bodyReplace")))) {
+                        is MockFixtureLoader.Resolution.Text -> body = resolution.text
+                        is MockFixtureLoader.Resolution.Binary -> bodyBytes = resolution.bytes
+                        is MockFixtureLoader.Resolution.Error ->
+                            Log.w(TAG, "MOCK_RESPONSE bodyReplace fixture failed, using empty body: ${resolution.message}")
+                    }
+                }
                 if (json.has("addHeaders")) {
                     val added = json.getJSONObject("addHeaders")
-                    added.keys().forEach { key -> headers[key.lowercase()] = added.getString(key) }
+                    added.keys().forEach { key -> headers[key.lowercase()] = tmpl(added.getString(key)) }
                 }
             }.onFailure { Log.w(TAG, "Malformed MOCK_RESPONSE config, using defaults: ${it.message}") }
         }
 
+        val isBinary = bodyBytes != null
+        val realBodyLength = bodyBytes?.size ?: body.toByteArray(Charsets.UTF_8).size
+
         if (!headers.containsKey("content-type")) {
-            headers["content-type"] =
-                if (looksLikeJson(body)) "application/json; charset=utf-8" else "text/plain; charset=utf-8"
+            headers["content-type"] = when {
+                isBinary -> "application/octet-stream"
+                looksLikeJson(body) -> "application/json; charset=utf-8"
+                else -> "text/plain; charset=utf-8"
+            }
         }
-        headers["content-length"] = body.toByteArray(Charsets.UTF_8).size.toString()
+        headers["content-length"] = realBodyLength.toString()
 
         return ParsedHttpMessage(
             isRequest = false,
@@ -268,7 +391,13 @@ object RuleEnforcer {
             statusCode = statusCode,
             statusMessage = statusMessage,
             headers = headers,
-            body = body,
+            body = if (isBinary) HttpBodyDecoder.BINARY_BODY_PLACEHOLDER else body,
+            isBodyBinary = isBinary,
+            replacedBodyBytes = bodyBytes,
+            // MitmProxyEngine.bodyBytesFor keys off this to prefer replacedBodyBytes when set,
+            // exactly as it does for a real MODIFY_RESPONSE/BODY_ENCRYPT_AES rewrite -- a
+            // synthesized MOCK_RESPONSE body is *always* the "real, intended content" case.
+            bodyReplaced = true,
         )
     }
 

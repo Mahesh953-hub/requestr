@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -30,6 +31,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
@@ -37,7 +39,10 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Tune
@@ -49,12 +54,14 @@ import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material.icons.outlined.DarkMode
 import androidx.compose.material.icons.outlined.SettingsBrightness
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -64,7 +71,9 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -86,12 +95,19 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import android.content.Intent
 import com.example.data.interception.CaptureLogRepository
+import com.example.data.models.AppPackageItem
 import com.example.data.repository.SettingsRepository
+import com.example.data.repository.AppUtils
+import com.example.data.repository.P12ImportErrorClassifier
+import com.example.data.repository.P12ImportFailureKind
+import com.example.data.repository.TrafficInterceptorRepository
 import com.example.data.interception.CaState
 import com.example.data.interception.FridaState
 import com.example.data.interception.InterceptionStateRepository
@@ -99,7 +115,13 @@ import com.example.data.interception.RootState
 import com.example.data.interception.ShizukuState
 import com.example.interception.CapabilityProbe
 import com.example.interception.CertificateAuthority
+import com.example.interception.CaP12Exchange
+import com.example.interception.TargetAppDatabaseBrowser
+import com.example.interception.isSafeSqlIdentifier
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.example.ui.components.BadgePill
 import com.example.ui.components.CdpCard
 import com.example.ui.components.GlassCard
@@ -155,7 +177,48 @@ fun SettingsScreen(
         }
     }
 
+    // `.p12` CA import (master plan §3 LOW-ADD): CaP12Exchange.importP12 is complete and
+    // unit-tested (CaP12ExchangeTest) but had no UI counterpart to the existing .p12 export
+    // button. This launcher only reads the picked file's bytes; the password prompt (rendered
+    // next to the CA export row, below) drives the actual import via CaP12Exchange.
+    var p12ImportPendingBytes by remember { mutableStateOf<ByteArray?>(null) }
+    var p12ImportPendingFileName by remember { mutableStateOf<String?>(null) }
+    var p12ImportPickError by remember { mutableStateOf<String?>(null) }
+    val p12ImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri == null) {
+            // User backed out of the picker — a real, distinct state, not a crash or a silent no-op.
+            p12ImportPickError = "No file selected — the picker was cancelled."
+            return@rememberLauncherForActivityResult
+        }
+        val bytes = runCatching {
+            settingsContext.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        }.getOrNull()
+        if (bytes == null || bytes.isEmpty()) {
+            p12ImportPickError = "Could not read the selected file — it may be unreadable or empty."
+            p12ImportPendingBytes = null
+            return@rememberLauncherForActivityResult
+        }
+        p12ImportPickError = null
+        p12ImportPendingBytes = bytes
+        p12ImportPendingFileName = runCatching {
+            settingsContext.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                val nameIdx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (nameIdx >= 0 && cursor.moveToFirst()) cursor.getString(nameIdx) else null
+            }
+        }.getOrNull() ?: uri.lastPathSegment
+    }
+
     val capabilities by InterceptionStateRepository.capabilities.collectAsState()
+
+    // VPN app picker observability (master plan §3 LOW-ADD, C8) — mirrors the same
+    // repository-level filter state InterceptScreen.kt's picker reads, so this screen's toggle
+    // and counts stay in sync with whatever that screen last loaded (and vice versa).
+    val appPickerInternetOnly by TrafficInterceptorRepository.internetOnlyFilterEnabled.collectAsState()
+    val appPickerTotal by TrafficInterceptorRepository.totalInstalledAppCount.collectAsState()
+    val appPickerFilteredOut by TrafficInterceptorRepository.filteredOutAppCount.collectAsState()
+    val appPickerApps by TrafficInterceptorRepository.installedApps.collectAsState()
     // B9: the port editable here MUST be the same value PreflightController/InterceptScreen
     // actually read (SettingsDataStore), not the separate, unconsumed SettingsRepository copy
     // that previously made this field a no-op on the real capture engine.
@@ -170,10 +233,25 @@ fun SettingsScreen(
         initial = com.example.data.prefs.CaptureTierPreference.AUTO
     )
     val rememberLastAppFilter by interceptionDataStore.rememberLastAppFilter.collectAsState(initial = true)
+    // §3 (C2) — weak-network simulation. Collected from the Flow (not a local-only toggle) so
+    // this reflects process death and any external change; the three text inputs below are
+    // `remember(networkCondition.*)`-keyed so an external update overwrites in-progress local
+    // edits the same way `proxyPortInput` already does for `realProxyPort` above.
+    val networkCondition by interceptionDataStore.networkCondition.collectAsState(
+        initial = com.example.interception.NetworkConditionInjector.NetworkCondition.NONE
+    )
+    var networkLatencyInput by remember(networkCondition.latencyMs) { mutableStateOf(networkCondition.latencyMs.toString()) }
+    var networkJitterInput by remember(networkCondition.jitterMs) { mutableStateOf(networkCondition.jitterMs.toString()) }
+    var networkLossInput by remember(networkCondition.packetLossPercent) { mutableStateOf(networkCondition.packetLossPercent.toString()) }
     val capturedCount by remember(settingsContext) {
         CaptureLogRepository.observeCount(settingsContext)
     }.collectAsState(initial = 0)
-    val caSummary by produceState<Triple<String, String, String>?>(initialValue = null) {
+    // `.p12` import (§3 LOW-ADD) and "Regenerate CA" both replace the active CA keystore on
+    // disk; bumping this key forces caSummary's produceState block to re-read the new
+    // certificate instead of continuing to show the one that was active when Settings first
+    // composed, so a successful import/regenerate is visibly reflected without leaving the screen.
+    var caRefreshTrigger by remember { mutableStateOf(0) }
+    val caSummary by produceState<Triple<String, String, String>?>(initialValue = null, caRefreshTrigger) {
         value = runCatching {
             val cert = CertificateAuthority.getOrCreate(settingsContext).certificate
             val fp = java.security.MessageDigest.getInstance("SHA-256")
@@ -1359,6 +1437,29 @@ fun SettingsScreen(
                             modifier = Modifier.padding(top = 4.dp)
                         )
 
+                        // `.p12` import (master plan §3 LOW-ADD) — the export half above already
+                        // existed; CaP12Exchange.importP12 is complete + unit-tested but had no
+                        // file-picker/password UI. Placed right next to the export row per the
+                        // task's "add the import counterpart right next to it" instruction.
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = {
+                                p12ImportPickError = null
+                                p12ImportLauncher.launch("*/*")
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)
+                        ) {
+                            Icon(imageVector = Icons.Default.Upload, contentDescription = "Upload", tint = MaterialTheme.colorScheme.onTertiaryContainer, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Import .p12 (with password)", color = MaterialTheme.colorScheme.onTertiaryContainer, fontSize = 11.sp)
+                        }
+                        val pickError = p12ImportPickError
+                        if (pickError != null && p12ImportPendingBytes == null) {
+                            Text(pickError, fontSize = 10.sp, color = MaterialTheme.colorScheme.error)
+                        }
+
                         // Regenerate CA button
                         Spacer(modifier = Modifier.height(8.dp))
                         Button(
@@ -1368,6 +1469,8 @@ fun SettingsScreen(
                                         CertificateAuthority.regenerate(settingsContext)
                                         android.widget.Toast.makeText(settingsContext, "CA regenerated — re-export and re-install", android.widget.Toast.LENGTH_SHORT).show()
                                     }
+                                    caRefreshTrigger++
+                                    CapabilityProbe.probeAll(settingsContext)
                                 }
                             },
                             modifier = Modifier.fillMaxWidth(),
@@ -1461,6 +1564,205 @@ fun SettingsScreen(
                 }
             }
 
+            // Section 6b (§1.10): remote-cert mirror opt-in -- a deliberately non-default,
+            // expert setting. Placed right after the CA root cert section since it changes what
+            // metadata ends up baked into the per-host leaf certs that section is about.
+            item {
+                SettingsSectionHeader("REMOTE CERT MIRRORING (EXPERT)")
+                GlassCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    backgroundColor = MaterialTheme.colorScheme.surface
+                ) {
+                    val remoteCertMirrorEnabled by interceptionDataStore.remoteCertMirrorEnabled.collectAsState(initial = false)
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "Mirror real cert metadata into generated leafs",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    if (remoteCertMirrorEnabled) "On" else "Off (default)",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (remoteCertMirrorEnabled) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = remoteCertMirrorEnabled,
+                                onCheckedChange = { checked ->
+                                    settingsScope.launch { interceptionDataStore.setRemoteCertMirrorEnabled(checked) }
+                                }
+                            )
+                        }
+                        Text(
+                            "When ON: the first time requestr MITMs a FORCE_MITM host, it opens a " +
+                                "real upstream TLS connection to that host to copy its actual " +
+                                "certificate metadata (subject, SANs, validity) into the generated " +
+                                "per-host leaf cert -- so the leaf you inspect looks like the real " +
+                                "site's cert instead of a generic requestr-issued one.",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            "Trade-off: that means a genuine outbound network call to the target " +
+                                "host on first contact, per host -- which is exactly why this is " +
+                                "OFF by default and must stay off for any host you're mocking or " +
+                                "testing offline (a mocked/offline host has nothing real to mirror, " +
+                                "so this would either fail or leak a real connection attempt you " +
+                                "didn't intend). Leave this off unless you specifically need the " +
+                                "generated cert to carry real upstream metadata.",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            }
+
+            // Section 6c (§3 C2): weak-network simulation -- master enable switch, three clamped
+            // numeric inputs, and one-tap presets. Off by default; see NetworkConditionUiHelpers.kt
+            // for why the clamp maxima and preset numbers are what they are.
+            item {
+                SettingsSectionHeader("WEAK NETWORK SIMULATION")
+                GlassCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    backgroundColor = MaterialTheme.colorScheme.surface
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "Simulate a weak connection",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    if (networkCondition.enabled) "On" else "Off (default)",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (networkCondition.enabled) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = networkCondition.enabled,
+                                onCheckedChange = { checked ->
+                                    settingsScope.launch {
+                                        interceptionDataStore.setNetworkCondition(
+                                            sanitizedNetworkCondition(
+                                                enabled = checked,
+                                                latencyMs = networkCondition.latencyMs,
+                                                jitterMs = networkCondition.jitterMs,
+                                                packetLossPercent = networkCondition.packetLossPercent,
+                                            )
+                                        )
+                                    }
+                                }
+                            )
+                        }
+                        Text(
+                            "Applies only to the HTTP-proxy, MITM-proxy, and gateway relay tiers -- " +
+                                "it has no effect on the VPN-tun packet path or Frida-based interception, " +
+                                "which don't run through this relay code at all. Simulated packet loss " +
+                                "surfaces as a failed connection (a 502 for plain HTTP, a CONNECT tunnel " +
+                                "that never opens for HTTPS) -- not literal dropped bytes mid-stream, " +
+                                "since that isn't reproducible above the OS's own TCP stack.",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        OutlinedTextField(
+                            value = networkLatencyInput,
+                            onValueChange = { networkLatencyInput = it },
+                            label = { Text("Latency (ms, 0-$MAX_NETWORK_LATENCY_MS)", fontSize = 11.sp) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            textStyle = LocalTextStyle.current.copy(fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                        )
+                        OutlinedTextField(
+                            value = networkJitterInput,
+                            onValueChange = { networkJitterInput = it },
+                            label = { Text("Jitter (± ms, 0-$MAX_NETWORK_JITTER_MS)", fontSize = 11.sp) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            textStyle = LocalTextStyle.current.copy(fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                        )
+                        OutlinedTextField(
+                            value = networkLossInput,
+                            onValueChange = { networkLossInput = it },
+                            label = { Text("Packet loss (%, 0-100)", fontSize = 11.sp) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            textStyle = LocalTextStyle.current.copy(fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                        )
+
+                        Button(
+                            onClick = {
+                                val sanitized = sanitizedNetworkCondition(
+                                    enabled = true,
+                                    latencyMs = parseClampedNonNegativeIntInput(networkLatencyInput, MAX_NETWORK_LATENCY_MS),
+                                    jitterMs = parseClampedNonNegativeIntInput(networkJitterInput, MAX_NETWORK_JITTER_MS),
+                                    packetLossPercent = parseClampedPercentInput(networkLossInput),
+                                )
+                                networkLatencyInput = sanitized.latencyMs.toString()
+                                networkJitterInput = sanitized.jitterMs.toString()
+                                networkLossInput = sanitized.packetLossPercent.toString()
+                                settingsScope.launch { interceptionDataStore.setNetworkCondition(sanitized) }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text("Apply")
+                        }
+
+                        Text(
+                            "Presets (tap to apply and enable):",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        NETWORK_CONDITION_PRESETS.forEach { preset ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f))
+                                    .clickable {
+                                        networkLatencyInput = preset.condition.latencyMs.toString()
+                                        networkJitterInput = preset.condition.jitterMs.toString()
+                                        networkLossInput = preset.condition.packetLossPercent.toString()
+                                        settingsScope.launch { interceptionDataStore.setNetworkCondition(preset.condition) }
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                            ) {
+                                Column {
+                                    Text(preset.label, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                                    Text(preset.description, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Section 7: Diagnostics
             item {
                 SettingsSectionHeader("SECURITY TIERS DIAGNOSTICS")
@@ -1528,6 +1830,80 @@ fun SettingsScreen(
                         )
                     }
                 }
+            }
+
+            // Section 7b: VPN app picker (master plan §3 LOW-ADD, C8) — makes the
+            // INTERNET-permission prefilter an observable, user-controlled setting instead of a
+            // silent, invisible change. The picker itself lives in InterceptScreen.kt (not owned
+            // here); this toggle/count display shares the same repository-level filter state
+            // (`TrafficInterceptorRepository.internetOnlyFilterEnabled`), so flipping it here
+            // takes effect the next time the capture-setup app picker loads.
+            item {
+                SettingsSectionHeader("VPN APP PICKER")
+                GlassCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    backgroundColor = MaterialTheme.colorScheme.surface
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        SettingToggleRow(
+                            "Hide apps without INTERNET permission",
+                            appPickerInternetOnly,
+                            onCheckedChange = { enabled ->
+                                TrafficInterceptorRepository.setInternetOnlyFilter(enabled)
+                                settingsScope.launch { TrafficInterceptorRepository.loadInstalledApps(settingsContext, enabled) }
+                            }
+                        )
+                        Text(
+                            "An app with no INTERNET permission can't make network requests, so " +
+                                "it has nothing for the interceptor to ever capture. On: fewer, " +
+                                "more relevant apps in the capture-setup picker. Off: every " +
+                                "launchable app is shown, unfiltered.",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                        if (appPickerTotal == 0) {
+                            Text(
+                                "Not loaded yet — open Interceptr's capture-setup sheet once, or " +
+                                    "tap refresh below, to see live counts.",
+                                fontSize = 11.sp,
+                                fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            AppMetaInfoRow("Launchable apps on this device", "$appPickerTotal")
+                            AppMetaInfoRow("Hidden by this filter", "$appPickerFilteredOut")
+                            AppMetaInfoRow("Shown in picker", "${appPickerApps.size}")
+                        }
+                        Button(
+                            onClick = { settingsScope.launch { TrafficInterceptorRepository.loadInstalledApps(settingsContext, appPickerInternetOnly) } },
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Refresh app list", fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+
+            // Section 7c: Target app database browser (master plan §2.18) — rooted-device-only
+            // feature. Gated on the SAME capability probe used by Interceptr's "Capture setup"
+            // sheet (`capabilities.root`, refreshed via `CapabilityProbe.probeAll`), never a
+            // second independent root check.
+            item {
+                SettingsSectionHeader("TARGET APP DATABASE BROWSER")
+                TargetAppDatabaseBrowserSection(
+                    root = capabilities.root,
+                    installedApps = appPickerApps,
+                    context = settingsContext,
+                    scope = settingsScope,
+                    onProbeAgain = { settingsScope.launch { CapabilityProbe.probeAll(settingsContext) } }
+                )
             }
 
             // Section 8: Backup & Privacy
@@ -1679,6 +2055,507 @@ fun SettingsScreen(
             }
 
             item { Spacer(modifier = Modifier.height(90.dp)) }
+        }
+    }
+
+    // `.p12` import password prompt — rendered as a dialog overlay regardless of scroll
+    // position, since the "Import .p12" button that triggers it lives inside the scrolling
+    // LazyColumn above.
+    P12ImportPasswordDialog(
+        pendingBytes = p12ImportPendingBytes,
+        fileName = p12ImportPendingFileName,
+        onDismiss = {
+            p12ImportPendingBytes = null
+            p12ImportPendingFileName = null
+        },
+        onImported = {
+            p12ImportPendingBytes = null
+            p12ImportPendingFileName = null
+            caRefreshTrigger++
+            settingsScope.launch { CapabilityProbe.probeAll(settingsContext) }
+        },
+        context = settingsContext,
+        scope = settingsScope,
+    )
+}
+
+/**
+ * Master plan §3 LOW-ADD — `.p12` CA import password prompt.
+ *
+ * [CaP12Exchange.importP12] is complete and unit-tested ([CaP12ExchangeTest]); this dialog is
+ * the missing UI half: a masked (show/hide-toggleable) password field, clear validation, and
+ * honest, distinct error messaging per [P12ImportErrorClassifier] for wrong-password vs
+ * corrupt-file vs unsupported-content, rather than one generic "import failed" toast.
+ */
+@Composable
+private fun P12ImportPasswordDialog(
+    pendingBytes: ByteArray?,
+    fileName: String?,
+    onDismiss: () -> Unit,
+    onImported: () -> Unit,
+    context: android.content.Context,
+    scope: CoroutineScope,
+) {
+    if (pendingBytes == null) return
+
+    var password by remember(pendingBytes) { mutableStateOf("") }
+    var showPassword by remember(pendingBytes) { mutableStateOf(false) }
+    var importing by remember(pendingBytes) { mutableStateOf(false) }
+    var errorMessage by remember(pendingBytes) { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = { if (!importing) onDismiss() },
+        icon = {
+            Icon(imageVector = Icons.Default.VpnKey, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+        },
+        title = { Text("Import CA (.p12)", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface) },
+        text = {
+            Column {
+                Text(
+                    "File: ${fileName ?: "(unknown name)"} · ${pendingBytes.size} bytes\n\n" +
+                        "Enter the password protecting this PKCS#12 bundle. Importing replaces requestr's " +
+                        "active CA — you'll need to re-install the new CA afterwards.",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it; errorMessage = null },
+                    label = { Text("Password") },
+                    singleLine = true,
+                    enabled = !importing,
+                    visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { showPassword = !showPassword }) {
+                            Icon(
+                                imageVector = if (showPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                contentDescription = if (showPassword) "Hide password" else "Show password"
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
+                )
+                val err = errorMessage
+                if (err != null) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.Top) {
+                        Icon(imageVector = Icons.Default.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(err, fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !importing,
+                onClick = {
+                    if (password.isEmpty()) {
+                        errorMessage = "Enter the bundle's password first."
+                        return@TextButton
+                    }
+                    importing = true
+                    errorMessage = null
+                    scope.launch {
+                        val passwordChars = password.toCharArray()
+                        val result = withContext(Dispatchers.IO) {
+                            CaP12Exchange.importP12(context, pendingBytes, passwordChars)
+                        }
+                        java.util.Arrays.fill(passwordChars, '\u0000')
+                        result.onSuccess {
+                            android.widget.Toast.makeText(
+                                context, "CA imported — this app now trusts and signs with the imported CA.",
+                                android.widget.Toast.LENGTH_LONG
+                            ).show()
+                            importing = false
+                            onImported()
+                        }.onFailure { e ->
+                            val kind = P12ImportErrorClassifier.classify(e.message)
+                            errorMessage = P12ImportErrorClassifier.userMessage(kind, e.message)
+                            importing = false
+                        }
+                    }
+                }
+            ) {
+                Text(if (importing) "Importing..." else "Import", fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(enabled = !importing, onClick = onDismiss) {
+                Text("Cancel", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        },
+        containerColor = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(20.dp)
+    )
+}
+
+/** Small "tap to pick from a list" control shared by the three DB-browser pickers below. */
+@Composable
+private fun LabeledDropdown(
+    label: String,
+    selected: String?,
+    placeholder: String,
+    options: List<String>,
+    enabled: Boolean = true,
+    onSelect: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(label, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, letterSpacing = 0.5.sp)
+        Spacer(modifier = Modifier.height(2.dp))
+        Box {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .then(if (enabled) Modifier.clickable { expanded = true } else Modifier)
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = selected ?: placeholder,
+                    fontSize = 12.sp,
+                    fontFamily = if (selected != null) FontFamily.Monospace else FontFamily.Default,
+                    color = if (selected != null) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Icon(
+                    imageVector = Icons.Default.ChevronRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(14.dp)
+                )
+            }
+            DropdownMenu(expanded = expanded && enabled, onDismissRequest = { expanded = false }) {
+                if (options.isEmpty()) {
+                    DropdownMenuItem(text = { Text("(none)", color = MaterialTheme.colorScheme.onSurfaceVariant) }, onClick = { expanded = false })
+                }
+                options.forEach { option ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                option,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 12.sp,
+                                color = if (option == selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                            )
+                        },
+                        onClick = { onSelect(option); expanded = false }
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Master plan §2.18 — rooted target-app SQLite database browser UI.
+ *
+ * Gated on [root] ([RootState]) — the SAME [CapabilityProbe]/[InterceptionStateRepository]
+ * state Interceptr's "Capture setup" sheet already surfaces, never a second independent check.
+ * On this project's own reference emulator the real probe result is [RootState.UNAVAILABLE]
+ * (no `su` binary at all), which is why that branch below is written as the most complete,
+ * reassuring explanation rather than an afterthought — a blank/crashed-looking screen on the
+ * single most common real-world outcome would be worse than a slightly sparse GRANTED branch
+ * nobody without a rooted device ever sees.
+ */
+@Composable
+private fun TargetAppDatabaseBrowserSection(
+    root: RootState,
+    installedApps: List<AppPackageItem>,
+    context: android.content.Context,
+    scope: CoroutineScope,
+    onProbeAgain: () -> Unit,
+) {
+    var selectedPkg by remember { mutableStateOf<String?>(null) }
+    var databases by remember { mutableStateOf<List<String>?>(null) }
+    var selectedDb by remember { mutableStateOf<String?>(null) }
+    var localFile by remember { mutableStateOf<java.io.File?>(null) }
+    var tables by remember { mutableStateOf<List<String>?>(null) }
+    var selectedTable by remember { mutableStateOf<String?>(null) }
+    var pageOffset by remember { mutableStateOf(0) }
+    var result by remember { mutableStateOf<TargetAppDatabaseBrowser.QueryResult?>(null) }
+    var browserError by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    val pageSize = 50
+
+    // Never leave a stale cache copy behind: the previous local copy is deleted the moment a
+    // new one replaces it, and the last one is deleted if this section leaves composition.
+    DisposableEffect(localFile) {
+        val fileToClean = localFile
+        onDispose { fileToClean?.let { TargetAppDatabaseBrowser.cleanup(it) } }
+    }
+
+    fun resetBelowApp() {
+        databases = null; selectedDb = null; localFile = null; tables = null
+        selectedTable = null; pageOffset = 0; result = null; browserError = null
+    }
+    fun resetBelowDb() {
+        tables = null; selectedTable = null; pageOffset = 0; result = null
+    }
+
+    GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surface) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            when (root) {
+                RootState.UNAVAILABLE -> {
+                    Row(verticalAlignment = Alignment.Top) {
+                        Icon(Icons.Default.Storage, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column {
+                            Text("Root access unavailable", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                "This device has no `su` binary — it isn't rooted (or is running a " +
+                                    "locked-down build). Browsing another app's private SQLite databases " +
+                                    "needs root to read files under /data/data/<package>/databases/, which " +
+                                    "isn't accessible any other way. This isn't a bug — most real devices " +
+                                    "report exactly this. Install Magisk (or use a rooted AVD image) and " +
+                                    "tap \"Re-check\" below to unlock this feature.",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+                RootState.AVAILABLE -> {
+                    Text("Root present, not confirmed", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                    Text(
+                        "A `su` binary exists on this device, but requestr hasn't confirmed it can " +
+                            "actually run as root (the binary may be present but restricted to the shell " +
+                            "user, or a root manager hasn't granted this app access yet). Tap \"Re-check\" " +
+                            "after granting access in Magisk/KernelSU.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                RootState.DENIED -> {
+                    Text("Root access denied", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.error)
+                    Text(
+                        "A root manager (Magisk/KernelSU) is present but explicitly denied requestr " +
+                            "root access. Open your root manager's app list, grant requestr access, then " +
+                            "tap \"Re-check\" below.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                RootState.UNKNOWN -> {
+                    Text("Not probed yet", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                    Text(
+                        "Root access hasn't been checked yet this session. Tap \"Re-check\" to probe it.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                RootState.GRANTED -> {
+                    Text("Root granted", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF10B981))
+                    Text(
+                        "Pick a target app, then one of its databases, then a table to browse its rows " +
+                            "read-only. Nothing here ever writes back to the target app's storage.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    LabeledDropdown(
+                        label = "TARGET APP",
+                        selected = selectedPkg?.let { pkg -> installedApps.find { it.packageName == pkg }?.appName ?: pkg },
+                        placeholder = if (installedApps.isEmpty()) "No apps loaded — use the VPN app picker section above first" else "Choose an app",
+                        options = installedApps.map { it.packageName },
+                        enabled = installedApps.isNotEmpty() && !busy
+                    ) { pkg ->
+                        selectedPkg = pkg
+                        resetBelowApp()
+                        busy = true
+                        scope.launch {
+                            val r = withContext(Dispatchers.IO) { TargetAppDatabaseBrowser.listDatabases(pkg) }
+                            r.onSuccess { databases = it }.onFailure { browserError = it.message ?: "Failed to list databases" }
+                            busy = false
+                        }
+                    }
+
+                    val dbList = databases
+                    if (selectedPkg != null && dbList != null) {
+                        if (dbList.isEmpty()) {
+                            Text("No databases found under this app's databases/ directory.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        } else {
+                            LabeledDropdown(
+                                label = "DATABASE",
+                                selected = selectedDb,
+                                placeholder = "Choose a database",
+                                options = dbList,
+                                enabled = !busy
+                            ) { dbName ->
+                                resetBelowDb()
+                                selectedDb = dbName
+                                busy = true
+                                scope.launch {
+                                    val copyResult = withContext(Dispatchers.IO) { TargetAppDatabaseBrowser.copyDatabaseLocally(context, selectedPkg!!, dbName) }
+                                    copyResult.onSuccess { file ->
+                                        localFile = file
+                                        val tablesResult = withContext(Dispatchers.IO) { TargetAppDatabaseBrowser.listTables(file) }
+                                        tablesResult.onSuccess { tables = it }.onFailure { browserError = it.message ?: "Failed to list tables" }
+                                    }.onFailure { browserError = it.message ?: "Failed to copy database" }
+                                    busy = false
+                                }
+                            }
+                        }
+                    }
+
+                    val tableList = tables
+                    if (selectedDb != null && tableList != null) {
+                        if (tableList.isEmpty()) {
+                            Text("This database has no user tables.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        } else {
+                            LabeledDropdown(
+                                label = "TABLE",
+                                selected = selectedTable,
+                                placeholder = "Choose a table",
+                                options = tableList,
+                                enabled = !busy
+                            ) { table ->
+                                selectedTable = table
+                                pageOffset = 0
+                                result = null
+                                if (!isSafeSqlIdentifier(table)) {
+                                    browserError = "Invalid table identifier: $table"
+                                } else {
+                                    val file = localFile
+                                    if (file != null) {
+                                        busy = true
+                                        scope.launch {
+                                            val r = withContext(Dispatchers.IO) {
+                                                TargetAppDatabaseBrowser.query(file, "SELECT * FROM \"$table\" LIMIT $pageSize OFFSET 0")
+                                            }
+                                            r.onSuccess { result = it }.onFailure { browserError = it.message ?: "Query failed" }
+                                            busy = false
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (busy) {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            androidx.compose.material3.CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Working…", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+
+                    val currentResult = result
+                    if (currentResult != null) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                        Text(
+                            "${currentResult.rows.size} row(s) · rows ${pageOffset + 1}–${pageOffset + currentResult.rows.size} · " +
+                                "${currentResult.columns.size} column(s)",
+                            fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        // Wide/large cell values are truncated for display only — never mutated,
+                        // never re-used to build another query.
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
+                        ) {
+                            Row {
+                                currentResult.columns.forEach { col ->
+                                    Text(
+                                        col.take(40),
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.widthIn(min = 90.dp).padding(end = 8.dp)
+                                    )
+                                }
+                            }
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                            currentResult.rows.forEach { row ->
+                                Row {
+                                    row.forEach { cell ->
+                                        val display = (cell ?: "NULL").let { if (it.length > 200) it.take(200) + "…" else it }
+                                        Text(
+                                            display,
+                                            fontSize = 10.sp,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = if (cell == null) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.widthIn(min = 90.dp).padding(end = 8.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            TextButton(
+                                enabled = pageOffset > 0 && !busy,
+                                onClick = {
+                                    val newOffset = (pageOffset - pageSize).coerceAtLeast(0)
+                                    val file = localFile
+                                    val table = selectedTable
+                                    if (file != null && table != null) {
+                                        busy = true
+                                        scope.launch {
+                                            val r = withContext(Dispatchers.IO) {
+                                                TargetAppDatabaseBrowser.query(file, "SELECT * FROM \"$table\" LIMIT $pageSize OFFSET $newOffset")
+                                            }
+                                            r.onSuccess { result = it; pageOffset = newOffset }.onFailure { browserError = it.message }
+                                            busy = false
+                                        }
+                                    }
+                                }
+                            ) { Text("‹ Prev page", fontSize = 11.sp) }
+                            TextButton(
+                                enabled = currentResult.rows.size == pageSize && !busy,
+                                onClick = {
+                                    val newOffset = pageOffset + pageSize
+                                    val file = localFile
+                                    val table = selectedTable
+                                    if (file != null && table != null) {
+                                        busy = true
+                                        scope.launch {
+                                            val r = withContext(Dispatchers.IO) {
+                                                TargetAppDatabaseBrowser.query(file, "SELECT * FROM \"$table\" LIMIT $pageSize OFFSET $newOffset")
+                                            }
+                                            r.onSuccess { result = it; pageOffset = newOffset }.onFailure { browserError = it.message }
+                                            busy = false
+                                        }
+                                    }
+                                }
+                            ) { Text("Next page ›", fontSize = 11.sp) }
+                        }
+                    }
+                }
+            }
+
+            val err = browserError
+            if (err != null) {
+                Row(verticalAlignment = Alignment.Top) {
+                    Icon(Icons.Default.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(14.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(err, fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+                }
+            }
+
+            Button(
+                onClick = onProbeAgain,
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Re-check root access", fontSize = 12.sp)
+            }
         }
     }
 }

@@ -483,4 +483,15 @@ data class ParsedHttpMessage(
      *    HttpBodyDecoder could decompress/decode it as text.
      */
     var bodyReplaced: Boolean = false,
+    /**
+     * §2.14(b)/§6 (MockFixtureLoader byte-exact fixtures): the byte-exact replacement body when
+     * [bodyReplaced] is true and the replacement is NOT representable as UTF-8 text (binary
+     * fixture files, [RequestCryptoManager] ciphertext, ...). Serializers (see
+     * [MitmProxyEngine.bodyBytesFor]) must prefer this over re-encoding [body] whenever it's
+     * non-null -- re-encoding [body] as UTF-8 for a rule that set this is exactly the byte
+     * corruption this field exists to avoid. Null for the common case (a rule replaced the body
+     * with plain text, or no rule touched the body at all) -- [body] alone is still authoritative
+     * then, same as before this field existed.
+     */
+    var replacedBodyBytes: ByteArray? = null,
 )

@@ -231,7 +231,13 @@ class CdpFetchAdapter(
                     // CHAOS (fault injection) is only wired into the TLS-MITM path (see
                     // ChaosInjector / MitmProxyEngine) -- the CDP/browser capture path does not
                     // yet run it, so it falls through to plain allow here, same as SCRIPT_REWRITE.
-                    RuleAction.MODIFY_RESPONSE, RuleAction.LOG_ONLY, RuleAction.FORCE_MITM, RuleAction.SCRIPT_REWRITE, RuleAction.CHAOS -> {
+                    // §2.14(b) BODY_ENCRYPT_AES/BODY_DECRYPT_AES are only wired into the TLS-MITM
+                    // path (see RuleEnforcer/RequestCryptoManager / MitmProxyEngine) -- the
+                    // CDP/browser capture path does not yet run them, so they fall through to
+                    // plain allow here, same as SCRIPT_REWRITE/CHAOS above.
+                    RuleAction.MODIFY_RESPONSE, RuleAction.LOG_ONLY, RuleAction.FORCE_MITM, RuleAction.SCRIPT_REWRITE, RuleAction.CHAOS,
+                    RuleAction.BODY_ENCRYPT_AES, RuleAction.BODY_DECRYPT_AES,
+                    -> {
                         allowedCount++
                         notifyCountersChanged()
                         client.send(

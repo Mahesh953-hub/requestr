@@ -11,6 +11,7 @@ import com.example.data.local.TlsSessionEntity
 import com.example.interception.grpc.GrpcDetector
 import com.example.interception.grpc.ProtobufDecoder
 import com.example.interception.http.Http2Parser
+import com.example.interception.http.HttpBodyDecoder
 import com.example.interception.http.HttpParser
 import com.example.interception.http.ParsedHttpMessage
 import com.example.interception.tcp.TcpReassembler
@@ -709,6 +710,14 @@ class CaptureEngine(
                 // completed on the wire, so there is no live request/response left to inject
                 // a fault into here; persist as observed, same as LOG_ONLY.
             }
+            com.example.data.local.RuleAction.BODY_ENCRYPT_AES, com.example.data.local.RuleAction.BODY_DECRYPT_AES -> {
+                // §2.14(b): wired into RuleEnforcer/MitmProxyEngine, the engines that terminate
+                // the connection and can still transform request/response bytes before they hit
+                // the wire. Same rationale as SCRIPT_REWRITE/CHAOS/MOCK_RESPONSE above -- this
+                // tun-pipeline path only observes the transaction after the real exchange
+                // already completed, so there is nothing left to encrypt/decrypt in place here;
+                // persist as observed, same as LOG_ONLY.
+            }
         }
 
         // LOG_ONLY rules override the capture toggle — always persist tagged traffic
@@ -727,6 +736,10 @@ class CaptureEngine(
             "${(request.method ?: com.example.data.models.HttpMethod.GET).name} ${request.path} ${request.version}".toByteArray(Charsets.UTF_8),
         )
 
+        // Binary-body persistence: see MitmProxyEngine.emitTransaction's identical use of
+        // HttpBodyDecoder.forStorage for the three-state contract this populates.
+        val reqStorage = HttpBodyDecoder.forStorage(request)
+        val respStorage = HttpBodyDecoder.forStorage(response)
         val entity = CapturedTrafficEntity(
             sessionId = sessionId,
             method = (request.method ?: com.example.data.models.HttpMethod.GET).name,
@@ -739,8 +752,14 @@ class CaptureEngine(
             responseHeaders = if (responseLogging) response.headers else emptyMap(),
             requestBody = if (requestLogging) request.body.ifEmpty { null } else null,
             responseBody = if (responseLogging) response.body.ifEmpty { null } else null,
-            requestSizeBytes = request.body.toByteArray(Charsets.UTF_8).size.toLong(),
-            responseSizeBytes = response.body.toByteArray(Charsets.UTF_8).size.toLong(),
+            requestSizeBytes = reqStorage.trueSizeBytes,
+            responseSizeBytes = respStorage.trueSizeBytes,
+            isRequestBodyBinary = requestLogging && reqStorage.isBinary,
+            isResponseBodyBinary = responseLogging && respStorage.isBinary,
+            requestBodyBytes = if (requestLogging) reqStorage.bytes else null,
+            responseBodyBytes = if (responseLogging) respStorage.bytes else null,
+            requestBodyBytesTruncated = requestLogging && reqStorage.truncated,
+            responseBodyBytesTruncated = responseLogging && respStorage.truncated,
             latencyMs = 0L, // without proxy we don't have timing between request/response
             timestamp = System.currentTimeMillis(),
             wasDecrypted = false,

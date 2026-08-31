@@ -377,6 +377,36 @@ data class AppPackageItem(
     val isSystemApp: Boolean = false
 )
 
+/**
+ * Master plan §3 LOW-ADD (C9) — launcher-label fallback chain for the VPN app-picker.
+ *
+ * `PackageManager.getApplicationLabel()` occasionally returns a blank string or the raw
+ * package name for apps whose `android:label` resolution is broken (mislabelled/obfuscated
+ * manifests, some OEM system apps). Android's own launcher instead resolves a package's
+ * display name via the *launcher activity's* `ResolveInfo.loadLabel()` (from
+ * `queryIntentActivities` against `ACTION_MAIN`/`CATEGORY_LAUNCHER`), which is frequently
+ * correct even when the application-level label lookup fails — so it is tried first here.
+ *
+ * Resolution order: [launcherLabel] -> [applicationLabel] -> [packageName]. Each rung is
+ * skipped if it is blank or is literally the package name (i.e. that lookup silently fell
+ * back to the identifier instead of producing a real label). The final rung, [packageName],
+ * is never blank for a well-formed package name, so this function never returns an empty
+ * string.
+ */
+fun resolveAppDisplayLabel(
+    launcherLabel: String?,
+    applicationLabel: String?,
+    packageName: String
+): String {
+    val launcher = launcherLabel?.trim().orEmpty()
+    if (launcher.isNotEmpty() && launcher != packageName) return launcher
+
+    val application = applicationLabel?.trim().orEmpty()
+    if (application.isNotEmpty() && application != packageName) return application
+
+    return packageName
+}
+
 enum class NoteFormatType(val label: String) {
     PLAIN("Plain"),
     MARKDOWN("Markdown"),

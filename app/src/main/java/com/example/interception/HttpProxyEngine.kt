@@ -6,6 +6,7 @@ import com.example.data.interception.CaptureMethod
 import com.example.data.interception.InterceptionStateRepository
 import com.example.data.local.ConnectAttemptEntity
 import com.example.data.local.RequestrDatabase
+import com.example.data.prefs.SettingsDataStore
 import com.example.interception.HttpProxyShared.copyToStream
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -13,6 +14,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.first
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
@@ -116,6 +118,13 @@ class HttpProxyEngine(
 
                 val isConnect = method.equals("CONNECT", ignoreCase = true)
 
+                // §3 (C2) -- read fresh per connection. Disabled (NONE) by default, and also if
+                // appContext isn't set yet (shouldn't happen -- see the CONNECT branch's own
+                // null-check below), so this never blocks a connection on a missing context.
+                val networkCondition = appContext?.let {
+                    SettingsDataStore.get(it).networkCondition.first()
+                } ?: NetworkConditionInjector.NetworkCondition.NONE
+
                 if (isConnect) {
                     val (host, connectPort) = HttpProxyShared.parseHostPort(rawUrl, 443)
                     val ctx = appContext
@@ -143,7 +152,10 @@ class HttpProxyEngine(
                             "MITM not available in HTTP_PROXY tier"
                         } else null,
                     )
-                    HttpProxyShared.handleConnectAttempt(sock, rawUrl, disposition, output) { sentBytes, recvBytes ->
+                    HttpProxyShared.handleConnectAttempt(
+                        sock, rawUrl, disposition, output,
+                        networkCondition = networkCondition,
+                    ) { sentBytes, recvBytes ->
                         runCatching {
                             runBlocking {
                                 db.connectAttemptDao().insert(
@@ -165,23 +177,17 @@ class HttpProxyEngine(
                     }
                 } else {
                     val bodyLen = headers["Content-Length"]?.toIntOrNull() ?: 0
-                    val bodyBytes = if (bodyLen > 0) input.readNBytes(bodyLen) else ByteArray(0)
-                    val bodyStr = String(bodyBytes, Charsets.UTF_8)
+                    val bodyBytes = if (bodyLen > 0) HttpProxyShared.readExactBytes(input, bodyLen) else ByteArray(0)
 
                     // Forward to upstream
                     val t0 = System.currentTimeMillis()
-                    val (status, respHeaders, respBody) = HttpProxyShared.forwardRequest(rawUrl, method, headers, bodyStr)
+                    val (status, respHeaders, respBody) = HttpProxyShared.forwardRequest(
+                        rawUrl, method, headers, bodyBytes,
+                        networkCondition = networkCondition,
+                    )
                     val latency = System.currentTimeMillis() - t0
 
-                    // Send response back
-                    val responseLine = "$httpVersion $status OK\r\n"
-                    output.write(responseLine.toByteArray())
-                    respHeaders.forEach { (k, v) ->
-                        output.write("$k: $v\r\n".toByteArray())
-                    }
-                    output.write("\r\n".toByteArray())
-                    output.write(respBody.toByteArray())
-                    output.flush()
+                    HttpProxyShared.writeResponse(output, httpVersion, status, respHeaders, respBody)
 
                     packetCount.incrementAndGet()
                     InterceptionStateRepository.updateCounters(packetCount = packetCount.get().toInt())

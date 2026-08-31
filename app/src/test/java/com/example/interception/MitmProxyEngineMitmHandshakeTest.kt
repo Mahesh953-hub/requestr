@@ -189,10 +189,13 @@ class MitmProxyEngineMitmHandshakeTest {
 
         val captured = mutableListOf<CapturedTrafficEntity>()
         val latch = CountDownLatch(1)
-        engine = MitmProxyEngine(onDecryptedTransaction = { entity ->
-            captured.add(entity)
-            latch.countDown()
-        })
+        engine = MitmProxyEngine(
+            onDecryptedTransaction = { entity ->
+                captured.add(entity)
+                latch.countDown()
+            },
+            caTrustGate = CaTrustGate(probe = { true }),
+        )
 
         val proxyPort = engine.start(context, 0)
 

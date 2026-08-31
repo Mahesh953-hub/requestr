@@ -78,4 +78,93 @@ class MitmProxyEngineEmitTransactionTest {
         assertTrue("response headers must be dropped when logResponses=false", entity.responseHeaders.isEmpty())
         assertEquals(null, entity.responseBody)
     }
+
+    // ── Binary-body persistence (real bytes, not just an empty text placeholder) ────
+
+    @Test
+    fun `binary response body within the storage cap persists real bytes and the binary flag`() {
+        val jpegLike = ByteArray(2048) { (it % 250).toByte() }
+        val response = ParsedHttpMessage(
+            isRequest = false,
+            method = null,
+            statusCode = 200,
+            headers = mapOf("content-type" to "image/jpeg"),
+            body = com.example.interception.http.HttpBodyDecoder.BINARY_BODY_PLACEHOLDER,
+            isBodyBinary = true,
+            rawBodyBytes = jpegLike,
+        )
+        var captured: CapturedTrafficEntity? = null
+        val engine = MitmProxyEngine(onDecryptedTransaction = { captured = it })
+
+        engine.emitTransaction(request(), response, 10L, "example.com:443", logRequests = true, logResponses = true)
+
+        val entity = captured ?: throw AssertionError("callback was never invoked")
+        assertTrue(entity.isResponseBodyBinary)
+        assertTrue("response bytes must be the real captured bytes, not the empty text placeholder",
+            entity.responseBodyBytes!!.contentEquals(jpegLike))
+        assertEquals(false, entity.responseBodyBytesTruncated)
+        assertEquals(jpegLike.size.toLong(), entity.responseSizeBytes)
+        assertEquals(null, entity.responseBody)
+    }
+
+    @Test
+    fun `binary response body exceeding the storage cap is not stored but true size and truncation flag survive`() {
+        val huge = ByteArray(com.example.interception.http.HttpBodyDecoder.MAX_STORED_BODY_BYTES + 1)
+        val response = ParsedHttpMessage(
+            isRequest = false,
+            method = null,
+            statusCode = 200,
+            body = com.example.interception.http.HttpBodyDecoder.BINARY_BODY_PLACEHOLDER,
+            isBodyBinary = true,
+            rawBodyBytes = huge,
+        )
+        var captured: CapturedTrafficEntity? = null
+        val engine = MitmProxyEngine(onDecryptedTransaction = { captured = it })
+
+        engine.emitTransaction(request(), response, 10L, "example.com:443", logRequests = true, logResponses = true)
+
+        val entity = captured ?: throw AssertionError("callback was never invoked")
+        assertTrue(entity.isResponseBodyBinary)
+        assertEquals(null, entity.responseBodyBytes)
+        assertTrue(entity.responseBodyBytesTruncated)
+        assertEquals(huge.size.toLong(), entity.responseSizeBytes)
+    }
+
+    @Test
+    fun `response logging disabled drops binary bytes and the binary flag too, not just headers and text`() {
+        val jpegLike = ByteArray(1024)
+        val response = ParsedHttpMessage(
+            isRequest = false,
+            method = null,
+            statusCode = 200,
+            body = com.example.interception.http.HttpBodyDecoder.BINARY_BODY_PLACEHOLDER,
+            isBodyBinary = true,
+            rawBodyBytes = jpegLike,
+        )
+        var captured: CapturedTrafficEntity? = null
+        val engine = MitmProxyEngine(onDecryptedTransaction = { captured = it })
+
+        engine.emitTransaction(request(), response, 10L, "example.com:443", logRequests = true, logResponses = false)
+
+        val entity = captured ?: throw AssertionError("callback was never invoked")
+        assertEquals(false, entity.isResponseBodyBinary)
+        assertEquals(null, entity.responseBodyBytes)
+        assertEquals(false, entity.responseBodyBytesTruncated)
+    }
+
+    @Test
+    fun `no body at all is distinguishable from a stored binary body via isResponseBodyBinary`() {
+        val response = response(body = "")
+        var captured: CapturedTrafficEntity? = null
+        val engine = MitmProxyEngine(onDecryptedTransaction = { captured = it })
+
+        engine.emitTransaction(request(), response, 10L, "example.com:443", logRequests = true, logResponses = true)
+
+        val entity = captured ?: throw AssertionError("callback was never invoked")
+        assertEquals(false, entity.isResponseBodyBinary)
+        assertEquals(null, entity.responseBodyBytes)
+        assertEquals(false, entity.responseBodyBytesTruncated)
+        assertEquals(null, entity.responseBody)
+        assertEquals(0L, entity.responseSizeBytes)
+    }
 }

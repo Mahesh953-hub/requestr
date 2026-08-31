@@ -71,6 +71,128 @@ object HttpBodyDecoder {
      */
     const val BINARY_BODY_PLACEHOLDER = ""
 
+    /**
+     * Hard, named cap on how many raw bytes of a single binary body get persisted verbatim
+     * (BLOB column, see [com.example.data.local.CapturedTrafficEntity.requestBodyBytes] /
+     * `.responseBodyBytes`) per direction of a single transaction.
+     *
+     * This is deliberately "store nothing" beyond the cap, not "store a truncated prefix":
+     * a partial JPEG/PNG/protobuf is not renderable/decodable anyway, so a clipped blob would
+     * just be dead weight. [clampForStorage] returns `bytes = null` and `truncated = true` in
+     * that case; the true original length is still recoverable from the caller's already-known
+     * pre-clamp byte count (persisted separately as `requestSizeBytes`/`responseSizeBytes`) --
+     * see [clampForStorage]'s doc for the exact three-state contract this produces.
+     *
+     * 2 MiB comfortably covers real-world API response images (thumbnails, icons, optimized
+     * photos) without letting a single row's BLOB balloon the `captured_traffic` table --
+     * bodies genuinely bigger than this are exactly the case the UI's large-body gate
+     * ([com.example.ui.screens.CapturedTrafficHelpers.MAX_RENDERABLE_BODY_BYTES], a much
+     * smaller 100 KiB threshold for *rendering* already-stored text) also has to worry about.
+     */
+    const val MAX_STORED_BODY_BYTES: Int = 2 * 1024 * 1024 // 2 MiB
+
+    /**
+     * Result of [clampForStorage]: what to actually persist as a binary-body BLOB column, and
+     * whether the cap was hit.
+     *
+     * @property bytes the exact bytes to store, or null when [truncated] is true (the input
+     *   exceeded [MAX_STORED_BODY_BYTES], so nothing usable was kept -- see [MAX_STORED_BODY_BYTES]).
+     * @property truncated true iff the input exceeded [MAX_STORED_BODY_BYTES] and [bytes] is
+     *   therefore null. Callers must persist this as its own row flag (never silently drop the
+     *   distinction) so the UI can render "binary body, not stored -- exceeded N KB" distinctly
+     *   from "no body at all" and from "binary body, stored".
+     */
+    data class ClampedBody(val bytes: ByteArray?, val truncated: Boolean)
+
+    /**
+     * Caps [bytes] at [MAX_STORED_BODY_BYTES] for BLOB storage. Callers still separately record
+     * `bytes.size` (the true, un-clamped length) as the row's `requestSizeBytes`/
+     * `responseSizeBytes` *before* calling this -- that field must reflect reality regardless of
+     * whether the bytes themselves made the storage cut, which is exactly what lets the UI show
+     * a correct "N KB, truncated" message even though [ClampedBody.bytes] is null.
+     */
+    fun clampForStorage(bytes: ByteArray): ClampedBody =
+        if (bytes.size <= MAX_STORED_BODY_BYTES) {
+            ClampedBody(bytes = bytes, truncated = false)
+        } else {
+            ClampedBody(bytes = null, truncated = true)
+        }
+
+    /**
+     * Everything a [com.example.data.local.CapturedTrafficEntity] persist call needs for one
+     * direction (request or response) of a transaction, computed straight from
+     * [ParsedHttpMessage.isBodyBinary]/[ParsedHttpMessage.rawBodyBytes]/[ParsedHttpMessage.body]
+     * so every persistence path (MitmProxyEngine.emitTransaction, CaptureEngine.persistTransaction,
+     * ...) applies the exact same rule and can't drift from each other.
+     *
+     * @property isBinary mirrors [ParsedHttpMessage.isBodyBinary] -- write straight to
+     *   `isRequestBodyBinary`/`isResponseBodyBinary`.
+     * @property bytes the BLOB to persist as `requestBodyBytes`/`responseBodyBytes` -- always
+     *   null when [isBinary] is false (the text column is authoritative then); may also be null
+     *   when [isBinary] is true and [truncated] is true (exceeded [MAX_STORED_BODY_BYTES]).
+     * @property truncated write straight to `requestBodyBytesTruncated`/`responseBodyBytesTruncated`.
+     * @property trueSizeBytes the real, un-clamped byte length -- for a binary body this is
+     *   [ParsedHttpMessage.rawBodyBytes]'s length (correct even when [bytes] got dropped by the
+     *   cap); for a text body this matches the pre-existing `body.toByteArray(UTF_8).size`
+     *   computation exactly, so switching a caller over to this for text bodies is a no-op.
+     */
+    data class BinaryBodyStorage(
+        val isBinary: Boolean,
+        val bytes: ByteArray?,
+        val truncated: Boolean,
+        val trueSizeBytes: Long,
+    )
+
+    fun forStorage(message: ParsedHttpMessage): BinaryBodyStorage {
+        if (!message.isBodyBinary) {
+            return BinaryBodyStorage(
+                isBinary = false,
+                bytes = null,
+                truncated = false,
+                trueSizeBytes = message.body.toByteArray(Charsets.UTF_8).size.toLong(),
+            )
+        }
+        val raw = message.rawBodyBytes ?: ByteArray(0)
+        val clamped = clampForStorage(raw)
+        return BinaryBodyStorage(
+            isBinary = true,
+            bytes = clamped.bytes,
+            truncated = clamped.truncated,
+            trueSizeBytes = raw.size.toLong(),
+        )
+    }
+
+    /**
+     * [forStorage] sibling for capture paths that never build a [ParsedHttpMessage] at all --
+     * [com.example.interception.gateway.GatewayEngine]'s T2 LAN-proxy relay and
+     * [com.example.interception.PacketPump]'s HTTP/3 (QUIC) exchange path both operate on raw
+     * post-decompression [ByteArray]s directly, with no parsed-message object to hang
+     * [ParsedHttpMessage.isBodyBinary]/[ParsedHttpMessage.rawBodyBytes] off of.
+     *
+     * Classifies [bytes] with the exact same [isProbablyUtf8] heuristic and applies the exact
+     * same [MAX_STORED_BODY_BYTES] cap via [clampForStorage] as the [ParsedHttpMessage] overload
+     * above, so every capture path -- MitmProxyEngine, CaptureEngine, GatewayEngine, PacketPump
+     * -- produces the identical three-state contract (text/no-body, binary stored, binary
+     * exceeded cap) with no per-transport special casing in the UI.
+     */
+    fun forStorage(bytes: ByteArray): BinaryBodyStorage {
+        if (isProbablyUtf8(bytes)) {
+            return BinaryBodyStorage(
+                isBinary = false,
+                bytes = null,
+                truncated = false,
+                trueSizeBytes = bytes.size.toLong(),
+            )
+        }
+        val clamped = clampForStorage(bytes)
+        return BinaryBodyStorage(
+            isBinary = true,
+            bytes = clamped.bytes,
+            truncated = clamped.truncated,
+            trueSizeBytes = bytes.size.toLong(),
+        )
+    }
+
     /** Content-Encoding values this JDK/Android has no decoder for. */
     private val UNDECODABLE_ENCODINGS = setOf("br", "zstd", "compress")
 

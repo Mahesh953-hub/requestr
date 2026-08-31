@@ -34,15 +34,20 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.BrokenImage
+import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ClearAll
 import androidx.compose.material.icons.filled.Close
@@ -51,9 +56,13 @@ import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.FilterList
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Sensors
@@ -78,7 +87,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.LocalTextStyle
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Switch
@@ -145,6 +156,7 @@ import com.example.data.models.RequestBodyType
 import com.example.data.models.RuleAction
 import com.example.data.models.TrafficRuleItem
 import com.example.data.models.CertificateDetails
+import com.example.data.repository.ApiTestrRepository
 import com.example.data.repository.FridaScript
 import com.example.data.repository.TrafficInterceptorRepository
 import com.example.ui.components.ContextActionItem
@@ -177,6 +189,9 @@ import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.scaledTween
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.security.MessageDigest
@@ -242,6 +257,12 @@ fun InterceptScreen(
 
     val installedApps by TrafficInterceptorRepository.installedApps.collectAsState()
     val trafficRules by TrafficInterceptorRepository.trafficRules.collectAsState()
+    // C8 follow-up: the INTERNET-permission prefilter lives in TrafficInterceptorRepository
+    // (sibling-owned) — the app-picker dialog just reads/writes this single source of truth so
+    // Settings' "VPN app picker" toggle and this dialog's own toggle never disagree.
+    val internetOnlyFilterEnabled by TrafficInterceptorRepository.internetOnlyFilterEnabled.collectAsState()
+    val totalInstalledAppCount by TrafficInterceptorRepository.totalInstalledAppCount.collectAsState()
+    val filteredOutAppCount by TrafficInterceptorRepository.filteredOutAppCount.collectAsState()
 
     // Persisted capture settings. These are the same values the VpnService reads, so what the
     // picker shows is exactly what gets applied.
@@ -284,6 +305,10 @@ fun InterceptScreen(
     var selectedMethodFilter by remember { mutableStateOf<HttpMethod?>(null) }
 
     var selectedItemForDetail by remember { mutableStateOf<CapturedTrafficItem?>(null) }
+    // C7: the request currently open in the repeat/replay dialog. Set from
+    // CapturedDetailBottomSheet's "Repeat" action, which also closes the detail sheet first —
+    // matches the existing "Send to Testr" dismiss-then-route pattern below.
+    var repeatReplayItem by remember { mutableStateOf<CapturedTrafficItem?>(null) }
     var itemForContextMenu by remember { mutableStateOf<CapturedTrafficItem?>(null) }
     var showAppFilterSheet by remember { mutableStateOf(false) }
     var showRulesConfigSheet by remember { mutableStateOf(false) }
@@ -295,17 +320,29 @@ fun InterceptScreen(
     // used for the other capture-related sheets on this screen.
     var showConnectionsSheet by remember { mutableStateOf(false) }
 
-    // Paste-cURL: reuses ApiTestrRepository.parseCurl (read-only call into that file) to build a
-    // real ApiRequestItem from a pasted command, then routes it to API Testr the same way a
-    // captured transaction's "Send to API Testr" action does.
+    // Paste-cURL: parses a pasted curl command with the hardened com.example.data.export.CurlParser
+    // (C11) to build a real ApiRequestItem, then routes it to API Testr the same way a captured
+    // transaction's "Send to API Testr" action does.
     var showPasteCurlSheet by remember { mutableStateOf(false) }
 
-    val filteredTraffic = remember(capturedTraffic, searchQuery, selectedMethodFilter) {
+    // C1/C5: entry points opened from the "Capture setup" sheet.
+    var showImageGallerySheet by remember { mutableStateOf(false) }
+    var showStatsSheet by remember { mutableStateOf(false) }
+
+    // C6: multi-key sort, applied on top of the search/method filter below. Defaults to
+    // newest-first (matches the unsorted order CaptureLogRepository.observeTraffic already
+    // returns), so turning this feature on doesn't change anyone's existing view until they
+    // actually open the sort sheet and change something.
+    var showSortSheet by remember { mutableStateOf(false) }
+    var sortSpecs by remember { mutableStateOf(listOf(CaptureSortSpec(CaptureSortKey.TIMESTAMP, descending = true))) }
+
+    val filteredTraffic = remember(capturedTraffic, searchQuery, selectedMethodFilter, sortSpecs) {
         val baseFiltered = if (selectedMethodFilter == null) capturedTraffic
             else capturedTraffic.filter { it.method == selectedMethodFilter }
-        if (searchQuery.isNotBlank()) {
+        val searched = if (searchQuery.isNotBlank()) {
             com.example.data.search.TrafficSearch.filter(baseFiltered, searchQuery)
         } else baseFiltered
+        sortCaptures(searched, sortSpecs)
     }
 
     // FAB colour is driven by the real engine status, and the three states are genuinely
@@ -472,42 +509,76 @@ fun InterceptScreen(
                 Spacer(modifier = Modifier.height(6.dp))
 
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // C6: multi-key sort entry point. Kept as a fixed (non-scrolling) chip to
+                    // the left of the method filters, and its label always shows the real
+                    // active sort so the effect on the list below is never silent.
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
-                            .background(if (selectedMethodFilter == null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
-                            .clickable { selectedMethodFilter = null }
-                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .clickable { showSortSheet = true }
+                            .padding(horizontal = 8.dp, vertical = 5.dp)
                     ) {
-                        Text(
-                            text = "ALL (${capturedTraffic.size})",
-                            color = if (selectedMethodFilter == null) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Sort,
+                                contentDescription = "Sort",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = describeSortSpecs(sortSpecs),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
 
-                    HttpMethod.values().forEach { method ->
-                        val isSelected = selectedMethodFilter == method
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(8.dp))
-                                .background(if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
-                            .clickable { selectedMethodFilter = if (isSelected) null else method }
-                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                                .background(if (selectedMethodFilter == null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                                .clickable { selectedMethodFilter = null }
+                                .padding(horizontal = 10.dp, vertical = 5.dp)
                         ) {
                             Text(
-                                text = method.name,
-                                color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                text = "ALL (${capturedTraffic.size})",
+                                color = if (selectedMethodFilter == null) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
                                 fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace
+                                fontWeight = FontWeight.Bold
                             )
+                        }
+
+                        HttpMethod.values().forEach { method ->
+                            val isSelected = selectedMethodFilter == method
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                                .clickable { selectedMethodFilter = if (isSelected) null else method }
+                                .padding(horizontal = 10.dp, vertical = 5.dp)
+                            ) {
+                                Text(
+                                    text = method.name,
+                                    color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
                         }
                     }
                 }
@@ -797,7 +868,33 @@ fun InterceptScreen(
                 }
             },
             hasPcapFile = com.example.interception.packet.PacketCaptureEngine.getLastExport() != null,
+            onOpenImageGallery = {
+                showCaptureSetupSheet = false
+                showImageGallerySheet = true
+            },
+            onOpenStats = {
+                showCaptureSetupSheet = false
+                showStatsSheet = true
+            },
             onDismiss = { showCaptureSetupSheet = false }
+        )
+    }
+
+    if (showImageGallerySheet) {
+        ImageGalleryBottomSheet(
+            items = capturedTraffic,
+            onDismiss = { showImageGallerySheet = false },
+            onOpenTransaction = { item ->
+                showImageGallerySheet = false
+                selectedItemForDetail = item
+            }
+        )
+    }
+
+    if (showStatsSheet) {
+        StatsDashboardBottomSheet(
+            items = capturedTraffic,
+            onDismiss = { showStatsSheet = false }
         )
     }
 
@@ -807,7 +904,11 @@ fun InterceptScreen(
         ConnectionsBottomSheet(
             context = screenContext,
             sessionId = interceptionState.sessionId,
-            onDismiss = { showConnectionsSheet = false }
+            onDismiss = { showConnectionsSheet = false },
+            onNavigateToSettings = {
+                showConnectionsSheet = false
+                onNavigateFullSettings()
+            }
         )
     }
 
@@ -913,8 +1014,17 @@ fun InterceptScreen(
                     label = "Copy as cURL",
                     icon = Icons.Default.ContentCopy,
                     onClick = {
-                        // Real clipboard write of a genuinely runnable command.
-                        clipboardManager.setText(AnnotatedString(TrafficExporter.toCurl(item)))
+                        // C11: real clipboard write of a genuinely runnable command, via the
+                        // shared com.example.data.export.CodeExporter (also the reverse-parsed
+                        // format for CurlParser's round trip -- see PasteCurlDialog).
+                        clipboardManager.setText(
+                            AnnotatedString(
+                                com.example.data.export.CodeExporter.export(
+                                    item,
+                                    com.example.data.export.ExportFormat.CURL,
+                                )
+                            )
+                        )
                     }
                 ),
                 ContextActionItem(
@@ -983,6 +1093,9 @@ fun InterceptScreen(
             installedApps = installedApps,
             filterMode = appFilterMode,
             selectedPackages = selectedPackages,
+            internetOnlyFilterEnabled = internetOnlyFilterEnabled,
+            totalInstalledAppCount = totalInstalledAppCount,
+            filteredOutAppCount = filteredOutAppCount,
             onDismiss = { showAppFilterSheet = false },
             onFilterModeChange = { mode ->
                 screenScope.launch { settings.setAppFilterMode(mode) }
@@ -1000,6 +1113,13 @@ fun InterceptScreen(
             },
             onDeselectAll = {
                 screenScope.launch { settings.setSelectedPackages(emptySet()) }
+            },
+            onToggleInternetOnlyFilter = { enabled ->
+                // Re-runs the real PackageManager query with the new filter value so the list
+                // (and total/filtered counts) reflect it immediately — a bare
+                // setInternetOnlyFilter() call only affects the *next* unrelated load, it
+                // doesn't refresh what's already cached in installedApps.
+                screenScope.launch { TrafficInterceptorRepository.loadInstalledApps(screenContext, internetOnly = enabled) }
             }
         )
     }
@@ -1022,6 +1142,14 @@ fun InterceptScreen(
         )
     }
 
+    if (showSortSheet) {
+        SortOptionsBottomSheet(
+            activeSpecs = sortSpecs,
+            onApply = { sortSpecs = it },
+            onDismiss = { showSortSheet = false }
+        )
+    }
+
     // Full Request/Response Detail Sheet
     selectedItemForDetail?.let { item ->
         CapturedDetailBottomSheet(
@@ -1039,15 +1167,37 @@ fun InterceptScreen(
                 )
                 selectedItemForDetail = null
                 onSendToTestr(apiItem)
+            },
+            onRepeatReplay = {
+                repeatReplayItem = item
+                selectedItemForDetail = null
             }
+        )
+    }
+
+    // C7: repeat/replay a captured HTTP transaction N times with a jittered interval, using the
+    // real ApiTestrRepository.executeRequest transport -- not the CONNECT-tunnel-only
+    // "Repeat replay" feature inside ConnectAttemptDetailSheet (com.example.interception.ConnectReplay),
+    // which replays raw TCP/TLS connects, not full HTTP requests with headers/bodies.
+    repeatReplayItem?.let { item ->
+        RepeatReplayDialog(
+            item = item,
+            onDismiss = { repeatReplayItem = null }
         )
     }
 }
 
 /**
- * Paste a raw `curl ...` command and route the parsed request straight to API Testr. Parsing
- * itself is delegated to the existing, out-of-scope [com.example.data.repository.ApiTestrRepository.parseCurl]
- * (called read-only, never edited) so this dialog is purely a thin UI wrapper + validation.
+ * Paste a raw `curl ...` command and route the parsed request straight to API Testr.
+ *
+ * C11 hardening note: this dialog previously delegated to
+ * [com.example.data.repository.ApiTestrRepository.parseCurl] -- a naive `split("\\s+")`
+ * tokenizer that breaks on any quoted value containing a space (e.g. `-d '{"a": "b c"}'`), has
+ * no line-continuation handling, and mis-assigns unrecognized flags' arguments as the URL. That
+ * function lives in `data/repository/ApiTestrRepository.kt`, which is out of this file's
+ * ownership scope and is still called, unmodified, by `ApiTestrScreen.kt`'s own unrelated
+ * "paste cURL into a saved request" feature -- so it is intentionally left alone. This dialog now
+ * calls the hardened, real-shell-quoting-aware [com.example.data.export.CurlParser] instead.
  */
 @Composable
 private fun PasteCurlDialog(
@@ -1090,9 +1240,21 @@ private fun PasteCurlDialog(
                         error = "Enter a curl command."
                         return@Button
                     }
-                    runCatching { com.example.data.repository.ApiTestrRepository.parseCurl(trimmed) }
-                        .onSuccess { onParsed(it) }
-                        .onFailure { error = it.message ?: "Could not parse this curl command." }
+                    val parsed = com.example.data.export.CurlParser.parse(trimmed)
+                    if (parsed.url.isBlank()) {
+                        error = "Could not find a URL in this curl command."
+                        return@Button
+                    }
+                    val apiItem = ApiRequestItem(
+                        name = "Imported cURL",
+                        method = runCatching { HttpMethod.valueOf(parsed.method) }.getOrDefault(HttpMethod.GET),
+                        url = parsed.url,
+                        headers = parsed.headers.map { (k, v) -> KeyValueItem(key = k, value = v) }
+                            .ifEmpty { listOf(KeyValueItem(key = "Accept", value = "*/*")) },
+                        bodyType = if (parsed.body != null) RequestBodyType.JSON else RequestBodyType.NONE,
+                        bodyContent = parsed.body ?: "",
+                    )
+                    onParsed(apiItem)
                 },
             ) {
                 Text("Send to API Testr")
@@ -1768,6 +1930,7 @@ fun ConnectionsBottomSheet(
     context: android.content.Context,
     sessionId: Long?,
     onDismiss: () -> Unit,
+    onNavigateToSettings: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var selectedTab by remember { mutableIntStateOf(0) }
@@ -2152,39 +2315,69 @@ fun ConnectionsBottomSheet(
                         } else {
                             LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 items(connectAttempts, key = { it.id }) { conn ->
+                                    // C12: this is the DEFAULT path on a device where requestr's
+                                    // CA was never installed -- a FORCE_MITM rule matched but got
+                                    // silently (from the user's point of view) degraded to a raw,
+                                    // undecrypted relay. Without a distinct treatment here this
+                                    // just looks like a normal opaque tunnel with no explanation.
+                                    val caDegraded = isCaUntrustedDegrade(conn.disposition, conn.failureReason)
                                     GlassCard(
                                         modifier = Modifier.fillMaxWidth(),
                                         backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
                                     ) {
-                                        Column(
-                                            modifier = Modifier
-                                                .padding(10.dp)
-                                                .clickable { selectedConnectAttempt = conn }
-                                        ) {
-                                            Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                                                Text("${conn.targetHost}:${conn.targetPort}", fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-                                                BadgePill(text = conn.disposition, color = connectDispositionColor(conn.disposition))
+                                        Row(modifier = Modifier.fillMaxWidth()) {
+                                            if (caDegraded) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .width(3.dp)
+                                                        .fillMaxHeight()
+                                                        .background(Color(0xFFF59E0B))
+                                                )
                                             }
-                                            Spacer(modifier = Modifier.height(4.dp))
-                                            Text(
-                                                clientIdentityFor(context, conn.clientUid) ?: conn.sourceIp ?: "local",
-                                                fontSize = 10.sp,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            )
-                                            Spacer(modifier = Modifier.height(2.dp))
-                                            Text(
-                                                listOfNotNull(
-                                                    "sent ${conn.bytesToUpstream}B · recv ${conn.bytesToClient}B",
-                                                    conn.negotiatedAlpn?.let { "alpn=$it" },
-                                                ).joinToString(" · "),
-                                                fontSize = 10.sp,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            )
-                                            Text(
-                                                SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(java.util.Date(conn.timestamp)),
-                                                fontSize = 9.sp,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                                            )
+                                            Column(
+                                                modifier = Modifier
+                                                    .padding(10.dp)
+                                                    .clickable { selectedConnectAttempt = conn }
+                                            ) {
+                                                Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                                                    Text("${conn.targetHost}:${conn.targetPort}", fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                                                    if (caDegraded) {
+                                                        BadgePill(text = "CA NOT TRUSTED", color = 0xFFF59E0B)
+                                                    } else {
+                                                        BadgePill(text = conn.disposition, color = connectDispositionColor(conn.disposition))
+                                                    }
+                                                }
+                                                Spacer(modifier = Modifier.height(4.dp))
+                                                Text(
+                                                    clientIdentityFor(context, conn.clientUid) ?: conn.sourceIp ?: "local",
+                                                    fontSize = 10.sp,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                )
+                                                Spacer(modifier = Modifier.height(2.dp))
+                                                Text(
+                                                    listOfNotNull(
+                                                        "sent ${conn.bytesToUpstream}B · recv ${conn.bytesToClient}B",
+                                                        conn.negotiatedAlpn?.let { "alpn=$it" },
+                                                    ).joinToString(" · "),
+                                                    fontSize = 10.sp,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                )
+                                                Text(
+                                                    SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(java.util.Date(conn.timestamp)),
+                                                    fontSize = 9.sp,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                                )
+                                                if (caDegraded) {
+                                                    Spacer(modifier = Modifier.height(4.dp))
+                                                    Text(
+                                                        "This host had a FORCE_MITM rule, but requestr's CA isn't " +
+                                                            "trusted on this device, so traffic was relayed raw " +
+                                                            "(undecrypted) instead. Tap to see the fix.",
+                                                        fontSize = 9.sp,
+                                                        color = Color(0xFFF59E0B),
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -2273,6 +2466,7 @@ fun ConnectionsBottomSheet(
         ConnectAttemptDetailSheet(
             item = attempt,
             onDismiss = { selectedConnectAttempt = null },
+            onNavigateToSettings = onNavigateToSettings,
         )
     }
 
@@ -2348,6 +2542,7 @@ private fun clientIdentityFor(context: android.content.Context, uid: Int?): Stri
 fun ConnectAttemptDetailSheet(
     item: ConnectAttemptEntity,
     onDismiss: () -> Unit,
+    onNavigateToSettings: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val context = LocalContext.current
@@ -2385,7 +2580,42 @@ fun ConnectAttemptDetailSheet(
             }
 
             Spacer(modifier = Modifier.height(4.dp))
-            BadgePill(text = item.disposition, color = connectDispositionColor(item.disposition))
+            val caDegraded = isCaUntrustedDegrade(item.disposition, item.failureReason)
+            if (caDegraded) {
+                BadgePill(text = "CA NOT TRUSTED", color = 0xFFF59E0B)
+            } else {
+                BadgePill(text = item.disposition, color = connectDispositionColor(item.disposition))
+            }
+
+            if (caDegraded) {
+                Spacer(modifier = Modifier.height(8.dp))
+                GlassCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    backgroundColor = Color(0xFFF59E0B).copy(alpha = 0.10f),
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Text(
+                            "A FORCE_MITM rule matched this host, but requestr's CA is not " +
+                                "trusted on this device, so this CONNECT was degraded to a raw, " +
+                                "undecrypted relay instead of being decrypted -- the bytes you " +
+                                "see in the traffic log for this host are not visible.",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = onNavigateToSettings,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF59E0B))
+                        ) {
+                            Icon(imageVector = Icons.Default.Security, contentDescription = "Security", tint = Color.Black, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Install requestr's CA", color = Color.Black, fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
 
             Spacer(modifier = Modifier.height(10.dp))
 
@@ -2593,6 +2823,10 @@ fun CaptureSetupBottomSheet(
     onClearTraffic: () -> Unit,
     onExportPcap: () -> Unit,
     hasPcapFile: Boolean,
+    // C1/C5: image gallery and stats dashboard entry points live here rather than adding more
+    // header icons, matching this sheet's own "decluttered header" rationale.
+    onOpenImageGallery: () -> Unit,
+    onOpenStats: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -2842,6 +3076,20 @@ fun CaptureSetupBottomSheet(
                 onClick = onExportPcap,
                 enabled = hasPcapFile
             )
+            SetupRow(
+                icon = Icons.Default.Image,
+                title = "Image gallery",
+                subtitle = "Browse captured responses with an image content type",
+                onClick = onOpenImageGallery
+            )
+            SetupRow(
+                icon = Icons.Default.BarChart,
+                title = "Traffic stats",
+                // Real count so the row is honest before any capture has happened.
+                subtitle = if (trafficCount == 0) "Nothing captured yet" else "Status codes, methods, sizes and top hosts for $trafficCount transaction(s)",
+                onClick = onOpenStats,
+                enabled = trafficCount > 0
+            )
 
             Spacer(modifier = Modifier.height(8.dp))
 
@@ -2907,17 +3155,185 @@ private fun SetupRow(
     }
 }
 
+/**
+ * C6: multi-key sort configuration. Wraps [sortCaptures]/[CaptureSortSpec]/[CaptureSortKey]
+ * (pure, unit-tested logic in CapturedTrafficHelpers.kt) with a UI that lets the user turn any
+ * subset of the five sort keys on, pick each one's direction, and reorder them to control
+ * tie-breaking priority (earlier entries win ties first). Local [localSpecs] state means
+ * in-progress edits don't affect the real list until "Apply" — "Reset" restores the newest-first
+ * default.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SortOptionsBottomSheet(
+    activeSpecs: List<CaptureSortSpec>,
+    onApply: (List<CaptureSortSpec>) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var localSpecs by remember(activeSpecs) { mutableStateOf(activeSpecs) }
+    val allKeys = remember { CaptureSortKey.values().toList() }
+    val labels = remember {
+        mapOf(
+            CaptureSortKey.TIMESTAMP to "Time",
+            CaptureSortKey.LATENCY to "Latency",
+            CaptureSortKey.STATUS to "Status code",
+            CaptureSortKey.METHOD to "Method",
+            CaptureSortKey.HOST to "Host"
+        )
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Sort traffic",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                IconButton(onClick = onDismiss) {
+                    Icon(imageVector = Icons.Default.Close, contentDescription = "Close", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            Text(
+                text = "Active keys break ties left-to-right: the first one groups the list, later ones only decide order within a tie.",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Active keys first, in priority order, then remaining inactive keys.
+            val orderedKeys = localSpecs.map { it.key } + allKeys.filter { key -> localSpecs.none { it.key == key } }
+            orderedKeys.forEach { key ->
+                val index = localSpecs.indexOfFirst { it.key == key }
+                val spec = if (index >= 0) localSpecs[index] else null
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable {
+                            localSpecs = if (spec == null) {
+                                localSpecs + CaptureSortSpec(key, descending = true)
+                            } else {
+                                localSpecs.filterNot { it.key == key }
+                            }
+                        }
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                        Icon(
+                            imageVector = if (spec != null) Icons.Default.Check else Icons.Default.Add,
+                            contentDescription = null,
+                            tint = if (spec != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = if (spec != null) "${index + 1}. ${labels[key]}" else labels[key] ?: key.name,
+                            fontWeight = if (spec != null) FontWeight.Bold else FontWeight.Medium,
+                            fontSize = 13.sp,
+                            color = if (spec != null) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (spec != null) {
+                        // Reorder: move this key earlier/later in tie-break priority.
+                        IconButton(
+                            onClick = {
+                                if (index > 0) {
+                                    localSpecs = localSpecs.toMutableList().apply { add(index - 1, removeAt(index)) }
+                                }
+                            },
+                            enabled = index > 0,
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.KeyboardArrowUp, contentDescription = "Higher priority", modifier = Modifier.size(16.dp))
+                        }
+                        IconButton(
+                            onClick = {
+                                if (index < localSpecs.size - 1) {
+                                    localSpecs = localSpecs.toMutableList().apply { add(index + 1, removeAt(index)) }
+                                }
+                            },
+                            enabled = index < localSpecs.size - 1,
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.KeyboardArrowDown, contentDescription = "Lower priority", modifier = Modifier.size(16.dp))
+                        }
+                        // Direction toggle.
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                .clickable {
+                                    localSpecs = localSpecs.toMutableList().apply {
+                                        this[index] = this[index].copy(descending = !this[index].descending)
+                                    }
+                                }
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = if (spec.descending) "↓ Desc" else "↑ Asc",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(
+                    onClick = { localSpecs = listOf(CaptureSortSpec(CaptureSortKey.TIMESTAMP, descending = true)) },
+                    modifier = Modifier.weight(1f)
+                ) { Text("Reset") }
+                Button(
+                    onClick = {
+                        onApply(localSpecs)
+                        onDismiss()
+                    },
+                    modifier = Modifier.weight(1f)
+                ) { Text("Apply") }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AppFilterBottomSheet(
     installedApps: List<com.example.data.models.AppPackageItem>,
     filterMode: AppFilterMode,
     selectedPackages: Set<String>,
+    // C8 follow-up: single source of truth is TrafficInterceptorRepository.internetOnlyFilterEnabled
+    // (sibling-owned) — this dialog only reads/writes it via onToggleInternetOnlyFilter, it never
+    // keeps a second independent flag.
+    internetOnlyFilterEnabled: Boolean,
+    totalInstalledAppCount: Int,
+    filteredOutAppCount: Int,
     onDismiss: () -> Unit,
     onFilterModeChange: (AppFilterMode) -> Unit,
     onToggleApp: (String, Boolean) -> Unit,
     onSelectAll: () -> Unit,
-    onDeselectAll: () -> Unit
+    onDeselectAll: () -> Unit,
+    onToggleInternetOnlyFilter: (Boolean) -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val pm = LocalContext.current.packageManager
@@ -2993,6 +3409,46 @@ fun AppFilterBottomSheet(
 
             Spacer(modifier = Modifier.height(4.dp))
 
+            // C8 follow-up: makes the INTERNET-permission prefilter (owned by
+            // TrafficInterceptorRepository, toggled elsewhere from Settings' "VPN app picker"
+            // section) visible and controllable from the one place users actually pick apps to
+            // capture, instead of silently changing this list with no on-screen explanation.
+            // Reads/writes the exact same repository StateFlow Settings uses — no second flag.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable { onToggleInternetOnlyFilter(!internetOnlyFilterEnabled) }
+                    .padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Only apps with INTERNET permission",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = if (totalInstalledAppCount > 0) {
+                            "Showing ${installedApps.size} of $totalInstalledAppCount apps" +
+                                if (internetOnlyFilterEnabled && filteredOutAppCount > 0) " ($filteredOutAppCount hidden — no INTERNET permission)" else ""
+                        } else {
+                            "Hides apps that can't make network requests"
+                        },
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = internetOnlyFilterEnabled,
+                    onCheckedChange = { onToggleInternetOnlyFilter(it) }
+                )
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+
             SearchInputField(
                 query = appQuery,
                 onQueryChange = { appQuery = it },
@@ -3044,18 +3500,46 @@ fun AppFilterBottomSheet(
             Spacer(modifier = Modifier.height(6.dp))
 
             if (installedApps.isEmpty()) {
-                // Real empty state: the package query genuinely returned nothing yet.
+                // Two genuinely different empty states, not one generic spinner-ish message:
+                //  - totalInstalledAppCount == 0 means loadInstalledApps hasn't returned a
+                //    package-query result yet -- still loading.
+                //  - totalInstalledAppCount > 0 with an empty installedApps means the query
+                //    succeeded and the INTERNET-permission filter hid every candidate -- a real,
+                //    explainable outcome, not a loading failure, with a one-tap way out.
+                val filteredToNothing = totalInstalledAppCount > 0 && internetOnlyFilterEnabled
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(200.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = "Reading installed apps...",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    if (filteredToNothing) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                text = "No installed apps have the INTERNET permission",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = "Show all apps",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { onToggleInternetOnlyFilter(false) }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    } else {
+                        Text(
+                            text = "Reading installed apps...",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             } else {
                 LazyColumn(
@@ -3158,6 +3642,22 @@ fun RulesConfigBottomSheet(
     var ruleDomain by remember { mutableStateOf("") }
     var ruleAction by remember { mutableStateOf(com.example.data.local.RuleAction.BLOCK) }
     var ruleEnabled by remember { mutableStateOf(true) }
+    // C11 (body crypto rules) / C13 (file-backed mock bodies): extra per-action fields that only
+    // apply to a subset of RuleAction values -- see supportsReplacementValue/isBodyCryptoAction.
+    // §3 (C10): `ruleReplacementValueField` is a `TextFieldValue` (not a plain `String`) so the
+    // template cheat sheet below can insert a token at the real caret position instead of only
+    // ever appending to the end.
+    var ruleReplacementValueField by remember { mutableStateOf(androidx.compose.ui.text.input.TextFieldValue("")) }
+    var ruleCryptoKeyAlias by remember { mutableStateOf("") }
+    var ruleCryptoScope by remember { mutableStateOf("BOTH") }
+    var fixtureResolution by remember { mutableStateOf<com.example.interception.MockFixtureLoader.Resolution?>(null) }
+    // §3 (C10): SCRIPT_REWRITE's own config field -- this action has no other way to set its
+    // `"script"` config key anywhere in this form, unlike the three body-replacement actions
+    // above which already had `ruleReplacementValueField`.
+    var ruleScriptField by remember { mutableStateOf(androidx.compose.ui.text.input.TextFieldValue("")) }
+    // §3 (C10): this rule's own `"variables"` map, edited as key/value rows; a lone blank row is
+    // kept present by default so there's always an editable row to type into.
+    val ruleVariableRows = remember { mutableStateListOf("" to "") }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -3257,6 +3757,283 @@ fun RulesConfigBottomSheet(
                             }
                         }
 
+                        // C13: file:// discoverability -- resolve off the main thread on every
+                        // edit so the user gets live feedback on whether a fixture path actually
+                        // resolves, without blocking Save on it (a fixture may legitimately not
+                        // exist yet when the rule is first created).
+                        LaunchedEffect(ruleReplacementValueField.text) {
+                            fixtureResolution = if (com.example.interception.MockFixtureLoader.isFileFixtureReference(ruleReplacementValueField.text)) {
+                                withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                    com.example.interception.MockFixtureLoader.resolve(ruleReplacementValueField.text)
+                                }
+                            } else {
+                                null
+                            }
+                        }
+
+                        // Followup fix: the generic "Replacement value" field used to show the
+                        // same literal-body copy for every action and never appeared at all for
+                        // REDIRECT/CHAOS (supportsReplacementValue excludes both -- see its KDoc,
+                        // deliberately unmodified since CapturedTrafficHelpersTest locks it to the
+                        // three body-replacement actions). replacementValueSpecFor is the broader,
+                        // per-action source of truth for label/placeholder/supporting text/
+                        // required-ness that also covers REDIRECT and CHAOS -- see its KDoc.
+                        val replacementSpec = replacementValueSpecFor(ruleAction)
+                        if (supportsReplacementValue(ruleAction) || replacementSpec != null) {
+                            val replacementError = replacementValueError(ruleAction, effectiveReplacementValueForSave(ruleAction, ruleReplacementValueField.text, variableRowsToMap(ruleVariableRows)))
+                            OutlinedTextField(
+                                value = ruleReplacementValueField,
+                                onValueChange = { ruleReplacementValueField = it },
+                                label = { Text(replacementSpec?.label ?: "Replacement value", fontSize = 11.sp) },
+                                placeholder = { Text(replacementSpec?.placeholder ?: "literal body, or file:///path/to/fixture.json", fontSize = 11.sp) },
+                                isError = replacementError != null,
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                                textStyle = LocalTextStyle.current.copy(fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                            )
+                            if (replacementSpec != null) {
+                                Text(replacementSpec.supportingText, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            if (replacementError != null) {
+                                Text(replacementError, fontSize = 10.sp, color = MaterialTheme.colorScheme.error)
+                            }
+                            // file:// fixture discoverability only makes sense for the three
+                            // body-replacement actions (their bodyReplace/replacementValue is a
+                            // body) -- not REDIRECT's URL or CHAOS's JSON, so this stays gated on
+                            // the original supportsReplacementValue, unlike the field above.
+                            if (supportsReplacementValue(ruleAction)) {
+                                val resolution = fixtureResolution
+                                when {
+                                    resolution == null && !com.example.interception.MockFixtureLoader.isFileFixtureReference(ruleReplacementValueField.text) -> {
+                                        Text(
+                                            "Prefix with file:// to load the body from a file on device " +
+                                                "instead of typing it literally (e.g. file:///storage/emulated/0/Download/fixture.json).",
+                                            fontSize = 10.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    resolution is com.example.interception.MockFixtureLoader.Resolution.Text -> {
+                                        Text("File fixture OK — text, ${resolution.text.length} chars", fontSize = 10.sp, color = MaterialTheme.colorScheme.primary)
+                                    }
+                                    resolution is com.example.interception.MockFixtureLoader.Resolution.Binary -> {
+                                        Text("File fixture OK — binary, ${resolution.bytes.size} bytes", fontSize = 10.sp, color = MaterialTheme.colorScheme.primary)
+                                    }
+                                    resolution is com.example.interception.MockFixtureLoader.Resolution.Error -> {
+                                        Text(resolution.message, fontSize = 10.sp, color = MaterialTheme.colorScheme.error)
+                                    }
+                                }
+                            }
+                        }
+
+                        // §3 (C10): SCRIPT_REWRITE's own script config -- no other field in this
+                        // form writes its `"script"` config key. Real pm.* API surface (see
+                        // PmPrelude.kt), same engine ApiTestr's pre/post-request scripts use.
+                        if (ruleAction == com.example.data.local.RuleAction.SCRIPT_REWRITE) {
+                            OutlinedTextField(
+                                value = ruleScriptField,
+                                onValueChange = { ruleScriptField = it },
+                                label = { Text("Script (JS)", fontSize = 11.sp) },
+                                placeholder = { Text("pm.request.headers.set('X-Trace', '{{traceId}}');", fontSize = 10.sp) },
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 96.dp),
+                                textStyle = LocalTextStyle.current.copy(fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                            )
+                            Text(
+                                "Runs against this matched request/response with the same pm.* JS engine " +
+                                    "ApiTestr's pre/post-request scripts use (pm.request/pm.response, pm.test, " +
+                                    "pm.expect, {{\$name}} dynamic generators, and this rule's own variables below).",
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+
+                        // §3 (C10): template-variable affordances -- the variables editor, the
+                        // placeholder cheat sheet, and a live preview -- only for the actions
+                        // that actually run their config through template expansion.
+                        if (ruleActionUsesTemplating(ruleAction)) {
+                            val activeTemplateField = ruleAction == com.example.data.local.RuleAction.SCRIPT_REWRITE
+                            fun insertTemplateToken(token: String) {
+                                if (activeTemplateField) {
+                                    val (newText, newCursor) = insertTextAtCursor(ruleScriptField.text, ruleScriptField.selection.start, token)
+                                    ruleScriptField = androidx.compose.ui.text.input.TextFieldValue(newText, androidx.compose.ui.text.TextRange(newCursor))
+                                } else {
+                                    val (newText, newCursor) = insertTextAtCursor(ruleReplacementValueField.text, ruleReplacementValueField.selection.start, token)
+                                    ruleReplacementValueField = androidx.compose.ui.text.input.TextFieldValue(newText, androidx.compose.ui.text.TextRange(newCursor))
+                                }
+                            }
+
+                            GlassCard(
+                                modifier = Modifier.fillMaxWidth(),
+                                backgroundColor = MaterialTheme.colorScheme.surface
+                            ) {
+                                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text("Template variables", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                                    Text(
+                                        "Available as {{name}} in the field(s) above -- saved into this rule's config under \"variables\".",
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    ruleVariableRows.forEachIndexed { index, (key, value) ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        ) {
+                                            OutlinedTextField(
+                                                value = key,
+                                                onValueChange = { ruleVariableRows[index] = it to value },
+                                                label = { Text("key", fontSize = 10.sp) },
+                                                modifier = Modifier.weight(1f),
+                                                singleLine = true,
+                                                textStyle = LocalTextStyle.current.copy(fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                                            )
+                                            OutlinedTextField(
+                                                value = value,
+                                                onValueChange = { ruleVariableRows[index] = key to it },
+                                                label = { Text("value", fontSize = 10.sp) },
+                                                modifier = Modifier.weight(1f),
+                                                singleLine = true,
+                                                textStyle = LocalTextStyle.current.copy(fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                                            )
+                                            IconButton(
+                                                onClick = {
+                                                    if (ruleVariableRows.size > 1) ruleVariableRows.removeAt(index) else ruleVariableRows[index] = "" to ""
+                                                },
+                                                modifier = Modifier.size(28.dp)
+                                            ) {
+                                                Icon(imageVector = Icons.Default.Delete, contentDescription = "Remove variable", tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(16.dp))
+                                            }
+                                        }
+                                    }
+                                    TextButton(onClick = { ruleVariableRows.add("" to "") }) {
+                                        Icon(imageVector = Icons.Default.Add, contentDescription = "Add variable", modifier = Modifier.size(14.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Add variable", fontSize = 11.sp)
+                                    }
+                                }
+                            }
+
+                            GlassCard(
+                                modifier = Modifier.fillMaxWidth(),
+                                backgroundColor = MaterialTheme.colorScheme.surface
+                            ) {
+                                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text("Placeholder cheat sheet -- tap to insert", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .heightIn(max = 160.dp)
+                                            .verticalScroll(rememberScrollState())
+                                    ) {
+                                        templateCheatSheet(ruleVariableRows.map { it.first }).forEach { tokenInfo ->
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clickable { insertTemplateToken(tokenInfo.token) }
+                                                    .padding(vertical = 4.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                            ) {
+                                                Text(
+                                                    tokenInfo.token,
+                                                    fontSize = 11.sp,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    color = MaterialTheme.colorScheme.primary,
+                                                    modifier = Modifier.widthIn(min = 120.dp)
+                                                )
+                                                Text(tokenInfo.description, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            GlassCard(
+                                modifier = Modifier.fillMaxWidth(),
+                                backgroundColor = MaterialTheme.colorScheme.surface
+                            ) {
+                                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text("Live preview -- example request", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                                    Text(TEMPLATE_PREVIEW_EXAMPLE_DESCRIPTION, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, fontFamily = FontFamily.Monospace)
+                                    val previewSource = if (activeTemplateField) ruleScriptField.text else ruleReplacementValueField.text
+                                    if (previewSource.isBlank()) {
+                                        Text(
+                                            "Type a value above containing {{...}} placeholders to preview its expansion.",
+                                            fontSize = 10.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    } else {
+                                        val variablesNow = variableRowsToMap(ruleVariableRows)
+                                        val expanded = remember(previewSource, variablesNow) {
+                                            runCatching {
+                                                com.example.interception.RuleTemplateExpander.expand(
+                                                    previewSource,
+                                                    variablesNow,
+                                                    templatePreviewContext(),
+                                                )
+                                            }.getOrDefault(previewSource)
+                                        }
+                                        Text("Expands to:", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text(expanded, fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.primary)
+                                    }
+                                    Text(
+                                        "Unknown/typo'd tokens are left intact on purpose, so a mistake stays visible instead of silently disappearing.",
+                                        fontSize = 9.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
+
+                        // C11: AES body-crypto config -- cryptoDirection is deliberately NOT an
+                        // independently editable field here. RuleEnforcer.applyBodyCrypto's own
+                        // KDoc documents cryptoDirection as informational metadata kept in sync
+                        // by the caller -- the actual encrypt-vs-decrypt operation is driven by
+                        // `action` (BODY_ENCRYPT_AES / BODY_DECRYPT_AES), not by this field. Letting
+                        // the user set it independently would let it drift out of sync with the
+                        // action, which is worse than not showing it at all -- so it's derived and
+                        // shown read-only instead.
+                        if (isBodyCryptoAction(ruleAction)) {
+                            GlassCard(
+                                modifier = Modifier.fillMaxWidth(),
+                                backgroundColor = MaterialTheme.colorScheme.surface
+                            ) {
+                                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text("AES body crypto", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                                    OutlinedTextField(
+                                        value = ruleCryptoKeyAlias,
+                                        onValueChange = { ruleCryptoKeyAlias = it },
+                                        label = { Text("Key alias", fontSize = 11.sp) },
+                                        placeholder = { Text("Android Keystore alias to use", fontSize = 11.sp) },
+                                        isError = cryptoKeyAliasError(ruleAction, ruleCryptoKeyAlias) != null,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        singleLine = true,
+                                        textStyle = LocalTextStyle.current.copy(fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                                    )
+                                    cryptoKeyAliasError(ruleAction, ruleCryptoKeyAlias)?.let {
+                                        Text(it, fontSize = 10.sp, color = MaterialTheme.colorScheme.error)
+                                    }
+                                    Text("Algorithm: AES/GCM/NoPadding", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text(
+                                        "Direction: ${impliedCryptoDirection(ruleAction)} (fixed by the action above)",
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    Text("Scope", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        listOf("REQUEST", "RESPONSE", "BOTH").forEach { scope ->
+                                            FilterChip(
+                                                selected = ruleCryptoScope == scope,
+                                                onClick = { ruleCryptoScope = scope },
+                                                label = { Text(scope, fontSize = 10.sp) },
+                                                colors = FilterChipDefaults.filterChipColors(
+                                                    selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
+                                                )
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // Enabled toggle
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -3270,7 +4047,10 @@ fun RulesConfigBottomSheet(
                         // Save button
                         Button(
                             onClick = {
-                                if (ruleName.isNotBlank() && rulePattern.isNotBlank()) {
+                                if (ruleName.isNotBlank() && rulePattern.isNotBlank() &&
+                                    cryptoKeyAliasError(ruleAction, ruleCryptoKeyAlias) == null &&
+                                    replacementValueError(ruleAction, effectiveReplacementValueForSave(ruleAction, ruleReplacementValueField.text, variableRowsToMap(ruleVariableRows))) == null
+                                ) {
                                     // Capture the current field values into locals BEFORE resetting
                                     // the form. scope.launch(Dispatchers.IO) only schedules the
                                     // coroutine -- it does not run synchronously -- so if the
@@ -3283,6 +4063,29 @@ fun RulesConfigBottomSheet(
                                     val domainToSave = ruleDomain.trim()
                                     val actionToSave = ruleAction
                                     val enabledToSave = ruleEnabled
+                                    // §3 (C10): merge this rule's `variables` map into whatever
+                                    // config JSON the form otherwise produces, without touching
+                                    // any other config key -- see mergeVariablesIntoConfigJson's
+                                    // KDoc. SCRIPT_REWRITE builds its config from ruleScriptField
+                                    // instead of ruleReplacementValueField (its own field, added
+                                    // above -- no other field writes SCRIPT_REWRITE's config).
+                                    val variablesToSave = variableRowsToMap(ruleVariableRows)
+                                    val rawReplacementText = ruleReplacementValueField.text.trim()
+                                    val replacementValueToSave: String? = when {
+                                        actionToSave == com.example.data.local.RuleAction.SCRIPT_REWRITE -> {
+                                            val scriptText = ruleScriptField.text.trim()
+                                            if (scriptText.isBlank() && variablesToSave.isEmpty()) {
+                                                null
+                                            } else {
+                                                mergeVariablesIntoConfigJson(mergeScriptIntoConfigJson(null, scriptText), variablesToSave)
+                                            }
+                                        }
+                                        ruleActionUsesTemplating(actionToSave) && variablesToSave.isNotEmpty() ->
+                                            effectiveReplacementValueForSave(actionToSave, rawReplacementText, variablesToSave).ifBlank { null }
+                                        else -> rawReplacementText.ifBlank { null }
+                                    }
+                                    val cryptoKeyAliasToSave = ruleCryptoKeyAlias.trim()
+                                    val cryptoScopeToSave = ruleCryptoScope
                                     scope.launch(kotlinx.coroutines.Dispatchers.IO) {
                                         dao.insert(
                                             com.example.data.local.InterceptRuleEntity(
@@ -3291,6 +4094,10 @@ fun RulesConfigBottomSheet(
                                                 domain = domainToSave,
                                                 action = actionToSave,
                                                 enabled = enabledToSave,
+                                                replacementValue = replacementValueToSave,
+                                                cryptoKeyAlias = cryptoKeyAliasToSave,
+                                                cryptoDirection = impliedCryptoDirection(actionToSave),
+                                                cryptoScope = cryptoScopeToSave,
                                             )
                                         )
                                     }
@@ -3300,10 +4107,19 @@ fun RulesConfigBottomSheet(
                                     ruleDomain = ""
                                     ruleAction = com.example.data.local.RuleAction.BLOCK
                                     ruleEnabled = true
+                                    ruleReplacementValueField = androidx.compose.ui.text.input.TextFieldValue("")
+                                    ruleScriptField = androidx.compose.ui.text.input.TextFieldValue("")
+                                    ruleVariableRows.clear()
+                                    ruleVariableRows.add("" to "")
+                                    ruleCryptoKeyAlias = ""
+                                    ruleCryptoScope = "BOTH"
+                                    fixtureResolution = null
                                     showAddForm = false
                                 }
                             },
-                            enabled = ruleName.isNotBlank() && rulePattern.isNotBlank(),
+                            enabled = ruleName.isNotBlank() && rulePattern.isNotBlank() &&
+                                cryptoKeyAliasError(ruleAction, ruleCryptoKeyAlias) == null &&
+                                replacementValueError(ruleAction, effectiveReplacementValueForSave(ruleAction, ruleReplacementValueField.text, variableRowsToMap(ruleVariableRows))) == null,
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(8.dp)
                         ) {
@@ -3357,14 +4173,24 @@ fun RulesConfigBottomSheet(
                                         Text("Domain: ${rule.domain}", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
                                     Text(
-                                        "Action: ${rule.action.name}",
+                                        "Action: ${ruleActionLabel(rule.action)}",
                                         fontSize = 10.sp,
-                                        color = when (rule.action) {
-                                            com.example.data.local.RuleAction.BLOCK -> MaterialTheme.colorScheme.error
-                                            com.example.data.local.RuleAction.LOG_ONLY -> MaterialTheme.colorScheme.tertiary
-                                            else -> MaterialTheme.colorScheme.secondary
-                                        }
+                                        color = Color(ruleActionColorHex(rule.action)),
                                     )
+                                    if (isBodyCryptoAction(rule.action)) {
+                                        Text(
+                                            "Key: ${rule.cryptoKeyAlias.ifBlank { "(none set)" }} · scope: ${rule.cryptoScope}",
+                                            fontSize = 9.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    if (com.example.interception.MockFixtureLoader.isFileFixtureReference(rule.replacementValue)) {
+                                        Text(
+                                            "Body from file fixture",
+                                            fontSize = 9.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
                                 }
                                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                     // Toggle enabled
@@ -3443,15 +4269,398 @@ private fun CaptureBodySection(label: String, body: String, contentType: String?
     Spacer(modifier = Modifier.height(10.dp))
 }
 
+/**
+ * C14: renders the three real states a binary-flagged body can be in, per
+ * [classifyBodyStorageState] -- decrypted/decoded image, raw hex dump with copy/export, or (if
+ * the true body was bigger than [com.example.interception.http.HttpBodyDecoder.MAX_STORED_BODY_BYTES])
+ * an honest "wasn't stored" explanation instead of pretending it's empty.
+ *
+ * [bytes] is the real, byte-exact body straight from [com.example.data.local.CapturedTrafficEntity]
+ * -- decoding happens here (Bitmap decode is CPU work, not I/O, so it's fine on the composition
+ * thread for the sizes involved; large-N cases are exactly the ones [truncated] routes around).
+ */
+@Composable
+private fun CaptureBinaryBodySection(
+    label: String,
+    labelColor: Color,
+    contentType: String?,
+    truncated: Boolean,
+    trueSizeBytes: Long,
+    bytes: ByteArray?,
+    fileBaseName: String,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val clipboardManager = LocalClipboardManager.current
+    var exportResult by remember(bytes) { mutableStateOf<String?>(null) }
+    val storageState = remember(truncated) { classifyBodyStorageState(isBinary = true, truncated = truncated) }
+
+    Text("$label:", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = labelColor)
+    when {
+        storageState == BodyStorageState.BINARY_EXCEEDED_CAP || bytes == null -> {
+            Text(
+                exceededCapMessage(trueSizeBytes, com.example.interception.http.HttpBodyDecoder.MAX_STORED_BODY_BYTES.toLong()),
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+            )
+        }
+        else -> {
+            val isImage = contentType?.startsWith("image/", ignoreCase = true) == true
+            val bitmap = if (isImage) {
+                remember(bytes) {
+                    runCatching { android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }.getOrNull()
+                }
+            } else {
+                null
+            }
+            if (bitmap != null) {
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = label,
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 220.dp),
+                )
+            } else {
+                if (isImage) {
+                    Text(
+                        "Image body (${contentType}, ${bytes.size} bytes) -- bytes are present but " +
+                            "could not be decoded as an image.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                    )
+                }
+                Text(
+                    hexDump(bytes),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = {
+                        clipboardManager.setText(AnnotatedString(android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)))
+                    },
+                ) {
+                    Text("Copy as Base64", fontSize = 10.sp)
+                }
+                Button(
+                    onClick = {
+                        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                            val mimeType = contentType?.takeIf { it.isNotBlank() } ?: "application/octet-stream"
+                            val target = com.example.data.export.MediaStoreExporter.writeBytes(context, fileBaseName, mimeType, bytes)
+                            exportResult = if (target != null) {
+                                com.example.data.export.FileExporter.shareFile(context, target, mimeType, fileBaseName)
+                                "Saved to Downloads/requestr"
+                            } else {
+                                "Export failed"
+                            }
+                        }
+                    },
+                ) {
+                    Text("Export / Share", fontSize = 10.sp)
+                }
+            }
+            exportResult?.let {
+                Text(it, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+    Spacer(modifier = Modifier.height(10.dp))
+}
+
+/** C7: outcome of a single repeat-replay send, shown in [RepeatReplayDialog]'s results list. */
+private data class ReplayAttemptResult(
+    val attemptNumber: Int,
+    val statusCode: Int? = null,
+    val latencyMs: Long? = null,
+    val error: String? = null
+)
+
+/**
+ * C7: replay a captured HTTP transaction N times with a jittered interval between sends.
+ *
+ * Distinct from the pre-existing "Repeat replay" feature inside `ConnectAttemptDetailSheet`
+ * (com.example.interception.ConnectReplay.replayRepeated) -- that one replays a raw CONNECT
+ * tunnel (TCP/TLS handshake only, for a target host:port), not a full HTTP request. This dialog
+ * actually resends [item]'s method/url/headers/body through the real
+ * [com.example.data.repository.ApiTestrRepository.executeRequest] transport, so it exercises the
+ * full request the same way "Send to Testr" would, just N times.
+ *
+ * Uses [computeReplaySchedule] (pure, unit-tested in CapturedTrafficHelpersTest.kt) for the
+ * jittered inter-send delays. The run is a cancellable coroutine ([replayJob]) launched off the
+ * UI thread (network I/O on [Dispatchers.IO]) so the dialog stays responsive and "Cancel" takes
+ * effect at the next delay/request boundary rather than blocking anything.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun RepeatReplayDialog(
+    item: CapturedTrafficItem,
+    onDismiss: () -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val scope = rememberCoroutineScope()
+
+    var countText by remember { mutableStateOf("5") }
+    var intervalText by remember { mutableStateOf("1000") }
+    var jitterText by remember { mutableStateOf("0") }
+    var validationError by remember { mutableStateOf<String?>(null) }
+
+    var running by remember { mutableStateOf(false) }
+    var completed by remember { mutableIntStateOf(0) }
+    var total by remember { mutableIntStateOf(0) }
+    var results by remember { mutableStateOf<List<ReplayAttemptResult>>(emptyList()) }
+    var replayJob by remember { mutableStateOf<Job?>(null) }
+
+    fun cancelAndClose() {
+        replayJob?.cancel()
+        running = false
+        onDismiss()
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = { cancelAndClose() },
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        text = "Repeat replay",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "${item.method} ${item.path}",
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1
+                    )
+                }
+                IconButton(onClick = { cancelAndClose() }) {
+                    Icon(imageVector = Icons.Default.Close, contentDescription = "Close", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            if (!running && results.isEmpty()) {
+                // Configuration form.
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = countText,
+                        onValueChange = { countText = it },
+                        label = { Text("Count") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = intervalText,
+                        onValueChange = { intervalText = it },
+                        label = { Text("Interval ms") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = jitterText,
+                        onValueChange = { jitterText = it },
+                        label = { Text("Jitter ms") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                validationError?.let { err ->
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(text = err, fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                Button(
+                    onClick = {
+                        val count = countText.trim().toIntOrNull()
+                        val interval = intervalText.trim().toLongOrNull()
+                        val jitter = jitterText.trim().toLongOrNull()
+                        if (count == null || interval == null || jitter == null || count < 0 || interval < 0 || jitter < 0) {
+                            validationError = "Count, interval and jitter must all be non-negative numbers."
+                            return@Button
+                        }
+                        if (count == 0) {
+                            validationError = "Count must be at least 1."
+                            return@Button
+                        }
+                        validationError = null
+                        completed = 0
+                        total = count
+                        results = emptyList()
+                        running = true
+                        replayJob = scope.launch {
+                            val schedule = computeReplaySchedule(count, interval, jitter)
+                            val collected = mutableListOf<ReplayAttemptResult>()
+                            try {
+                                for ((idx, waitMs) in schedule.withIndex()) {
+                                    if (!isActive) break
+                                    if (waitMs > 0) delay(waitMs)
+                                    if (!isActive) break
+                                    val requestItem = ApiRequestItem(
+                                        id = UUID.randomUUID().toString(),
+                                        name = "${item.method} ${item.path} (replay ${idx + 1})",
+                                        method = item.method,
+                                        url = item.url,
+                                        headers = item.requestHeaders.map { KeyValueItem(it.key, it.value) },
+                                        bodyType = if (item.requestBody.isNotBlank()) RequestBodyType.JSON else RequestBodyType.NONE,
+                                        bodyContent = item.requestBody
+                                    )
+                                    val outcome = runCatching {
+                                        withContext(Dispatchers.IO) { ApiTestrRepository.executeRequest(requestItem) }
+                                    }
+                                    collected.add(
+                                        ReplayAttemptResult(
+                                            attemptNumber = idx + 1,
+                                            statusCode = outcome.getOrNull()?.statusCode,
+                                            latencyMs = outcome.getOrNull()?.latencyMs,
+                                            error = outcome.exceptionOrNull()?.message ?: outcome.getOrNull()?.error
+                                        )
+                                    )
+                                    completed = idx + 1
+                                    results = collected.toList()
+                                }
+                            } finally {
+                                running = false
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(imageVector = Icons.Default.Repeat, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Start replay")
+                }
+            } else {
+                // Progress / results.
+                if (running) {
+                    Text(
+                        text = "Replayed $completed of $total",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    LinearProgressIndicator(
+                        progress = { if (total > 0) completed.toFloat() / total.toFloat() else 0f },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    OutlinedButton(
+                        onClick = {
+                            replayJob?.cancel()
+                            running = false
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(imageVector = Icons.Default.Cancel, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Cancel")
+                    }
+                } else {
+                    val successCount = results.count { it.statusCode != null && it.statusCode in 200..399 }
+                    Text(
+                        text = "Done: $successCount of ${results.size} succeeded" +
+                            if (results.size < total) " (cancelled after ${results.size} of $total)" else "",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 260.dp)) {
+                    items(results.reversed(), key = { it.attemptNumber }) { result ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "#${result.attemptNumber}",
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = when {
+                                    result.error != null -> "ERROR: ${result.error}"
+                                    result.statusCode != null -> "${result.statusCode} · ${result.latencyMs ?: 0} ms"
+                                    else -> "unknown"
+                                },
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = if (result.error != null || (result.statusCode ?: 0) >= 400)
+                                    MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                }
+
+                if (!running) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    OutlinedButton(
+                        onClick = {
+                            results = emptyList()
+                            completed = 0
+                            total = 0
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Run again") }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CapturedDetailBottomSheet(
     item: CapturedTrafficItem,
     onDismiss: () -> Unit,
     onSendToTestr: () -> Unit,
+    onRepeatReplay: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var selectedTab by remember { mutableIntStateOf(0) }
+
+    // C14 (binary body persistence): CapturedTrafficItem (the UI model in data/models) doesn't
+    // carry the new isXBinary/xBodyBytes/xBodyBytesTruncated fields yet -- only the underlying
+    // CapturedTrafficEntity does. Reading the entity directly by id via the DAO's own public
+    // suspend getById() is a normal, ordinary use of that DAO's API, not an edit to any of the
+    // forbidden data/local, data/models, or data/repository files -- see this composable's other
+    // binary-body call sites for the same pattern.
+    val detailContext = LocalContext.current
+    val capturedEntity by produceState<com.example.data.local.CapturedTrafficEntity?>(initialValue = null, item.id) {
+        value = withContext(kotlinx.coroutines.Dispatchers.IO) {
+            item.id.toLongOrNull()?.let { id ->
+                runCatching {
+                    com.example.data.local.RequestrDatabase.get(detailContext).capturedTrafficDao().getById(id)
+                }.getOrNull()
+            }
+        }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -3476,6 +4685,9 @@ fun CapturedDetailBottomSheet(
                 }
 
                 Row {
+                    IconButton(onClick = onRepeatReplay) {
+                        Icon(imageVector = Icons.Default.Repeat, contentDescription = "Repeat replay", tint = MaterialTheme.colorScheme.primary)
+                    }
                     IconButton(onClick = onSendToTestr) {
                         Icon(imageVector = Icons.Default.Send, contentDescription = "Send to Testr", tint = MaterialTheme.colorScheme.primary)
                     }
@@ -3573,23 +4785,51 @@ fun CapturedDetailBottomSheet(
                         }
                         2 -> item { // Body
                             Column {
-                                if (item.responseBody.isNotBlank()) {
-                                    CaptureBodySection(
-                                        label = "RESPONSE BODY",
-                                        body = item.responseBody,
-                                        contentType = contentTypeOf(item.responseHeaders),
-                                        labelColor = MaterialTheme.colorScheme.primary,
-                                    )
+                                val responseBinary = capturedEntity?.isResponseBodyBinary == true
+                                val requestBinary = capturedEntity?.isRequestBodyBinary == true
+                                val hasResponseBody = item.responseBody.isNotBlank() || responseBinary
+                                val hasRequestBody = item.requestBody.isNotBlank() || requestBinary
+                                if (hasResponseBody) {
+                                    if (responseBinary) {
+                                        CaptureBinaryBodySection(
+                                            label = "RESPONSE BODY",
+                                            labelColor = MaterialTheme.colorScheme.primary,
+                                            contentType = contentTypeOf(item.responseHeaders),
+                                            truncated = capturedEntity?.responseBodyBytesTruncated == true,
+                                            trueSizeBytes = capturedEntity?.responseSizeBytes ?: 0L,
+                                            bytes = capturedEntity?.responseBodyBytes,
+                                            fileBaseName = "captured-response-${item.id}",
+                                        )
+                                    } else {
+                                        CaptureBodySection(
+                                            label = "RESPONSE BODY",
+                                            body = item.responseBody,
+                                            contentType = contentTypeOf(item.responseHeaders),
+                                            labelColor = MaterialTheme.colorScheme.primary,
+                                        )
+                                    }
                                 }
-                                if (item.requestBody.isNotBlank()) {
-                                    CaptureBodySection(
-                                        label = "REQUEST BODY",
-                                        body = item.requestBody,
-                                        contentType = contentTypeOf(item.requestHeaders),
-                                        labelColor = MaterialTheme.colorScheme.secondary,
-                                    )
+                                if (hasRequestBody) {
+                                    if (requestBinary) {
+                                        CaptureBinaryBodySection(
+                                            label = "REQUEST BODY",
+                                            labelColor = MaterialTheme.colorScheme.secondary,
+                                            contentType = contentTypeOf(item.requestHeaders),
+                                            truncated = capturedEntity?.requestBodyBytesTruncated == true,
+                                            trueSizeBytes = capturedEntity?.requestSizeBytes ?: 0L,
+                                            bytes = capturedEntity?.requestBodyBytes,
+                                            fileBaseName = "captured-request-${item.id}",
+                                        )
+                                    } else {
+                                        CaptureBodySection(
+                                            label = "REQUEST BODY",
+                                            body = item.requestBody,
+                                            contentType = contentTypeOf(item.requestHeaders),
+                                            labelColor = MaterialTheme.colorScheme.secondary,
+                                        )
+                                    }
                                 }
-                                if (item.requestBody.isBlank() && item.responseBody.isBlank()) {
+                                if (!hasResponseBody && !hasRequestBody) {
                                     Text("(Empty)", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
                                 }
                             }

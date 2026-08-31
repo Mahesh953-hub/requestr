@@ -55,6 +55,17 @@ object SecureKeyStore {
 
     private fun dataStoreKey(alias: String) = stringPreferencesKey("secure_key_$alias")
 
+    /**
+     * §2.14(b): exposes the same AndroidKeyStore-backed AES-256/GCM key material
+     * [getOrCreateSecretKey] already generates/fetches for chat-provider secrets, so
+     * [com.example.interception.RequestCryptoManager] can reuse it for per-rule request/response
+     * body encryption without a second key-management implementation. Callers must use their
+     * own alias (never one already used for a chat-provider secret) -- aliases are just
+     * AndroidKeyStore entry names, so reusing one would let a crypto rule decrypt/overwrite a
+     * chat provider's stored API key material and vice versa.
+     */
+    internal fun getOrCreateAesGcmKey(alias: String): SecretKey = getOrCreateSecretKey(alias)
+
     /** Generates (first use) or fetches the AES-256 Keystore key for [alias]. */
     private fun getOrCreateSecretKey(alias: String): SecretKey {
         val keyStore = java.security.KeyStore.getInstance(ANDROID_KEYSTORE)

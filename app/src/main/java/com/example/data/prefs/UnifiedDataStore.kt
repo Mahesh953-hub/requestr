@@ -112,6 +112,24 @@ object AppSettingsKeys {
     val GATEWAY_MODE_ENABLED = booleanPreferencesKey("gateway_mode_enabled")
     val GATEWAY_PORT = intPreferencesKey("gateway_port")
 
+    // §1.10: opt-in remote-cert mirroring -- when a FORCE_MITM host's leaf cert is generated,
+    // probe the real upstream server first (RemoteCertificateMirror) and mirror its subject/SANs
+    // /validity into our self-signed leaf instead of always synthesizing a generic one. OFF by
+    // default: mirroring means opening a real upstream connection before any mock-short-circuit
+    // decision for that host, which would silently break §1.5's "a MOCK_RESPONSE-only connection
+    // never dials the real endpoint" guarantee if it ran unconditionally -- see
+    // CertificateAuthority.issueMirroredLeaf's KDoc and MitmProxyEngine's cert-cache call site.
+    val REMOTE_CERT_MIRROR_ENABLED = booleanPreferencesKey("remote_cert_mirror_enabled")
+
+    // §3 (C2) — weak-network simulation (added latency/jitter/packet-loss) applied at the proxy
+    // relay tier (HttpProxyShared -- the only tier that runs on this emulator; see
+    // NetworkConditionInjector's KDoc). OFF by default: simulated network degradation must never
+    // silently slow down or fail real traffic unless a user explicitly opts in.
+    val NETWORK_CONDITION_ENABLED = booleanPreferencesKey("network_condition_enabled")
+    val NETWORK_CONDITION_LATENCY_MS = intPreferencesKey("network_condition_latency_ms")
+    val NETWORK_CONDITION_JITTER_MS = intPreferencesKey("network_condition_jitter_ms")
+    val NETWORK_CONDITION_PACKET_LOSS_PCT = intPreferencesKey("network_condition_packet_loss_pct")
+
     // SDK & CONNECT scope, Task 6: pairing token gating `/api/observe` on LocalApiServer.
     // Generated once (SecureRandom, 256-bit) on first LocalApiServer.start() and never rotated
     // automatically -- only the "Regenerate Token" button in Settings changes it.

@@ -174,6 +174,13 @@ interface CapturedTrafficDao {
      * guard the row's body would be replaced by the shorter one while its size stayed large. Re-applying
      * the same write repeatedly is a no-op.
      *
+     * The 6 binary-body columns ([isRequestBodyBinary]/[isResponseBodyBinary]/[requestBodyBytes]/
+     * [responseBodyBytes]/[requestBodyBytesTruncated]/[responseBodyBytesTruncated], item 4 / gap B
+     * follow-up) are gated by the exact same `:requestSizeBytes >= requestSizeBytes` /
+     * `:responseSizeBytes >= responseSizeBytes` monotonic guard as [requestBody]/[responseBody] --
+     * they describe the same body those columns describe, so they must advance/hold in lockstep with
+     * it, never independently.
+     *
      * **Every column here only ever moves from less-known to more-known.** A response can decode before
      * its request HEADERS do (a capture that started mid-stream, or reordering), in which case the row
      * is first written with empty request metadata; this fills `method`/`url`/`host`/`path`/
@@ -195,6 +202,18 @@ interface CapturedTrafficDao {
             "  THEN :requestBody ELSE requestBody END, " +
             "responseBody = CASE WHEN :responseBody IS NOT NULL AND :responseSizeBytes >= responseSizeBytes " +
             "  THEN :responseBody ELSE responseBody END, " +
+            "isRequestBodyBinary = CASE WHEN :requestSizeBytes >= requestSizeBytes " +
+            "  THEN :isRequestBodyBinary ELSE isRequestBodyBinary END, " +
+            "isResponseBodyBinary = CASE WHEN :responseSizeBytes >= responseSizeBytes " +
+            "  THEN :isResponseBodyBinary ELSE isResponseBodyBinary END, " +
+            "requestBodyBytes = CASE WHEN :requestSizeBytes >= requestSizeBytes " +
+            "  THEN :requestBodyBytes ELSE requestBodyBytes END, " +
+            "responseBodyBytes = CASE WHEN :responseSizeBytes >= responseSizeBytes " +
+            "  THEN :responseBodyBytes ELSE responseBodyBytes END, " +
+            "requestBodyBytesTruncated = CASE WHEN :requestSizeBytes >= requestSizeBytes " +
+            "  THEN :requestBodyBytesTruncated ELSE requestBodyBytesTruncated END, " +
+            "responseBodyBytesTruncated = CASE WHEN :responseSizeBytes >= responseSizeBytes " +
+            "  THEN :responseBodyBytesTruncated ELSE responseBodyBytesTruncated END, " +
             "requestSizeBytes = MAX(requestSizeBytes, :requestSizeBytes), " +
             "responseSizeBytes = MAX(responseSizeBytes, :responseSizeBytes), " +
             "latencyMs = CASE WHEN :latencyMs > 0 THEN :latencyMs ELSE latencyMs END " +
@@ -216,6 +235,12 @@ interface CapturedTrafficDao {
         requestSizeBytes: Long,
         responseSizeBytes: Long,
         latencyMs: Long,
+        isRequestBodyBinary: Boolean = false,
+        isResponseBodyBinary: Boolean = false,
+        requestBodyBytes: ByteArray? = null,
+        responseBodyBytes: ByteArray? = null,
+        requestBodyBytesTruncated: Boolean = false,
+        responseBodyBytesTruncated: Boolean = false,
     )
 
     @Delete

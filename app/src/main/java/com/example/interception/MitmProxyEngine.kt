@@ -15,6 +15,7 @@ import com.example.data.prefs.SettingsDataStore
 import com.example.interception.grpc.GrpcDetector
 import com.example.interception.grpc.ProtobufDecoder
 import com.example.interception.http.GrpcEvent
+import com.example.interception.http.HttpBodyDecoder
 import com.example.interception.http.Http2Parser
 import com.example.interception.http.Http2Session
 import com.example.interception.http.HttpParser
@@ -100,6 +101,13 @@ class MitmProxyEngine(
      * that prevents startHandshake() on a socket that already exchanged plain HTTP data.
      */
     private val sslContextProvider: String? = null,
+    /**
+     * C12: gates `FORCE_MITM` on requestr's CA actually being trusted client-side -- see
+     * [CaTrustGate]'s KDoc and the `ForceMitm` branch of [handleClient]. Exposed as a
+     * constructor param (rather than a hardcoded `CaTrustGate()`) purely as a test seam, so
+     * tests can inject a fake/deterministic probe instead of touching the real KeyStore.
+     */
+    private val caTrustGate: CaTrustGate = CaTrustGate(),
 ) {
     private var serverSocket: ServerSocket? = null
     private var acceptJob: Job? = null
@@ -186,6 +194,10 @@ class MitmProxyEngine(
 
             val db = RequestrDatabase.get(context)
             val disposition = ConnectControl.evaluate(db, host, port)
+            // §3 (C2) -- read fresh per CONNECT for the non-MITM (opaque tunnel) paths below.
+            // The MITM path re-reads this itself just before dialing upstream (see
+            // `networkCondition` a few lines further down, passed into LazyUpstreamConnection).
+            val opaqueNetworkCondition = SettingsDataStore.get(context).networkCondition.first()
 
             when (disposition) {
                 is ConnectControl.Disposition.Block -> {
@@ -201,6 +213,7 @@ class MitmProxyEngine(
                     // HttpProxyShared.handleConnectAttempt writes the 200 response itself.
                     HttpProxyShared.handleConnectAttempt(
                         client, disposition.target, ConnectControl.Disposition.AllowOpaque, output,
+                        networkCondition = opaqueNetworkCondition,
                     ) { sent, recv ->
                         persistConnectAttempt(
                             context, client, db, host, port, "REDIRECTED",
@@ -215,6 +228,7 @@ class MitmProxyEngine(
                     // HttpProxyShared.handleConnectAttempt writes the 200 response itself.
                     HttpProxyShared.handleConnectAttempt(
                         client, target, ConnectControl.Disposition.AllowOpaque, output,
+                        networkCondition = opaqueNetworkCondition,
                     ) { sent, recv ->
                         persistConnectAttempt(
                             context, client, db, host, port, "ALLOWED_OPAQUE",
@@ -224,6 +238,32 @@ class MitmProxyEngine(
                     return
                 }
                 is ConnectControl.Disposition.ForceMitm -> {
+                    // C12: a FORCE_MITM rule matching is necessary but not sufficient -- if
+                    // requestr's own CA isn't trusted client-side (never installed, or removed
+                    // since), terminating TLS with our per-host leaf would just break the
+                    // client-facing handshake outright. Degrade to the same opaque relay path
+                    // AllowOpaque uses, with a descriptive failureReason, rather than failing
+                    // silently or ignoring the rule without explanation.
+                    if (shouldDegradeForUntrustedCa(disposition, caTrustGate.isTrusted())) {
+                        Log.i(
+                            TAG,
+                            "FORCE_MITM rule matched for $host but requestr's CA is not trusted " +
+                                "client-side -- degrading to raw relay",
+                        )
+                        HttpProxyShared.handleConnectAttempt(
+                            client, target, ConnectControl.Disposition.AllowOpaque, output,
+                            networkCondition = opaqueNetworkCondition,
+                        ) { sent, recv ->
+                            persistConnectAttempt(
+                                context, client, db, host, port, "ALLOWED_OPAQUE",
+                                failureReason = "FORCE_MITM rule matched, but requestr's CA is not trusted " +
+                                    "on this device (install it in Settings to enable MITM decryption for " +
+                                    "this host) -- degraded to raw relay",
+                                bytesToUpstream = sent, bytesToClient = recv,
+                            )
+                        }
+                        return
+                    }
                     // Fall through to the existing MITM path below.
                 }
             }
@@ -235,7 +275,17 @@ class MitmProxyEngine(
             // Get or create per-host certificate. ExpiringLruCertCache.getOrCompute (§3) keeps
             // the same "generate at most once per host, even under concurrent callers" semantics
             // the old computeIfAbsent call site relied on, plus a 200-entry LRU cap + TTL.
-            val (cert, keyPair) = certCache.getOrCompute(host) { h -> generateHostCert(context, h) }
+            // §1.10: remote-cert mirroring is a discrete opt-in (default OFF) read fresh per
+            // CONNECT -- see SettingsDataStore.remoteCertMirrorEnabled's KDoc for why this isn't
+            // unconditional (it means an extra real upstream probe on every first-seen
+            // FORCE_MITM host, which a user who leaves the toggle off never pays for).
+            val mirrorEnabled = SettingsDataStore.get(context).remoteCertMirrorEnabled.first()
+            // §3 (C2) -- read fresh per CONNECT, same convention as mirrorEnabled above. Disabled
+            // (all-zero/no-op) by default, so a user who never touches this setting pays nothing.
+            val networkCondition = SettingsDataStore.get(context).networkCondition.first()
+            val (cert, keyPair) = certCache.getOrCompute(host) { h ->
+                generateHostCertOrMirror(context, h, mirrorEnabled)
+            }
 
             // Real JA3 (M6): peek the raw ClientHello record directly off the accepted socket
             // BEFORE handing it to JSSE -- by the time startHandshake() below returns, JSSE has
@@ -305,6 +355,7 @@ class MitmProxyEngine(
             val upstream = LazyUpstreamConnection(
                 host, port,
                 preferredAlpnProtocols = negotiatedAlpn?.let { listOf(it) } ?: emptyList(),
+                networkCondition = networkCondition,
             ) { connected ->
                 // W5: the MITM proxy terminates TLS itself, so tlsSessionId/connectionId have
                 // historically been keyed as "$host:$port" -- a real key, but a different
@@ -889,6 +940,12 @@ class MitmProxyEngine(
                 RuleEnforcer.applyScriptRewrite(request, rule?.replacementValue)
                 serializeRequest(request)
             }
+            RuleAction.BODY_ENCRYPT_AES, RuleAction.BODY_DECRYPT_AES -> {
+                rule?.let {
+                    RuleEnforcer.applyBodyCrypto(request, it, encrypt = it.action == RuleAction.BODY_ENCRYPT_AES)
+                }
+                serializeRequest(request)
+            }
             else -> raw // LOG_ONLY / response-only actions — forward the exact original bytes
         }
 
@@ -937,6 +994,9 @@ class MitmProxyEngine(
             } else if (rule?.action == RuleAction.SCRIPT_REWRITE) {
                 RuleEnforcer.applyScriptRewrite(response, rule.replacementValue)
                 out = serializeResponse(response)
+            } else if (rule?.action == RuleAction.BODY_ENCRYPT_AES || rule?.action == RuleAction.BODY_DECRYPT_AES) {
+                RuleEnforcer.applyBodyCrypto(response, rule, encrypt = rule.action == RuleAction.BODY_ENCRYPT_AES)
+                out = serializeResponse(response)
             }
         }
         synchronized(clientWriteLock) {
@@ -979,6 +1039,11 @@ class MitmProxyEngine(
         logRequests: Boolean,
         logResponses: Boolean,
     ) {
+        // Binary-body persistence (image gallery / hex viewer support): [HttpBodyDecoder.forStorage]
+        // is the single source of truth for what to write to the *BodyBytes/isXBodyBinary/
+        // XBodyBytesTruncated columns -- see that function's doc for the three-state contract.
+        val reqStorage = HttpBodyDecoder.forStorage(request)
+        val respStorage = HttpBodyDecoder.forStorage(response)
         val entity = CapturedTrafficEntity(
             sessionId = sessionId.get(),
             method = (request.method ?: HttpMethod.GET).name,
@@ -991,8 +1056,14 @@ class MitmProxyEngine(
             responseHeaders = if (logResponses) response.headers else emptyMap(),
             requestBody = if (logRequests) request.body.ifEmpty { null } else null,
             responseBody = if (logResponses) response.body.ifEmpty { null } else null,
-            requestSizeBytes = request.body.toByteArray(Charsets.UTF_8).size.toLong(),
-            responseSizeBytes = response.body.toByteArray(Charsets.UTF_8).size.toLong(),
+            requestSizeBytes = reqStorage.trueSizeBytes,
+            responseSizeBytes = respStorage.trueSizeBytes,
+            isRequestBodyBinary = logRequests && reqStorage.isBinary,
+            isResponseBodyBinary = logResponses && respStorage.isBinary,
+            requestBodyBytes = if (logRequests) reqStorage.bytes else null,
+            responseBodyBytes = if (logResponses) respStorage.bytes else null,
+            requestBodyBytesTruncated = logRequests && reqStorage.truncated,
+            responseBodyBytesTruncated = logResponses && respStorage.truncated,
             latencyMs = latencyMs,
             timestamp = System.currentTimeMillis(),
             wasDecrypted = true,
@@ -1185,7 +1256,10 @@ class MitmProxyEngine(
     private fun bodyBytesFor(msg: ParsedHttpMessage, headers: MutableMap<String, String>): ByteArray {
         return if (msg.bodyReplaced) {
             headers.remove("Content-Encoding")
-            msg.body.toByteArray(Charsets.UTF_8)
+            // §2.14(b)/§6: prefer the byte-exact replacement when one was set (binary fixture
+            // files, RequestCryptoManager ciphertext, ...) -- re-encoding msg.body as UTF-8
+            // would corrupt anything that isn't representable as text.
+            msg.replacedBodyBytes ?: msg.body.toByteArray(Charsets.UTF_8)
         } else {
             msg.rawBodyBytes ?: msg.body.toByteArray(Charsets.UTF_8)
         }
@@ -1206,6 +1280,28 @@ class MitmProxyEngine(
     }
 
     // ── Per-host cert generation ────────────────────────────────────────
+
+    /**
+     * §1.10: when remote-cert mirroring is enabled, tries [CertificateAuthority.issueMirroredLeaf]
+     * first (an independent direct probe of the real host, subject/SANs/validity copied into our
+     * self-signed leaf) and falls back to the plain [generateHostCert] leaf whenever mirroring
+     * fails for any reason (unreachable host, handshake failure, timeout -- issueMirroredLeaf
+     * never throws, only returns null). When mirroring is disabled (the default), this is
+     * exactly the pre-existing [generateHostCert] behaviour with zero extra I/O.
+     */
+    internal fun generateHostCertOrMirror(
+        context: Context,
+        host: String,
+        mirrorEnabled: Boolean,
+    ): Pair<X509Certificate, KeyPair> {
+        if (mirrorEnabled) {
+            val mirrored = kotlinx.coroutines.runBlocking {
+                CertificateAuthority.issueMirroredLeaf(context, host)
+            }
+            if (mirrored != null) return mirrored
+        }
+        return generateHostCert(context, host)
+    }
 
     private fun generateHostCert(context: Context, host: String): Pair<X509Certificate, KeyPair> {
         val ca = kotlinx.coroutines.runBlocking { CertificateAuthority.getOrCreate(context) }

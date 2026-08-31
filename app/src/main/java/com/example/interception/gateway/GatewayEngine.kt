@@ -8,6 +8,7 @@ import com.example.data.local.CaptureTier
 import com.example.data.local.CapturedTrafficEntity
 import com.example.data.local.RequestrDatabase
 import com.example.interception.HttpProxyShared
+import com.example.interception.http.HttpBodyDecoder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -15,6 +16,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.net.Inet4Address
@@ -174,6 +176,12 @@ object GatewayEngine {
 
                 val isConnect = method.equals("CONNECT", ignoreCase = true)
 
+                // §3 (C2) -- read fresh per connection, disabled (NONE) by default and if
+                // appContext isn't set yet (matches the CONNECT branch's own null-check below).
+                val networkCondition = appContext?.let {
+                    com.example.data.prefs.SettingsDataStore.get(it).networkCondition.first()
+                } ?: com.example.interception.NetworkConditionInjector.NetworkCondition.NONE
+
                 if (isConnect) {
                     val ctx = appContext
                     if (ctx == null) {
@@ -205,7 +213,10 @@ object GatewayEngine {
                         redirectTarget = (disposition as? com.example.interception.ConnectControl.Disposition.Redirect)?.target,
                         failureReason = (disposition as? com.example.interception.ConnectControl.Disposition.Block)?.reason,
                     )
-                    HttpProxyShared.handleConnectAttempt(sock, rawUrl, disposition, output) { sentBytes, recvBytes ->
+                    HttpProxyShared.handleConnectAttempt(
+                        sock, rawUrl, disposition, output,
+                        networkCondition = networkCondition,
+                    ) { sentBytes, recvBytes ->
                         runCatching {
                             kotlinx.coroutines.runBlocking {
                                 RequestrDatabase.get(ctx).connectAttemptDao().insert(
@@ -226,19 +237,16 @@ object GatewayEngine {
                     }
                 } else {
                     val bodyLen = headers["Content-Length"]?.toIntOrNull() ?: 0
-                    val bodyBytes = if (bodyLen > 0) input.readNBytes(bodyLen) else ByteArray(0)
-                    val bodyStr = String(bodyBytes, Charsets.UTF_8)
+                    val bodyBytes = if (bodyLen > 0) HttpProxyShared.readExactBytes(input, bodyLen) else ByteArray(0)
 
                     val t0 = System.currentTimeMillis()
-                    val (status, respHeaders, respBody) = HttpProxyShared.forwardRequest(rawUrl, method, headers, bodyStr)
+                    val (status, respHeaders, respBody) = HttpProxyShared.forwardRequest(
+                        rawUrl, method, headers, bodyBytes,
+                        networkCondition = networkCondition,
+                    )
                     val latency = System.currentTimeMillis() - t0
 
-                    val responseLine = "$httpVersion $status OK\r\n"
-                    output.write(responseLine.toByteArray())
-                    respHeaders.forEach { (k, v) -> output.write("$k: $v\r\n".toByteArray()) }
-                    output.write("\r\n".toByteArray())
-                    output.write(respBody.toByteArray())
-                    output.flush()
+                    HttpProxyShared.writeResponse(output, httpVersion, status, respHeaders, respBody)
 
                     Log.d(TAG, "[gateway${if (isRemote) " remote=$clientIp" else ""}] $method $rawUrl → $status (${latency}ms)")
 
@@ -249,8 +257,8 @@ object GatewayEngine {
                         latencyMs = latency,
                         reqHeaders = headers,
                         respHeaders = respHeaders,
-                        reqBody = bodyStr,
-                        respBody = respBody,
+                        reqBodyBytes = bodyBytes,
+                        respBodyBytes = respBody,
                         sourceIp = if (isRemote) clientIp else null,
                         connectionId = "$clientEndpoint>$rawUrl",
                     )
@@ -261,15 +269,18 @@ object GatewayEngine {
         }
     }
 
-    private suspend fun persistTransaction(
+    // internal (not private), like MitmProxyEngine.emitTransaction: gives
+    // GatewayEnginePersistTransactionTest a direct, no-socket-plumbing-required entry point to
+    // exercise the binary-body classification/persistence logic below.
+    internal suspend fun persistTransaction(
         method: String,
         rawUrl: String,
         statusCode: Int?,
         latencyMs: Long,
         reqHeaders: Map<String, String>,
         respHeaders: Map<String, String>,
-        reqBody: String,
-        respBody: String,
+        reqBodyBytes: ByteArray,
+        respBodyBytes: ByteArray,
         sourceIp: String?,
         connectionId: String?,
     ) {
@@ -278,6 +289,19 @@ object GatewayEngine {
             val u = if (rawUrl.startsWith("http")) java.net.URI(rawUrl) else java.net.URI("http://$rawUrl")
             (u.host ?: rawUrl) to (u.path ?: "")
         }.getOrDefault(rawUrl to "")
+
+        // Binary-body persistence (§6/item-4 follow-up): this relay path forwards raw bytes
+        // straight from HttpProxyShared.forwardRequest, never through a ParsedHttpMessage, so
+        // it must classify text-vs-binary itself via HttpBodyDecoder.forStorage's ByteArray
+        // overload rather than force-decoding as UTF-8 the way this used to (which silently
+        // mangled any binary request/response body, e.g. an uploaded image or a protobuf
+        // response, into garbled/lossy text). Same 2 MiB cap, same truncation flag, same
+        // three-state contract (text/no-body, binary stored, binary exceeded cap) as
+        // MitmProxyEngine.emitTransaction/CaptureEngine.persistTransaction.
+        val reqStorage = HttpBodyDecoder.forStorage(reqBodyBytes)
+        val respStorage = HttpBodyDecoder.forStorage(respBodyBytes)
+        val reqBodyText = if (reqStorage.isBinary) null else String(reqBodyBytes, Charsets.UTF_8).ifEmpty { null }
+        val respBodyText = if (respStorage.isBinary) null else String(respBodyBytes, Charsets.UTF_8).ifEmpty { null }
 
         val entity = CapturedTrafficEntity(
             sessionId = gatewaySessionId(ctx),
@@ -289,10 +313,16 @@ object GatewayEngine {
             protocol = "gateway",
             requestHeaders = reqHeaders,
             responseHeaders = respHeaders,
-            requestBody = reqBody.ifEmpty { null },
-            responseBody = respBody.ifEmpty { null },
-            requestSizeBytes = reqBody.length.toLong(),
-            responseSizeBytes = respBody.length.toLong(),
+            requestBody = reqBodyText,
+            responseBody = respBodyText,
+            requestSizeBytes = reqStorage.trueSizeBytes,
+            responseSizeBytes = respStorage.trueSizeBytes,
+            isRequestBodyBinary = reqStorage.isBinary,
+            isResponseBodyBinary = respStorage.isBinary,
+            requestBodyBytes = reqStorage.bytes,
+            responseBodyBytes = respStorage.bytes,
+            requestBodyBytesTruncated = reqStorage.truncated,
+            responseBodyBytesTruncated = respStorage.truncated,
             latencyMs = latencyMs,
             // E.2: the engine only ever calls this from the fully-decrypted HTTP relay path
             // below (every CONNECT tunnel it opaquely relays instead goes through

@@ -75,7 +75,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
     // following a poll Location that resolves to a different origin (see
     // ApiTestrRepository.executeRequestWithScripts). RuleAction.CHAOS needs no schema change,
     // for the same persisted-by-name reason as every other RuleAction value.
-    version = 14,
+    // §2.14(b): bumped 14 -> 15 to add InterceptRuleEntity.cryptoKeyAlias/cryptoAlgorithm/
+    // cryptoDirection/cryptoScope for the new BODY_ENCRYPT_AES/BODY_DECRYPT_AES RuleActions
+    // (which, like every other RuleAction, need no schema change themselves -- persisted by
+    // name via RequestrTypeConverters).
+    version = 15,
     exportSchema = true,
 )
 @TypeConverters(RequestrTypeConverters::class)
@@ -124,7 +128,7 @@ abstract class RequestrDatabase : RoomDatabase() {
                     // real, disclosed data loss (see AUDIT_REPORT.md/TODO_v5.md) -- but it is
                     // strictly better than a crash loop, and it does not touch the v8->v9 path,
                     // which stays a real, non-destructive migration.
-                    .addMigrations(MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14)
+                    .addMigrations(MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15)
                     .fallbackToDestructiveMigrationFrom(/* dropAllTables = */ true, 1, 2, 3, 4, 5, 6, 7)
                     .build()
                     .also { INSTANCE = it }
@@ -175,6 +179,32 @@ abstract class RequestrDatabase : RoomDatabase() {
          * fixed same-origin-only behavior; `RuleAction.CHAOS` needs no schema change, same
          * persisted-by-name reason as every other `RuleAction` value.
          */
+        /**
+         * Same v14 -> v15 bump as the `intercept_rules` crypto columns above -- folded into one
+         * migration rather than bumping to v16, since both landed in the same release. Adds the
+         * real-binary-body-persistence columns to `captured_traffic` (see
+         * [CapturedTrafficEntity.requestBodyBytes]'s doc for the full three-state contract):
+         * `*BodyBytes` are nullable BLOBs (default NULL, i.e. absent, matching every pre-v15 row
+         * -- there is no real captured binary data to backfill), `isXBodyBinary`/
+         * `XBodyBytesTruncated` are booleans defaulting to `0`/false, matching
+         * [CapturedTrafficEntity]'s Kotlin defaults exactly so an upgraded row and a freshly
+         * inserted one behave identically (same discipline as every migration above).
+         */
+        val MIGRATION_14_15: Migration = object : Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE intercept_rules ADD COLUMN cryptoKeyAlias TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE intercept_rules ADD COLUMN cryptoAlgorithm TEXT NOT NULL DEFAULT 'AES/GCM/NoPadding'")
+                db.execSQL("ALTER TABLE intercept_rules ADD COLUMN cryptoDirection TEXT NOT NULL DEFAULT 'ENCRYPT'")
+                db.execSQL("ALTER TABLE intercept_rules ADD COLUMN cryptoScope TEXT NOT NULL DEFAULT 'BOTH'")
+                db.execSQL("ALTER TABLE captured_traffic ADD COLUMN isRequestBodyBinary INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE captured_traffic ADD COLUMN isResponseBodyBinary INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE captured_traffic ADD COLUMN requestBodyBytes BLOB DEFAULT NULL")
+                db.execSQL("ALTER TABLE captured_traffic ADD COLUMN responseBodyBytes BLOB DEFAULT NULL")
+                db.execSQL("ALTER TABLE captured_traffic ADD COLUMN requestBodyBytesTruncated INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE captured_traffic ADD COLUMN responseBodyBytesTruncated INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         val MIGRATION_13_14: Migration = object : Migration(13, 14) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE saved_api_requests ADD COLUMN pollingAllowCrossOriginRedirect INTEGER NOT NULL DEFAULT 0")

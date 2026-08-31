@@ -53,6 +53,63 @@ data class CapturedTrafficEntity(
      * for producers that genuinely have no connection to attach to (e.g. SDK-observed traffic).
      */
     val connectionId: String? = null,
+    /**
+     * True when [com.example.interception.http.HttpBodyDecoder.isProbablyUtf8] flagged this
+     * transaction's request/response body as binary (images, protobufs, undecodable
+     * Content-Encoding, ...). [requestBody]/[responseBody] (the text columns) are null/empty
+     * for such a body -- [requestBodyBytes]/[responseBodyBytes] below are where the real bytes
+     * live instead, when they were small enough to keep (see those fields' doc).
+     *
+     * This is the disambiguator a consumer needs: `isXBinary == false` means "this is (or would
+     * have been, if present) a text body" -- [requestBody]/[responseBody] are authoritative and
+     * [requestBodyBytes]/[responseBodyBytes] are always null. `isXBinary == true` means the real
+     * content lives only in the `*BodyBytes` BLOB column (or was too large to keep -- see
+     * [requestBodyBytesTruncated]/[responseBodyBytesTruncated]).
+     */
+    val isRequestBodyBinary: Boolean = false,
+    val isResponseBodyBinary: Boolean = false,
+    /**
+     * The real, byte-exact request/response body when [isRequestBodyBinary]/
+     * [isResponseBodyBinary] is true -- e.g. actual JPEG/PNG bytes for an image response, where
+     * [responseBody] (text) only ever holds
+     * [com.example.interception.http.HttpBodyDecoder.BINARY_BODY_PLACEHOLDER] (empty). This is
+     * what a consumer (e.g. the image gallery) must decode instead of the text column whenever
+     * the corresponding `isXBodyBinary` flag is set.
+     *
+     * Null in three distinct cases a consumer must NOT conflate:
+     *  1. The body was text, not binary (`isXBodyBinary == false`) -- nothing was ever meant to
+     *     be here; [requestBody]/[responseBody] hold the real content instead.
+     *  2. The body was binary but exceeded
+     *     [com.example.interception.http.HttpBodyDecoder.MAX_STORED_BODY_BYTES] --
+     *     `isXBodyBinary == true` AND `XBodyBytesTruncated == true`: real bytes existed
+     *     on the wire but were deliberately not persisted (too big). The true original size is
+     *     still available from `requestSizeBytes`/`responseSizeBytes` even though the bytes
+     *     themselves are gone, so the UI can still say "N KB, not stored".
+     *  3. There was no body at all -- `isXBodyBinary == false` and `requestBody`/`responseBody`
+     *     is also null/empty and the corresponding size field is 0.
+     *
+     * A non-null value here always means `isXBodyBinary == true` AND
+     * `XBodyBytesTruncated == false`, and its size always equals the matching
+     * `requestSizeBytes`/`responseSizeBytes`.
+     *
+     * EQUALITY NOTE: same caveat as [com.example.interception.http.ParsedHttpMessage.rawBodyBytes]
+     * -- a `ByteArray` property in a `data class` downgrades the generated `equals`/`hashCode`
+     * to array identity for this field. Nothing compares whole [CapturedTrafficEntity] instances
+     * today; if that changes, this field needs deliberate handling.
+     */
+    val requestBodyBytes: ByteArray? = null,
+    val responseBodyBytes: ByteArray? = null,
+    /**
+     * True iff the request/response body was flagged binary
+     * ([isRequestBodyBinary]/[isResponseBodyBinary] true) but exceeded
+     * [com.example.interception.http.HttpBodyDecoder.MAX_STORED_BODY_BYTES], so
+     * [requestBodyBytes]/[responseBodyBytes] is null even though a real binary body existed.
+     * This is the "not stored because it exceeded the cap" row flag distinguishing that case
+     * from "no body at all" (where this stays false) -- see [requestBodyBytes]'s doc for the
+     * full three-state contract. Never true when the corresponding `isXBodyBinary` is false.
+     */
+    val requestBodyBytesTruncated: Boolean = false,
+    val responseBodyBytesTruncated: Boolean = false,
 )
 
 /**
@@ -109,7 +166,13 @@ data class CaptureSessionEntity(
  * action (not a replacement for them) so existing fixed-modification rules keep working
  * unchanged for users who don't need scripting.
  */
-enum class RuleAction { BLOCK, REDIRECT, MODIFY_REQUEST, MODIFY_RESPONSE, LOG_ONLY, FORCE_MITM, MOCK_RESPONSE, SCRIPT_REWRITE, CHAOS }
+enum class RuleAction {
+    BLOCK, REDIRECT, MODIFY_REQUEST, MODIFY_RESPONSE, LOG_ONLY, FORCE_MITM, MOCK_RESPONSE, SCRIPT_REWRITE, CHAOS,
+    /** §2.14(b): AES/GCM-encrypt the matched request/response body in place -- see [RequestCryptoManager]. */
+    BODY_ENCRYPT_AES,
+    /** §2.14(b): AES/GCM-decrypt the matched request/response body in place -- see [RequestCryptoManager]. */
+    BODY_DECRYPT_AES,
+}
 
 /**
  * User-defined intercept rules. The "Block this domain" long-press action must be gated on a
@@ -128,6 +191,19 @@ data class InterceptRuleEntity(
     val enabled: Boolean = true,
     val replacementValue: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
+    /**
+     * §2.14(b): AndroidKeyStore alias whose AES/GCM key material [BODY_ENCRYPT_AES]/
+     * [BODY_DECRYPT_AES] rules use -- see [RequestCryptoManager]. Empty (unset) for every other
+     * [RuleAction]; [RuleEnforcer] treats a blank alias on a crypto rule as a configuration error
+     * (surfaced, never silently skipped -- see [RequestCryptoManager]'s KDoc).
+     */
+    val cryptoKeyAlias: String = "",
+    /** Cipher transformation, e.g. `"AES/GCM/NoPadding"` -- the only one [RequestCryptoManager] implements today. */
+    val cryptoAlgorithm: String = "AES/GCM/NoPadding",
+    /** `"ENCRYPT"` or `"DECRYPT"` -- which [RequestCryptoManager] operation this rule applies. */
+    val cryptoDirection: String = "ENCRYPT",
+    /** `"REQUEST"`, `"RESPONSE"`, or `"BOTH"` -- which side(s) of the transaction this rule applies to. */
+    val cryptoScope: String = "BOTH",
 )
 
 /**
