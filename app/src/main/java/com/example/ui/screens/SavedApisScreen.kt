@@ -3,6 +3,7 @@ package com.example.ui.screens
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -28,6 +29,8 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Star
@@ -52,6 +55,7 @@ import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -60,6 +64,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -136,6 +141,17 @@ fun SavedApisScreen(
         if (showSaved) allRequests
         else allRequests.filter { it.isFavorite }
     }.sortedByDescending { it.updatedAt }
+
+    // Dossier Q3 — collections-grouped card list (docs/designs/saved_apis/*.html) instead of the
+    // old flat list. Pure grouping/counting/sorting lives in SavedApisGrouping.kt so it can be
+    // unit tested without Compose; this screen only owns per-card expand/collapse UI state.
+    val collectionGroups = remember(filtered, allFolders) {
+        groupRequestsIntoCollections(filtered, allFolders)
+    }
+    // Collapsed-state set rather than expanded-state: a freshly created folder (not yet in this
+    // set either way) defaults to expanded, matching the pre-restructure flat list where every
+    // request was always visible.
+    var collapsedCollectionIds by remember { mutableStateOf(setOf<String>()) }
 
     Column(
         modifier = Modifier
@@ -268,7 +284,7 @@ fun SavedApisScreen(
         Spacer(modifier = Modifier.height(8.dp))
         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
 
-        // List
+        // List — dossier Q3: collections-grouped cards (was a flat LazyColumn of requests).
         if (filtered.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -299,46 +315,68 @@ fun SavedApisScreen(
                 ),
                 verticalArrangement = Arrangement.spacedBy(com.example.ui.theme.LocalAppSpacing.current.listItemSpacing)
             ) {
-                items(filtered, key = { it.id }) { request ->
-                    val swipeState = rememberSwipeToDismissBoxState(
-                        confirmValueChange = { value ->
-                            if (value == SwipeToDismissBoxValue.EndToStart) {
-                                ApiCollectionsRepository.deleteRequest(request.id)
-                                true
-                            } else false
+                items(collectionGroups, key = { it.id }) { group ->
+                    val expanded = group.id !in collapsedCollectionIds
+                    CollectionGroupCard(
+                        group = group,
+                        expanded = expanded,
+                        onToggleExpanded = {
+                            collapsedCollectionIds = if (expanded) {
+                                collapsedCollectionIds + group.id
+                            } else {
+                                collapsedCollectionIds - group.id
+                            }
                         }
-                    )
-                    SwipeToDismissBox(
-                        state = swipeState,
-                        backgroundContent = {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .background(MaterialTheme.colorScheme.error)
-                                    .padding(horizontal = 20.dp),
-                                contentAlignment = Alignment.CenterEnd
-                            ) {
-                                Icon(Icons.Default.Delete, null, tint = Color.White)
-                            }
-                        },
-                        enableDismissFromStartToEnd = false,
-                        enableDismissFromEndToStart = true
                     ) {
-                        SavedApiCard(
-                            request = request,
-                            allRequests = allRequests,
-                            onClick = { onOpenRequest(request) },
-                            onToggleFavorite = {
-                                ApiCollectionsRepository.toggleFavorite(request.id)
+                        if (group.requests.isEmpty()) {
+                            EmptyCollectionPlaceholder()
+                        } else {
+                            group.requests.forEach { request ->
+                                key(request.id) {
+                                    val swipeState = rememberSwipeToDismissBoxState(
+                                        confirmValueChange = { value ->
+                                            if (value == SwipeToDismissBoxValue.EndToStart) {
+                                                ApiCollectionsRepository.deleteRequest(request.id)
+                                                true
+                                            } else false
+                                        }
+                                    )
+                                    SwipeToDismissBox(
+                                        state = swipeState,
+                                        backgroundContent = {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .clip(RoundedCornerShape(14.dp))
+                                                    .background(MaterialTheme.colorScheme.error)
+                                                    .padding(horizontal = 20.dp),
+                                                contentAlignment = Alignment.CenterEnd
+                                            ) {
+                                                Icon(Icons.Default.Delete, null, tint = Color.White)
+                                            }
+                                        },
+                                        enableDismissFromStartToEnd = false,
+                                        enableDismissFromEndToStart = true
+                                    ) {
+                                        SavedApiCard(
+                                            request = request,
+                                            allRequests = allRequests,
+                                            onClick = { onOpenRequest(request) },
+                                            onToggleFavorite = {
+                                                ApiCollectionsRepository.toggleFavorite(request.id)
+                                            }
+                                        )
+                                    }
+                                }
                             }
-                        )
+                        }
                     }
                 }
                 item { Spacer(modifier = Modifier.height(80.dp)) }
             }
         }
     }
+
 
     // v3.4 Part C — C3: summary report modal for "Run All Tests" — X passed / Y failed overall,
     // with a per-request breakdown so a failure can be traced back to which saved request and
@@ -518,6 +556,102 @@ private fun TabChip(
                 color = textColor.copy(alpha = 0.8f)
             )
         }
+    }
+}
+
+@Composable
+private fun CollectionGroupCard(
+    group: CollectionSummary,
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
+    content: @Composable () -> Unit
+) {
+    val chevronRotation by animateFloatAsState(
+        targetValue = if (expanded) 180f else 0f,
+        animationSpec = com.example.ui.theme.scaledTween(200),
+        label = "collectionChevron"
+    )
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+            .border(
+                width = 1.dp,
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f),
+                shape = RoundedCornerShape(16.dp)
+            )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onToggleExpanded() }
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Default.Folder,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    group.name,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 15.sp,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                // Dossier Q3: only the endpoint count is truthfully sourceable here.
+                // ApiFolderItem has no environment field and EnvironmentRepository models
+                // environments as a single global list, not one scoped per collection — so
+                // unlike the mockup's "2 environments" line, we deliberately omit any
+                // environment count rather than fabricate one.
+                Text(
+                    if (group.endpointCount == 1) "1 endpoint" else "${group.endpointCount} endpoints",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                )
+            }
+            Icon(
+                Icons.Default.ExpandMore,
+                contentDescription = if (expanded) "Collapse" else "Expand",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .size(22.dp)
+                    .graphicsLayer { rotationZ = chevronRotation }
+            )
+        }
+        if (expanded) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(com.example.ui.theme.LocalAppSpacing.current.listItemSpacing)
+            ) {
+                content()
+                Spacer(modifier = Modifier.height(4.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmptyCollectionPlaceholder() {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 16.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            "No requests yet",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+        )
     }
 }
 

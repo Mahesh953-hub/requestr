@@ -84,7 +84,17 @@ fun TlsFailureDetailSheet(
                 }
             }
             Text(
-                text = "${detail.sniHost ?: detail.connectionId} · session ${detail.connectionId}",
+                text = buildString {
+                    append(detail.sniHost ?: detail.connectionId)
+                    append(" · session ${detail.connectionId}")
+                    // Item 4 (verification pass): detail.failedAt is real, already-flowing data
+                    // (TlsSessionEntity.failedAt) that was captured but never rendered here --
+                    // the mockup's header subtitle includes it.
+                    detail.failedAt?.let {
+                        append(" · ")
+                        append(java.text.SimpleDateFormat("d MMM HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(it)))
+                    }
+                },
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

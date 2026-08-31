@@ -110,7 +110,52 @@ data class CapturedTrafficEntity(
      */
     val requestBodyBytesTruncated: Boolean = false,
     val responseBodyBytesTruncated: Boolean = false,
+    /**
+     * Item 1 (dossier Q2 / audit §7.5): which capture tier actually produced THIS row, recorded
+     * by the engine at persist time rather than read off the current global capture setting --
+     * a single database can contain rows captured under different tiers across sessions (e.g. a
+     * VPN_TUN session followed by a MITM_PROXY one), so the row must record how IT was captured,
+     * not what the app's capture mode happens to be right now.
+     *
+     * [CaptureRowMethod.UNKNOWN] is the default for every row persisted before this column
+     * existed (backfilled by `MIGRATION_15_16`) -- the UI must render "unknown" as genuinely
+     * absent, never as "definitely not VPN", since an old row's real capture method is simply
+     * not recorded.
+     */
+    val captureMethod: CaptureRowMethod = CaptureRowMethod.UNKNOWN,
 )
+
+/**
+ * Item 1: honest, per-row record of which capture tier produced a [CapturedTrafficEntity] row --
+ * richer than a bare `routedViaVpnRelay: Boolean` because it also distinguishes MITM/gateway
+ * rows from VPN ones, while the VPN-relay-icon boolean the UI needs is trivially
+ * `captureMethod == VPN_TUN`.
+ *
+ * Deliberately NOT the same type as [com.example.data.interception.CaptureMethod] (a different,
+ * pre-existing enum in an unrelated package) or [CaptureTier] above (that one is the *session's*
+ * declared tier, e.g. for the capture-setup UI; this one is the *row's own* observed tier, set by
+ * the engine that actually persisted it -- the two can legitimately disagree, e.g. a GATEWAY
+ * session proxying another device's traffic never touches this device's VPN/root/Shizuku tier at
+ * all).
+ *
+ * Every value below has a real, confirmed persist site as of this wave:
+ *  - [VPN_TUN]: `CaptureEngine` (driven by `PacketPump`, itself only ever instantiated by
+ *    `RequestrVpnService`) and `PacketPump`'s own HTTP/3 persist path.
+ *  - [MITM_PROXY]: `MitmProxyEngine`, which only ever reaches its persist call sites after
+ *    terminating TLS itself (`wasDecrypted` is always true for these rows).
+ *  - [GATEWAY]: `gateway/GatewayEngine`'s `persistTransaction`.
+ *  - [HTTP_PROXY]: `HttpProxyEngine`'s own `persistTransaction` (added after this enum was
+ *    introduced — a separate audit pass found the plain, non-CONNECT relay path forwarded and
+ *    counted every request but never persisted a `CapturedTrafficEntity` at all, permanently
+ *    starving the traffic list for this tier; the fix mirrors [GATEWAY]'s `persistTransaction`
+ *    exactly, including `HttpBodyDecoder.forStorage`'s binary/text/truncation contract).
+ *
+ * [UNKNOWN] is the default for legacy rows (see [CapturedTrafficEntity.captureMethod]'s doc) and
+ * for the persist sites this enum's introduction did not (yet) reach: `RuntimeTrafficSink`,
+ * `LocalApiServer`'s SDK-observer ingestion, and `HarImporter`'s file import.
+ */
+enum class CaptureRowMethod { UNKNOWN, VPN_TUN, MITM_PROXY, GATEWAY, HTTP_PROXY }
+
 
 /**
  * Capture-tier actually used for a session. Never inferred by the UI — recorded by the engine.
@@ -550,13 +595,37 @@ data class CustomToolEntity(
 /** Backs `ChatRepository`'s persisted chat history (H1). */
 @Entity(
     tableName = "chat_messages",
-    indices = [Index("timestamp")],
+    indices = [Index("timestamp"), Index("conversationId")],
 )
 data class ChatMessageEntity(
     @PrimaryKey val id: String,
     val role: String,                   // "user" or "assistant"
     val content: String,
     val timestamp: Long = System.currentTimeMillis(),
+    // v16 -> v17: which conversation this message belongs to (see [ChatConversationEntity]).
+    // Every pre-v17 row gets backfilled to MIGRATION_16_17's 'default-migrated' conversation id
+    // -- see RequestrDatabase.MIGRATION_16_17's doc for the full backfill story. The Kotlin
+    // default here is a convenience for tests/newly-constructed objects only; real production
+    // callers (ChatRepository) always pass an explicit conversationId.
+    val conversationId: String = "default",
+)
+
+/**
+ * Multi-conversation chat history (Reqy Assistant completeness pass, item 1): one row per
+ * conversation shown in the drawer's "AI History" list. [title] is either a user-set override
+ * ([titleIsOverride] = true, set via the drawer's Rename action) or kept in sync with the
+ * conversation's own derived title (see `deriveChatTitle`) as its messages change.
+ */
+@Entity(
+    tableName = "chat_conversations",
+    indices = [Index("updatedAt")],
+)
+data class ChatConversationEntity(
+    @PrimaryKey val id: String,
+    val title: String,
+    val titleIsOverride: Boolean = false,
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis(),
 )
 
 /**

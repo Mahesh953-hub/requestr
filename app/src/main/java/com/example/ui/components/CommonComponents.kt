@@ -315,13 +315,54 @@ fun MethodBadge(
     }
 }
 
+/**
+ * Pure formatting decision behind [StatusCodeBadge] — extracted so the "what text does the
+ * badge show" call can be unit-tested without a Compose UI test harness.
+ *
+ * Audit fix: rows that never decoded a real HTTP/QUIC status (an HTTP/3 OBSERVED/DETECTED row,
+ * or a fully opaque undecoded-TLS row) used to be handed [statusCode] `== 0` as a numeric
+ * placeholder by upstream mapping code, and this function would happily print the literal `"0"`
+ * — a reader could reasonably mistake that for a real (if unusual) status code. [hasKnownStatus]
+ * makes that distinction explicit at the call site instead of re-deriving it here from the
+ * magic-number `statusCode == 0`, so callers that only ever produce real statuses (every
+ * existing caller of [StatusCodeBadge] except the Intercept traffic list) are unaffected by
+ * defaulting it to `true`.
+ */
+fun statusCodeBadgeText(
+    statusCode: Int,
+    statusMessage: String?,
+    hasKnownStatus: Boolean,
+    unknownStatusLabel: String,
+): String = when {
+    !hasKnownStatus -> unknownStatusLabel
+    statusMessage.isNullOrBlank() -> "$statusCode"
+    else -> "$statusCode $statusMessage"
+}
+
 @Composable
 fun StatusCodeBadge(
     statusCode: Int,
     statusMessage: String? = null,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /**
+     * False means [statusCode] carries no real, decoded HTTP/QUIC status — see
+     * [statusCodeBadgeText]. Defaults to `true` so every pre-existing caller (which always has
+     * a real status, even for a failed request) keeps its exact current rendering unchanged.
+     * Only a caller that can genuinely produce a statusless row (currently just the Intercept
+     * traffic list, for HTTP/3 OBSERVED/DETECTED and opaque undecoded-TLS rows) should ever
+     * pass `false` here.
+     */
+    hasKnownStatus: Boolean = true,
+    /**
+     * Text shown instead of a fabricated numeric status when [hasKnownStatus] is `false`.
+     * Defaults to an em dash; HTTP/3 callers pass the row's own "OBSERVED"/"DETECTED" label
+     * (already computed for [Http3RowIndicator]) so the badge agrees with the rest of the row
+     * instead of inventing new wording.
+     */
+    unknownStatusLabel: String = "—",
 ) {
     val color = when {
+        !hasKnownStatus -> MaterialTheme.colorScheme.onSurfaceVariant
         statusCode in 200..299 -> Status2xx
         statusCode in 300..399 -> Status3xx
         statusCode in 400..499 -> Status4xx
@@ -329,7 +370,7 @@ fun StatusCodeBadge(
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
 
-    val text = if (statusMessage.isNullOrBlank()) "$statusCode" else "$statusCode $statusMessage"
+    val text = statusCodeBadgeText(statusCode, statusMessage, hasKnownStatus, unknownStatusLabel)
 
     Box(
         modifier = modifier

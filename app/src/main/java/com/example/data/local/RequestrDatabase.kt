@@ -35,6 +35,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         CustomToolEntity::class,
         ChatMessageEntity::class,
         ChatProviderEntity::class,
+        ChatConversationEntity::class,
         ConnectAttemptEntity::class,
     ],
     // v3.5: bumped 4 -> 5 for FlowNodeEntity + FlowConnectionEntity (Flow persistence).
@@ -79,7 +80,15 @@ import androidx.sqlite.db.SupportSQLiteDatabase
     // cryptoDirection/cryptoScope for the new BODY_ENCRYPT_AES/BODY_DECRYPT_AES RuleActions
     // (which, like every other RuleAction, need no schema change themselves -- persisted by
     // name via RequestrTypeConverters).
-    version = 15,
+    // Item 1 (dossier Q2 / audit §7.5): bumped 15 -> 16 to add
+    // CapturedTrafficEntity.captureMethod (see CaptureRowMethod's doc) so the traffic row can
+    // record which capture tier actually produced it, independent of whatever the app's current
+    // global capture setting is.
+    // Reqy Assistant completeness pass, item 1: bumped 16 -> 17 to add ChatConversationEntity
+    // (real multi-conversation chat history, see its doc) and ChatMessageEntity.conversationId.
+    // MIGRATION_16_17 preserves every existing chat_messages row -- it does NOT drop them --
+    // by folding them into one derived-title "default-migrated" conversation.
+    version = 17,
     exportSchema = true,
 )
 @TypeConverters(RequestrTypeConverters::class)
@@ -102,6 +111,7 @@ abstract class RequestrDatabase : RoomDatabase() {
     abstract fun customToolDao(): CustomToolDao
     abstract fun chatMessageDao(): ChatMessageDao
     abstract fun chatProviderDao(): ChatProviderDao
+    abstract fun chatConversationDao(): ChatConversationDao
     abstract fun connectAttemptDao(): ConnectAttemptDao
 
     companion object {
@@ -128,7 +138,7 @@ abstract class RequestrDatabase : RoomDatabase() {
                     // real, disclosed data loss (see AUDIT_REPORT.md/TODO_v5.md) -- but it is
                     // strictly better than a crash loop, and it does not touch the v8->v9 path,
                     // which stays a real, non-destructive migration.
-                    .addMigrations(MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15)
+                    .addMigrations(MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17)
                     .fallbackToDestructiveMigrationFrom(/* dropAllTables = */ true, 1, 2, 3, 4, 5, 6, 7)
                     .build()
                     .also { INSTANCE = it }
@@ -190,6 +200,69 @@ abstract class RequestrDatabase : RoomDatabase() {
          * [CapturedTrafficEntity]'s Kotlin defaults exactly so an upgraded row and a freshly
          * inserted one behave identically (same discipline as every migration above).
          */
+        /**
+         * v15 -> v16. Item 1 (dossier Q2 / audit §7.5): adds `captured_traffic.captureMethod`,
+         * the per-row honest record of which capture tier actually produced the row (see
+         * [CaptureRowMethod]'s doc for exactly which engines set which value). Defaults to
+         * `'UNKNOWN'`, matching [CapturedTrafficEntity.captureMethod]'s Kotlin default exactly --
+         * every pre-v16 row's real capture method is simply not recorded, and the UI must treat
+         * that as genuinely absent rather than "definitely not VPN".
+         */
+        /**
+         * v16 -> v17. Reqy Assistant completeness pass, item 1: real multi-conversation chat
+         * history. Adds `chat_messages.conversationId` and the new `chat_conversations` table
+         * (see [ChatConversationEntity]'s doc). Critically, this does NOT drop any existing
+         * `chat_messages` row -- every row that existed at v16 is folded into a single new
+         * `'default-migrated'` conversation so nobody's chat history disappears on upgrade:
+         *
+         * 1. `ALTER TABLE ... ADD COLUMN conversationId TEXT NOT NULL DEFAULT 'default-migrated'`
+         *    backfills every pre-existing row's conversationId in one statement (SQLite applies
+         *    the DEFAULT to existing rows for an ALTER TABLE ADD COLUMN), so no separate UPDATE
+         *    is needed to link old messages to the new conversation row below.
+         * 2. The `chat_conversations` row is only inserted `WHERE EXISTS` at least one
+         *    pre-existing message -- a fresh v17 install (or a v16 install that never sent a
+         *    message) must NOT get a spurious empty conversation row; `ChatRepository.init`
+         *    lazily creates the first real conversation instead (see `ensureActiveConversation`).
+         * 3. The derived title mirrors [com.example.data.models.deriveChatTitle]'s own
+         *    truncate-at-40-chars-plus-ellipsis convention (`CHAR(8230)` = U+2026 `…`) applied to
+         *    the earliest surviving user message, falling back to `'Imported chat'` if the old
+         *    history has no user message at all (e.g. only ever produced local-mode replies).
+         *    Raw SQL can't strip an attachment-marker prefix the way the Kotlin helper does --
+         *    an attachment-prefixed FIRST message is a rare, acceptable edge case here.
+         */
+        val MIGRATION_16_17: Migration = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE chat_messages ADD COLUMN conversationId TEXT NOT NULL DEFAULT 'default-migrated'")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_chat_messages_conversationId ON chat_messages(conversationId)")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS chat_conversations (" +
+                        "id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL, " +
+                        "titleIsOverride INTEGER NOT NULL DEFAULT 0, " +
+                        "createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_chat_conversations_updatedAt ON chat_conversations(updatedAt)")
+                db.execSQL(
+                    "INSERT INTO chat_conversations (id, title, titleIsOverride, createdAt, updatedAt) " +
+                        "SELECT 'default-migrated', " +
+                        "  COALESCE(" +
+                        "    (SELECT CASE WHEN LENGTH(content) > 40 THEN SUBSTR(content, 1, 40) || CHAR(8230) ELSE content END " +
+                        "     FROM chat_messages WHERE role = 'user' ORDER BY timestamp ASC LIMIT 1)," +
+                        "    'Imported chat'" +
+                        "  ), " +
+                        "  0, " +
+                        "  (SELECT MIN(timestamp) FROM chat_messages), " +
+                        "  (SELECT MAX(timestamp) FROM chat_messages) " +
+                        "WHERE EXISTS (SELECT 1 FROM chat_messages)"
+                )
+            }
+        }
+
+        val MIGRATION_15_16: Migration = object : Migration(15, 16) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE captured_traffic ADD COLUMN captureMethod TEXT NOT NULL DEFAULT 'UNKNOWN'")
+            }
+        }
+
         val MIGRATION_14_15: Migration = object : Migration(14, 15) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE intercept_rules ADD COLUMN cryptoKeyAlias TEXT NOT NULL DEFAULT ''")

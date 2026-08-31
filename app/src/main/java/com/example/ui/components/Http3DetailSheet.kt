@@ -114,6 +114,9 @@ private fun DecodedBody(state: Http3DetailState.Decoded) {
     DetailKV("QUIC version", state.quicVersion?.let { "0x%08X".format(it) } ?: "unknown")
     DetailKV("ALPN", state.alpn ?: "unknown")
     DetailKV("SNI", state.sniHost ?: "unknown")
+    // Item 4 (verification pass): the mockup's "Dest conn ID" row -- state.connectionId is
+    // already authoritative real data flowing through this state, it was just never rendered.
+    DetailKV("Dest conn ID", state.connectionId)
     DetailKV("5-tuple", state.fiveTuple)
     state.cipherSuite?.let { DetailKV("Cipher suite", it) }
 
@@ -150,6 +153,8 @@ private fun UndecryptedBody(
     DetailKV("QUIC version", state.quicVersion?.let { "0x%08X".format(it) } ?: "unknown")
     DetailKV("ALPN", state.alpn ?: "unknown")
     DetailKV("SNI", state.sniHost ?: "unknown")
+    // Item 4: see the Decoded body's identical note above -- same real, already-flowing field.
+    DetailKV("Dest conn ID", state.connectionId)
     DetailKV("5-tuple", state.fiveTuple)
     DetailKV("Observed", "${formatByteCount(state.bytesReceived)}")
     DetailKV("Decoded", "Initial packet only")
@@ -189,6 +194,8 @@ private fun QuicOnlyBody(
     DetailKV("QUIC version", state.quicVersion?.let { "0x%08X".format(it) } ?: "unknown")
     DetailKV("ALPN", "unknown · CRYPTO not reassembled")
     DetailKV("SNI", state.sniHost ?: "unknown · taken from DNS answer")
+    // Item 4: see the Decoded body's identical note above -- same real, already-flowing field.
+    DetailKV("Dest conn ID", state.connectionId)
     DetailKV("5-tuple", state.fiveTuple)
     DetailKV("Observed", "${formatByteCount(state.bytesReceived)}")
     if (state.retriesAccepted > 0 || state.retriesRejected > 0) {

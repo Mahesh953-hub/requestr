@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import android.os.Build
 import com.example.data.models.CapturedTrafficItem
+import com.example.data.models.Http3RowState
 import com.example.data.models.HttpMethod
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -454,5 +455,93 @@ class CapturedTrafficHelpersTest {
         val bytes = ByteArray(20) { 0x41 }
         val dump = hexDump(bytes, maxBytes = 16)
         assertTrue(dump.contains("more byte(s)"))
+    }
+
+    // ── isSensitiveHeaderName / maskHeaderValue (Item 2, audit §7.2) ───────────────────────
+
+    @Test
+    fun `isSensitiveHeaderName matches the fixed set case-insensitively`() {
+        assertTrue(isSensitiveHeaderName("Set-Cookie"))
+        assertTrue(isSensitiveHeaderName("set-cookie"))
+        assertTrue(isSensitiveHeaderName("SET-COOKIE"))
+        assertTrue(isSensitiveHeaderName("Cookie"))
+        assertTrue(isSensitiveHeaderName("cookie"))
+        assertTrue(isSensitiveHeaderName("Authorization"))
+        assertTrue(isSensitiveHeaderName("authorization"))
+        assertTrue(isSensitiveHeaderName("Proxy-Authorization"))
+        assertTrue(isSensitiveHeaderName("proxy-authorization"))
+    }
+
+    @Test
+    fun `isSensitiveHeaderName tolerates incidental whitespace around the name`() {
+        assertTrue(isSensitiveHeaderName("  Set-Cookie  "))
+    }
+
+    @Test
+    fun `isSensitiveHeaderName is false for unrelated header names`() {
+        assertFalse(isSensitiveHeaderName("Content-Type"))
+        assertFalse(isSensitiveHeaderName("X-Cookie-Consent"))
+        assertFalse(isSensitiveHeaderName("Authorization-Hint"))
+        assertFalse(isSensitiveHeaderName(""))
+    }
+
+    @Test
+    fun `maskHeaderValue never renders one asterisk per character`() {
+        val longToken = "a".repeat(500)
+        val masked = maskHeaderValue(longToken)
+        assertFalse(masked.contains(longToken))
+        assertTrue(masked.length < 50)
+    }
+
+    @Test
+    fun `maskHeaderValue reports the real byte length as separate text`() {
+        val masked = maskHeaderValue("s3cr3t-token-value")
+        assertTrue(masked.contains("18 bytes"))
+    }
+
+    @Test
+    fun `maskHeaderValue byte length reflects UTF-8 encoding not char count`() {
+        // "é" is 1 char but 2 UTF-8 bytes -- the reported length must be the real byte length.
+        val masked = maskHeaderValue("é")
+        assertTrue(masked.contains("2 bytes"))
+    }
+
+    @Test
+    fun `maskHeaderValue on an empty value has no byte-count suffix`() {
+        val masked = maskHeaderValue("")
+        assertFalse(masked.contains("bytes"))
+        assertTrue(masked.isNotEmpty())
+    }
+
+    @Test
+    fun `maskHeaderValue on a very long value stays a short fixed placeholder`() {
+        val huge = "x".repeat(10_000)
+        val masked = maskHeaderValue(huge)
+        assertTrue(masked.length < 50)
+        assertTrue(masked.contains("10000 bytes"))
+    }
+
+    @Test
+    fun `unknownStatusLabelFor renders OBSERVED for an HTTP3 row with no decoded status`() {
+        assertEquals("OBSERVED", unknownStatusLabelFor(Http3RowState.OBSERVED))
+    }
+
+    @Test
+    fun `unknownStatusLabelFor renders DETECTED for a QUIC-only row`() {
+        assertEquals("DETECTED", unknownStatusLabelFor(Http3RowState.DETECTED))
+    }
+
+    @Test
+    fun `unknownStatusLabelFor falls back to an em dash for a statusless non-HTTP3 row`() {
+        // e.g. a fully opaque undecoded-TLS row, which has no Http3RowState at all.
+        assertEquals("—", unknownStatusLabelFor(null))
+    }
+
+    @Test
+    fun `unknownStatusLabelFor never returns DECODED even if misused on a decoded row`() {
+        // DECODED implies a real status was found, so hasKnownStatus should already be true and
+        // this function should never actually be called for that state -- but if it ever is
+        // (defensive), it must not fabricate a "DECODED" placeholder that looks like a status.
+        assertEquals("—", unknownStatusLabelFor(Http3RowState.DECODED))
     }
 }

@@ -4,10 +4,13 @@ import android.content.Context
 import android.util.Log
 import com.example.data.interception.CaptureMethod
 import com.example.data.interception.InterceptionStateRepository
+import com.example.data.local.CapturedTrafficEntity
+import com.example.data.local.CaptureRowMethod
 import com.example.data.local.ConnectAttemptEntity
 import com.example.data.local.RequestrDatabase
 import com.example.data.prefs.SettingsDataStore
 import com.example.interception.HttpProxyShared.copyToStream
+import com.example.interception.http.HttpBodyDecoder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -192,10 +195,73 @@ class HttpProxyEngine(
                     packetCount.incrementAndGet()
                     InterceptionStateRepository.updateCounters(packetCount = packetCount.get().toInt())
                     Log.d(TAG, "$method $rawUrl → $status (${latency}ms)")
+
+                    // Item: the HTTP_PROXY tier's plain-HTTP relay forwarded and logged every
+                    // request (see the Log.d above and the packetCount increment) but never
+                    // persisted a CapturedTrafficEntity, so the Intercept traffic list stayed
+                    // permanently empty for this tier ("No HTTP transaction decoded yet.") even
+                    // though the relay itself worked -- GatewayEngine.persistTransaction is the
+                    // proven pattern for this exact same HttpProxyShared.forwardRequest shape;
+                    // mirrored here rather than duplicated ad hoc.
+                    runCatching {
+                        persistTransaction(rawUrl, method, status, latency, headers, respHeaders, bodyBytes, respBody)
+                    }.onFailure { Log.w(TAG, "Failed to persist HTTP proxy transaction: ${it.message}") }
                 }
             }
         } catch (e: Exception) {
             if (running.get()) Log.w(TAG, "Client handler error: ${e.message}")
         }
+    }
+
+    // internal (not private): mirrors GatewayEngine.persistTransaction's shape/reasoning exactly
+    // (same HttpProxyShared.forwardRequest byte-array contract), so this on-device HTTP_PROXY
+    // tier and the T2 LAN-relay tier classify/store binary bodies identically.
+    internal suspend fun persistTransaction(
+        rawUrl: String,
+        method: String,
+        statusCode: Int?,
+        latencyMs: Long,
+        reqHeaders: Map<String, String>,
+        respHeaders: Map<String, String>,
+        reqBodyBytes: ByteArray,
+        respBodyBytes: ByteArray,
+    ) {
+        val ctx = appContext ?: return
+        val (host, path) = runCatching {
+            val u = if (rawUrl.startsWith("http")) java.net.URI(rawUrl) else java.net.URI("http://$rawUrl")
+            (u.host ?: rawUrl) to (u.path ?: "")
+        }.getOrDefault(rawUrl to "")
+
+        val reqStorage = HttpBodyDecoder.forStorage(reqBodyBytes)
+        val respStorage = HttpBodyDecoder.forStorage(respBodyBytes)
+        val reqBodyText = if (reqStorage.isBinary) null else String(reqBodyBytes, Charsets.UTF_8).ifEmpty { null }
+        val respBodyText = if (respStorage.isBinary) null else String(respBodyBytes, Charsets.UTF_8).ifEmpty { null }
+
+        val entity = CapturedTrafficEntity(
+            sessionId = sessionId.get(),
+            method = method,
+            url = if (rawUrl.startsWith("http")) rawUrl else "http://$rawUrl",
+            host = host,
+            path = path,
+            statusCode = statusCode,
+            protocol = "http-proxy",
+            requestHeaders = reqHeaders,
+            responseHeaders = respHeaders,
+            requestBody = reqBodyText,
+            responseBody = respBodyText,
+            requestSizeBytes = reqStorage.trueSizeBytes,
+            responseSizeBytes = respStorage.trueSizeBytes,
+            isRequestBodyBinary = reqStorage.isBinary,
+            isResponseBodyBinary = respStorage.isBinary,
+            requestBodyBytes = reqStorage.bytes,
+            responseBodyBytes = respStorage.bytes,
+            requestBodyBytesTruncated = reqStorage.truncated,
+            responseBodyBytesTruncated = respStorage.truncated,
+            latencyMs = latencyMs,
+            wasDecrypted = true,
+            isUndecoded = false,
+            captureMethod = CaptureRowMethod.HTTP_PROXY,
+        )
+        RequestrDatabase.get(ctx).capturedTrafficDao().insert(entity)
     }
 }

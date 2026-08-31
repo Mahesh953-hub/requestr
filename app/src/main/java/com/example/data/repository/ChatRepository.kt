@@ -1,29 +1,45 @@
 package com.example.data.repository
 
 import android.content.Context
+import com.example.data.local.ChatConversationEntity
 import com.example.data.local.ChatMessageEntity
 import com.example.data.local.ChatProviderEntity
 import com.example.data.local.RequestrDatabase
 import com.example.data.models.ChatMessage
 import com.example.data.models.ChatProviderConfig
+import com.example.data.models.ChatProviderKind
+import com.example.data.models.deriveChatTitle
+import com.example.data.models.validateProviderFields
+import com.example.data.prefs.ChatSettingsStore
 import com.example.data.prefs.SecureKeyStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
+import org.json.JSONObject
+import java.util.concurrent.TimeUnit
 
 /**
- * Chat repository — manages AI chat conversations.
+ * Chat repository — manages Reqy Assistant chat conversations.
  *
- * Supports configurable API providers (OpenAI-compatible format) for
- * chat completion. Falls back to a local echo/mock response when no
- * provider is configured.
+ * Supports multiple provider *kinds* (see [ChatProviderKind]: OpenAI, Anthropic, Gemini,
+ * OpenRouter, Groq (Free), HuggingFace (Free), Ollama (Local), + Custom), each keyed by
+ * [ChatProviderConfig.id] == [ChatProviderKind.id], with exactly one marked `isActive` in Room
+ * at a time (`chat_providers.isActive`) -- see [saveProviderConfig]/[loadProviderConfig]. Falls
+ * back to a local echo/mock response when no provider is active/configured, or when Local Mode
+ * ([ChatSettingsStore.isLocalModeEnabled]) is explicitly turned on.
  *
  * Task 12: the provider's `name`/`baseUrl`/`model`/`isActive` live in the `chat_providers` Room
  * table (task 11); the API key is never stored there -- it lives only in Keystore-backed
@@ -48,6 +64,30 @@ object ChatRepository {
     private val _providerConfig = MutableStateFlow(ChatProviderConfig(id = DEFAULT_PROVIDER_ID))
     val providerConfig: StateFlow<ChatProviderConfig> = _providerConfig.asStateFlow()
 
+    // Reqy Assistant completeness pass, item 1: title override is now per-conversation (see
+    // ChatConversationEntity.titleIsOverride/title in Room) rather than a single global
+    // ChatSettingsStore key -- a single global override made no sense once multiple
+    // conversations exist. `null` means "derive it" for the ACTIVE conversation.
+    private val _titleOverride = MutableStateFlow<String?>(null)
+    val titleOverride: StateFlow<String?> = _titleOverride.asStateFlow()
+
+    // Every known conversation, most-recently-updated first -- backs the drawer's "AI History"
+    // list.
+    private val _conversations = MutableStateFlow<List<ChatConversationEntity>>(emptyList())
+    val conversations: StateFlow<List<ChatConversationEntity>> = _conversations.asStateFlow()
+
+    // Which conversation [messages]/[titleOverride] currently reflect. Empty string means "no
+    // conversation switched to yet" -- only true for the brief window before init()'s
+    // ensureActiveConversation() completes.
+    private val _activeConversationId = MutableStateFlow("")
+    val activeConversationId: StateFlow<String> = _activeConversationId.asStateFlow()
+
+    // When the CURRENT chat session started (reset by startNewChat()/switchToConversation()) --
+    // feeds the placeholder title shown before the first message exists, e.g.
+    // "New chat -- 6:02 PM".
+    private var sessionStartedAt: Long = System.currentTimeMillis()
+    fun currentSessionStartedAt(): Long = sessionStartedAt
+
     private var appContext: Context? = null
     private val repoScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -59,23 +99,75 @@ object ChatRepository {
     // keeps overwriting [_messages] after the reset, which just moves the race rather than fixing
     // it (see resetForTest's kdoc for the full failure mode this closes).
     private var observeMessagesJob: Job? = null
+    private var observeConversationsJob: Job? = null
     private var loadProviderConfigJob: Job? = null
 
     /**
-     * Backs [messages] with the real `chat_messages` Room table (task 11), and loads the
-     * persisted provider config (Room metadata + Keystore key) into [providerConfig]. Call once
-     * from MainActivity.onCreate(), mirroring [NotesRepository.init]/[FlowRepository.init].
+     * Backs [messages] with the real `chat_messages` Room table (task 11), loads the active
+     * provider's config (Room metadata + Keystore key) into [providerConfig], loads every saved
+     * conversation into [conversations], and switches to the most-recently-updated one (creating
+     * one if none exist yet -- see [ensureActiveConversation]). Call once from
+     * MainActivity.onCreate(), mirroring [NotesRepository.init]/[FlowRepository.init].
      */
     fun init(context: Context) {
         if (appContext != null) return
         val ctx = context.applicationContext
         appContext = ctx
+        observeConversationsJob = repoScope.launch {
+            RequestrDatabase.get(ctx).chatConversationDao().observeAll().collect { rows ->
+                _conversations.value = rows
+            }
+        }
+        loadProviderConfigJob = repoScope.launch {
+            loadProviderConfig()
+            ensureActiveConversation(ctx)
+        }
+    }
+
+    /**
+     * Guarantees at least one conversation exists and is active -- picks the most-recently-
+     * updated saved conversation (e.g. the one MIGRATION_16_17 folded old messages into), or
+     * creates a fresh empty one if the table is genuinely empty (fresh install, or a v16 install
+     * that never sent a message so MIGRATION_16_17's `WHERE EXISTS` guard skipped the insert).
+     */
+    private suspend fun ensureActiveConversation(ctx: Context) {
+        val dao = RequestrDatabase.get(ctx).chatConversationDao()
+        val target = dao.getAll().firstOrNull() ?: run {
+            val now = System.currentTimeMillis()
+            val fresh = ChatConversationEntity(
+                id = java.util.UUID.randomUUID().toString(),
+                title = "New chat",
+                titleIsOverride = false,
+                createdAt = now,
+                updatedAt = now,
+            )
+            dao.upsert(fresh)
+            fresh
+        }
+        switchToConversation(target.id)
+    }
+
+    /**
+     * Switches [messages]/[titleOverride]/[currentSessionStartedAt] to reflect [conversationId] --
+     * used both by [ensureActiveConversation] on startup and by the drawer's conversation list
+     * (tap an entry to switch to it). Cancels and relaunches [observeMessagesJob] against the new
+     * conversation's own `chat_messages` rows, following the same cancel-and-relaunch idiom
+     * `init()` already used for a single conversation before this pass.
+     */
+    fun switchToConversation(conversationId: String) {
+        val ctx = appContext ?: return
+        _activeConversationId.value = conversationId
+        observeMessagesJob?.cancel()
         observeMessagesJob = repoScope.launch {
-            RequestrDatabase.get(ctx).chatMessageDao().observeAll().collect { entities ->
+            RequestrDatabase.get(ctx).chatMessageDao().observeByConversation(conversationId).collect { entities ->
                 _messages.value = entities.map { it.toChatMessage() }
             }
         }
-        loadProviderConfigJob = repoScope.launch { loadProviderConfig() }
+        repoScope.launch {
+            val conv = RequestrDatabase.get(ctx).chatConversationDao().getById(conversationId)
+            sessionStartedAt = conv?.createdAt ?: System.currentTimeMillis()
+            _titleOverride.value = if (conv?.titleIsOverride == true) conv.title else null
+        }
     }
 
     /**
@@ -100,79 +192,204 @@ object ChatRepository {
      */
     internal fun resetForTest() {
         observeMessagesJob?.cancel()
+        observeConversationsJob?.cancel()
         loadProviderConfigJob?.cancel()
         observeMessagesJob = null
+        observeConversationsJob = null
         loadProviderConfigJob = null
         appContext = null
         _messages.value = emptyList()
         _isLoading.value = false
         _providerConfig.value = ChatProviderConfig(id = DEFAULT_PROVIDER_ID)
+        _titleOverride.value = null
+        _conversations.value = emptyList()
+        _activeConversationId.value = ""
+        sessionStartedAt = System.currentTimeMillis()
     }
 
     /**
-     * Reloads [providerConfig] from Room (metadata) + [SecureKeyStore] (key) for
-     * [DEFAULT_PROVIDER_ID]. Safe to call multiple times, e.g. after [saveProviderConfig].
+     * Reloads [providerConfig] from Room (metadata) + [SecureKeyStore] (key) for whichever
+     * `chat_providers` row currently has `isActive = true`. Safe to call multiple times, e.g.
+     * after [saveProviderConfig]. Multiple rows (one per [ChatProviderKind]) may exist at once
+     * -- only the active one feeds [providerConfig]/`callProvider`.
      */
     private suspend fun loadProviderConfig() {
         val ctx = appContext ?: return
         val entity = RequestrDatabase.get(ctx).chatProviderDao().getAll()
-            .firstOrNull { it.id == DEFAULT_PROVIDER_ID }
+            .firstOrNull { it.isActive }
             ?: return // nothing saved yet -- keep the all-blank default
 
-        val key = when (val result = SecureKeyStore.getSecret(ctx, entity.id)) {
+        _providerConfig.value = entity.toConfig(readKey(ctx, entity.id))
+    }
+
+    private suspend fun readKey(ctx: Context, id: String): String {
+        return when (val result = SecureKeyStore.getSecret(ctx, id)) {
             is SecureKeyStore.SecretReadResult.Found -> result.value
             SecureKeyStore.SecretReadResult.Absent -> ""
             // Task 12 non-negotiable: an unreadable key must never look like "no key entered".
-            // ChatScreen/SettingsScreen key this off apiKey.isBlank() vs a dedicated flag; since
+            // ChatScreen/Settings key this off apiKey.isBlank() vs a dedicated flag; since
             // isConfigured only gates whether callProvider is reachable (never silently swallowed
             // as success), surfacing "" here plus the provider still failing loudly at call time
             // is acceptable, but we log so the underlying cause is diagnosable.
             SecureKeyStore.SecretReadResult.Unreadable -> {
                 android.util.Log.w(
                     "ChatRepository",
-                    "Stored API key for provider ${entity.id} is unreadable (auth tag failed) " +
+                    "Stored API key for provider $id is unreadable (auth tag failed) " +
                         "-- treating as not configured; user must re-enter it in Settings.",
                 )
                 ""
             }
         }
+    }
 
-        _providerConfig.value = ChatProviderConfig(
-            id = entity.id,
-            name = entity.name,
-            baseUrl = entity.baseUrl,
-            model = entity.model,
-            apiKey = key,
-            isActive = entity.isActive,
-        )
+    private fun ChatProviderEntity.toConfig(apiKey: String) = ChatProviderConfig(
+        id = id,
+        name = name,
+        baseUrl = baseUrl,
+        model = model,
+        apiKey = apiKey,
+        isActive = isActive,
+    )
+
+    /**
+     * Loads a specific provider kind's saved config (Room metadata + Keystore key) without
+     * touching [providerConfig] -- used by the Settings provider-chip row to pre-fill fields
+     * when the user switches chips, without discarding whatever chip is currently active.
+     * Falls back to [ChatProviderKind]'s catalog defaults (endpoint/model) when nothing has
+     * been saved for that id yet.
+     */
+    suspend fun getProviderConfigById(id: String): ChatProviderConfig {
+        val kind = ChatProviderKind.fromId(id)
+        val ctx = appContext
+        val key = if (ctx != null) readKey(ctx, id) else ""
+        val entity = ctx?.let { RequestrDatabase.get(it).chatProviderDao().getAll().firstOrNull { row -> row.id == id } }
+        return if (entity != null) {
+            entity.toConfig(key)
+        } else {
+            ChatProviderConfig(
+                id = id,
+                name = kind.displayName,
+                baseUrl = kind.defaultBaseUrl,
+                model = kind.defaultModel,
+                apiKey = key,
+                isActive = false,
+            )
+        }
     }
 
     /**
-     * Persists [config]'s metadata to Room and its key to [SecureKeyStore], then updates
-     * [providerConfig] so the UI reflects the change immediately (not just on the next
-     * observeAll() emission, which the `chat_providers` table alone can't drive since the key
-     * isn't in it).
+     * All saved `chat_providers` rows as [ChatProviderConfig] (no API key populated -- this is
+     * only used to render each chip's "configured"/"active" indicator, never to call a provider).
+     */
+    fun observeProviderEntities(): Flow<List<ChatProviderConfig>> {
+        val ctx = appContext ?: return flowOf(emptyList())
+        return RequestrDatabase.get(ctx).chatProviderDao().observeAll().map { rows ->
+            rows.map { it.toConfig(apiKey = "") }
+        }
+    }
+
+    /**
+     * Persists [config]'s metadata to Room and its key to [SecureKeyStore], marks it the sole
+     * active provider (deactivating every other saved row), then updates [providerConfig] so the
+     * UI reflects the change immediately (not just on the next `observeAll()` emission, which
+     * the `chat_providers` table alone can't drive since the key isn't in it).
      */
     fun saveProviderConfig(config: ChatProviderConfig) {
-        val ctx = appContext ?: run {
-            _providerConfig.value = config
-            return
-        }
-        _providerConfig.value = config
+        val activeConfig = config.copy(isActive = true)
+        _providerConfig.value = activeConfig
+        val ctx = appContext ?: return
         repoScope.launch {
-            RequestrDatabase.get(ctx).chatProviderDao().upsert(
+            val dao = RequestrDatabase.get(ctx).chatProviderDao()
+            dao.getAll().forEach { existing ->
+                if (existing.id != activeConfig.id && existing.isActive) {
+                    dao.upsert(existing.copy(isActive = false))
+                }
+            }
+            dao.upsert(
                 ChatProviderEntity(
-                    id = config.id,
-                    name = config.name,
-                    baseUrl = config.baseUrl,
-                    model = config.model,
-                    isActive = config.isActive,
+                    id = activeConfig.id,
+                    name = activeConfig.name,
+                    baseUrl = activeConfig.baseUrl,
+                    model = activeConfig.model,
+                    isActive = true,
                 ),
             )
-            if (config.apiKey.isNotBlank()) {
-                SecureKeyStore.putSecret(ctx, config.id, config.apiKey)
+            if (activeConfig.apiKey.isNotBlank()) {
+                SecureKeyStore.putSecret(ctx, activeConfig.id, activeConfig.apiKey)
             } else {
-                SecureKeyStore.removeSecret(ctx, config.id)
+                SecureKeyStore.removeSecret(ctx, activeConfig.id)
+            }
+        }
+    }
+
+    /**
+     * Drawer/header "Rename" -- overrides the derived title for [conversationId] (the ACTIVE
+     * conversation by default) until it's cleared again with `title = null`, in which case the
+     * title goes back to being derived from that conversation's own messages (see
+     * [recomputeTitleIfNotOverridden]).
+     */
+    fun renameChat(title: String?, conversationId: String = _activeConversationId.value) {
+        val trimmed = title?.trim()?.takeIf { it.isNotBlank() }
+        if (conversationId == _activeConversationId.value) {
+            _titleOverride.value = trimmed
+        }
+        val ctx = appContext ?: return
+        repoScope.launch {
+            val dao = RequestrDatabase.get(ctx).chatConversationDao()
+            val existing = dao.getById(conversationId) ?: return@launch
+            if (trimmed != null) {
+                dao.upsert(existing.copy(title = trimmed, titleIsOverride = true, updatedAt = System.currentTimeMillis()))
+            } else {
+                dao.upsert(existing.copy(titleIsOverride = false, updatedAt = System.currentTimeMillis()))
+                recomputeTitleIfNotOverridden(ctx, conversationId)
+            }
+        }
+    }
+
+    /**
+     * Header/drawer "New Chat" -- instant, no naming modal (see the mockup's legend: "the old
+     * 'New Chat' naming-modal concept is fully removed"). Creates and switches to a genuinely
+     * new [ChatConversationEntity] row rather than clearing the current conversation's history --
+     * the previous conversation stays intact in the drawer's "AI History" list.
+     *
+     * [messages]/[titleOverride] are cleared synchronously first (optimistic UI update) so the
+     * "instant" feel is preserved even though creating the Room row and re-pointing
+     * [observeMessagesJob] at it happens asynchronously on [repoScope].
+     */
+    fun startNewChat() {
+        val newId = java.util.UUID.randomUUID().toString()
+        val now = System.currentTimeMillis()
+        _messages.value = emptyList()
+        _titleOverride.value = null
+        sessionStartedAt = now
+        _activeConversationId.value = newId
+        val ctx = appContext ?: return
+        observeMessagesJob?.cancel()
+        repoScope.launch {
+            RequestrDatabase.get(ctx).chatConversationDao().upsert(
+                ChatConversationEntity(id = newId, title = "New chat", titleIsOverride = false, createdAt = now, updatedAt = now),
+            )
+            observeMessagesJob = repoScope.launch {
+                RequestrDatabase.get(ctx).chatMessageDao().observeByConversation(newId).collect { entities ->
+                    _messages.value = entities.map { it.toChatMessage() }
+                }
+            }
+        }
+    }
+
+    /**
+     * Drawer's per-conversation delete. Deleting the currently-ACTIVE conversation switches to
+     * another existing one (or creates a fresh empty one if it was the last conversation --
+     * never leaves the app with zero conversations, see [ensureActiveConversation]).
+     */
+    fun deleteConversation(conversationId: String) {
+        val ctx = appContext ?: return
+        repoScope.launch {
+            val convDao = RequestrDatabase.get(ctx).chatConversationDao()
+            RequestrDatabase.get(ctx).chatMessageDao().deleteByConversation(conversationId)
+            convDao.deleteById(conversationId)
+            if (conversationId == _activeConversationId.value) {
+                ensureActiveConversation(ctx)
             }
         }
     }
@@ -180,6 +397,14 @@ object ChatRepository {
     /** Sends a user message and generates a response. */
     suspend fun sendMessage(text: String) {
         if (text.isBlank()) return
+        // init() launches ensureActiveConversation() fire-and-forget on repoScope, so a caller
+        // that awaits init() and immediately calls sendMessage() (every real caller, and
+        // ChatRepositoryRoomTest) can otherwise race it and see the placeholder "" id. Join the
+        // in-flight job (a no-op once it's already completed) instead of re-running
+        // ensureActiveConversation ourselves, which would risk creating a second conversation
+        // row if both ran concurrently.
+        loadProviderConfigJob?.join()
+        val conversationId = _activeConversationId.value
 
         // Add user message
         val userMsg = ChatMessage(
@@ -189,14 +414,15 @@ object ChatRepository {
             timestamp = System.currentTimeMillis(),
         )
         _messages.value = _messages.value + userMsg
-        persist(userMsg)
+        persist(userMsg, conversationId)
 
         _isLoading.value = true
 
         // Generate response
         val config = _providerConfig.value
-        val response = if (config.isConfigured) {
-            callProvider(text, config)
+        val localModeForced = appContext?.let { ChatSettingsStore.isLocalModeEnabled(it) } ?: false
+        val response = if (config.isConfigured && !localModeForced) {
+            callProvider(config)
         } else {
             // Local fallback: echo with context awareness
             generateLocalResponse(text)
@@ -209,15 +435,80 @@ object ChatRepository {
             timestamp = System.currentTimeMillis(),
         )
         _messages.value = _messages.value + assistantMsg
-        persist(assistantMsg)
+        persist(assistantMsg, conversationId)
         _isLoading.value = false
+
+        appContext?.let { notifyAssistantReplyIfEnabled(it, response) }
     }
 
-    /** Clears the chat history, both in-memory and in Room. */
+    /**
+     * Lock panel's "Edit this message and resend" (see the mockup's `usermsg-edit` action):
+     * drops [originalId] and every message after it (its now-stale assistant reply included),
+     * then resends [newText] as a fresh user message.
+     */
+    suspend fun editMessageAndResend(originalId: String, newText: String) {
+        if (newText.isBlank()) return
+        val current = _messages.value
+        val idx = current.indexOfFirst { it.id == originalId }
+        if (idx == -1) return
+        val toRemove = current.subList(idx, current.size)
+        _messages.value = current.subList(0, idx)
+        val ctx = appContext
+        if (ctx != null) {
+            val dao = RequestrDatabase.get(ctx).chatMessageDao()
+            toRemove.forEach { dao.deleteById(it.id) }
+        }
+        sendMessage(newText)
+    }
+
+    /** Lock panel's "Delete this message" (`usermsg-delete`) / multi-select delete. */
+    fun deleteMessage(id: String) {
+        deleteMessages(setOf(id))
+    }
+
+    /** Bulk delete for the lock panel's "Select" multi-select mode (`usermsg-select`). */
+    fun deleteMessages(ids: Set<String>) {
+        if (ids.isEmpty()) return
+        _messages.value = _messages.value.filterNot { it.id in ids }
+        val ctx = appContext ?: return
+        repoScope.launch {
+            val dao = RequestrDatabase.get(ctx).chatMessageDao()
+            ids.forEach { dao.deleteById(it) }
+        }
+    }
+
+    /**
+     * Clears the ACTIVE conversation's history only, both in-memory and in Room -- kept name-
+     * and signature-compatible with every pre-multi-conversation caller/test (there was only
+     * ever one conversation before this pass). See [clearAllConversations] for "wipe every
+     * conversation", which the Settings/drawer UI must offer as a clearly DIFFERENT action now
+     * that "clear history" is ambiguous between "this chat" and "everything".
+     */
     fun clearHistory() {
         _messages.value = emptyList()
         val ctx = appContext ?: return
-        repoScope.launch { deleteAllPersistedMessages(ctx) }
+        val conversationId = _activeConversationId.value
+        repoScope.launch {
+            deleteAllPersistedMessages(ctx, conversationId)
+            recomputeTitleIfNotOverridden(ctx, conversationId)
+        }
+    }
+
+    /**
+     * Settings/drawer "Clear ALL conversations" -- wipes every conversation's messages AND the
+     * conversation rows themselves, then creates one fresh empty conversation so the app never
+     * ends up with zero conversations (mirrors [ensureActiveConversation]'s own guarantee).
+     */
+    fun clearAllConversations() {
+        _messages.value = emptyList()
+        val ctx = appContext ?: return
+        repoScope.launch {
+            val convDao = RequestrDatabase.get(ctx).chatConversationDao()
+            val msgDao = RequestrDatabase.get(ctx).chatMessageDao()
+            convDao.getAll().forEach { msgDao.deleteByConversation(it.id) }
+            convDao.getAll().forEach { convDao.deleteById(it.id) }
+            ensureActiveConversation(ctx)
+        }
     }
 
     /**
@@ -228,44 +519,72 @@ object ChatRepository {
      * moved on immediately, so a still-in-flight delete from a PREVIOUS test could land after the
      * next test's `sendMessage()`, deleting the very row that test's assertion was waiting for.
      */
-    internal suspend fun deleteAllPersistedMessages(context: Context) {
-        RequestrDatabase.get(context).chatMessageDao().getAll().forEach {
-            RequestrDatabase.get(context).chatMessageDao().deleteById(it.id)
+    internal suspend fun deleteAllPersistedMessages(context: Context, conversationId: String) {
+        RequestrDatabase.get(context).chatMessageDao().deleteByConversation(conversationId)
+    }
+
+    /**
+     * Keeps [conversationId]'s Room `title` in sync with its own messages -- called after every
+     * new message is persisted into it, and after an explicit rename is cleared back to "derive
+     * it". No-ops once the user has explicitly renamed the conversation ([titleIsOverride]).
+     */
+    private suspend fun recomputeTitleIfNotOverridden(ctx: Context, conversationId: String) {
+        val convDao = RequestrDatabase.get(ctx).chatConversationDao()
+        val conv = convDao.getById(conversationId) ?: return
+        if (conv.titleIsOverride) return
+        val msgs = RequestrDatabase.get(ctx).chatMessageDao().getByConversation(conversationId).map { it.toChatMessage() }
+        val derived = deriveChatTitle(msgs, null, conv.createdAt)
+        if (derived != conv.title) {
+            convDao.upsert(conv.copy(title = derived, updatedAt = System.currentTimeMillis()))
         }
     }
 
-    private fun persist(message: ChatMessage) {
+    private fun persist(message: ChatMessage, conversationId: String) {
         val ctx = appContext ?: return
         repoScope.launch {
-            RequestrDatabase.get(ctx).chatMessageDao().upsert(message.toEntity())
+            RequestrDatabase.get(ctx).chatMessageDao().upsert(message.toEntity(conversationId))
+            recomputeTitleIfNotOverridden(ctx, conversationId)
         }
     }
 
-    private fun ChatMessage.toEntity() = ChatMessageEntity(
-        id = id, role = role, content = content, timestamp = timestamp
+    private fun ChatMessage.toEntity(conversationId: String) = ChatMessageEntity(
+        id = id, role = role, content = content, timestamp = timestamp, conversationId = conversationId,
     )
 
     private fun ChatMessageEntity.toChatMessage() = ChatMessage(
         id = id, role = role, content = content, timestamp = timestamp
     )
 
-    /**
-     * Calls an OpenAI-compatible chat completion API.
-     * Works with OpenAI, Anthropic (via proxy), or any compatible endpoint.
-     */
+    private fun notifyAssistantReplyIfEnabled(ctx: Context, replyText: String) {
+        if (!ChatSettingsStore.areNotificationsEnabled(ctx)) return
+        try {
+            com.example.data.notifications.ReqyNotifier.notifyAssistantReply(ctx, replyText)
+        } catch (e: Exception) {
+            android.util.Log.w("ChatRepository", "Reqy reply notification failed: ${e.message}")
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // OpenAI-compatible request/response (OpenAI, OpenRouter, Groq, + Custom -- see
+    // ChatProviderKind.isOpenAiCompatible).
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+
     /**
      * Builds the OpenAI-compatible chat-completion request body: `model`, a `messages` array
      * windowed to the last 10 messages of [history] (oldest-to-newest, matching [ChatMessage]
      * ordering), and `max_tokens`. Extracted as a pure function (task 12) so the shape can be
      * asserted on directly in [com.example.data.repository.ChatProviderConfigTest] without a
-     * real network call.
+     * real network call. Locked shape -- do not add/rename/remove keys here; provider-specific
+     * additions (system instructions, temperature) are layered on top in
+     * [buildOpenAiCompatibleRequest] instead, which callers other than that test always go
+     * through.
      */
-    internal fun buildRequestBodyJson(config: ChatProviderConfig, history: List<ChatMessage>): org.json.JSONObject {
-        return org.json.JSONObject().apply {
+    internal fun buildRequestBodyJson(config: ChatProviderConfig, history: List<ChatMessage>): JSONObject {
+        return JSONObject().apply {
             put("model", config.model.ifBlank { "gpt-3.5-turbo" })
-            put("messages", org.json.JSONArray().apply {
+            put("messages", JSONArray().apply {
                 history.takeLast(10).forEach { msg ->
-                    put(org.json.JSONObject().apply {
+                    put(JSONObject().apply {
                         put("role", msg.role)
                         put("content", msg.content)
                     })
@@ -275,36 +594,264 @@ object ChatRepository {
         }
     }
 
-    private suspend fun callProvider(userMessage: String, config: ChatProviderConfig): String {
+    private fun buildOpenAiCompatibleRequest(
+        config: ChatProviderConfig,
+        history: List<ChatMessage>,
+        temperature: Double,
+        instructions: String,
+    ): Request {
+        val body = buildRequestBodyJson(config, history)
+        if (instructions.isNotBlank()) {
+            val withSystem = JSONArray()
+            withSystem.put(JSONObject().apply { put("role", "system"); put("content", instructions) })
+            val existing = body.getJSONArray("messages")
+            for (i in 0 until existing.length()) withSystem.put(existing.get(i))
+            body.put("messages", withSystem)
+        }
+        body.put("temperature", temperature)
+        val builder = Request.Builder()
+            .url(config.baseUrl)
+            .addHeader("Content-Type", "application/json")
+            .post(body.toString().toRequestBody("application/json".toMediaTypeOrNull()))
+        if (config.apiKey.isNotBlank()) builder.addHeader("Authorization", "Bearer ${config.apiKey}")
+        return builder.build()
+    }
+
+    internal fun parseOpenAiStyleResponse(body: String): String {
+        val json = JSONObject(body)
+        return json.optJSONArray("choices")
+            ?.optJSONObject(0)
+            ?.optJSONObject("message")
+            ?.optString("content", "No response")
+            ?: "Empty response from provider"
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // Anthropic (`x-api-key` + `anthropic-version` headers, `/v1/messages` shape).
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+
+    internal fun buildAnthropicRequestBodyJson(
+        config: ChatProviderConfig,
+        history: List<ChatMessage>,
+        instructions: String,
+    ): JSONObject {
+        return JSONObject().apply {
+            put("model", config.model.ifBlank { ChatProviderKind.ANTHROPIC.defaultModel })
+            put("max_tokens", 1024)
+            if (instructions.isNotBlank()) put("system", instructions)
+            put("messages", JSONArray().apply {
+                history.takeLast(10).forEach { msg ->
+                    put(JSONObject().apply { put("role", msg.role); put("content", msg.content) })
+                }
+            })
+        }
+    }
+
+    private fun buildAnthropicRequest(
+        config: ChatProviderConfig,
+        history: List<ChatMessage>,
+        instructions: String,
+    ): Request {
+        val body = buildAnthropicRequestBodyJson(config, history, instructions)
+        return Request.Builder()
+            .url(config.baseUrl.ifBlank { ChatProviderKind.ANTHROPIC.defaultBaseUrl })
+            .addHeader("x-api-key", config.apiKey)
+            .addHeader("anthropic-version", "2023-06-01")
+            .addHeader("Content-Type", "application/json")
+            .post(body.toString().toRequestBody("application/json".toMediaTypeOrNull()))
+            .build()
+    }
+
+    internal fun parseAnthropicResponse(body: String): String {
+        val json = JSONObject(body)
+        return json.optJSONArray("content")
+            ?.optJSONObject(0)
+            ?.optString("text", "No response")
+            ?: "Empty response from provider"
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // Gemini (`:generateContent?key=` URL, `contents[].parts[].text` shape, `model` role name).
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+
+    internal fun buildGeminiRequestBodyJson(history: List<ChatMessage>, instructions: String): JSONObject {
+        return JSONObject().apply {
+            if (instructions.isNotBlank()) {
+                put("systemInstruction", JSONObject().apply {
+                    put("parts", JSONArray().apply { put(JSONObject().put("text", instructions)) })
+                })
+            }
+            put("contents", JSONArray().apply {
+                history.takeLast(10).forEach { msg ->
+                    put(JSONObject().apply {
+                        put("role", if (msg.role == "assistant") "model" else "user")
+                        put("parts", JSONArray().apply { put(JSONObject().put("text", msg.content)) })
+                    })
+                }
+            })
+        }
+    }
+
+    internal fun buildGeminiUrl(baseUrl: String, model: String, apiKey: String): String {
+        val base = baseUrl.ifBlank { ChatProviderKind.GEMINI.defaultBaseUrl }.trimEnd('/')
+        val effectiveModel = model.ifBlank { ChatProviderKind.GEMINI.defaultModel }
+        return "$base/$effectiveModel:generateContent?key=$apiKey"
+    }
+
+    private fun buildGeminiRequest(
+        config: ChatProviderConfig,
+        history: List<ChatMessage>,
+        instructions: String,
+    ): Request {
+        val body = buildGeminiRequestBodyJson(history, instructions)
+        return Request.Builder()
+            .url(buildGeminiUrl(config.baseUrl, config.model, config.apiKey))
+            .addHeader("Content-Type", "application/json")
+            .post(body.toString().toRequestBody("application/json".toMediaTypeOrNull()))
+            .build()
+    }
+
+    internal fun parseGeminiResponse(body: String): String {
+        val json = JSONObject(body)
+        return json.optJSONArray("candidates")
+            ?.optJSONObject(0)
+            ?.optJSONObject("content")
+            ?.optJSONArray("parts")
+            ?.optJSONObject(0)
+            ?.optString("text", "No response")
+            ?: "Empty response from provider"
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // HuggingFace Inference API (Free) -- single-turn `{"inputs": text}`, no auth required.
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+
+    internal fun buildHuggingFaceRequestBodyJson(userMessage: String): JSONObject =
+        JSONObject().put("inputs", userMessage)
+
+    private fun buildHuggingFaceRequest(config: ChatProviderConfig, userMessage: String): Request {
+        val base = config.baseUrl.ifBlank { ChatProviderKind.HUGGINGFACE.defaultBaseUrl }.trimEnd('/')
+        val model = config.model.ifBlank { ChatProviderKind.HUGGINGFACE.defaultModel }
+        val builder = Request.Builder()
+            .url("$base/$model")
+            .addHeader("Content-Type", "application/json")
+            .post(buildHuggingFaceRequestBodyJson(userMessage).toString().toRequestBody("application/json".toMediaTypeOrNull()))
+        if (config.apiKey.isNotBlank()) builder.addHeader("Authorization", "Bearer ${config.apiKey}")
+        return builder.build()
+    }
+
+    internal fun parseHuggingFaceResponse(body: String): String {
+        val trimmed = body.trim()
+        return try {
+            val text = if (trimmed.startsWith("[")) {
+                JSONArray(trimmed).optJSONObject(0)?.optString("generated_text", "") ?: ""
+            } else {
+                val obj = JSONObject(trimmed)
+                obj.optString("generated_text", obj.optString("error", ""))
+            }
+            text.ifBlank { "Empty response from provider" }
+        } catch (e: Exception) {
+            "Empty response from provider"
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // Ollama (Local) -- `/api/chat`, `{model, messages, stream:false}`, no auth.
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+
+    internal fun buildOllamaRequestBodyJson(
+        config: ChatProviderConfig,
+        history: List<ChatMessage>,
+        temperature: Double,
+    ): JSONObject {
+        return JSONObject().apply {
+            put("model", config.model.ifBlank { ChatProviderKind.OLLAMA.defaultModel })
+            put("stream", false)
+            put("options", JSONObject().put("temperature", temperature))
+            put("messages", JSONArray().apply {
+                history.takeLast(10).forEach { msg ->
+                    put(JSONObject().apply { put("role", msg.role); put("content", msg.content) })
+                }
+            })
+        }
+    }
+
+    private fun buildOllamaRequest(config: ChatProviderConfig, history: List<ChatMessage>, temperature: Double): Request {
+        val base = config.baseUrl.ifBlank { ChatProviderKind.OLLAMA.defaultBaseUrl }.trimEnd('/')
+        val body = buildOllamaRequestBodyJson(config, history, temperature)
+        return Request.Builder()
+            .url("$base/api/chat")
+            .addHeader("Content-Type", "application/json")
+            .post(body.toString().toRequestBody("application/json".toMediaTypeOrNull()))
+            .build()
+    }
+
+    internal fun parseOllamaResponse(body: String): String {
+        val json = JSONObject(body)
+        return json.optJSONObject("message")?.optString("content", "No response")
+            ?: "Empty response from provider"
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // Dispatch
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+
+    private suspend fun callProvider(config: ChatProviderConfig): String {
+        val kind = ChatProviderKind.fromId(config.id)
+
+        // Defensive re-check -- the UI already validates before enabling Send (see
+        // ChatProviderCatalog.validateProviderFields), but callProvider must never trust that a
+        // caller validated first (e.g. a stale/edited-out-of-band providerConfig).
+        validateProviderFields(kind, config.baseUrl, config.apiKey)?.let { reason ->
+            return "Configuration error: $reason"
+        }
+
+        val ctx = appContext
+        val timeoutSeconds = ctx?.let { ChatSettingsStore.getTimeoutSeconds(it) }
+            ?: ChatSettingsStore.DEFAULT_TIMEOUT_SECONDS
+        val temperature = ctx?.let { ChatSettingsStore.getTemperature(it) }
+            ?: ChatSettingsStore.DEFAULT_TEMPERATURE
+        val rawLogging = ctx?.let { ChatSettingsStore.isRawLoggingEnabled(it) } ?: false
+        val instructions = ctx?.let { ChatSettingsStore.getInstructions(it) }
+            ?: ChatSettingsStore.DEFAULT_INSTRUCTIONS
+        val history = _messages.value
+
         return try {
             val client = okhttp3.OkHttpClient.Builder()
-                .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+                .connectTimeout(timeoutSeconds.toLong(), TimeUnit.SECONDS)
+                .readTimeout((timeoutSeconds * 2).toLong(), TimeUnit.SECONDS)
                 .build()
 
-            val requestBody = buildRequestBodyJson(config, _messages.value)
-
-            val request = okhttp3.Request.Builder()
-                .url(config.baseUrl)
-                .addHeader("Authorization", "Bearer ${config.apiKey}")
-                .addHeader("Content-Type", "application/json")
-                .post(requestBody.toString().toRequestBody("application/json".toMediaTypeOrNull()))
-                .build()
-
-            val response = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                client.newCall(request).execute()
+            val request = when (kind) {
+                ChatProviderKind.ANTHROPIC -> buildAnthropicRequest(config, history, instructions)
+                ChatProviderKind.GEMINI -> buildGeminiRequest(config, history, instructions)
+                ChatProviderKind.HUGGINGFACE -> buildHuggingFaceRequest(
+                    config,
+                    history.lastOrNull { it.role == "user" }?.content ?: "",
+                )
+                ChatProviderKind.OLLAMA -> buildOllamaRequest(config, history, temperature)
+                else -> buildOpenAiCompatibleRequest(config, history, temperature, instructions)
             }
 
-            if (response.isSuccessful) {
-                val body = response.body?.string() ?: ""
-                val json = org.json.JSONObject(body)
-                json.optJSONArray("choices")
-                    ?.optJSONObject(0)
-                    ?.optJSONObject("message")
-                    ?.optString("content", "No response")
-                    ?: "Empty response from provider"
-            } else {
-                "Error ${response.code}: ${response.message}"
+            if (rawLogging) {
+                // Never logs config.apiKey -- only the URL, which is not a secret.
+                android.util.Log.d("ChatRepository", "Reqy request (raw logging ON) -> ${request.url}")
+            }
+
+            val response = withContext(Dispatchers.IO) { client.newCall(request).execute() }
+            val bodyStr = response.body?.string() ?: ""
+            if (rawLogging) {
+                android.util.Log.d("ChatRepository", "Reqy response ${response.code}: $bodyStr")
+            }
+
+            if (!response.isSuccessful) return "Error ${response.code}: ${response.message}"
+
+            when (kind) {
+                ChatProviderKind.ANTHROPIC -> parseAnthropicResponse(bodyStr)
+                ChatProviderKind.GEMINI -> parseGeminiResponse(bodyStr)
+                ChatProviderKind.HUGGINGFACE -> parseHuggingFaceResponse(bodyStr)
+                ChatProviderKind.OLLAMA -> parseOllamaResponse(bodyStr)
+                else -> parseOpenAiStyleResponse(bodyStr)
             }
         } catch (e: Exception) {
             // Never logs config.apiKey -- only the exception message, which is provider/network
@@ -314,7 +861,7 @@ object ChatRepository {
     }
 
     /**
-     * Local fallback response generator when no provider is configured.
+     * Local fallback response generator when no provider is configured (or Local Mode is on).
      * Provides contextually relevant answers about the app's own features.
      */
     private fun generateLocalResponse(text: String): String {

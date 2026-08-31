@@ -970,6 +970,10 @@ class PacketPump(
                 wasDecrypted = true,
                 isUndecoded = false,
                 connectionId = write.connectionId,
+                // Item 1: PacketPump is only ever instantiated by RequestrVpnService, so this
+                // HTTP/3 row -- like every row this class's tun-driven pipeline produces -- is
+                // genuinely VPN_TUN-tier.
+                captureMethod = com.example.data.local.CaptureRowMethod.VPN_TUN,
             )
             runCatching { db.capturedTrafficDao().insert(entity) }
                 .onSuccess { newId ->

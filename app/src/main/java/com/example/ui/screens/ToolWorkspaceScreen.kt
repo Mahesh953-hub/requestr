@@ -9,18 +9,22 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDropDown
@@ -185,22 +189,23 @@ private fun ReversibleWorkspace(
         output = if (mode) encode(input) else decode(input)
     }
 
-    // Mode selector
+    // Mode selector — dossier Q4 / mockup tools/*base64* pixel-tab pattern: a spring-animated
+    // sliding accent fill (PixelTabSwitch), not a plain two-chip toggle. Per the mockup's legend,
+    // switching tabs must NOT auto-reprocess the existing input — the user re-triggers processing
+    // by editing the input or using Swap, so [process] is deliberately NOT called here.
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(label, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
-        Row(
-            modifier = Modifier
-                .clip(RoundedCornerShape(6.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            ModeChip(encodeLabel, selected = mode) { mode = true; process() }
-            ModeChip(decodeLabel, selected = !mode) { mode = false; process() }
-        }
+        PixelTabSwitch(
+            leftLabel = encodeLabel,
+            rightLabel = decodeLabel,
+            leftSelected = mode,
+            onSelectLeft = { mode = true },
+            onSelectRight = { mode = false }
+        )
     }
 
     Spacer(modifier = Modifier.height(12.dp))
@@ -235,6 +240,16 @@ private fun ReversibleWorkspace(
         Text("Output", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (output.isNotBlank()) {
             Row {
+                // Swap: mockup's exact semantic is "swaps output into input field AND switches
+                // the active tab to the opposite mode" — not a generic two-field swap. We also
+                // re-run processing immediately so the round-trip result is visible right away.
+                IconButton(onClick = {
+                    input = output
+                    mode = !mode
+                    process()
+                }, modifier = Modifier.size(28.dp)) {
+                    Icon(Icons.Default.SwapHoriz, "Swap output into input", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                }
                 IconButton(onClick = { copyToClipboard(ctx, output) }, modifier = Modifier.size(28.dp)) {
                     Icon(Icons.Default.ContentCopy, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
                 }
@@ -261,6 +276,71 @@ private fun ReversibleWorkspace(
         )
     }
 }
+
+/**
+ * Reusable spring-animated dual pixel-tab mode switch (dossier Q4 / mockup
+ * tools/tools-section-with-independate-tools-*.html Screen 3's Base64 pattern, also applied to
+ * AES's Encrypt/Decrypt tabs per the same mockup's legend). Unlike [ModeChip] (a plain two-chip
+ * toggle used by non-reversible tools), this renders a single sliding accent-filled pill that
+ * animates between the two labels via [com.example.ui.theme.scaledSpring] so it honours
+ * [com.example.ui.theme.LocalAnimationsEnabled] / duration-scale gating like the rest of the app.
+ */
+@Composable
+private fun PixelTabSwitch(
+    leftLabel: String,
+    rightLabel: String,
+    leftSelected: Boolean,
+    onSelectLeft: () -> Unit,
+    onSelectRight: () -> Unit
+) {
+    BoxWithConstraints(
+        modifier = Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(3.dp)
+    ) {
+        val tabWidth = maxWidth / 2
+        val fillOffset by animateDpAsState(
+            targetValue = if (leftSelected) 0.dp else tabWidth,
+            animationSpec = com.example.ui.theme.scaledSpring(
+                dampingRatio = Spring.DampingRatioNoBouncy,
+                stiffness = Spring.StiffnessMediumLow
+            ),
+            label = "pixelTabFill"
+        )
+        Box(
+            modifier = Modifier
+                .offset(x = fillOffset)
+                .width(tabWidth)
+                .height(26.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(MaterialTheme.colorScheme.primary)
+        )
+        Row(modifier = Modifier.width(tabWidth * 2)) {
+            PixelTabLabel(leftLabel, leftSelected, Modifier.width(tabWidth)) { onSelectLeft() }
+            PixelTabLabel(rightLabel, !leftSelected, Modifier.width(tabWidth)) { onSelectRight() }
+        }
+    }
+}
+
+@Composable
+private fun PixelTabLabel(label: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    Box(
+        modifier = modifier
+            .height(26.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+            fontSize = 11.sp,
+            color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
 
 @Composable
 private fun ModeChip(label: String, selected: Boolean, onClick: () -> Unit) {
@@ -517,9 +597,17 @@ private fun AesCipherWorkspace() {
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Encrypt/Decrypt + Key
+        // Encrypt/Decrypt — dossier Q4 pixel-tab pattern, applied here per the mockup legend
+        // ("this pattern also covers AES"). Switching does NOT auto-reprocess; the user
+        // re-triggers via editing input, changing key/IV, or the swap action below.
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            ModeChip(if (encrypt) "Encrypt" else "Decrypt", true) { encrypt = !encrypt; process() }
+            PixelTabSwitch(
+                leftLabel = "Encrypt",
+                rightLabel = "Decrypt",
+                leftSelected = encrypt,
+                onSelectLeft = { encrypt = true },
+                onSelectRight = { encrypt = false }
+            )
             Spacer(modifier = Modifier.weight(1f))
             IconButton(onClick = { key = randomHex(32); process() }, modifier = Modifier.size(32.dp)) {
                 Icon(Icons.Default.AutoAwesome, "Random key", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
@@ -554,7 +642,14 @@ private fun AesCipherWorkspace() {
             colors = fieldColors(), shape = RoundedCornerShape(12.dp))
 
         Spacer(modifier = Modifier.height(12.dp))
-        outputBlock(if (encrypt) "Ciphertext" else "Plaintext", output, ctx)
+        // Swap: puts the ciphertext/plaintext output back into Input and flips Encrypt/Decrypt,
+        // then reprocesses so the round-trip result is visible immediately (same semantic as the
+        // mockup's Base64 swap action).
+        outputBlock(if (encrypt) "Ciphertext" else "Plaintext", output, ctx, onSwap = {
+            input = output
+            encrypt = !encrypt
+            process()
+        })
     }
 }
 
@@ -895,7 +990,7 @@ private fun modeRow(title: String) {
 }
 
 @Composable
-private fun outputBlock(label: String, value: String, ctx: Context) {
+private fun outputBlock(label: String, value: String, ctx: Context, onSwap: (() -> Unit)? = null) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween
@@ -903,6 +998,11 @@ private fun outputBlock(label: String, value: String, ctx: Context) {
         Text(label, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (value.isNotBlank()) {
             Row {
+                if (onSwap != null) {
+                    IconButton(onClick = onSwap, modifier = Modifier.size(28.dp)) {
+                        Icon(Icons.Default.SwapHoriz, "Swap output into input", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                    }
+                }
                 IconButton(onClick = { copyToClipboard(ctx, value) }, modifier = Modifier.size(28.dp)) {
                     Icon(Icons.Default.ContentCopy, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
                 }

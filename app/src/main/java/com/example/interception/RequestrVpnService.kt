@@ -55,7 +55,10 @@ import kotlinx.coroutines.launch
  */
 class RequestrVpnService : VpnService() {
 
-    private var tunInterface: ParcelFileDescriptor? = null
+    // internal (not private): lets the lifecycle-ordering regression test in
+    // RequestrVpnServiceTest read/seed this field directly rather than via reflection, without
+    // widening the real public API surface (still module-internal).
+    internal var tunInterface: ParcelFileDescriptor? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var pumpJob: Job? = null
     private var filterObserverJob: Job? = null
@@ -416,13 +419,29 @@ class RequestrVpnService : VpnService() {
     }
 
     private fun fail(message: String) {
+        // Lifecycle-race fix (matches stopCapture below): cleanup() must run before the state
+        // transition, not after, so a UI observer reacting to ERROR (e.g. offering "retry") never
+        // sees a state that claims capture is over while tunInterface is still genuinely non-null.
         Log.e(TAG, message)
-        InterceptionStateRepository.markError(message)
         cleanup()
+        InterceptionStateRepository.markError(message)
         stopSelf()
     }
 
-    private fun stopCapture(reason: String) {
+    /**
+     * Lifecycle-race fix: this used to call [InterceptionStateRepository.markStopped] *before*
+     * [cleanup], so a collector reacting to the state going idle (e.g. re-enabling the Start
+     * button) could race a still-non-null [tunInterface] -- a fast stop-then-start double-tap
+     * could hit [startCapture]'s `tunInterface != null` guard and silently no-op the restart,
+     * with nothing capturing and no error surfaced. [cleanup] is a plain synchronous function
+     * with no suspension point before the [markStopped] call below, so by the time any collector
+     * observes [InterceptionStateRepository.state] converge to `CONFIGURED_IDLE`, [tunInterface]
+     * is *already* null -- this is what lets [PreflightController] treat this service as owning
+     * its own stop convergence (see [PreflightController.stopCapture]'s doc) rather than routing
+     * VPN_TUN/ROOT_FRIDA through [InterceptionStateRepository.runStop]'s generic guarantee, which
+     * would otherwise fire the same premature transition one layer up instead.
+     */
+    internal fun stopCapture(reason: String) {
         Log.i(TAG, "Stopping capture: $reason")
         scope.launch {
             sessionId?.let { id ->
@@ -430,8 +449,8 @@ class RequestrVpnService : VpnService() {
                     RequestrDatabase.get(applicationContext).captureSessionDao().markEnded(id)
                 }
             }
-            InterceptionStateRepository.markStopped()
             cleanup()
+            InterceptionStateRepository.markStopped()
             stopSelf()
         }
     }

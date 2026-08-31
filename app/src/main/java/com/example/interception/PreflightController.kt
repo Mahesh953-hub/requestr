@@ -161,55 +161,105 @@ object PreflightController {
      *
      * Previously this unconditionally called `RequestrVpnService.start()` regardless of
      * the resolved method — Root/Shizuku/MITM tiers were cosmetic (AUDIT_REPORT Fix #1/#2).
+     *
+     * Audit fix (capture start/stop state desync): every branch below is wrapped by
+     * [InterceptionStateRepository.runStart], which guarantees a clean `markError` transition
+     * if the branch throws (e.g. `MitmProxyEngine`/`HttpProxyEngine`'s `ServerSocket(port)`
+     * binding a port already in use) or returns `false` (e.g. `RootIptablesEngine`/
+     * `ShizukuTunEngine` reporting a real `su`/binder failure) — see that function's KDoc for
+     * why this used to leave the FAB stuck on the `ARMED` state [run] had already set, forever.
+     * VPN_TUN/ROOT_FRIDA return `true` unconditionally because `RequestrVpnService` is async and
+     * already guarantees its own `markActive`/`markError` from inside `startCapture()`/`fail()`.
      */
     fun startCapture(context: Context, method: CaptureMethod = CaptureMethod.VPN_TUN, port: Int = 8080) {
-        when (method) {
-            CaptureMethod.VPN_TUN -> {
-                RequestrVpnService.start(context)
-            }
-            CaptureMethod.MITM_PROXY -> {
-                // MITM proxy runs as a local CONNECT proxy. For full capture, VPN still
-                // routes traffic to it — but the MITM engine handles TLS termination.
-                // Decrypted transactions are persisted to Room via the engine's
-                // onDecryptedTransaction callback (see mitmProxy(context)).
-                mitmProxy(context).start(context, port)
-            }
-            CaptureMethod.ROOT_IPTABLES -> {
-                // Root: iptables redirect to MITM proxy port, no VPN needed
-                val mitmPort = mitmProxy(context).start(context, port)
-                val uid = android.os.Process.myUid()
-                rootEngine.start(mitmPort, uid)
-            }
-            CaptureMethod.SHIZUKU_TUN -> {
-                // Shizuku: same approach as root but via Shizuku shell
-                val mitmPort = mitmProxy(context).start(context, port)
-                shizukuEngine.start(mitmPort)
-            }
-            CaptureMethod.HTTP_PROXY -> {
-                httpProxy.start(context, port)
-            }
-            CaptureMethod.ROOT_FRIDA -> {
-                // Frida requires external frida-server; start VPN as fallback for traffic
-                // capture, Frida scripts handled separately
-                RequestrVpnService.start(context)
+        InterceptionStateRepository.runStart(method.name) {
+            when (method) {
+                CaptureMethod.VPN_TUN -> {
+                    RequestrVpnService.start(context)
+                    true
+                }
+                CaptureMethod.MITM_PROXY -> {
+                    // MITM proxy runs as a local CONNECT proxy. For full capture, VPN still
+                    // routes traffic to it — but the MITM engine handles TLS termination.
+                    // Decrypted transactions are persisted to Room via the engine's
+                    // onDecryptedTransaction callback (see mitmProxy(context)).
+                    mitmProxy(context).start(context, port)
+                    true
+                }
+                CaptureMethod.ROOT_IPTABLES -> {
+                    // Root: iptables redirect to MITM proxy port, no VPN needed
+                    val mitmPort = mitmProxy(context).start(context, port)
+                    val uid = android.os.Process.myUid()
+                    val ok = rootEngine.start(mitmPort, uid)
+                    if (!ok) {
+                        // The MITM proxy socket is already listening at this point but iptables
+                        // never got installed -- don't leave it orphaned behind a clean ERROR.
+                        mitmProxy?.stop()
+                    }
+                    ok
+                }
+                CaptureMethod.SHIZUKU_TUN -> {
+                    // Shizuku: same approach as root but via Shizuku shell
+                    val mitmPort = mitmProxy(context).start(context, port)
+                    val ok = shizukuEngine.start(mitmPort)
+                    if (!ok) {
+                        mitmProxy?.stop()
+                    }
+                    ok
+                }
+                CaptureMethod.HTTP_PROXY -> {
+                    httpProxy.start(context, port)
+                    true
+                }
+                CaptureMethod.ROOT_FRIDA -> {
+                    // Frida requires external frida-server; start VPN as fallback for traffic
+                    // capture, Frida scripts handled separately
+                    RequestrVpnService.start(context)
+                    true
+                }
             }
         }
     }
 
+    /**
+     * Stops capture for the resolved [CaptureMethod].
+     *
+     * Audit fix (capture start/stop state desync): every tier converges to `CONFIGURED_IDLE`
+     * exactly once, but *how* differs by whether the tier already owns a real completion signal:
+     *
+     * - VPN_TUN/ROOT_FRIDA are handled by [RequestrVpnService], which now (lifecycle-race fix)
+     *   runs its own `cleanup()` before calling [InterceptionStateRepository.markStopped] itself
+     *   from inside its internal `stopCapture(reason)` -- so by the time the shared state
+     *   converges, the tun interface really is torn down, not just "an intent got sent". These
+     *   two tiers are deliberately called *outside* [InterceptionStateRepository.runStop] here:
+     *   wrapping them too would make `runStop`'s `finally` fire `markStopped` immediately after
+     *   dispatching the (fire-and-forget) stop `Intent`, i.e. before the service's real teardown
+     *   even starts -- reintroducing the exact "stopped shown before the tun is actually torn
+     *   down" race this whole fix exists to close, at an even earlier point than before.
+     * - MITM_PROXY/ROOT_IPTABLES/SHIZUKU_TUN/HTTP_PROXY have no equivalent owned completion
+     *   signal -- their `.stop()` calls just tear down a socket/process synchronously with
+     *   nothing to guarantee the transition -- so they route through
+     *   [InterceptionStateRepository.runStop], which unconditionally converges to `markStopped`
+     *   right after that synchronous teardown returns, even if it throws. This is what fixed the
+     *   original bug: previously these four tiers had no call to `markStopped` anywhere, so the
+     *   FAB stayed permanently on "Stop capture" after the first real stop.
+     *
+     * A future tier added to this `when` should default to the `runStop` branch unless it gains
+     * its own service-owned convergence signal the way VPN_TUN/ROOT_FRIDA have.
+     */
     fun stopCapture(context: Context, method: CaptureMethod = CaptureMethod.VPN_TUN) {
         when (method) {
-            CaptureMethod.VPN_TUN -> RequestrVpnService.stop(context)
-            CaptureMethod.MITM_PROXY -> mitmProxy?.stop()
-            CaptureMethod.ROOT_IPTABLES -> {
+            CaptureMethod.VPN_TUN, CaptureMethod.ROOT_FRIDA -> RequestrVpnService.stop(context)
+            CaptureMethod.MITM_PROXY -> InterceptionStateRepository.runStop { mitmProxy?.stop() }
+            CaptureMethod.ROOT_IPTABLES -> InterceptionStateRepository.runStop {
                 rootEngine.stop(android.os.Process.myUid())
                 mitmProxy?.stop()
             }
-            CaptureMethod.SHIZUKU_TUN -> {
+            CaptureMethod.SHIZUKU_TUN -> InterceptionStateRepository.runStop {
                 shizukuEngine.stop(mitmProxy?.port ?: 0)
                 mitmProxy?.stop()
             }
-            CaptureMethod.HTTP_PROXY -> httpProxy.stop()
-            CaptureMethod.ROOT_FRIDA -> RequestrVpnService.stop(context)
+            CaptureMethod.HTTP_PROXY -> InterceptionStateRepository.runStop { httpProxy.stop() }
         }
     }
 }

@@ -60,12 +60,22 @@ class TunRelay(
         // aggregate relayErrors / unrelayableCount fields above, so the breakdown is an
         // honest partition of those totals -- never a separate invented stream. The fifth
         // mockup category (tun-MTU over-length) has no drop site in this relay today, so it
-        // is deliberately absent rather than shown as a fabricated zero.
+        // is deliberately absent rather than shown as a fabricated zero. EAGAIN/would-block on
+        // a TCP upstream write is likewise absent: it is handled by re-registering OP_WRITE
+        // interest (see writeUpstream) and retried once the socket is writable again, so the
+        // packet is queued, not dropped -- there is nothing to count.
         val evictionCount: Int = 0,
         val dropProtectFail: Int = 0,
         val dropUpstreamOpen: Int = 0,
         val dropUpstreamWrite: Int = 0,
         val dropUnrelayableProto: Int = 0,
+        // dropTcpUpstreamWriteFail is deliberately distinct from dropUpstreamWrite (the UDP
+        // write-failure counter above): a UDP write failure drops one datagram and the flow
+        // lives on, while a TCP upstream write failure (writeUpstream's/flushPendingUpstream's
+        // catch blocks) tears down the whole TCP connection -- an app-visible reset, not a
+        // single lost packet. A user reading the drop-reason panel would investigate these very
+        // differently, so they are not folded together.
+        val dropTcpUpstreamWriteFail: Int = 0,
     )
 
     private val _stats = MutableStateFlow(RelayStats())
@@ -262,6 +272,7 @@ class TunRelay(
             }
         } catch (e: Exception) {
             Log.w(TAG, "TCP upstream write failed: ${e.message}")
+            updateStats { it.copy(relayErrors = it.relayErrors + 1, dropTcpUpstreamWriteFail = it.dropTcpUpstreamWriteFail + 1) }
             synchronized(flowLock) { closeTcpFlow(flow.mapKey, flow, sendFinToGuest = false) }
         }
     }
@@ -285,6 +296,7 @@ class TunRelay(
             if (key != null && key.isValid) key.interestOps(SelectionKey.OP_READ)
         } catch (e: Exception) {
             Log.w(TAG, "TCP upstream flush failed: ${e.message}")
+            updateStats { it.copy(relayErrors = it.relayErrors + 1, dropTcpUpstreamWriteFail = it.dropTcpUpstreamWriteFail + 1) }
         }
     }
 

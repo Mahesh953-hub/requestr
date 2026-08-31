@@ -19,12 +19,18 @@ import com.example.interception.tun.TunRelay
  * live IcmpRelay. The per-reason drop breakdown ([dropReasons]) is an honest partition of
  * [TunRelay.RelayStats.relayErrors] + [TunRelay.RelayStats.unrelayableCount], never a separate
  * invented stream (see the counter doc on RelayStats).
+ *
+ * Item 3: [icmpChecksumFailureCount] and [icmpUnrelayableIcmpv6Count] are the same kind of honest
+ * partition, but of [IcmpRelay.unrelayableCount] rather than [TunRelay.RelayStats] -- see the
+ * counter doc on [IcmpRelay] for exactly which call sites increment each one.
  */
 sealed class RelayHealthState {
     abstract val pumpRunning: Boolean
     abstract val stats: TunRelay.RelayStats
     abstract val icmpUnrelayableCount: Int
     abstract val icmpLastPathUsed: IcmpRelay.LastPathUsed
+    abstract val icmpChecksumFailureCount: Int
+    abstract val icmpUnrelayableIcmpv6Count: Int
 
     /** Relay is up and no drop/error counters are non-zero. */
     data class Healthy(
@@ -32,6 +38,8 @@ sealed class RelayHealthState {
         override val stats: TunRelay.RelayStats,
         override val icmpUnrelayableCount: Int,
         override val icmpLastPathUsed: IcmpRelay.LastPathUsed,
+        override val icmpChecksumFailureCount: Int = 0,
+        override val icmpUnrelayableIcmpv6Count: Int = 0,
     ) : RelayHealthState()
 
     /** Relay is up but at least one drop/error counter is non-zero (real packet loss). */
@@ -40,6 +48,8 @@ sealed class RelayHealthState {
         override val stats: TunRelay.RelayStats,
         override val icmpUnrelayableCount: Int,
         override val icmpLastPathUsed: IcmpRelay.LastPathUsed,
+        override val icmpChecksumFailureCount: Int = 0,
+        override val icmpUnrelayableIcmpv6Count: Int = 0,
     ) : RelayHealthState()
 
     /** No PacketPump instance — nothing is capturing, so nothing is being relayed. */
@@ -48,6 +58,8 @@ sealed class RelayHealthState {
         override val stats: TunRelay.RelayStats,
         override val icmpUnrelayableCount: Int,
         override val icmpLastPathUsed: IcmpRelay.LastPathUsed,
+        override val icmpChecksumFailureCount: Int = 0,
+        override val icmpUnrelayableIcmpv6Count: Int = 0,
     ) : RelayHealthState()
 }
 
@@ -65,9 +77,25 @@ fun TunRelay.RelayStats.totalDropped(): Int = relayErrors + unrelayableCount
 fun TunRelay.RelayStats.dropReasons(): List<RelayDropReason> = listOfNotNull(
     RelayDropReason("Flow table at cap — entry evicted", evictionCount).takeIf { it.count > 0 },
     RelayDropReason("Upstream socket not writable", dropUpstreamWrite).takeIf { it.count > 0 },
+    RelayDropReason("TCP upstream write failed — connection reset", dropTcpUpstreamWriteFail).takeIf { it.count > 0 },
     RelayDropReason("No route to upstream host", dropUpstreamOpen).takeIf { it.count > 0 },
     RelayDropReason("VPN socket protection failed", dropProtectFail).takeIf { it.count > 0 },
     RelayDropReason("Unrelayable protocol / ICMP", dropUnrelayableProto).takeIf { it.count > 0 },
+)
+
+/**
+ * Item 3: the same honest breakdown as [TunRelay.RelayStats.dropReasons], extended with the two
+ * [com.example.interception.tun.IcmpRelay]-level reasons this state carries
+ * ([RelayHealthState.icmpChecksumFailureCount], [RelayHealthState.icmpUnrelayableIcmpv6Count]).
+ * A separate function (rather than changing [TunRelay.RelayStats.dropReasons] itself) because the
+ * ICMP counters live on [IcmpRelay], a different class with its own independent counters -- not a
+ * field of [TunRelay.RelayStats] -- so only the full [RelayHealthState] has enough information to
+ * list them together. Zero-count reasons are omitted, exactly like the [TunRelay.RelayStats]
+ * version.
+ */
+fun RelayHealthState.dropReasons(): List<RelayDropReason> = stats.dropReasons() + listOfNotNull(
+    RelayDropReason("ICMP echo checksum invalid", icmpChecksumFailureCount).takeIf { it.count > 0 },
+    RelayDropReason("ICMPv6 not relayable", icmpUnrelayableIcmpv6Count).takeIf { it.count > 0 },
 )
 
 /** Active flow count across every transport/family — the "N flows" compact-card figure. */
@@ -87,14 +115,16 @@ fun toRelayHealthState(
     stats: TunRelay.RelayStats,
     icmpUnrelayableCount: Int,
     icmpLastPathUsed: IcmpRelay.LastPathUsed,
+    icmpChecksumFailureCount: Int = 0,
+    icmpUnrelayableIcmpv6Count: Int = 0,
 ): RelayHealthState {
     if (!pumpRunning) {
-        return RelayHealthState.Down(pumpRunning, stats, icmpUnrelayableCount, icmpLastPathUsed)
+        return RelayHealthState.Down(pumpRunning, stats, icmpUnrelayableCount, icmpLastPathUsed, icmpChecksumFailureCount, icmpUnrelayableIcmpv6Count)
     }
     val hasIssues = stats.relayErrors > 0 || stats.unrelayableCount > 0 || icmpUnrelayableCount > 0
     return if (hasIssues) {
-        RelayHealthState.Degraded(pumpRunning, stats, icmpUnrelayableCount, icmpLastPathUsed)
+        RelayHealthState.Degraded(pumpRunning, stats, icmpUnrelayableCount, icmpLastPathUsed, icmpChecksumFailureCount, icmpUnrelayableIcmpv6Count)
     } else {
-        RelayHealthState.Healthy(pumpRunning, stats, icmpUnrelayableCount, icmpLastPathUsed)
+        RelayHealthState.Healthy(pumpRunning, stats, icmpUnrelayableCount, icmpLastPathUsed, icmpChecksumFailureCount, icmpUnrelayableIcmpv6Count)
     }
 }

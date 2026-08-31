@@ -333,6 +333,9 @@ object GatewayEngine {
             isUndecoded = false,
             sourceIp = sourceIp,
             connectionId = connectionId,
+            // Item 1: every row this engine persists is genuinely GATEWAY-tier -- see the
+            // same E.2 note above about this being the single call site for this path.
+            captureMethod = com.example.data.local.CaptureRowMethod.GATEWAY,
         )
         runCatching { RequestrDatabase.get(ctx).capturedTrafficDao().insert(entity) }
             .onFailure { Log.w(TAG, "Failed to persist gateway transaction: ${it.message}") }

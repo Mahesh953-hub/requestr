@@ -3,6 +3,7 @@ package com.example.interception
 import android.content.Context
 import android.util.Log
 import com.example.data.export.MediaStoreExporter
+import com.example.data.local.CaptureRowMethod
 import com.example.data.local.CapturedTrafficEntity
 import com.example.data.local.InterceptRuleEntity
 import com.example.data.local.RequestrDatabase
@@ -36,6 +37,11 @@ import kotlinx.coroutines.runBlocking
  *   CA to the client and connects to the real server)
  * - HTTP/2 frame parsing
  * - WebSocket message capture
+ *
+ * Item 1: this class is driven exclusively by [PacketPump], which is itself only ever
+ * instantiated by [com.example.interception.RequestrVpnService] -- so every
+ * `CapturedTrafficEntity` this class persists is tagged
+ * `captureMethod = CaptureRowMethod.VPN_TUN`, unconditionally.
  */
 class CaptureEngine(
     private val context: Context,
@@ -282,6 +288,10 @@ class CaptureEngine(
                         wasDecrypted = false,
                         isUndecoded = true,
                         connectionId = stream.key,
+                        // Item 1: this class is only ever driven by PacketPump, which is only
+                        // ever instantiated by RequestrVpnService -- every row this class
+                        // persists is genuinely VPN_TUN-tier.
+                        captureMethod = CaptureRowMethod.VPN_TUN,
                     )
                     kotlinx.coroutines.runBlocking {
                         try { db.capturedTrafficDao().insert(entity); transactionCount++; Log.i(TAG, "Undecoded TLS persisted: ${stream.sniHost ?: stream.dstIp}") } catch (_: Exception) {}
@@ -611,6 +621,9 @@ class CaptureEngine(
             timestamp = System.currentTimeMillis(),
             wasDecrypted = stream.decryptedByMitm,
             connectionId = stream.key,
+            // Item 1: gRPC messages captured here always came in over the tun pipeline --
+            // see the class-level VPN_TUN note above.
+            captureMethod = CaptureRowMethod.VPN_TUN,
         )
 
         runCatching {
@@ -764,6 +777,8 @@ class CaptureEngine(
             timestamp = System.currentTimeMillis(),
             wasDecrypted = false,
             connectionId = stream.key,
+            // Item 1: see the class-level VPN_TUN note above.
+            captureMethod = CaptureRowMethod.VPN_TUN,
         )
 
         runCatching {
@@ -838,6 +853,8 @@ class CaptureEngine(
             timestamp = System.currentTimeMillis(),
             wasDecrypted = false,
             connectionId = stream.key,
+            // Item 1: see the class-level VPN_TUN note above.
+            captureMethod = CaptureRowMethod.VPN_TUN,
         )
         runCatching {
             kotlinx.coroutines.runBlocking { db.capturedTrafficDao().insert(entity) }

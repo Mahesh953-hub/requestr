@@ -334,6 +334,31 @@ data class CapturedTrafficItem(
     val alpnProtocol: String = "",
     // ── V3: Tags ───────────────────────────────────────────────────────
     val tags: List<String> = emptyList(),
+    /**
+     * Item 1 (dossier Q2 / audit §7.5): true iff THIS row's own
+     * [com.example.data.local.CapturedTrafficEntity.captureMethod] is
+     * [com.example.data.local.CaptureRowMethod.VPN_TUN] -- the exact boolean the traffic row's
+     * VPN-relay icon needs, derived from the richer per-row enum at mapping time
+     * ([com.example.data.interception.CaptureLogRepository.toUiModel]) rather than duplicating
+     * the enum itself onto this UI-facing model. Defaults to false, matching
+     * [com.example.data.local.CaptureRowMethod.UNKNOWN]'s "render as absent" contract -- a false
+     * value here must never be read as "confirmed not VPN," only as "not confirmed VPN."
+     */
+    val routedViaVpnRelay: Boolean = false,
+    /**
+     * Audit fix (StatusCodeBadge "0" defect): true iff [statusCode] is a real, decoded
+     * HTTP/QUIC status. False means no status line was ever decoded for this row (an HTTP/3
+     * OBSERVED/DETECTED row, or a fully opaque undecoded-TLS row) and [statusCode] is only
+     * carrying the historical `0` placeholder that legacy numeric call sites (sorting,
+     * `statusCode >= 400` filters) already rely on — UI code that renders a label/badge for a
+     * human MUST check this flag rather than testing `statusCode == 0` itself, since 0 is not
+     * a reserved "unknown" sentinel for those numeric call sites, just a convenient default.
+     * Defaults to true so every pre-existing construction site (previews, tests, exporters,
+     * mocked responses) — none of which ever had a genuinely statusless row — is unaffected.
+     * Set truthfully from the entity's own nullable status in
+     * [com.example.data.interception.CaptureLogRepository.toUiModel].
+     */
+    val hasKnownStatus: Boolean = true,
 )
 
 enum class RuleAction(val label: String, val colorHex: Long) {

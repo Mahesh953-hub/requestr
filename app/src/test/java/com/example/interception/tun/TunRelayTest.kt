@@ -136,6 +136,65 @@ class TunRelayTest {
     }
 
     @Test
+    fun `peer reset mid-flow increments dropTcpUpstreamWriteFail instead of dropping silently`() {
+        // Regression test for the two uncounted TCP write-failure paths: writeUpstream's catch
+        // (channel.write throws once the peer has genuinely reset the connection) and
+        // flushPendingUpstream's catch. Before this counter existed, a reset upstream connection
+        // closed the flow with a log line only -- invisible in the relay-health drop-reason
+        // panel, unlike the equivalent UDP write-failure case which was already counted.
+        val server = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
+        try {
+            val (relay, sink) = startRelay()
+
+            val guestIp = byteArrayOf(10, 111, 222.toByte(), 6)
+            val serverIp = byteArrayOf(127, 0, 0, 1)
+            val guestPort = 51001
+            val serverPort = server.localPort
+
+            val syn = IpPacketBuilder.buildIpv4Tcp(
+                srcIp = guestIp, srcPort = guestPort,
+                dstIp = serverIp, dstPort = serverPort,
+                seq = 2000L, ack = 0L, flags = TcpReassembler.FLAG_SYN,
+            )
+            relay.offer(syn, syn.size, 4)
+
+            val accepted = server.accept()
+            awaitAtLeast(sink, 1) // SYN-ACK reached the guest, so the upstream channel is connected.
+
+            // A hard reset (SO_LINGER 0), not a graceful FIN, so the relay's next channel.write()
+            // upstream genuinely throws -- the real "peer reset the connection mid-flow" case
+            // writeUpstream's/flushPendingUpstream's catch blocks exist for.
+            accepted.setSoLinger(true, 0)
+            accepted.close()
+
+            val payload = "still-trying".toByteArray()
+            var seq = 2001L
+            val deadline = System.currentTimeMillis() + 5000L
+            while (relay.stats.value.dropTcpUpstreamWriteFail == 0 && System.currentTimeMillis() < deadline) {
+                val dataSeg = IpPacketBuilder.buildIpv4Tcp(
+                    srcIp = guestIp, srcPort = guestPort,
+                    dstIp = serverIp, dstPort = serverPort,
+                    seq = seq, ack = 1L, flags = TcpReassembler.FLAG_ACK,
+                    payload = payload,
+                )
+                relay.offer(dataSeg, dataSeg.size, 4)
+                seq += payload.size
+                Thread.sleep(50)
+            }
+
+            assertTrue(
+                "expected writeUpstream's catch to bump dropTcpUpstreamWriteFail once the peer reset the connection",
+                relay.stats.value.dropTcpUpstreamWriteFail > 0,
+            )
+            // Every per-reason counter is an honest partition of the relayErrors aggregate --
+            // never counted separately from it -- exactly like every other drop reason.
+            assertTrue(relay.stats.value.relayErrors >= relay.stats.value.dropTcpUpstreamWriteFail)
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
     fun `flow-table eviction respects the MAX_FLOWS bound`() {
         val server = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
         try {

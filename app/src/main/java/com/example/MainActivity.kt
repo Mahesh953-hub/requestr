@@ -650,7 +650,32 @@ fun RequestrApp() {
 
                         composable("chat") {
                             ChatScreen(
-                                onMiniSettings = { showMiniSettingsForSection = "Chats" }
+                                onMiniSettings = { showMiniSettingsForSection = "Chats" },
+                                onNavigateHome = {
+                                    navController.navigate(Screen.Home.route) {
+                                        popUpTo(Screen.Home.route) { saveState = true }
+                                        launchSingleTop = true
+                                        restoreState = true
+                                    }
+                                },
+                                // "Collections" in Reqy's drawer means the saved/organized API
+                                // requests list -- Screen.SavedApis ("Saved APIs"), the same
+                                // destination HomeScreen's own "APIs" power-module card already
+                                // treats as the collections surface.
+                                onNavigateToCollections = {
+                                    navController.navigate(Screen.SavedApis.route) {
+                                        popUpTo(Screen.Home.route) { saveState = true }
+                                        launchSingleTop = true
+                                        restoreState = true
+                                    }
+                                },
+                                onNavigateToFlows = {
+                                    navController.navigate(Screen.Flow.route) {
+                                        popUpTo(Screen.Home.route) { saveState = true }
+                                        launchSingleTop = true
+                                        restoreState = true
+                                    }
+                                },
                             )
                         }
 

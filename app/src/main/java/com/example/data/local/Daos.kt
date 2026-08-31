@@ -739,16 +739,49 @@ interface CustomToolDao {
 @Dao
 interface ChatMessageDao {
 
+    // Kept for backward compatibility (ChatRepositoryRoomTest + pre-multi-conversation callers
+    // operate across every conversation at once); conversation-scoped queries below are additive.
     @Query("SELECT * FROM chat_messages ORDER BY timestamp ASC")
     fun observeAll(): Flow<List<ChatMessageEntity>>
 
     @Query("SELECT * FROM chat_messages ORDER BY timestamp ASC")
     suspend fun getAll(): List<ChatMessageEntity>
 
+    @Query("SELECT * FROM chat_messages WHERE conversationId = :conversationId ORDER BY timestamp ASC")
+    fun observeByConversation(conversationId: String): Flow<List<ChatMessageEntity>>
+
+    @Query("SELECT * FROM chat_messages WHERE conversationId = :conversationId ORDER BY timestamp ASC")
+    suspend fun getByConversation(conversationId: String): List<ChatMessageEntity>
+
+    @Query("SELECT COUNT(*) FROM chat_messages WHERE conversationId = :conversationId")
+    suspend fun countForConversation(conversationId: String): Int
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(message: ChatMessageEntity)
 
     @Query("DELETE FROM chat_messages WHERE id = :id")
+    suspend fun deleteById(id: String)
+
+    @Query("DELETE FROM chat_messages WHERE conversationId = :conversationId")
+    suspend fun deleteByConversation(conversationId: String)
+}
+
+@Dao
+interface ChatConversationDao {
+
+    @Query("SELECT * FROM chat_conversations ORDER BY updatedAt DESC")
+    fun observeAll(): Flow<List<ChatConversationEntity>>
+
+    @Query("SELECT * FROM chat_conversations ORDER BY updatedAt DESC")
+    suspend fun getAll(): List<ChatConversationEntity>
+
+    @Query("SELECT * FROM chat_conversations WHERE id = :id")
+    suspend fun getById(id: String): ChatConversationEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(conversation: ChatConversationEntity)
+
+    @Query("DELETE FROM chat_conversations WHERE id = :id")
     suspend fun deleteById(id: String)
 }
 

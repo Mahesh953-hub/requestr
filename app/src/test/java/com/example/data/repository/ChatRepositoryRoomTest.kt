@@ -36,6 +36,14 @@ class ChatRepositoryRoomTest {
         RequestrDatabase.get(context).chatMessageDao().getAll().forEach {
             RequestrDatabase.get(context).chatMessageDao().deleteById(it.id)
         }
+        // Multi-conversation pass: also clear any leftover chat_conversations rows from a
+        // previous test class in this same Robolectric JVM fork (RequestrDatabase.INSTANCE can
+        // outlive a single test class the same way ChatRepository itself does -- see this
+        // class's own kdoc above), so init()'s ensureActiveConversation() always starts this
+        // test from a genuinely empty conversation table.
+        RequestrDatabase.get(context).chatConversationDao().getAll().forEach {
+            RequestrDatabase.get(context).chatConversationDao().deleteById(it.id)
+        }
         ChatRepository.init(context)
     }
 

@@ -387,6 +387,68 @@ fun exceededCapMessage(trueSizeBytes: Long, capBytes: Long): String =
         "${formatByteCount(capBytes)} capture cap, so its bytes weren't stored. Only the size is known."
 
 /**
+ * Item 2 (audit §7.2): the fixed set of header names whose VALUE must be masked by default in
+ * [CapturedDetailBottomSheet]'s request/response header views. Case-insensitive by construction
+ * (see [isSensitiveHeaderName]) -- HTTP header names are case-insensitive per RFC 7230 §3.2, and
+ * a naive case-sensitive set here would be a silent leak the moment a server/client capitalizes
+ * a header differently (e.g. `set-cookie` vs `Set-Cookie`).
+ */
+private val SENSITIVE_HEADER_NAMES = setOf(
+    "set-cookie",
+    "cookie",
+    "authorization",
+    "proxy-authorization",
+)
+
+/**
+ * Item 2: pure predicate -- is [headerName] one of [SENSITIVE_HEADER_NAMES]? Case-insensitive,
+ * matches on the trimmed name so incidental leading/trailing whitespace from a raw header map
+ * doesn't defeat the check. Unknown/other header names (including anything not in the fixed
+ * set, e.g. `Content-Type`) are correctly left unaffected -- this function has no "fuzzy" or
+ * prefix matching, only exact (case-insensitive) name equality, so it can't over-mask.
+ */
+fun isSensitiveHeaderName(headerName: String): Boolean =
+    headerName.trim().lowercase() in SENSITIVE_HEADER_NAMES
+
+/**
+ * Item 2: pure mask-formatting for a sensitive header's value. Deliberately NOT
+ * one-asterisk-per-character -- rendering a mask whose glyph-count scales with the real value's
+ * length would leak exactly the kind of length signal (e.g. "this bearer token is 812 characters
+ * long") that defeats the point of masking a session token or API key in the first place. Instead
+ * this renders a fixed-width placeholder plus the real byte length as separate, explicit text,
+ * so the user gets a useful signal ("there's a value here, and it's this big") without the
+ * masked glyphs themselves encoding the value's shape.
+ *
+ * An empty value masks to just the placeholder with no byte-count suffix (there is nothing to
+ * report a length for, and "0 bytes" would be redundant with an empty value that isn't secret
+ * anyway -- but [isSensitiveHeaderName] is checked by the caller, not here, so an empty value
+ * still reaching this function is masked like any other for consistency).
+ */
+fun maskHeaderValue(value: String): String {
+    val byteLength = value.toByteArray(Charsets.UTF_8).size
+    return if (byteLength == 0) HEADER_MASK_PLACEHOLDER else "$HEADER_MASK_PLACEHOLDER ($byteLength bytes)"
+}
+
+private const val HEADER_MASK_PLACEHOLDER = "•••••••••"
+
+/**
+ * Audit fix (StatusCodeBadge "0" defect): the text [com.example.ui.components.StatusCodeBadge]
+ * shows for a row with [CapturedTrafficItem.hasKnownStatus] false. Reuses the row's own
+ * already-computed [com.example.data.models.Http3RowState] label ("OBSERVED"/"DETECTED") so the
+ * status pill agrees with the [com.example.ui.components.Http3RowIndicator] pill beside it
+ * instead of inventing separate wording -- matches the `http3-row-indicators-*` mockups, which
+ * show the exact same label in both places. Falls back to an em dash for a statusless row this
+ * app can't attribute to HTTP/3/QUIC at all (e.g. a fully opaque undecoded-TLS row), which is
+ * `StatusCodeBadge`'s own default anyway. Pure function, no Android/Compose dependency.
+ */
+fun unknownStatusLabelFor(h3State: com.example.data.models.Http3RowState?): String =
+    when (h3State) {
+        com.example.data.models.Http3RowState.OBSERVED -> "OBSERVED"
+        com.example.data.models.Http3RowState.DETECTED -> "DETECTED"
+        else -> "—"
+    }
+
+/**
  * Lowercase-hex + printable-ASCII dump of the first [maxBytes] of [bytes], 16 bytes per row --
  * a plain-text summary view for a stored binary body that isn't an image (or whose image decode
  * failed). Pure and small enough to unit test without touching Android's `BitmapFactory`.

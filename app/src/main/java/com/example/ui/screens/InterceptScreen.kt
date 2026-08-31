@@ -73,6 +73,8 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VpnKey
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.AlertDialog
@@ -107,6 +109,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -229,6 +232,10 @@ fun InterceptScreen(
             ?: kotlinx.coroutines.flow.MutableStateFlow(com.example.interception.tun.TunRelay.RelayStats())
     }.collectAsStateWithLifecycle()
     val icmpUnrelayableCount = activePumpForHealth?.icmpRelay?.unrelayableCount ?: 0
+    // Item 3: honest per-reason partitions of icmpUnrelayableCount above -- see the counter doc
+    // on IcmpRelay for exactly which call sites increment each one.
+    val icmpChecksumFailureCount = activePumpForHealth?.icmpRelay?.checksumFailureCount ?: 0
+    val icmpUnrelayableIcmpv6Count = activePumpForHealth?.icmpRelay?.unrelayableIcmpv6Count ?: 0
     val icmpLastPathUsed by remember(activePumpForHealth) {
         activePumpForHealth?.icmpRelay?.lastPathUsed
             ?: kotlinx.coroutines.flow.MutableStateFlow(com.example.interception.tun.IcmpRelay.LastPathUsed.NONE_YET)
@@ -237,13 +244,15 @@ fun InterceptScreen(
 
     // Task 14 / Lane D: derive the three-state RelayHealthState (healthy / degraded / down) from the
     // live counters so the extracted RelayHealthCard / RelayHealthDetailSheet can switch exhaustively.
-    val relayHealthState by remember(relayHealthStats, activePumpForHealth, icmpUnrelayableCount, icmpLastPathUsed) {
+    val relayHealthState by remember(relayHealthStats, activePumpForHealth, icmpUnrelayableCount, icmpLastPathUsed, icmpChecksumFailureCount, icmpUnrelayableIcmpv6Count) {
         mutableStateOf(
             com.example.data.models.toRelayHealthState(
                 pumpRunning = activePumpForHealth != null,
                 stats = relayHealthStats,
                 icmpUnrelayableCount = icmpUnrelayableCount,
                 icmpLastPathUsed = icmpLastPathUsed,
+                icmpChecksumFailureCount = icmpChecksumFailureCount,
+                icmpUnrelayableIcmpv6Count = icmpUnrelayableIcmpv6Count,
             )
         )
     }
@@ -1809,6 +1818,10 @@ private fun CapabilityStatusCard(
     }
 }
 
+// unknownStatusLabelFor moved to CapturedTrafficHelpers.kt (Audit fix: StatusCodeBadge "0"
+// defect) so it lives alongside this file's other pure formatting helpers and is covered by
+// CapturedTrafficHelpersTest without needing a Compose UI test harness.
+
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun TrafficItemCard(
@@ -1845,7 +1858,12 @@ fun TrafficItemCard(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     MethodBadge(method = item.method)
                     Spacer(modifier = Modifier.width(8.dp))
-                    StatusCodeBadge(statusCode = item.statusCode, statusMessage = item.statusMessage)
+                    StatusCodeBadge(
+                        statusCode = item.statusCode,
+                        statusMessage = item.statusMessage,
+                        hasKnownStatus = item.hasKnownStatus,
+                        unknownStatusLabel = unknownStatusLabelFor(h3State),
+                    )
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1869,6 +1887,23 @@ fun TrafficItemCard(
                     if (h3State != null) {
                         Spacer(modifier = Modifier.width(6.dp))
                         Http3RowIndicator(state = h3State)
+                    }
+                    // Item 1 (dossier Q2 / audit §7.5): per-row "this connection was routed
+                    // through requestr's VPN engine" indicator, distinct from the protocol/H3
+                    // badges above and the status-code badge on the left. Gated on the row's
+                    // OWN recorded captureMethod (via routedViaVpnRelay), never on the current
+                    // global CaptureRecordMode -- so it stays correct for a database that mixes
+                    // rows captured under different tiers across sessions. Never renders for
+                    // CaptureRowMethod.UNKNOWN (legacy/migrated rows, or rows from a persist
+                    // site this wave didn't tag) -- an absent value must not look like "not VPN".
+                    if (item.routedViaVpnRelay) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Icon(
+                            imageVector = Icons.Default.SettingsInputAntenna,
+                            contentDescription = "Routed via requestr VPN",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(14.dp)
+                        )
                     }
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
@@ -2274,10 +2309,14 @@ fun ConnectionsBottomSheet(
                                                 )
                                                 // Task 14: render the real failureReason (task 11) beneath the
                                                 // version/cipher/alpn line, styled like the existing cert:/JA3:
-                                                // rows below -- this is the row-level treatment the plan asks
-                                                // for; a full handshake-stage-rail detail sheet (per the
-                                                // tls-failed-detail-* mockups) would need per-stage timestamps
-                                                // TlsSessionEntity does not store, so it is out of scope here.
+                                                // rows below. Item 4 (verification pass): this comment used to
+                                                // say the full handshake-stage-rail detail sheet was out of
+                                                // scope pending per-stage timestamps -- that sheet has since
+                                                // shipped as TlsFailureDetailSheet (wired via onClick/
+                                                // selectedTlsFailure just above), using stages *inferred from
+                                                // the alert kind* rather than stored timestamps, exactly as
+                                                // TlsFailureDetail.kt's own KDoc documents. Updated so this
+                                                // comment doesn't contradict the code beside it.
                                                 if (failed && tls.failureReason != null) {
                                                     Text(
                                                         "failed: ${tls.failureReason}",
@@ -2840,6 +2879,7 @@ fun CaptureSetupBottomSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp, vertical = 12.dp)
         ) {
             Row(
@@ -3668,6 +3708,7 @@ fun RulesConfigBottomSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp, vertical = 12.dp)
         ) {
             // Header
@@ -3741,7 +3782,9 @@ fun RulesConfigBottomSheet(
                         // Action selector
                         Text("Action", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             com.example.data.local.RuleAction.values().forEach { action ->
@@ -4643,6 +4686,9 @@ fun CapturedDetailBottomSheet(
     onRepeatReplay: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    // Audit fix (StatusCodeBadge "0" defect): same H3 row state TrafficItemCard computes, so
+    // this sheet's status badge and Overview "Status" row agree with the traffic list's pill.
+    val h3State = http3RowState(item.protocolHint, item.statusCode)
     var selectedTab by remember { mutableIntStateOf(0) }
 
     // C14 (binary body persistence): CapturedTrafficItem (the UI model in data/models) doesn't
@@ -4681,7 +4727,12 @@ fun CapturedDetailBottomSheet(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     MethodBadge(method = item.method)
                     Spacer(modifier = Modifier.width(8.dp))
-                    StatusCodeBadge(statusCode = item.statusCode, statusMessage = item.statusMessage)
+                    StatusCodeBadge(
+                        statusCode = item.statusCode,
+                        statusMessage = item.statusMessage,
+                        hasKnownStatus = item.hasKnownStatus,
+                        unknownStatusLabel = unknownStatusLabelFor(h3State),
+                    )
                 }
 
                 Row {
@@ -4750,7 +4801,18 @@ fun CapturedDetailBottomSheet(
                                 DetailRow("URL", item.url)
                                 DetailRow("Host", item.host)
                                 DetailRow("Path", item.path)
-                                DetailRow("Status", "${item.statusCode} ${item.statusMessage}")
+                                // Audit fix (StatusCodeBadge "0" defect): reuse the exact same
+                                // formatting decision as the badge above, via statusCodeBadgeText,
+                                // so this Overview row never shows a fabricated "0" either.
+                                DetailRow(
+                                    "Status",
+                                    com.example.ui.components.statusCodeBadgeText(
+                                        statusCode = item.statusCode,
+                                        statusMessage = item.statusMessage,
+                                        hasKnownStatus = item.hasKnownStatus,
+                                        unknownStatusLabel = unknownStatusLabelFor(h3State),
+                                    ),
+                                )
                                 DetailRow("Protocol", item.protocol)
                                 DetailRow("Latency", "${item.latencyMs}ms")
                                 DetailRow("Req Size", formatBytes(item.requestSize))
@@ -4764,15 +4826,39 @@ fun CapturedDetailBottomSheet(
                             }
                         }
                         1 -> item { // Headers
+                            // Item 2 (audit §7.2): per-header reveal state for Set-Cookie/
+                            // Cookie/Authorization/Proxy-Authorization values. Keyed by
+                            // "request:$name" / "response:$name" so a request and response
+                            // header of the same name (e.g. both carry "Cookie") reveal
+                            // independently. Deliberately a plain `remember` (not
+                            // rememberSaveable) -- CapturedDetailBottomSheet is only ever
+                            // composed while `selectedItemForDetail` is non-null and is fully
+                            // removed from composition on dismiss (see that state's call site),
+                            // so this map is naturally torn down on dismiss and never persisted
+                            // across app restarts or a navigate-away-and-back, satisfying the
+                            // "ephemeral, per-header" requirement for free.
+                            val revealedHeaders = remember(item.id) { mutableStateMapOf<String, Boolean>() }
                             Column {
                                 Text("REQUEST:", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
                                 item.requestHeaders.forEach { (k, v) ->
-                                    Text("$k: $v", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface)
+                                    val key = "request:$k"
+                                    SensitiveAwareHeaderRow(
+                                        name = k,
+                                        value = v,
+                                        revealed = revealedHeaders[key] == true,
+                                        onToggleRevealed = { revealedHeaders[key] = !(revealedHeaders[key] == true) },
+                                    )
                                 }
                                 Spacer(modifier = Modifier.height(10.dp))
                                 Text("RESPONSE:", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = MaterialTheme.colorScheme.secondary)
                                 item.responseHeaders.forEach { (k, v) ->
-                                    Text("$k: $v", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface)
+                                    val key = "response:$k"
+                                    SensitiveAwareHeaderRow(
+                                        name = k,
+                                        value = v,
+                                        revealed = revealedHeaders[key] == true,
+                                        onToggleRevealed = { revealedHeaders[key] = !(revealedHeaders[key] == true) },
+                                    )
                                 }
                                 // JWT detection — check Authorization header
                                 val authHeader = item.requestHeaders["Authorization"]
@@ -4908,6 +4994,68 @@ fun CapturedDetailBottomSheet(
 
 // ── Detail sheet helpers ──────────────────────────────────────────────
 // BadgePill extracted to CommonComponents.kt (shared, owned by Lane A after task 7).
+
+/**
+ * Item 2 (audit §7.2): renders one request/response header line, masking [value] by default
+ * when [isSensitiveHeaderName] flags [name] (Set-Cookie/Cookie/Authorization/
+ * Proxy-Authorization, case-insensitive) with a per-row tap-to-reveal eye icon. Non-sensitive
+ * headers render exactly as before (plain "$name: $value" text, no icon) so this is a no-op for
+ * the overwhelming majority of headers.
+ *
+ * [revealed]/[onToggleRevealed] are owned by the caller (a `mutableStateMapOf` keyed per header,
+ * scoped to the enclosing detail sheet) rather than local `remember` state here, so a single
+ * toggle map can track every header row in the sheet without this composable needing its own
+ * identity-preserving key beyond what its caller already provides.
+ */
+@Composable
+private fun SensitiveAwareHeaderRow(
+    name: String,
+    value: String,
+    revealed: Boolean,
+    onToggleRevealed: () -> Unit,
+) {
+    val clipboardManager = LocalClipboardManager.current
+    val sensitive = remember(name) { isSensitiveHeaderName(name) }
+    if (!sensitive) {
+        Text("$name: $value", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface)
+        return
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            text = "$name: ${if (revealed) value else maskHeaderValue(value)}",
+            fontFamily = FontFamily.Monospace,
+            fontSize = 10.sp,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f),
+        )
+        IconButton(onClick = onToggleRevealed, modifier = Modifier.size(22.dp)) {
+            Icon(
+                imageVector = if (revealed) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                contentDescription = if (revealed) "Hide $name value" else "Reveal $name value",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(14.dp),
+            )
+        }
+        IconButton(
+            onClick = {
+                // Item 2: copy the REAL value, never the mask -- silently copying the mask
+                // placeholder would be a bug (the whole point of "reveal" is a legitimate
+                // debugging need to actually use the value, e.g. paste it into curl). Do NOT
+                // "fix" this to respect `revealed`; that would defeat copy as a workflow when a
+                // header is masked, which is not the product decision made for this feature.
+                clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(value))
+            },
+            modifier = Modifier.size(22.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Default.ContentCopy,
+                contentDescription = "Copy $name value",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(14.dp),
+            )
+        }
+    }
+}
 
 @Composable
 private fun DetailRow(label: String, value: String) {

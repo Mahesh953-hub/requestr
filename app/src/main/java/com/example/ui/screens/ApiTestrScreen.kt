@@ -14,8 +14,10 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -38,12 +40,15 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -104,6 +109,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -210,7 +216,10 @@ fun ApiTestrScreen(
     var scriptError by remember { mutableStateOf<String?>(null) }
 
     var selectedViewMode by remember { mutableIntStateOf(0) } // 0: Request, 1: Response
-    var followRedirects by remember { mutableStateOf(true) }
+    // Dossier Q7: tap = follow redirects once (this send only), long-press = always follow
+    // (persists across sends). See ApiTestrRedirectMode.kt for the pure state-transition
+    // functions and rationale.
+    var redirectFollowState by remember { mutableStateOf(RedirectFollowState()) }
     var requestTab by remember { mutableIntStateOf(0) } // 0: Query, 1: Headers, 2: Body, 3: Auth, 4: Scripts, 5: Chain, 6: Tests
     var responseTab by remember { mutableIntStateOf(0) } // 0: Body, 1: Headers, 2: Metrics, 3: Test Results
 
@@ -269,7 +278,10 @@ fun ApiTestrScreen(
             // substitution, so a pre-script's pm.environment.set(...) is visible in the SAME
             // send) — pass the original, un-substituted reqState here rather than
             // pre-substituting it ourselves, to avoid double-applying substitution.
-            val outcome = ApiTestrRepository.executeRequestWithScripts(reqState, followRedirects)
+            val outcome = ApiTestrRepository.executeRequestWithScripts(reqState, shouldFollowRedirects(redirectFollowState))
+            // A "follow once" tap only applies to this send — consume it now so the next send
+            // reverts to whatever alwaysFollow is set to, instead of silently following forever.
+            redirectFollowState = consumeOnceAfterSend(redirectFollowState)
             val resp = outcome.response
             responseData = resp
             // v3.4 Part C — C3: clear any previous run's pass/fail results —
@@ -359,12 +371,19 @@ fun ApiTestrScreen(
         Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
             TitleAndUrlCard(
                 reqState = reqState,
-                followRedirects = followRedirects,
+                // "Unsaved changes" is only true — dossier §7 item 7: the old label was a static
+                // "Autosaved as draft · unsaved changes" string shown unconditionally, with no
+                // real autosave-to-storage mechanism behind the word "Autosaved". reqState only
+                // diverges from currentRequest (the last value ApiCollectionsRepository.saveRequest
+                // wrote) once the user actually edits something, so this is a real dirty check.
+                isDirty = reqState != currentRequest,
+                redirectFollowState = redirectFollowState,
                 wsStatus = if (reqState.method == HttpMethod.WS) wsStatus else null,
                 onTitleChanged = { reqState = reqState.copy(name = it) },
                 onMethodChanged = { reqState = reqState.copy(method = it) },
                 onUrlChanged = { reqState = reqState.copy(url = it) },
-                onToggleRedirects = { followRedirects = !followRedirects }
+                onTapRedirect = { redirectFollowState = toggleOnceArmed(redirectFollowState) },
+                onLongPressRedirect = { redirectFollowState = toggleAlwaysFollow(redirectFollowState) }
             )
         }
 
@@ -1719,9 +1738,10 @@ private fun RawTextEditor(
     items: List<KeyValueItem>,
     onItemsChanged: (List<KeyValueItem>) -> Unit
 ) {
-    var rawText by remember(items) {
-        mutableStateOf(items.joinToString("\n") { if (it.isEnabled) "${it.key}: ${it.value}" else "// ${it.key}: ${it.value}" })
-    }
+    // Dossier §7 item 6: the raw↔KeyValueItem sync logic now lives in the pure, unit-tested
+    // keyValueItemsToRawText/parseRawTextToKeyValueItems functions (ApiTestrBodyToolbarHelpers.kt)
+    // instead of being inlined here — behavior is unchanged.
+    var rawText by remember(items) { mutableStateOf(keyValueItemsToRawText(items)) }
 
     Text(
         "One per line. Prefix // to disable. Two-way sync with table above.",
@@ -1732,17 +1752,7 @@ private fun RawTextEditor(
         value = rawText,
         onValueChange = { newText ->
             rawText = newText
-            val lines = newText.split("\n")
-            val updated = lines.mapNotNull { line ->
-                if (line.isBlank()) null
-                else {
-                    val disabled = line.startsWith("//")
-                    val content = if (disabled) line.removePrefix("//").trim() else line
-                    val parts = content.split(":", limit = 2)
-                    if (parts.size == 2) KeyValueItem(key = parts[0].trim(), value = parts[1].trim(), isEnabled = !disabled) else null
-                }
-            }
-            onItemsChanged(updated)
+            onItemsChanged(parseRawTextToKeyValueItems(newText))
         },
         textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
         shape = RoundedCornerShape(8.dp),
@@ -1767,16 +1777,20 @@ fun getMethodColor(method: HttpMethod): Color {
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun TitleAndUrlCard(
     reqState: ApiRequestItem,
-    followRedirects: Boolean,
+    isDirty: Boolean,
+    redirectFollowState: RedirectFollowState,
     wsStatus: WsConnectionStatus? = null,
     onTitleChanged: (String) -> Unit,
     onMethodChanged: (HttpMethod) -> Unit,
     onUrlChanged: (String) -> Unit,
-    onToggleRedirects: () -> Unit
+    onTapRedirect: () -> Unit,
+    onLongPressRedirect: () -> Unit
 ) {
+    val followRedirects = shouldFollowRedirects(redirectFollowState)
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     var isEditingTitle by remember { mutableStateOf(false) }
     var showMethodMenu by remember { mutableStateOf(false) }
@@ -1916,16 +1930,20 @@ private fun TitleAndUrlCard(
                 }
             }
 
-            // Draft Note
-            Spacer(modifier = Modifier.height(3.dp))
-            Text(
-                text = "Autosaved as draft · unsaved changes",
-                style = TextStyle(
-                    fontSize = 9.5.sp,
-                    fontStyle = FontStyle.Italic,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
+            // Draft Note — dossier §7 item 7: only shown when reqState has actually diverged
+            // from the last saved/active request, and no longer claims "Autosaved" since there
+            // is no real autosave-to-storage path behind this label.
+            if (isDirty) {
+                Spacer(modifier = Modifier.height(3.dp))
+                Text(
+                    text = "Unsaved changes",
+                    style = TextStyle(
+                        fontSize = 9.5.sp,
+                        fontStyle = FontStyle.Italic,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
+                    )
                 )
-            )
+            }
 
             Spacer(modifier = Modifier.height(12.dp))
 
@@ -2048,18 +2066,27 @@ private fun TitleAndUrlCard(
                     modifier = Modifier.weight(1f)
                 )
 
-                // Follow Redirects Rocket Toggle with Animated Pill
+                // Follow Redirects Rocket Toggle with Animated Pill — dossier Q7: tap arms/disarms
+                // a one-shot "follow once" flag, long-press flips the persistent "always follow"
+                // setting. See ApiTestrRedirectMode.kt.
                 Box(
                     modifier = Modifier
                         .size(40.dp)
                         .clip(RoundedCornerShape(topEnd = 14.dp, bottomEnd = 14.dp))
                         .background(rocketBg)
-                        .clickable { onToggleRedirects() },
+                        .combinedClickable(
+                            onClick = onTapRedirect,
+                            onLongClick = onLongPressRedirect
+                        ),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = Icons.Default.RocketLaunch,
-                        contentDescription = "Follow redirects",
+                        contentDescription = when {
+                            redirectFollowState.alwaysFollow -> "Follow redirects — always on. Tap to follow once only, long-press to turn off."
+                            redirectFollowState.onceArmed -> "Follow redirects — armed for this send only. Tap to disarm, long-press to always follow."
+                            else -> "Follow redirects — off. Tap to follow once, long-press to always follow."
+                        },
                         tint = if (followRedirects) primaryColor else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
                         modifier = Modifier
                             .size(16.dp)
@@ -2069,7 +2096,21 @@ private fun TitleAndUrlCard(
                                 scaleY = rocketScale
                             }
                     )
+                    // Small lock badge distinguishes "always follow" (persistent) from a
+                    // one-shot "follow once" tap-armed state.
+                    if (redirectFollowState.alwaysFollow) {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = null,
+                            tint = primaryColor,
+                            modifier = Modifier
+                                .size(9.dp)
+                                .align(Alignment.BottomEnd)
+                                .offset(x = 2.dp, y = 2.dp)
+                        )
+                    }
                 }
+
             }
         }
     }
@@ -2411,6 +2452,17 @@ private fun HttpRequestBodyTab(
                 items = formData,
                 onItemsChanged = onFormDataChanged
             )
+            // Dossier §7 item 6 — Query Params/Headers already have a raw-text ↔ table toggle;
+            // the Body tab's FORM/MULTIPART rows didn't. Reuses the same components + the
+            // now-pure-and-tested parse/format functions.
+            var showRawEditor by remember { mutableStateOf(false) }
+            RawEditorToggleRow(showRawEditor) { showRawEditor = !showRawEditor }
+            if (showRawEditor) {
+                RawTextEditor(
+                    items = formData,
+                    onItemsChanged = onFormDataChanged
+                )
+            }
         } else {
             // Body Editor Surface
             Surface(
@@ -2438,10 +2490,42 @@ private fun HttpRequestBodyTab(
 
                     Spacer(modifier = Modifier.height(8.dp))
 
+                    // Dossier §7 item 6 — the mockup's JSON toolbar also has Copy-as-JSON,
+                    // Copy-as-flat (key=value), and Clear-all buttons next to Beautify. The
+                    // mockup itself ties these to Query/Header rows rather than literally the
+                    // raw HTTP body (flagged in the final report); here they act on the Body
+                    // tab's own bodyContent, which is the closest faithful equivalent for this
+                    // tab. Reuses CodeToolbarAction from LiveJsonAndRawBlock's styling below.
+                    val clipboardManager = LocalClipboardManager.current
+                    val performHaptic = com.example.ui.components.rememberAppHapticFeedback()
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                            CodeToolbarAction(
+                                icon = Icons.Default.ContentCopy,
+                                description = "Copy as JSON",
+                                onClick = {
+                                    clipboardManager.setText(AnnotatedString(ToolsRepository.formatJson(bodyContent)))
+                                    performHaptic(HapticFeedbackType.TextHandleMove)
+                                }
+                            )
+                            CodeToolbarAction(
+                                icon = Icons.Default.FormatListBulleted,
+                                description = "Copy as key=value",
+                                onClick = {
+                                    clipboardManager.setText(AnnotatedString(flattenJsonBodyToKeyValueLines(bodyContent)))
+                                    performHaptic(HapticFeedbackType.TextHandleMove)
+                                }
+                            )
+                            CodeToolbarAction(
+                                icon = Icons.Default.Clear,
+                                description = "Clear all",
+                                onClick = { onBodyContentChanged("") }
+                            )
+                        }
                         Button(
                             onClick = onBeautify,
                             shape = RoundedCornerShape(8.dp),

@@ -6,6 +6,7 @@ import android.util.Log
 import com.example.data.interception.ActiveTier
 import com.example.data.interception.CaptureMethod
 import com.example.data.interception.InterceptionStateRepository
+import com.example.data.local.CaptureRowMethod
 import com.example.data.local.CapturedTrafficEntity
 import com.example.data.local.ConnectAttemptEntity
 import com.example.data.local.RequestrDatabase
@@ -84,6 +85,11 @@ import javax.net.ssl.SSLSocket
  * request/response pair via [onDecryptedTransaction]. Non-HTTP/1.x traffic
  * (HTTP/2 preface, WebSocket frames after upgrade, ...) falls back to a blind
  * relay for the remainder of that connection so it is never broken.
+ *
+ * Item 1: [emitTransaction]/[emitWsFrame]/[emitGrpcMessage] are only ever reached via the
+ * `FORCE_MITM` disposition above (`AllowOpaque`/`Redirect`/`Block` never decrypt, so they never
+ * emit a [CapturedTrafficEntity] at all) -- every row this class persists is genuinely
+ * `captureMethod = CaptureRowMethod.MITM_PROXY`, unconditionally.
  */
 class MitmProxyEngine(
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
@@ -1073,6 +1079,10 @@ class MitmProxyEngine(
             // the CONNECT target, so this is the exact identity ConnectionLineage.findTlsFor's
             // two-step lookup already handles.
             connectionId = connectionId,
+            // Item 1: handleClient only ever reaches this call after terminating TLS itself via
+            // MITM (see the class-level MITM_PROXY note below) -- every row here is genuinely
+            // MITM_PROXY-tier.
+            captureMethod = CaptureRowMethod.MITM_PROXY,
         )
         deliverEntity(entity)
     }
@@ -1110,6 +1120,8 @@ class MitmProxyEngine(
             timestamp = System.currentTimeMillis(),
             wasDecrypted = true,
             connectionId = "$host:$port",
+            // Item 1: see the class-level MITM_PROXY note below.
+            captureMethod = CaptureRowMethod.MITM_PROXY,
         )
         deliverEntity(entity)
     }
@@ -1159,6 +1171,8 @@ class MitmProxyEngine(
             timestamp = System.currentTimeMillis(),
             wasDecrypted = true,
             connectionId = "$host:$port",
+            // Item 1: see the class-level MITM_PROXY note below.
+            captureMethod = CaptureRowMethod.MITM_PROXY,
         )
         deliverEntity(entity)
     }
