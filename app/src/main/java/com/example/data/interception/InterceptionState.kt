@@ -39,6 +39,91 @@ enum class CaptureMethod(val displayName: String) {
     SHIZUKU_TUN("Shizuku Tun"),
 }
 
+/**
+ * The one true [ActiveTier] for a [CaptureMethod] whose engine is *only* ever driven through
+ * [com.example.interception.PreflightController.startCapture] -- every engine below must derive
+ * its `markActive(tier = ...)` argument from this function instead of restating a separately
+ * hardcoded literal, so a copy-paste-from-a-sibling mistake can no longer compile and silently
+ * diverge from what [com.example.interception.PreflightController.run] itself resolved.
+ *
+ * Audit fix: [com.example.interception.HttpProxyEngine] used to hardcode `ActiveTier.VPN` in its
+ * own `markActive()` call even though [com.example.interception.PreflightController.run] resolves
+ * `ActiveTier.PROXY` for `HTTP_PROXY` -- the identical "one fact, two writers, no guarantee they
+ * agree" defect [CaptureLifecycleOwner] exists to prevent for lifecycle ownership, just for
+ * [ActiveTier] instead, and just as capable of resurrecting that same class of stop-routing bug:
+ * a stale published tier is exactly the input [com.example.interception.CaptureController] and
+ * [com.example.interception.PreflightController.stopCapture] read.
+ *
+ * [CaptureMethod.ROOT_FRIDA] is deliberately excluded -- it has no single true tier. Driven
+ * through [com.example.interception.PreflightController.startCapture] it is a VPN-tier fallback
+ * ([com.example.interception.RequestrVpnService] starts instead of any Frida-specific engine, as
+ * Frida requires an external frida-server this app cannot itself guarantee), but
+ * [com.example.interception.FridaCaptureEngine]'s own standalone lifecycle -- never wired into
+ * [com.example.interception.PreflightController] at all -- genuinely runs at [ActiveTier.ROOT].
+ * Both call sites state their own true value explicitly for that reason; calling this function
+ * for [CaptureMethod.ROOT_FRIDA] throws rather than silently picking one.
+ */
+fun CaptureMethod.engineTier(): ActiveTier = when (this) {
+    CaptureMethod.VPN_TUN -> ActiveTier.VPN
+    CaptureMethod.MITM_PROXY -> ActiveTier.PROXY
+    CaptureMethod.HTTP_PROXY -> ActiveTier.PROXY
+    CaptureMethod.ROOT_IPTABLES -> ActiveTier.ROOT
+    CaptureMethod.SHIZUKU_TUN -> ActiveTier.SHIZUKU
+    CaptureMethod.ROOT_FRIDA -> error(
+        "CaptureMethod.ROOT_FRIDA has no single true ActiveTier -- state it explicitly at the " +
+            "call site instead (see engineTier()'s KDoc)",
+    )
+}
+
+/**
+ * The one true [CaptureLifecycleOwner] for a [CaptureMethod] whose engine is *only* ever driven
+ * through [com.example.interception.PreflightController.startCapture]. Same rationale, and the
+ * same [CaptureMethod.ROOT_FRIDA] exception, as [engineTier].
+ */
+fun CaptureMethod.engineLifecycleOwner(): CaptureLifecycleOwner = when (this) {
+    CaptureMethod.VPN_TUN -> CaptureLifecycleOwner.VPN_SERVICE
+    CaptureMethod.MITM_PROXY -> CaptureLifecycleOwner.MITM_PROXY_ENGINE
+    CaptureMethod.ROOT_IPTABLES -> CaptureLifecycleOwner.ROOT_IPTABLES_ENGINE
+    CaptureMethod.SHIZUKU_TUN -> CaptureLifecycleOwner.SHIZUKU_TUN_ENGINE
+    CaptureMethod.HTTP_PROXY -> CaptureLifecycleOwner.HTTP_PROXY_ENGINE
+    CaptureMethod.ROOT_FRIDA -> error(
+        "CaptureMethod.ROOT_FRIDA has no single true CaptureLifecycleOwner -- state it " +
+            "explicitly at the call site instead (see engineLifecycleOwner()'s KDoc)",
+    )
+}
+
+/**
+ * Which concrete engine instance owns starting/stopping this session's transport — i.e. whose
+ * `.stop()` must be called to actually tear it down.
+ *
+ * Deliberately a *separate* field from both:
+ *  - [CaptureMethod], which only attributes/labels a captured row. A native-bridge VPN session
+ *    genuinely captures rows tagged [CaptureMethod.MITM_PROXY] (the decrypted-transaction path)
+ *    while [com.example.interception.RequestrVpnService] still owns the whole session's
+ *    lifecycle — routing a stop off `captureMethod` in that case tore down
+ *    [com.example.interception.PreflightController]'s unrelated singleton MITM proxy while the
+ *    real owning VPN service (and its tun interface) stayed alive, so the FAB confidently showed
+ *    "stopped" while capture kept running (audit fix).
+ *  - [ActiveTier], a capability-priority label surfaced to the user that is already reused
+ *    non-1:1 with a lifecycle owner elsewhere (e.g. [com.example.interception.RequestrVpnService]
+ *    deliberately reports `tier = ActiveTier.VPN` for a native-bridge session it attributes rows
+ *    to as `CaptureMethod.MITM_PROXY` -- see [engineTier]'s KDoc), so it is not a safe routing key
+ *    either.
+ *
+ * Every `markArmed`/`markActive` call site must state this explicitly (no default) so a newly
+ * added tier can never silently inherit the wrong stop route.
+ */
+enum class CaptureLifecycleOwner {
+    /** Nothing is active. */
+    NONE,
+    VPN_SERVICE,
+    MITM_PROXY_ENGINE,
+    HTTP_PROXY_ENGINE,
+    ROOT_IPTABLES_ENGINE,
+    SHIZUKU_TUN_ENGINE,
+    FRIDA_ENGINE,
+}
+
 /** Root manager types detected on the device. */
 enum class RootType(val displayName: String) {
     NONE("None"),
@@ -126,6 +211,8 @@ data class InterceptionState(
     val status: InterceptionStatus = InterceptionStatus.NEVER_CONFIGURED,
     val tier: ActiveTier = ActiveTier.NONE,
     val captureMethod: CaptureMethod = CaptureMethod.VPN_TUN,
+    /** Which engine's `.stop()` actually owns tearing this session down. See [CaptureLifecycleOwner]. */
+    val lifecycleOwner: CaptureLifecycleOwner = CaptureLifecycleOwner.NONE,
     val port: Int = 0,
     val packetCount: Int = 0,
     val bytesTransferred: Long = 0L,

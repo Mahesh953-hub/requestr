@@ -3,7 +3,8 @@ package com.example.interception
 import android.content.Context
 import android.net.ConnectivityManager
 import android.util.Log
-import com.example.data.interception.ActiveTier
+import com.example.data.interception.engineLifecycleOwner
+import com.example.data.interception.engineTier
 import com.example.data.interception.CaptureMethod
 import com.example.data.interception.InterceptionStateRepository
 import com.example.data.local.CaptureRowMethod
@@ -151,8 +152,9 @@ class MitmProxyEngine(
         running.set(true)
 
         InterceptionStateRepository.markActive(
-            sessionId = sessionId.get(), tier = ActiveTier.PROXY,
+            sessionId = sessionId.get(), tier = CaptureMethod.MITM_PROXY.engineTier(),
             port = serverSocket!!.localPort, method = CaptureMethod.MITM_PROXY,
+            lifecycleOwner = CaptureMethod.MITM_PROXY.engineLifecycleOwner(),
         )
 
         acceptJob = scope.launch {
@@ -535,8 +537,12 @@ class MitmProxyEngine(
      * for WebSocket traffic (§5). [clientAssembler]/[serverAssembler] reassemble fragmented
      * messages (RFC 6455 §5.4) independently per direction, matching the per-direction
      * [Http2Parser.HpackDecoder] convention used for HTTP/2.
+     *
+     * `internal` (not `private`): [handleParsedResponse] takes this as a parameter and is
+     * itself `internal` for testability (security audit fix, MUST-FIX 2) -- a `private` type
+     * can't appear in an `internal` function's signature.
      */
-    private class ConnectionProtocolState {
+    internal class ConnectionProtocolState {
         val webSocketMode = AtomicBoolean(false)
         @Volatile var wsUrl: String = ""
         val clientAssembler = WsMessageAssembler()
@@ -947,8 +953,28 @@ class MitmProxyEngine(
                 serializeRequest(request)
             }
             RuleAction.BODY_ENCRYPT_AES, RuleAction.BODY_DECRYPT_AES -> {
-                rule?.let {
+                val cryptoResult = rule?.let {
                     RuleEnforcer.applyBodyCrypto(request, it, encrypt = it.action == RuleAction.BODY_ENCRYPT_AES)
+                }
+                if (cryptoResult is RuleEnforcer.CryptoApplyResult.Failed) {
+                    // Security audit fix (fail-open AES crypto): never forward the
+                    // untransformed request -- for BODY_ENCRYPT_AES that would be exactly the
+                    // plaintext the rule was supposed to encrypt. Same short-circuit shape as
+                    // BLOCK above: the real request never reaches upstream, and the client (and
+                    // the captured-traffic UI) see a visibly-failed transaction rather than one
+                    // that looks like it succeeded.
+                    val failureResponse = RuleEnforcer.buildCryptoFailureResponse(
+                        ruleName = rule!!.name,
+                        encrypt = rule.action == RuleAction.BODY_ENCRYPT_AES,
+                        reason = cryptoResult.reason,
+                    )
+                    synchronized(clientWriteLock) {
+                        clientOut.write(serializeResponse(failureResponse))
+                        clientOut.flush()
+                    }
+                    Log.w(TAG, "BLOCKED (crypto failure): ${request.method?.name} ${request.url.take(80)}")
+                    emitTransaction(request, failureResponse, 0L, "$host:$port", logRequests, logResponses)
+                    return
                 }
                 serializeRequest(request)
             }
@@ -966,7 +992,13 @@ class MitmProxyEngine(
         upstreamOut.flush()
     }
 
-    private fun handleParsedResponse(
+    /**
+     * `internal` (not `private`), same rationale as [handleParsedRequest]/[emitTransaction]:
+     * asserting the BODY_ENCRYPT_AES/BODY_DECRYPT_AES fail-closed contract (security audit fix)
+     * needs direct access to drive a synthesized response through this function with fake
+     * streams, without standing up a real TLS/socket pair end-to-end.
+     */
+    internal fun handleParsedResponse(
         db: RequestrDatabase,
         response: ParsedHttpMessage,
         raw: ByteArray,
@@ -992,6 +1024,12 @@ class MitmProxyEngine(
         val pair = pending.poll()
         val request = pair?.first
         var out = raw
+        // Security audit fix (fail-open AES crypto): what actually gets persisted/shown in the
+        // UI for this transaction. Defaults to the real [response]; overridden below to a
+        // synthetic failure response when a BODY_ENCRYPT_AES/BODY_DECRYPT_AES rule fails, so the
+        // client and the captured-traffic list both see a visibly-failed transaction rather than
+        // the untransformed body forwarded as if it had succeeded.
+        var responseToEmit = response
         if (request != null) {
             val rule = RuleEnforcer.getMatchingRule(db, request.url, request.host)
             if (rule?.action == RuleAction.MODIFY_RESPONSE) {
@@ -1001,8 +1039,22 @@ class MitmProxyEngine(
                 RuleEnforcer.applyScriptRewrite(response, rule.replacementValue)
                 out = serializeResponse(response)
             } else if (rule?.action == RuleAction.BODY_ENCRYPT_AES || rule?.action == RuleAction.BODY_DECRYPT_AES) {
-                RuleEnforcer.applyBodyCrypto(response, rule, encrypt = rule.action == RuleAction.BODY_ENCRYPT_AES)
-                out = serializeResponse(response)
+                val cryptoResult = RuleEnforcer.applyBodyCrypto(response, rule, encrypt = rule.action == RuleAction.BODY_ENCRYPT_AES)
+                if (cryptoResult is RuleEnforcer.CryptoApplyResult.Failed) {
+                    // The real request already went out and a real response came back -- that
+                    // round trip cannot be undone. What can still be stopped is forwarding the
+                    // untransformed response body to the client: for BODY_DECRYPT_AES that would
+                    // be the raw ciphertext the rule was supposed to decrypt, silently passed
+                    // through looking like a normal successful response.
+                    responseToEmit = RuleEnforcer.buildCryptoFailureResponse(
+                        ruleName = rule.name,
+                        encrypt = rule.action == RuleAction.BODY_ENCRYPT_AES,
+                        reason = cryptoResult.reason,
+                    )
+                    out = serializeResponse(responseToEmit)
+                } else {
+                    out = serializeResponse(response)
+                }
             }
         }
         synchronized(clientWriteLock) {
@@ -1011,15 +1063,15 @@ class MitmProxyEngine(
         }
         if (request != null) {
             val latencyMs = System.currentTimeMillis() - pair!!.second
-            emitTransaction(request, response, latencyMs, "$host:$port", logRequests, logResponses)
+            emitTransaction(request, responseToEmit, latencyMs, "$host:$port", logRequests, logResponses)
             // §4/§5: a successful WebSocket upgrade handshake is terminal for HTTP/1.x framing
             // on this connection -- everything from here on is WS frames, in both directions.
             // Switching modes here (rather than, say, only in inspectClientToServer) means both
             // relay threads see the flip at the same logical point: right after the 101 that
             // caused it, before either side's next read.
-            if (response.statusCode == 101 &&
+            if (responseToEmit.statusCode == 101 &&
                 WebSocketParser.looksLikeUpgrade(request.headers, true) &&
-                WebSocketParser.looksLikeUpgrade(response.headers, false)
+                WebSocketParser.looksLikeUpgrade(responseToEmit.headers, false)
             ) {
                 wsState.wsUrl = buildWsUrl(request.url)
                 wsState.webSocketMode.set(true)

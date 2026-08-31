@@ -92,8 +92,11 @@ object MockFixtureLoader {
      * fixture bytes and leaves [ParsedHttpMessage.body] at
      * [HttpBodyDecoder.BINARY_BODY_PLACEHOLDER] (mirrors how a genuinely binary captured body is
      * represented -- see that constant's doc); [Resolution.Error] logs [onError] and leaves
-     * [message] completely untouched (no `bodyReplaced` flip, no empty-body regression) --
-     * matches [RuleEnforcer.applyBodyCrypto]'s fail-open discipline on failure.
+     * [message] completely untouched (no `bodyReplaced` flip, no empty-body regression) -- this
+     * is a confidentiality-neutral default (a broken `bodyReplace` fixture just means "the
+     * replace didn't happen"), unlike [RuleEnforcer.applyBodyCrypto], which fails *closed* on
+     * error (see that function's doc) because an encrypt/decrypt failure risks leaking the exact
+     * plaintext/ciphertext the rule existed to protect.
      */
     fun applyTo(message: ParsedHttpMessage, resolution: Resolution, onError: (String) -> Unit) {
         when (resolution) {

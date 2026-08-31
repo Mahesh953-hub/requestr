@@ -1199,14 +1199,10 @@ fun InterceptScreen(
 /**
  * Paste a raw `curl ...` command and route the parsed request straight to API Testr.
  *
- * C11 hardening note: this dialog previously delegated to
- * [com.example.data.repository.ApiTestrRepository.parseCurl] -- a naive `split("\\s+")`
- * tokenizer that breaks on any quoted value containing a space (e.g. `-d '{"a": "b c"}'`), has
- * no line-continuation handling, and mis-assigns unrecognized flags' arguments as the URL. That
- * function lives in `data/repository/ApiTestrRepository.kt`, which is out of this file's
- * ownership scope and is still called, unmodified, by `ApiTestrScreen.kt`'s own unrelated
- * "paste cURL into a saved request" feature -- so it is intentionally left alone. This dialog now
- * calls the hardened, real-shell-quoting-aware [com.example.data.export.CurlParser] instead.
+ * Import goes through [com.example.data.repository.ApiTestrRepository.parseCurl] -- the same entry
+ * point API Testr's own "Import cURL" uses -- so shell quoting, unsupported methods and body-type
+ * inference behave identically in both places, and its [com.example.data.repository.CurlImportResult.Failure]
+ * message is shown verbatim rather than importing a request the user did not paste.
  */
 @Composable
 private fun PasteCurlDialog(
@@ -1249,21 +1245,10 @@ private fun PasteCurlDialog(
                         error = "Enter a curl command."
                         return@Button
                     }
-                    val parsed = com.example.data.export.CurlParser.parse(trimmed)
-                    if (parsed.url.isBlank()) {
-                        error = "Could not find a URL in this curl command."
-                        return@Button
+                    when (val result = com.example.data.repository.ApiTestrRepository.parseCurl(trimmed)) {
+                        is com.example.data.repository.CurlImportResult.Failure -> error = result.message
+                        is com.example.data.repository.CurlImportResult.Success -> onParsed(result.request)
                     }
-                    val apiItem = ApiRequestItem(
-                        name = "Imported cURL",
-                        method = runCatching { HttpMethod.valueOf(parsed.method) }.getOrDefault(HttpMethod.GET),
-                        url = parsed.url,
-                        headers = parsed.headers.map { (k, v) -> KeyValueItem(key = k, value = v) }
-                            .ifEmpty { listOf(KeyValueItem(key = "Accept", value = "*/*")) },
-                        bodyType = if (parsed.body != null) RequestBodyType.JSON else RequestBodyType.NONE,
-                        bodyContent = parsed.body ?: "",
-                    )
-                    onParsed(apiItem)
                 },
             ) {
                 Text("Send to API Testr")
@@ -3683,7 +3668,7 @@ fun RulesConfigBottomSheet(
     var ruleAction by remember { mutableStateOf(com.example.data.local.RuleAction.BLOCK) }
     var ruleEnabled by remember { mutableStateOf(true) }
     // C11 (body crypto rules) / C13 (file-backed mock bodies): extra per-action fields that only
-    // apply to a subset of RuleAction values -- see supportsReplacementValue/isBodyCryptoAction.
+    // apply to a subset of RuleAction values -- see replacementValueSpecFor/isBodyCryptoAction.
     // §3 (C10): `ruleReplacementValueField` is a `TextFieldValue` (not a plain `String`) so the
     // template cheat sheet below can insert a token at the real caret position instead of only
     // ever appending to the end.
@@ -3814,37 +3799,31 @@ fun RulesConfigBottomSheet(
                             }
                         }
 
-                        // Followup fix: the generic "Replacement value" field used to show the
-                        // same literal-body copy for every action and never appeared at all for
-                        // REDIRECT/CHAOS (supportsReplacementValue excludes both -- see its KDoc,
-                        // deliberately unmodified since CapturedTrafficHelpersTest locks it to the
-                        // three body-replacement actions). replacementValueSpecFor is the broader,
-                        // per-action source of truth for label/placeholder/supporting text/
-                        // required-ness that also covers REDIRECT and CHAOS -- see its KDoc.
+                        // replacementValueSpecFor is the per-action source of truth for this
+                        // field's label/placeholder/supporting text/required-ness; a null spec
+                        // means the action has no replacement value at all and the field is
+                        // hidden. supportsFileFixtureBody, below, is the narrower question of
+                        // whether that value is a *body* (and so can be a file:// fixture).
                         val replacementSpec = replacementValueSpecFor(ruleAction)
-                        if (supportsReplacementValue(ruleAction) || replacementSpec != null) {
+                        if (replacementSpec != null) {
                             val replacementError = replacementValueError(ruleAction, effectiveReplacementValueForSave(ruleAction, ruleReplacementValueField.text, variableRowsToMap(ruleVariableRows)))
                             OutlinedTextField(
                                 value = ruleReplacementValueField,
                                 onValueChange = { ruleReplacementValueField = it },
-                                label = { Text(replacementSpec?.label ?: "Replacement value", fontSize = 11.sp) },
-                                placeholder = { Text(replacementSpec?.placeholder ?: "literal body, or file:///path/to/fixture.json", fontSize = 11.sp) },
+                                label = { Text(replacementSpec.label, fontSize = 11.sp) },
+                                placeholder = { Text(replacementSpec.placeholder, fontSize = 11.sp) },
                                 isError = replacementError != null,
                                 modifier = Modifier.fillMaxWidth(),
                                 singleLine = true,
                                 textStyle = LocalTextStyle.current.copy(fontSize = 12.sp, fontFamily = FontFamily.Monospace)
                             )
-                            if (replacementSpec != null) {
-                                Text(replacementSpec.supportingText, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
+                            Text(replacementSpec.supportingText, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             if (replacementError != null) {
                                 Text(replacementError, fontSize = 10.sp, color = MaterialTheme.colorScheme.error)
                             }
-                            // file:// fixture discoverability only makes sense for the three
-                            // body-replacement actions (their bodyReplace/replacementValue is a
-                            // body) -- not REDIRECT's URL or CHAOS's JSON, so this stays gated on
-                            // the original supportsReplacementValue, unlike the field above.
-                            if (supportsReplacementValue(ruleAction)) {
+                            // file:// fixture discoverability only makes sense when the value is
+                            // a body -- not REDIRECT's URL or CHAOS's JSON.
+                            if (supportsFileFixtureBody(ruleAction)) {
                                 val resolution = fixtureResolution
                                 when {
                                     resolution == null && !com.example.interception.MockFixtureLoader.isFileFixtureReference(ruleReplacementValueField.text) -> {
@@ -4040,18 +4019,19 @@ fun RulesConfigBottomSheet(
                                 backgroundColor = MaterialTheme.colorScheme.surface
                             ) {
                                 Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    val keyAliasError = cryptoKeyAliasError(ruleAction, ruleCryptoKeyAlias)
                                     Text("AES body crypto", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
                                     OutlinedTextField(
                                         value = ruleCryptoKeyAlias,
                                         onValueChange = { ruleCryptoKeyAlias = it },
                                         label = { Text("Key alias", fontSize = 11.sp) },
                                         placeholder = { Text("Android Keystore alias to use", fontSize = 11.sp) },
-                                        isError = cryptoKeyAliasError(ruleAction, ruleCryptoKeyAlias) != null,
+                                        isError = keyAliasError != null,
                                         modifier = Modifier.fillMaxWidth(),
                                         singleLine = true,
                                         textStyle = LocalTextStyle.current.copy(fontSize = 12.sp, fontFamily = FontFamily.Monospace)
                                     )
-                                    cryptoKeyAliasError(ruleAction, ruleCryptoKeyAlias)?.let {
+                                    keyAliasError?.let {
                                         Text(it, fontSize = 10.sp, color = MaterialTheme.colorScheme.error)
                                     }
                                     Text("Algorithm: AES/GCM/NoPadding", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)

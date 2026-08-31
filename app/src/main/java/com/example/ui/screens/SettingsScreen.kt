@@ -1012,14 +1012,25 @@ fun SettingsScreen(
 
                         Button(
                             onClick = {
-                                com.example.data.repository.ChatRepository.saveProviderConfig(
-                                    providerConfig.copy(
-                                        baseUrl = urlInput.trim(),
-                                        model = modelInput.trim(),
-                                        apiKey = keyInput,
-                                    )
-                                )
-                                android.widget.Toast.makeText(settingsContext, "AI provider saved.", android.widget.Toast.LENGTH_SHORT).show()
+                                // Wait for the real Room + Keystore outcome before telling the
+                                // user anything was saved -- an optimistic "AI provider saved."
+                                // Toast fired before the writes complete/fail is exactly the
+                                // defect this call site was flagged for (see saveProviderConfig's
+                                // kdoc in ChatRepository).
+                                settingsScope.launch {
+                                    when (val result = com.example.data.repository.ChatRepository.saveProviderConfig(
+                                        providerConfig.copy(
+                                            baseUrl = urlInput.trim(),
+                                            model = modelInput.trim(),
+                                            apiKey = keyInput,
+                                        )
+                                    )) {
+                                        is com.example.data.repository.SaveProviderResult.Success ->
+                                            android.widget.Toast.makeText(settingsContext, "AI provider saved.", android.widget.Toast.LENGTH_SHORT).show()
+                                        is com.example.data.repository.SaveProviderResult.Failure ->
+                                            android.widget.Toast.makeText(settingsContext, result.reason, android.widget.Toast.LENGTH_LONG).show()
+                                    }
+                                }
                             },
                             modifier = Modifier.fillMaxWidth(),
                         ) {

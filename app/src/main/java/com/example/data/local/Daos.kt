@@ -365,6 +365,14 @@ interface FlowNodeDao {
     @Query("SELECT * FROM flow_nodes WHERE flowId = :flowId")
     suspend fun getAll(flowId: String = "default"): List<FlowNodeEntity>
 
+    /**
+     * Every node in every flow, not just one -- used by [com.example.data.export.WorkspaceExporter],
+     * which must export a user's whole multi-flow workspace, not only the "default" flow that
+     * [getAll]'s default argument scopes to.
+     */
+    @Query("SELECT * FROM flow_nodes ORDER BY flowId ASC, createdAt ASC")
+    suspend fun getAllAcrossFlows(): List<FlowNodeEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(node: FlowNodeEntity)
 
@@ -388,6 +396,10 @@ interface FlowConnectionDao {
 
     @Query("SELECT * FROM flow_connections WHERE flowId = :flowId")
     suspend fun getAll(flowId: String = "default"): List<FlowConnectionEntity>
+
+    /** Every connection in every flow -- same rationale as [FlowNodeDao.getAllAcrossFlows]. */
+    @Query("SELECT * FROM flow_connections ORDER BY flowId ASC, createdAt ASC")
+    suspend fun getAllAcrossFlows(): List<FlowConnectionEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(connection: FlowConnectionEntity)

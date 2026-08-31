@@ -15,4 +15,15 @@
     <external-path
         name="downloads_requestr"
         path="Download/requestr/" />
+    <!--
+      Reqy Assistant screenshot attachments: captureScreenshotAttachment() in ChatScreen.kt
+      writes the captured PNG to context.cacheDir (reqy_screenshot_<timestamp>.png) and then
+      calls FileProvider.getUriForFile() on it. Without a matching <cache-path> root here,
+      getUriForFile() throws "Failed to find configured root that contains ..." every time,
+      which was being silently swallowed and surfaced to the user as the misleading toast
+      "Couldn't capture the screen on this device." Declaring the cache root fixes this.
+    -->
+    <cache-path
+        name="reqy_screenshots"
+        path="." />
 </paths>

@@ -161,8 +161,11 @@ class CaptureController(
 
     fun requestStop() {
         watcher.stop()
-        val currentMethod = InterceptionStateRepository.state.value.captureMethod
-        PreflightController.stopCapture(context, currentMethod)
+        // Routes off lifecycleOwner, not captureMethod: a native-bridge VPN session is owned by
+        // RequestrVpnService but attributes rows to CaptureMethod.MITM_PROXY, so the two must
+        // not be conflated for "which stop() to call" (see CaptureLifecycleOwner's KDoc).
+        val currentOwner = InterceptionStateRepository.state.value.lifecycleOwner
+        PreflightController.stopCapture(context, currentOwner)
     }
 
     /** Re-probes the trust store after the CA install activity returns. Never assumes success. */

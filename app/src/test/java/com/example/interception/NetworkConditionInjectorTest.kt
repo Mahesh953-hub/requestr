@@ -103,6 +103,25 @@ class NetworkConditionInjectorTest {
         assertEquals(first, second)
     }
 
+    @Test
+    fun `delayMillisFor spreads across the whole range when jitter exceeds latency`() {
+        // Jitter larger than latency is legal and realistic ("mostly fast, occasionally awful").
+        // The reachable range is [0, 550]; the draws must actually populate it rather than
+        // collapsing onto 0, which is what a sample-then-clamp implementation does to every draw
+        // that lands below zero (here, roughly 45% of them).
+        val condition = NetworkConditionInjector.NetworkCondition(enabled = true, latencyMs = 50, jitterMs = 500)
+        val delays = (0 until 400).map { seed ->
+            NetworkConditionInjector.delayMillisFor(condition, Random(seed))
+        }
+        delays.forEach { delay ->
+            assertTrue("delay=$delay should be within [0, 550]", delay in 0L..550L)
+        }
+        assertTrue("expected draws above the base latency", delays.any { it > 50L })
+        assertTrue("expected draws in the top half of the range", delays.any { it > 300L })
+        val zeros = delays.count { it == 0L }
+        assertTrue("expected no pile-up on zero, got $zeros of ${delays.size}", zeros < delays.size / 10)
+    }
+
     // ---- shouldDrop -------------------------------------------------------------------------
 
     @Test

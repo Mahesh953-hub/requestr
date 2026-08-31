@@ -24,6 +24,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -45,6 +46,17 @@ import java.util.concurrent.TimeUnit
  * table (task 11); the API key is never stored there -- it lives only in Keystore-backed
  * storage ([SecureKeyStore]), looked up by provider id. See [providerConfig].
  */
+
+/**
+ * Outcome of [ChatRepository.saveProviderConfig]. The UI must not show a success confirmation
+ * (e.g. "Saved and activated.") until it has actually received [Success] -- see that function's
+ * kdoc for why an optimistic in-memory update alone is not enough to claim success.
+ */
+sealed interface SaveProviderResult {
+    object Success : SaveProviderResult
+    data class Failure(val reason: String) : SaveProviderResult
+}
+
 object ChatRepository {
 
     private const val DEFAULT_PROVIDER_ID = "default"
@@ -293,32 +305,53 @@ object ChatRepository {
      * active provider (deactivating every other saved row), then updates [providerConfig] so the
      * UI reflects the change immediately (not just on the next `observeAll()` emission, which
      * the `chat_providers` table alone can't drive since the key isn't in it).
+     *
+     * Suspends until BOTH the Room write and the Keystore write have actually finished, and
+     * returns whether they succeeded -- callers MUST NOT show a "saved" confirmation before this
+     * returns [SaveProviderResult.Success]. [providerConfig] is still updated optimistically the
+     * instant this is called (so a responsive UI can re-render immediately), but that optimistic
+     * value is rolled back to whatever it was before this call if either write throws, so a
+     * failed save never leaves a phantom "active" provider sitting in memory that Room/Keystore
+     * don't actually agree with.
      */
-    fun saveProviderConfig(config: ChatProviderConfig) {
+    suspend fun saveProviderConfig(config: ChatProviderConfig): SaveProviderResult {
         val activeConfig = config.copy(isActive = true)
+        val previous = _providerConfig.value
         _providerConfig.value = activeConfig
-        val ctx = appContext ?: return
-        repoScope.launch {
-            val dao = RequestrDatabase.get(ctx).chatProviderDao()
-            dao.getAll().forEach { existing ->
-                if (existing.id != activeConfig.id && existing.isActive) {
-                    dao.upsert(existing.copy(isActive = false))
+        val ctx = appContext
+        if (ctx == null) {
+            _providerConfig.value = previous
+            return SaveProviderResult.Failure("The app isn't ready yet. Try again in a moment.")
+        }
+        return try {
+            withContext(Dispatchers.IO) {
+                val dao = RequestrDatabase.get(ctx).chatProviderDao()
+                dao.getAll().forEach { existing ->
+                    if (existing.id != activeConfig.id && existing.isActive) {
+                        dao.upsert(existing.copy(isActive = false))
+                    }
+                }
+                dao.upsert(
+                    ChatProviderEntity(
+                        id = activeConfig.id,
+                        name = activeConfig.name,
+                        baseUrl = activeConfig.baseUrl,
+                        model = activeConfig.model,
+                        isActive = true,
+                    ),
+                )
+                if (activeConfig.apiKey.isNotBlank()) {
+                    SecureKeyStore.putSecret(ctx, activeConfig.id, activeConfig.apiKey)
+                } else {
+                    SecureKeyStore.removeSecret(ctx, activeConfig.id)
                 }
             }
-            dao.upsert(
-                ChatProviderEntity(
-                    id = activeConfig.id,
-                    name = activeConfig.name,
-                    baseUrl = activeConfig.baseUrl,
-                    model = activeConfig.model,
-                    isActive = true,
-                ),
+            SaveProviderResult.Success
+        } catch (e: Exception) {
+            _providerConfig.value = previous
+            SaveProviderResult.Failure(
+                "Couldn't save provider settings: ${redactSecretFromMessage(e.message, activeConfig.apiKey)}. Nothing was changed -- try again.",
             )
-            if (activeConfig.apiKey.isNotBlank()) {
-                SecureKeyStore.putSecret(ctx, activeConfig.id, activeConfig.apiKey)
-            } else {
-                SecureKeyStore.removeSecret(ctx, activeConfig.id)
-            }
         }
     }
 
@@ -796,6 +829,36 @@ object ChatRepository {
     // Dispatch
     // ─────────────────────────────────────────────────────────────────────────────────────────
 
+    /**
+     * Renders [url] for logging with its ENTIRE query string (and fragment) stripped -- only
+     * scheme, host, and path survive. Gemini puts its API key in `?key=...` (see
+     * [buildGeminiUrl]), but the point of stripping the whole query rather than special-casing
+     * the literal parameter name `key` is that we wire eight provider kinds (OpenAI, Anthropic,
+     * Gemini, OpenRouter, Groq, HuggingFace, Ollama, Custom) and any of them -- especially
+     * CUSTOM, where a user supplies an arbitrary base URL -- could carry a token/signature under
+     * any query parameter name (`access_token`, `token`, `sig`, `api_key`, a presigned-URL
+     * signature, ...). Redaction here is unconditional, not an opt-in per provider, so a ninth
+     * provider added later doesn't need to remember to ask for it.
+     */
+    internal fun redactUrlForLogging(url: HttpUrl): String =
+        url.newBuilder().query(null).fragment(null).build().toString()
+
+    /**
+     * Removes every occurrence of [secret] from [message] before it's shown to the user or
+     * returned from [callProvider]. Defense in depth for a concrete leak path: OkHttp's
+     * `Request.Builder().url(String)` throws `IllegalArgumentException` with the exact,
+     * unparsed URL string in its message when a provider's base URL is malformed, and for
+     * Gemini that string is `buildGeminiUrl(...)`'s own `.../generateContent?key=<apiKey>` --
+     * so a malformed-URL exception could otherwise echo the API key straight into the chat
+     * transcript (which IS persisted to Room and rendered on screen, unlike raw-logging, which
+     * the user must explicitly opt into). Only redacts non-blank secrets; blank keys can't leak
+     * anything and `"".replace(...)` would otherwise no-op harmlessly anyway.
+     */
+    internal fun redactSecretFromMessage(message: String?, secret: String): String {
+        val safeMessage = message ?: "Unknown error"
+        return if (secret.isNotBlank()) safeMessage.replace(secret, "[redacted]") else safeMessage
+    }
+
     private suspend fun callProvider(config: ChatProviderConfig): String {
         val kind = ChatProviderKind.fromId(config.id)
 
@@ -834,8 +897,9 @@ object ChatRepository {
             }
 
             if (rawLogging) {
-                // Never logs config.apiKey -- only the URL, which is not a secret.
-                android.util.Log.d("ChatRepository", "Reqy request (raw logging ON) -> ${request.url}")
+                // Redact unconditionally -- see redactUrlForLogging's kdoc. The URL is NOT
+                // safe to log as-is: Gemini's own convention puts the API key in `?key=...`.
+                android.util.Log.d("ChatRepository", "Reqy request (raw logging ON) -> ${redactUrlForLogging(request.url)}")
             }
 
             val response = withContext(Dispatchers.IO) { client.newCall(request).execute() }
@@ -854,9 +918,10 @@ object ChatRepository {
                 else -> parseOpenAiStyleResponse(bodyStr)
             }
         } catch (e: Exception) {
-            // Never logs config.apiKey -- only the exception message, which is provider/network
-            // detail, not the secret itself.
-            "Connection failed: ${e.message}. Check provider URL and API key in Settings."
+            // Redact unconditionally -- see redactSecretFromMessage's kdoc. A malformed-URL
+            // IllegalArgumentException from Request.Builder().url() can otherwise echo
+            // config.apiKey verbatim (Gemini embeds it in the URL itself).
+            "Connection failed: ${redactSecretFromMessage(e.message, config.apiKey)}. Check provider URL and API key in Settings."
         }
     }
 

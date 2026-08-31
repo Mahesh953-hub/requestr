@@ -3,6 +3,7 @@ package com.example.data.repository
 import com.example.data.models.ChatMessage
 import com.example.data.models.ChatProviderConfig
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -170,5 +171,55 @@ class ChatRepositoryProviderShapesTest {
     @Test
     fun `parseOpenAiStyleResponse falls back when choices are missing`() {
         assertEquals("Empty response from provider", ChatRepository.parseOpenAiStyleResponse("{}"))
+    }
+
+    // ─── Logging redaction (credential-leak fix) ───────────────────────────
+
+    @Test
+    fun `redactUrlForLogging strips the Gemini api key query param entirely`() {
+        val url = ChatRepository.buildGeminiUrl(
+            "https://generativelanguage.googleapis.com/v1beta/models",
+            "gemini-1.5-flash",
+            "AIzaSyREALSECRETVALUE",
+        )
+        val request = okhttp3.Request.Builder().url(url).build()
+
+        val rendered = ChatRepository.redactUrlForLogging(request.url)
+
+        assertTrue(
+            "redacted URL must keep scheme/host/path so the log is still useful for debugging",
+            rendered.startsWith("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"),
+        )
+        assertFalse("redacted URL must not contain the api key value", rendered.contains("AIzaSyREALSECRETVALUE"))
+        assertFalse("redacted URL must not contain the query string at all, not just the literal 'key' name", rendered.contains("?"))
+    }
+
+    @Test
+    fun `redactUrlForLogging strips any query param, not just one literally named key`() {
+        // Custom/OpenRouter-style URLs could carry a credential under any parameter name (a
+        // presigned-URL signature, access_token, etc). The fix must not special-case "key".
+        val request = okhttp3.Request.Builder()
+            .url("https://api.example.com/v1/chat/completions?access_token=super-secret-token&other=1")
+            .build()
+
+        val rendered = ChatRepository.redactUrlForLogging(request.url)
+
+        assertEquals("https://api.example.com/v1/chat/completions", rendered)
+        assertFalse(rendered.contains("super-secret-token"))
+    }
+
+    @Test
+    fun `redactSecretFromMessage removes every occurrence of a non-blank secret`() {
+        val message = "unexpected url: https://x/y?key=sk-leaked-value (sk-leaked-value repeated)"
+        val redacted = ChatRepository.redactSecretFromMessage(message, "sk-leaked-value")
+
+        assertFalse(redacted.contains("sk-leaked-value"))
+        assertEquals("unexpected url: https://x/y?key=[redacted] ([redacted] repeated)", redacted)
+    }
+
+    @Test
+    fun `redactSecretFromMessage is a no-op for a blank secret and null message`() {
+        assertEquals("plain message", ChatRepository.redactSecretFromMessage("plain message", ""))
+        assertEquals("Unknown error", ChatRepository.redactSecretFromMessage(null, "sk-abc"))
     }
 }

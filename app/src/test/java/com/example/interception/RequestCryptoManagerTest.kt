@@ -101,6 +101,23 @@ class RequestCryptoManagerTest {
     }
 
     @Test
+    fun `unavailable key fails loudly on encrypt rather than falling back to plaintext`() {
+        // Stands in for an AndroidKeyStore alias that cannot be resolved/created (locked
+        // keystore, hardware-backed key deleted out from under the app, etc.) -- the keyProvider
+        // itself throws instead of returning a SecretKey.
+        val unavailableKey: (String) -> SecretKey = { throw java.security.KeyStoreException("key unavailable") }
+        val result = RequestCryptoManager.encryptWith("alias-missing", "payload".toByteArray(), "AES/GCM/NoPadding", unavailableKey)
+        assertTrue(result is RequestCryptoManager.CryptoResult.Failure)
+    }
+
+    @Test
+    fun `unavailable key fails loudly on decrypt rather than returning garbage or the ciphertext untouched`() {
+        val unavailableKey: (String) -> SecretKey = { throw java.security.KeyStoreException("key unavailable") }
+        val result = RequestCryptoManager.decryptWith("alias-missing", ByteArray(28), "AES/GCM/NoPadding", unavailableKey)
+        assertTrue(result is RequestCryptoManager.CryptoResult.Failure)
+    }
+
+    @Test
     fun `public encrypt-decrypt API delegates to the real SecureKeyStore-backed key provider`() {
         // Not a round-trip (AndroidKeyStore isn't available in this test JVM -- see class kdoc),
         // just confirms the public entry points exist with the documented signature and fail

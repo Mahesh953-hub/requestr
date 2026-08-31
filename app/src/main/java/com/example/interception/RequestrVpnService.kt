@@ -14,9 +14,12 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
 import com.example.data.interception.ActiveTier
+import com.example.data.interception.CaptureLifecycleOwner
 import com.example.data.interception.CaptureMethod
 import com.example.data.interception.InterceptionStateRepository
 import com.example.data.interception.WatcherStatus
+import com.example.data.interception.engineLifecycleOwner
+import com.example.data.interception.engineTier
 import com.example.data.local.CaptureSessionEntity
 import com.example.data.local.CaptureTier
 import com.example.data.local.RequestrDatabase
@@ -62,7 +65,15 @@ class RequestrVpnService : VpnService() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var pumpJob: Job? = null
     private var filterObserverJob: Job? = null
-    private val scope = CoroutineScope(Dispatchers.IO)
+    private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO)
+    // Test seam (SHOULD-FIX, code review): records real runtime invocation order from inside
+    // [stopCapture]'s launched block, instead of reading this file's source text off disk (the
+    // prior version of this regression test's brittleness) or trying to observe the ordering via
+    // a concurrent StateFlow collector on `Dispatchers.Unconfined` -- empirically that collector
+    // approach turned out to be vacuous, because Unconfined's thread-local event loop defers a
+    // *nested* resume (the collector waking up from inside markStopped()'s StateFlow emission)
+    // until the entire outer launched block finishes, regardless of statement order inside it.
+    internal var stopCaptureStepRecorder: (String) -> Unit = {}
     private var sessionId: Long? = null
 
     /**
@@ -215,9 +226,10 @@ class RequestrVpnService : VpnService() {
 
                 InterceptionStateRepository.markActive(
                     sessionId = newId,
-                    tier = ActiveTier.VPN,
+                    tier = CaptureMethod.VPN_TUN.engineTier(),
                     port = port,
                     method = CaptureMethod.VPN_TUN,
+                    lifecycleOwner = CaptureMethod.VPN_TUN.engineLifecycleOwner(),
                 )
 
                 // Gap #1 Approach A: attempt to hand the tun fd to the native tun2proxy
@@ -250,9 +262,19 @@ class RequestrVpnService : VpnService() {
                         activeMitmEngine = mitmEngine
                         InterceptionStateRepository.markActive(
                             sessionId = newId,
+                            // Deliberately NOT CaptureMethod.MITM_PROXY.engineTier()/
+                            // .engineLifecycleOwner() -- this is the one genuine, documented
+                            // exception where `method` (for row attribution only) and the real
+                            // tier/lifecycleOwner (this service, running at VPN tier) legitimately
+                            // differ. See CaptureMethod.engineTier()'s KDoc and
+                            // CaptureLifecycleOwner's KDoc.
                             tier = ActiveTier.VPN,
                             port = port,
                             method = CaptureMethod.MITM_PROXY,
+                            // Row attribution only -- this service (not PreflightController's
+                            // singleton MitmProxyEngine) still owns the whole session's
+                            // lifecycle. See CaptureLifecycleOwner's KDoc.
+                            lifecycleOwner = CaptureLifecycleOwner.VPN_SERVICE,
                         )
                         Log.i(TAG, "Native tun2proxy bridge started; VPN traffic now routed through MitmProxyEngine on port $mitmPort")
                     }
@@ -270,9 +292,10 @@ class RequestrVpnService : VpnService() {
                         // setWatcherStatus(DEGRADED) below must run strictly after this).
                         InterceptionStateRepository.markActive(
                             sessionId = newId,
-                            tier = ActiveTier.VPN,
+                            tier = CaptureMethod.VPN_TUN.engineTier(),
                             port = port,
                             method = CaptureMethod.VPN_TUN,
+                            lifecycleOwner = CaptureMethod.VPN_TUN.engineLifecycleOwner(),
                         )
                         InterceptionStateRepository.setWatcherStatus(WatcherStatus.DEGRADED)
                     }
@@ -450,7 +473,9 @@ class RequestrVpnService : VpnService() {
                 }
             }
             cleanup()
+            stopCaptureStepRecorder("cleanup")
             InterceptionStateRepository.markStopped()
+            stopCaptureStepRecorder("markStopped")
             stopSelf()
         }
     }

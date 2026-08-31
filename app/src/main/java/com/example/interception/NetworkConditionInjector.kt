@@ -48,20 +48,27 @@ object NetworkConditionInjector {
     }
 
     /**
-     * The number of milliseconds a caller should delay before proceeding, given [condition].
-     * `0` when [NetworkCondition.enabled] is false or [NetworkCondition.latencyMs] and
-     * [NetworkCondition.jitterMs] are both `0` -- never negative, even when jitter would
-     * otherwise swing below the base latency ([NetworkCondition.jitterMs] is clamped to
-     * `[0, latencyMs]` worth of symmetric spread around [NetworkCondition.latencyMs]).
+     * The number of milliseconds a caller should delay before proceeding, given [condition]:
+     * uniformly distributed over `[latencyMs - jitterMs, latencyMs + jitterMs]`, with the lower
+     * bound raised to `0` since no delay can be negative. `0` when [NetworkCondition.enabled] is
+     * false or [NetworkCondition.latencyMs] and [NetworkCondition.jitterMs] are both `0`.
+     *
+     * The range is narrowed rather than sampled-then-clamped so that a `jitterMs` larger than
+     * `latencyMs` (e.g. 50ms latency, 500ms jitter -- a legal, and realistic, "mostly fast but
+     * occasionally awful" link) still spreads across the whole reachable range instead of piling
+     * a large share of its draws up on exactly `0`.
      */
     fun delayMillisFor(condition: NetworkCondition, random: Random = Random.Default): Long {
         if (!condition.enabled) return 0L
         if (condition.latencyMs == 0 && condition.jitterMs == 0) return 0L
         if (condition.jitterMs == 0) return condition.latencyMs.toLong()
 
-        val spread = condition.jitterMs.coerceAtMost(condition.latencyMs.coerceAtLeast(condition.jitterMs))
-        val jitterDelta = random.nextInt(-spread, spread + 1)
-        return (condition.latencyMs + jitterDelta).toLong().coerceAtLeast(0L)
+        // Long math throughout: latencyMs + jitterMs are independently-validated Ints whose sum
+        // can overflow Int (the Settings UI clamps both, but NetworkCondition itself only
+        // requires non-negative).
+        val lowest = (condition.latencyMs.toLong() - condition.jitterMs).coerceAtLeast(0L)
+        val highest = condition.latencyMs.toLong() + condition.jitterMs
+        return random.nextLong(lowest, highest + 1)
     }
 
     /**

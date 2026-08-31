@@ -20,8 +20,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Workspace system — exports/imports the app's intercept rules, saved API requests, and
- * flow graphs (nodes + connections) as a single JSON file.
+ * Workspace system — exports/imports the app's intercept rules, saved API requests, and every
+ * flow (pipeline metadata + nodes + connections, across all flows, not just the "default" one)
+ * as a single JSON file.
  *
  * Environments, notes, and settings are not part of this export. Notes become exportable
  * after flow/notes-repository work lands; extending the export to cover them is a clean
@@ -31,7 +32,8 @@ object WorkspaceExporter {
 
     /**
      * Exports the workspace as a JSON string.
-     * Includes: intercept rules, saved requests, flow nodes and connections.
+     * Includes: intercept rules, saved requests, every flow pipeline, and every flow's nodes
+     * and connections.
      */
     suspend fun exportWorkspace(context: Context): String = withContext(Dispatchers.IO) {
         val db = RequestrDatabase.get(context)
@@ -51,6 +53,18 @@ object WorkspaceExporter {
                 put("action", rule.action.name)
                 put("enabled", rule.enabled)
                 put("replacementValue", rule.replacementValue)
+                put("createdAt", rule.createdAt)
+                // §2.14(b) crypto fields -- these four were added for BODY_ENCRYPT_AES/
+                // BODY_DECRYPT_AES and were previously missing here entirely: exporting and
+                // re-importing a crypto rule silently reconstructed it *enabled*, with a blank
+                // alias, which cannot perform the transformation the user configured. See
+                // importWorkspace()'s crypto-rule gate for how import now handles an alias that
+                // is blank or doesn't exist on this device (AndroidKeyStore aliases never travel
+                // with an export).
+                put("cryptoKeyAlias", rule.cryptoKeyAlias)
+                put("cryptoAlgorithm", rule.cryptoAlgorithm)
+                put("cryptoDirection", rule.cryptoDirection)
+                put("cryptoScope", rule.cryptoScope)
             })
         }
         root.put("interceptRules", rulesArray)
@@ -70,9 +84,42 @@ object WorkspaceExporter {
         savedRequests.forEach { req -> requestsArray.put(requestToJson(req.toApiRequestItem())) }
         root.put("savedRequests", requestsArray)
 
-        // Flow nodes and connections
-        val flowNodes = db.flowNodeDao().getAll()
-        val flowConns = db.flowConnectionDao().getAll()
+        // Flow pipelines (multi-flow support, transplant slice 11).
+        //
+        // Flows are already in scope for this export (nodes/connections below have always been
+        // exported) -- unlike environments/notes/settings, which this class's KDoc deliberately
+        // excludes. But exporting nodes/connections without their owning FlowPipelineEntity is
+        // an incomplete implementation of that scope, not a smaller deliberate boundary: [FlowScreen]'s
+        // flow picker (`PipelinePillItem`) renders `pipeline.name`, and `FlowRepository`'s
+        // `allFlows` is populated from `flowPipelineDao().observeAll()` -- NOT from whatever
+        // flowIds happen to appear in flow_nodes/flow_connections. So a flow whose nodes/
+        // connections import successfully but whose FlowPipelineEntity row was never exported
+        // is worse than "the user can't tell it apart from another flow": it has no name and
+        // never appears in the picker at all -- its nodes are silently orphaned in the DB.
+        val pipelines = db.flowPipelineDao().getAll()
+        val pipelinesArray = JSONArray()
+        pipelines.forEach { p ->
+            pipelinesArray.put(JSONObject().apply {
+                put("id", p.id)
+                put("name", p.name)
+                put("description", p.description)
+                put("triggerType", p.triggerType)
+                put("status", p.status)
+                put("lastRunText", p.lastRunText)
+                put("runsCount", p.runsCount)
+                put("createdAt", p.createdAt)
+            })
+        }
+        root.put("flowPipelines", pipelinesArray)
+
+        // Flow nodes and connections -- across EVERY flow, not just "default". getAll() on both
+        // DAOs defaults its `flowId` parameter to "default", so a user with multiple flows (see
+        // FlowRepository.allFlows / FlowScreen's flow picker) previously got only their default
+        // flow back on export, silently losing every other flow with no warning. Each node/
+        // connection's own `flowId` (exported below) is what lets import reconstruct the
+        // original graphs instead of merging everything into one flow.
+        val flowNodes = db.flowNodeDao().getAllAcrossFlows()
+        val flowConns = db.flowConnectionDao().getAllAcrossFlows()
         val nodesArray = JSONArray()
         flowNodes.forEach { node ->
             nodesArray.put(JSONObject().apply {
@@ -82,6 +129,13 @@ object WorkspaceExporter {
                 put("x", node.positionX)
                 put("y", node.positionY)
                 put("configData", node.configData)
+                // Generic field-drift fix: flowId/createdAt were previously omitted here, so
+                // every imported node silently landed back on flowId="default" and a fresh
+                // createdAt regardless of which flow graph it actually belonged to or when it
+                // was really created. See jsonToApiRequestItem's KDoc / the crypto-fields MUST-FIX
+                // above for the same class of bug on a different entity.
+                put("flowId", node.flowId)
+                put("createdAt", node.createdAt)
             })
         }
         val connsArray = JSONArray()
@@ -92,6 +146,9 @@ object WorkspaceExporter {
                 put("to", conn.toNodeId)
                 put("fromPort", conn.fromPort)
                 put("toPort", conn.toPort)
+                // Same fix as flow nodes above.
+                put("flowId", conn.flowId)
+                put("createdAt", conn.createdAt)
             })
         }
         root.put("flowNodes", nodesArray)
@@ -103,34 +160,91 @@ object WorkspaceExporter {
     /**
      * Imports a workspace from a JSON string. Merges with existing data
      * (does not delete existing entries).
+     *
+     * [hasKeyAlias] -- defaults to the real [com.example.data.prefs.SecureKeyStore.hasKey] --
+     * is a test seam for the crypto-rule import gate below (see that block's KDoc); production
+     * callers never need to pass it.
      */
-    suspend fun importWorkspace(context: Context, json: String): ImportResult = withContext(Dispatchers.IO) {
+    suspend fun importWorkspace(
+        context: Context,
+        json: String,
+        hasKeyAlias: (String) -> Boolean = com.example.data.prefs.SecureKeyStore::hasKey,
+    ): ImportResult = withContext(Dispatchers.IO) {
         val db = RequestrDatabase.get(context)
         val root = JSONObject(json)
         var rulesImported = 0
         var requestsImported = 0
+        var pipelinesImported = 0
         var nodesImported = 0
         var connsImported = 0
         val errors = mutableListOf<String>()
+        val warnings = mutableListOf<String>()
 
         // Import rules
         root.optJSONArray("interceptRules")?.let { arr ->
             for (i in 0 until arr.length()) {
                 try {
                     val r = arr.getJSONObject(i)
+                    val name = r.optString("name", "")
+                    // A workspace exported by an older build won't know FORCE_MITM (or any
+                    // future action) yet -- fall back to LOG_ONLY rather than failing the
+                    // whole rule import on an unrecognized action name.
+                    val action = runCatching {
+                        com.example.data.local.RuleAction.valueOf(r.optString("action", "LOG_ONLY"))
+                    }.getOrDefault(com.example.data.local.RuleAction.LOG_ONLY)
+                    var enabled = r.optBoolean("enabled", true)
+                    // §2.14(b) crypto fields -- round-tripped since MUST-FIX (data-loss bug):
+                    // export used to omit all four, so re-importing a crypto rule always
+                    // reconstructed it enabled with a blank alias.
+                    val cryptoKeyAlias = r.optString("cryptoKeyAlias", "")
+                    val cryptoAlgorithm = r.optString("cryptoAlgorithm", "AES/GCM/NoPadding")
+                    val cryptoDirection = r.optString("cryptoDirection", "ENCRYPT")
+                    val cryptoScope = r.optString("cryptoScope", "BOTH")
+
+                    // Crypto-rule import gate: a `cryptoKeyAlias` names an AndroidKeyStore
+                    // entry, which by design never travels with an export (it's per-device key
+                    // material, not exportable data) -- so a blank alias, or an alias that
+                    // simply doesn't exist yet on *this* device, is the normal case for an
+                    // imported crypto rule, not an edge case. RuleEnforcer's crypto path fails
+                    // open (leaves the body untouched) on a bad key, so importing this rule
+                    // *enabled* would silently start forwarding traffic in plaintext that the
+                    // user believes is encrypted -- the one option that's definitely wrong.
+                    // Instead: import it (never silently drop the user's configuration) but
+                    // force it disabled, and record a warning so this is discoverable at import
+                    // time rather than only when live traffic goes out unprotected.
+                    val isCryptoAction = action == com.example.data.local.RuleAction.BODY_ENCRYPT_AES ||
+                        action == com.example.data.local.RuleAction.BODY_DECRYPT_AES
+                    if (isCryptoAction && enabled) {
+                        val reason = when {
+                            cryptoKeyAlias.isBlank() ->
+                                "no key alias was set when this rule was exported"
+                            !hasKeyAlias(cryptoKeyAlias) ->
+                                "key alias '$cryptoKeyAlias' does not exist on this device " +
+                                    "(Keystore aliases never travel with an export)"
+                            else -> null
+                        }
+                        if (reason != null) {
+                            enabled = false
+                            warnings.add(
+                                "Rule '${name.ifBlank { "(unnamed)" }}': imported disabled -- $reason. " +
+                                    "Edit the rule and set a valid key alias, then re-enable it.",
+                            )
+                        }
+                    }
+
                     db.interceptRuleDao().insert(
                         com.example.data.local.InterceptRuleEntity(
-                            name = r.optString("name", ""),
+                            name = name,
                             pattern = r.optString("pattern", ""),
                             domain = r.optString("domain", ""),
-                            // A workspace exported by an older build won't know FORCE_MITM (or any
-                            // future action) yet -- fall back to LOG_ONLY rather than failing the
-                            // whole rule import on an unrecognized action name.
-                            action = runCatching {
-                                com.example.data.local.RuleAction.valueOf(r.optString("action", "LOG_ONLY"))
-                            }.getOrDefault(com.example.data.local.RuleAction.LOG_ONLY),
-                            enabled = r.optBoolean("enabled", true),
+                            action = action,
+                            enabled = enabled,
                             replacementValue = r.optString("replacementValue").takeIf { it.isNotBlank() },
+                            createdAt = if (r.has("createdAt")) r.optLong("createdAt", System.currentTimeMillis()) else System.currentTimeMillis(),
+                            cryptoKeyAlias = cryptoKeyAlias,
+                            cryptoAlgorithm = cryptoAlgorithm,
+                            cryptoDirection = cryptoDirection,
+                            cryptoScope = cryptoScope,
                         )
                     )
                     rulesImported++
@@ -155,6 +269,31 @@ object WorkspaceExporter {
             }
         }
 
+        // Import flow pipelines -- must run before nodes/connections below so a flow's
+        // FlowPipelineEntity row exists (name/status/etc.) as soon as its nodes do, matching
+        // export's ordering. See exportWorkspace()'s "Flow pipelines" block for why this entity
+        // is required, not optional, for a multi-flow workspace to reconstruct correctly.
+        root.optJSONArray("flowPipelines")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                try {
+                    val p = arr.getJSONObject(i)
+                    db.flowPipelineDao().upsert(
+                        com.example.data.local.FlowPipelineEntity(
+                            id = p.getString("id"),
+                            name = p.optString("name", ""),
+                            description = p.optString("description", ""),
+                            triggerType = p.optString("triggerType", "Manual"),
+                            status = p.optString("status", "DRAFT"),
+                            lastRunText = p.optString("lastRunText", "Never"),
+                            runsCount = p.optInt("runsCount", 0),
+                            createdAt = if (p.has("createdAt")) p.optLong("createdAt", System.currentTimeMillis()) else System.currentTimeMillis(),
+                        )
+                    )
+                    pipelinesImported++
+                } catch (e: Exception) { errors.add("Pipeline $i: ${e.message}") }
+            }
+        }
+
         // Import flow nodes
         root.optJSONArray("flowNodes")?.let { arr ->
             for (i in 0 until arr.length()) {
@@ -163,11 +302,13 @@ object WorkspaceExporter {
                     db.flowNodeDao().upsert(
                         com.example.data.local.FlowNodeEntity(
                             id = n.getString("id"),
+                            flowId = n.optString("flowId", "default"),
                             type = n.optString("type", "API"),
                             label = n.optString("label", ""),
                             positionX = n.optDouble("x", 0.0).toFloat(),
                             positionY = n.optDouble("y", 0.0).toFloat(),
                             configData = n.optString("configData", ""),
+                            createdAt = if (n.has("createdAt")) n.optLong("createdAt", System.currentTimeMillis()) else System.currentTimeMillis(),
                         )
                     )
                     nodesImported++
@@ -183,10 +324,12 @@ object WorkspaceExporter {
                     db.flowConnectionDao().upsert(
                         com.example.data.local.FlowConnectionEntity(
                             id = c.getString("id"),
+                            flowId = c.optString("flowId", "default"),
                             fromNodeId = c.getString("from"),
                             toNodeId = c.getString("to"),
                             fromPort = c.optString("fromPort", "out"),
                             toPort = c.optString("toPort", "in"),
+                            createdAt = if (c.has("createdAt")) c.optLong("createdAt", System.currentTimeMillis()) else System.currentTimeMillis(),
                         )
                     )
                     connsImported++
@@ -194,7 +337,7 @@ object WorkspaceExporter {
             }
         }
 
-        ImportResult(rulesImported, requestsImported, nodesImported, connsImported, errors)
+        ImportResult(rulesImported, requestsImported, pipelinesImported, nodesImported, connsImported, errors, warnings)
     }
 
     // ── Full-fidelity saved-request JSON (§1.6(b)) ───────────────────────────────────────────
@@ -239,6 +382,15 @@ object WorkspaceExporter {
         put("mockHeaders", keyValueListToJson(item.mockHeaders))
         put("mockBody", item.mockBody)
         put("mockDelayMs", item.mockDelayMs)
+        // Generic field-drift fix: async 202-polling config (Master plan §2.x LOW-ADD) was
+        // added to ApiRequestItem/SavedApiRequestEntity after this exporter was last updated
+        // and was never wired in here -- a saved request with polling configured silently lost
+        // that configuration on export/import, same class of bug as the crypto fields MUST-FIX.
+        put("pollingEnabled", item.pollingEnabled)
+        put("pollingIntervalMs", item.pollingIntervalMs)
+        put("pollingMaxAttempts", item.pollingMaxAttempts)
+        put("pollingLocationHeader", item.pollingLocationHeader)
+        put("pollingAllowCrossOriginRedirect", item.pollingAllowCrossOriginRedirect)
         put("chainExtractions", JSONArray().apply {
             item.chainExtractions.forEach { rule ->
                 put(JSONObject().apply {
@@ -296,6 +448,11 @@ object WorkspaceExporter {
         mockHeaders = jsonToKeyValueList(r.optJSONArray("mockHeaders")),
         mockBody = r.optString("mockBody", "{\"mocked\": true}"),
         mockDelayMs = r.optLong("mockDelayMs", 0L),
+        pollingEnabled = r.optBoolean("pollingEnabled", false),
+        pollingIntervalMs = r.optLong("pollingIntervalMs", 2000L),
+        pollingMaxAttempts = r.optInt("pollingMaxAttempts", 10),
+        pollingLocationHeader = r.optString("pollingLocationHeader", "Location"),
+        pollingAllowCrossOriginRedirect = r.optBoolean("pollingAllowCrossOriginRedirect", false),
         chainExtractions = r.optJSONArray("chainExtractions")?.let { arr ->
             (0 until arr.length()).mapNotNull { i ->
                 val o = arr.optJSONObject(i) ?: return@mapNotNull null
@@ -351,12 +508,31 @@ object WorkspaceExporter {
     data class ImportResult(
         val rulesImported: Int,
         val requestsImported: Int,
+        /** Multi-flow support: how many [com.example.data.local.FlowPipelineEntity] rows imported. */
+        val pipelinesImported: Int,
         val nodesImported: Int,
         val connsImported: Int,
         val errors: List<String>,
+        /**
+         * Non-fatal notices about an item that *was* imported but in a deliberately degraded
+         * state -- e.g. a crypto rule (see [importWorkspace]'s crypto-rule gate) imported
+         * disabled because its AndroidKeyStore alias is blank or doesn't exist on this device.
+         * Distinct from [errors] (which means the item was NOT imported at all): the item is
+         * still present in the DB, just not doing what its export-time config implied. Folded
+         * into [summary] so the existing "show the summary in a Toast" call site
+         * ([com.example.ui.screens.SettingsScreen]'s workspace-import launcher) surfaces these
+         * without needing its own change.
+         */
+        val warnings: List<String> = emptyList(),
     ) {
         val summary: String
-            get() = "Imported $rulesImported rules, $requestsImported requests, $nodesImported nodes, $connsImported connections" +
-                if (errors.isNotEmpty()) " (${errors.size} errors)" else ""
+            get() {
+                val base = "Imported $rulesImported rules, $requestsImported requests, $pipelinesImported flows, $nodesImported nodes, $connsImported connections"
+                val notes = buildList {
+                    if (warnings.isNotEmpty()) add("${warnings.size} warning(s): ${warnings.joinToString("; ")}")
+                    if (errors.isNotEmpty()) add("${errors.size} error(s)")
+                }
+                return if (notes.isEmpty()) base else "$base (${notes.joinToString("; ")})"
+            }
     }
 }

@@ -141,6 +141,7 @@ import com.example.data.models.RequestBodyType
 import com.example.data.repository.ApiCollectionsRepository
 import com.example.data.repository.ApiTestrRepository
 import com.example.data.repository.AssertionRunner
+import com.example.data.repository.CurlImportResult
 import com.example.data.repository.SettingsRepository
 import com.example.data.repository.ToolsRepository
 import com.example.data.repository.WebSocketSession
@@ -278,10 +279,10 @@ fun ApiTestrScreen(
             // substitution, so a pre-script's pm.environment.set(...) is visible in the SAME
             // send) — pass the original, un-substituted reqState here rather than
             // pre-substituting it ourselves, to avoid double-applying substitution.
-            val outcome = ApiTestrRepository.executeRequestWithScripts(reqState, shouldFollowRedirects(redirectFollowState))
+            val outcome = ApiTestrRepository.executeRequestWithScripts(reqState, redirectFollowState.shouldFollow)
             // A "follow once" tap only applies to this send — consume it now so the next send
             // reverts to whatever alwaysFollow is set to, instead of silently following forever.
-            redirectFollowState = consumeOnceAfterSend(redirectFollowState)
+            redirectFollowState = redirectFollowState.afterSend()
             val resp = outcome.response
             responseData = resp
             // v3.4 Part C — C3: clear any previous run's pass/fail results —
@@ -382,8 +383,8 @@ fun ApiTestrScreen(
                 onTitleChanged = { reqState = reqState.copy(name = it) },
                 onMethodChanged = { reqState = reqState.copy(method = it) },
                 onUrlChanged = { reqState = reqState.copy(url = it) },
-                onTapRedirect = { redirectFollowState = toggleOnceArmed(redirectFollowState) },
-                onLongPressRedirect = { redirectFollowState = toggleAlwaysFollow(redirectFollowState) }
+                onTapRedirect = { redirectFollowState = redirectFollowState.withOnceToggled() },
+                onLongPressRedirect = { redirectFollowState = redirectFollowState.withAlwaysToggled() }
             )
         }
 
@@ -1063,6 +1064,7 @@ fun ApiTestrScreen(
     // Modal: Import cURL
     if (showImportCurlModal) {
         var curlInput by remember { mutableStateOf("curl -X POST https://httpbin.org/post -H \"Content-Type: application/json\" -d '{\"hello\":\"world\"}'") }
+        var curlError by remember { mutableStateOf<String?>(null) }
 
         ModalBottomSheet(
             onDismissRequest = { showImportCurlModal = false },
@@ -1079,7 +1081,7 @@ fun ApiTestrScreen(
 
                 OutlinedTextField(
                     value = curlInput,
-                    onValueChange = { curlInput = it },
+                    onValueChange = { curlInput = it; curlError = null },
                     placeholder = { Text("Paste cURL here...", color = TextMuted) },
                     textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = TextPrimary),
                     modifier = Modifier
@@ -1088,16 +1090,26 @@ fun ApiTestrScreen(
                     shape = RoundedCornerShape(12.dp)
                 )
 
+                curlError?.let {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(it, fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+                }
+
                 Spacer(modifier = Modifier.height(14.dp))
 
                 Button(
                     onClick = {
-                        val parsed = ApiTestrRepository.parseCurl(curlInput)
-                        reqState = parsed
-                        ApiCollectionsRepository.saveRequest(parsed)
-                        showImportCurlModal = false
-                        performHaptic(HapticFeedbackType.LongPress)
-                        showSavedSnackbar("Imported \"${parsed.name}\"")
+                        when (val result = ApiTestrRepository.parseCurl(curlInput)) {
+                            is CurlImportResult.Failure -> curlError = result.message
+                            is CurlImportResult.Success -> {
+                                val parsed = result.request
+                                reqState = parsed
+                                ApiCollectionsRepository.saveRequest(parsed)
+                                showImportCurlModal = false
+                                performHaptic(HapticFeedbackType.LongPress)
+                                showSavedSnackbar("Imported \"${parsed.name}\"")
+                            }
+                        }
                     },
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp),
@@ -1790,7 +1802,7 @@ private fun TitleAndUrlCard(
     onTapRedirect: () -> Unit,
     onLongPressRedirect: () -> Unit
 ) {
-    val followRedirects = shouldFollowRedirects(redirectFollowState)
+    val followRedirects = redirectFollowState.shouldFollow
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     var isEditingTitle by remember { mutableStateOf(false) }
     var showMethodMenu by remember { mutableStateOf(false) }
@@ -2106,7 +2118,10 @@ private fun TitleAndUrlCard(
                             modifier = Modifier
                                 .size(9.dp)
                                 .align(Alignment.BottomEnd)
-                                .offset(x = 2.dp, y = 2.dp)
+                                // Inset inward (not outward) so the badge stays inside the
+                                // parent Box's clip(RoundedCornerShape(bottomEnd = 14.dp)) region
+                                // instead of being clipped away by the rounded corner.
+                                .offset(x = (-3).dp, y = (-3).dp)
                         )
                     }
                 }
@@ -2447,11 +2462,25 @@ private fun HttpRequestBodyTab(
         } else if (bodyType == RequestBodyType.FORM || bodyType == RequestBodyType.MULTIPART) {
             // Master plan §2.9 — reuse the same KeyValueEditorTable pattern already used for
             // query params / headers, rather than inventing a new UI language for form fields.
-            KeyValueEditorTable(
-                title = if (bodyType == RequestBodyType.MULTIPART) "Form Data (multipart/form-data)" else "Form Data (x-www-form-urlencoded)",
-                items = formData,
-                onItemsChanged = onFormDataChanged
-            )
+            //
+            // Bug fix (smoke test): KeyValueEditorTable's root Column is Modifier.fillMaxSize(),
+            // and its internal LazyColumn expands to fill all available height by default. The
+            // enclosing container here is a plain Column (unlike the Query Params/Headers tabs,
+            // which place KeyValueEditorTable + RawEditorToggleRow directly as Box siblings), so
+            // without a bound the table greedily consumed the *entire* remaining Column height,
+            // pushing the RawEditorToggleRow below it thousands of pixels off screen — rendering
+            // the new FORM/MULTIPART raw-editor toggle invisible and unreachable.
+            // `weight(1f, fill = false)` alone still lets fillMaxSize() inside claim ~all of the
+            // remaining space (the toggle row was the only other Column child), so this also caps
+            // the table's max height so the toggle row + optional raw editor always stay visible
+            // directly beneath it, with the row list scrolling internally if it grows past that.
+            Box(modifier = Modifier.weight(1f, fill = false).heightIn(max = 280.dp)) {
+                KeyValueEditorTable(
+                    title = if (bodyType == RequestBodyType.MULTIPART) "Form Data (multipart/form-data)" else "Form Data (x-www-form-urlencoded)",
+                    items = formData,
+                    onItemsChanged = onFormDataChanged
+                )
+            }
             // Dossier §7 item 6 — Query Params/Headers already have a raw-text ↔ table toggle;
             // the Body tab's FORM/MULTIPART rows didn't. Reuses the same components + the
             // now-pure-and-tested parse/format functions.
@@ -3280,212 +3309,6 @@ private fun CodeToolbarAction(
             tint = Color(0xFF8B95A6),
             modifier = Modifier.size(14.dp)
         )
-    }
-}
-
-/**
- * Builds syntax highlighted AnnotatedString for JSON lines.
- */
-private fun highlightJsonLine(line: String): AnnotatedString {
-    return buildAnnotatedString {
-        val parts = line.split(":", limit = 2)
-        if (parts.size == 2 && parts[0].trim().startsWith("\"")) {
-            val colonIdx = line.indexOf(':')
-            val beforeColon = line.substring(0, colonIdx)
-            val afterColon = line.substring(colonIdx)
-
-            // Key in cyan/blue
-            withStyle(SpanStyle(color = Color(0xFF7EC8E3))) {
-                append(beforeColon)
-            }
-            // Colon in punctuation color
-            withStyle(SpanStyle(color = Color(0xFF8B95A6))) {
-                append(":")
-            }
-            // Value in green
-            withStyle(SpanStyle(color = Color(0xFF8CE3A0))) {
-                append(afterColon.removePrefix(":"))
-            }
-        } else {
-            // Generic braces / brackets
-            withStyle(SpanStyle(color = Color(0xFFC9D3E8))) {
-                append(line)
-            }
-        }
-    }
-}
-
-@Composable
-private fun LiveJsonAndRawBlock(
-    formattedJson: String,
-    rawText: String,
-    showRawEditor: Boolean,
-    isDark: Boolean,
-    onToggleRawEditor: () -> Unit,
-    onBeautify: () -> Unit,
-    onCopyJson: () -> Unit,
-    onCopyFlat: () -> Unit,
-    onClear: () -> Unit,
-    onRawTextChanged: (String) -> Unit
-) {
-    val codeBg = if (isDark) Color(0xFF04060C) else Color(0xFF141720)
-    val toolbarBg = if (isDark) Color(0xFF0A0E18) else Color(0xFF1B202C)
-    val primaryColor = MaterialTheme.colorScheme.primary
-
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        color = codeBg,
-        border = BorderStroke(1.dp, Color(0xFF1E2838))
-    ) {
-        Column {
-            // JSON Toolbar
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(toolbarBg)
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "JSON",
-                    fontSize = 10.5.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    fontFamily = FontFamily.Monospace,
-                    color = Color(0xFF8B95A6),
-                    letterSpacing = 1.sp
-                )
-
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    CodeToolbarAction(
-                        icon = Icons.Default.AutoAwesome,
-                        description = "Beautify JSON",
-                        onClick = onBeautify
-                    )
-                    CodeToolbarAction(
-                        icon = Icons.Default.ContentCopy,
-                        description = "Copy as JSON",
-                        onClick = onCopyJson
-                    )
-                    CodeToolbarAction(
-                        icon = Icons.Default.Delete,
-                        description = "Clear all",
-                        onClick = onClear
-                    )
-
-                    // Toggle Raw Text Editor
-                    Box(
-                        modifier = Modifier
-                            .size(28.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(if (showRawEditor) primaryColor else Color.Transparent)
-                            .clickable { onToggleRawEditor() },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Edit,
-                            contentDescription = "Toggle Raw Editor",
-                            tint = if (showRawEditor) MaterialTheme.colorScheme.onPrimary else Color(0xFF8B95A6),
-                            modifier = Modifier.size(14.dp)
-                        )
-                    }
-                }
-            }
-
-            // Syntax Highlighted JSON Preview
-            val lines = formattedJson.split("\n")
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 180.dp)
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 12.dp, vertical = 10.dp)
-            ) {
-                lines.forEachIndexed { index, line ->
-                    Row(modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            text = "${index + 1}",
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp,
-                            color = Color(0xFF3B4862),
-                            textAlign = TextAlign.End,
-                            modifier = Modifier.width(22.dp)
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Text(
-                            text = highlightJsonLine(line),
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp,
-                            modifier = Modifier.horizontalScroll(rememberScrollState())
-                        )
-                    }
-                }
-            }
-
-            // Expandable Raw Text Editor Drawer
-            AnimatedVisibility(
-                visible = showRawEditor,
-                enter = expandVertically() + fadeIn(),
-                exit = shrinkVertically() + fadeOut()
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(if (isDark) Color(0xFF030408) else Color(0xFF10131B))
-                        .drawBehind {
-                            drawLine(
-                                color = Color(0xFF1E2838),
-                                start = Offset(0f, 0f),
-                                end = Offset(size.width, 0f),
-                                strokeWidth = 1.dp.toPx()
-                            )
-                        }
-                        .padding(12.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Editor",
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 9.5.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = Color(0xFF5B6B85),
-                            letterSpacing = 1.sp
-                        )
-                        Text(
-                            text = "key: value · // to disable a row",
-                            fontSize = 9.5.sp,
-                            color = Color(0xFF4A556B)
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(6.dp))
-
-                    BasicTextField(
-                        value = rawText,
-                        onValueChange = onRawTextChanged,
-                        textStyle = TextStyle(
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.5.sp,
-                            color = Color(0xFFC9D3E8),
-                            lineHeight = 16.sp
-                        ),
-                        cursorBrush = SolidColor(primaryColor),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 70.dp, max = 150.dp)
-                            .verticalScroll(rememberScrollState())
-                    )
-                }
-            }
-        }
     }
 }
 

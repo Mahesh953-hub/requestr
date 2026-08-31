@@ -174,4 +174,3 @@ fun replacementValueError(action: RuleAction, rawText: String): String? {
         }
     }
 }
-

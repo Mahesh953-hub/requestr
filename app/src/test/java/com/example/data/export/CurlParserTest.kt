@@ -144,6 +144,120 @@ class CurlParserTest {
         assertEquals(listOf("Authorization" to expected), result.headers)
     }
 
+    // ── glued and bundled short flags ────────────────────────────────────
+
+    @Test
+    fun `a glued short flag value parses the same as a separated one`() {
+        val glued = CurlParser.parse("curl -XPOST 'https://example.com/x'")
+        val separated = CurlParser.parse("curl -X POST 'https://example.com/x'")
+        assertEquals(separated, glued)
+        assertEquals("POST", glued.method)
+        assertEquals("https://example.com/x", glued.url)
+    }
+
+    @Test
+    fun `a glued header keeps a value containing a colon and spaces`() {
+        val result = CurlParser.parse("curl -H'Content-Type: application/json' 'https://example.com/x'")
+        assertEquals(listOf("Content-Type" to "application/json"), result.headers)
+        assertEquals("https://example.com/x", result.url)
+    }
+
+    @Test
+    fun `a glued data flag posts its body`() {
+        val result = CurlParser.parse("curl -d'{\"a\": \"b c\"}' 'https://example.com/x'")
+        assertEquals("{\"a\": \"b c\"}", result.body)
+        assertEquals("POST", result.method)
+        assertEquals("https://example.com/x", result.url)
+    }
+
+    @Test
+    fun `a bundle of value-less short flags is discarded rather than split into a flag and a value`() {
+        // -sS must not be read as -s with the value "S", which would consume the URL token.
+        val result = CurlParser.parse("curl -sS 'https://example.com/x'")
+        assertEquals("https://example.com/x", result.url)
+        assertEquals("GET", result.method)
+        assertNull(result.unsupportedFlag)
+    }
+
+    @Test
+    fun `a bundle followed by a value-taking flag consumes only that flag's value`() {
+        val separate = CurlParser.parse("curl -sS -H 'X-A: 1' -XPUT 'https://example.com/x'")
+        assertEquals("PUT", separate.method)
+        assertEquals(listOf("X-A" to "1"), separate.headers)
+        assertEquals("https://example.com/x", separate.url)
+        // The same flags bundled into one token, with -X last and its value glued on.
+        assertEquals("PUT", CurlParser.parse("curl -sSXPUT 'https://example.com/x'").method)
+    }
+
+    @Test
+    fun `an unrecognised short flag is reported instead of guessed at`() {
+        // -W is neither value-taking nor a known boolean, so "-Wfoo" could be "-W foo" or a
+        // bundle. Both spellings name the flag rather than picking one reading.
+        assertEquals("-W", CurlParser.parse("curl -W foo 'https://example.com/x'").unsupportedFlag)
+        assertEquals("-W", CurlParser.parse("curl -sW 'https://example.com/x'").unsupportedFlag)
+    }
+
+    // ── -G / --get: data belongs in the query string ─────────────────────
+
+    @Test
+    fun `-G moves the data into the query string of a bodiless GET`() {
+        val result = CurlParser.parse("curl -G -d 'a=b' 'https://example.com/x'")
+        assertEquals("https://example.com/x?a=b", result.url)
+        assertEquals("GET", result.method)
+        assertNull(result.body)
+    }
+
+    @Test
+    fun `-G merges with a query the url already has instead of replacing it`() {
+        val result = CurlParser.parse("curl -G -d 'a=b' 'https://example.com/x?p=1'")
+        assertEquals("https://example.com/x?p=1&a=b", result.url)
+        // A url already ending in a separator must not gain an empty parameter.
+        assertEquals(
+            "https://example.com/x?a=b",
+            CurlParser.parse("curl -G -d 'a=b' 'https://example.com/x?'").url,
+        )
+    }
+
+    @Test
+    fun `-G with multiple data flags joins them as query parameters`() {
+        val result = CurlParser.parse("curl -G -d 'a=1' -d 'b=2' 'https://example.com/x'")
+        assertEquals("https://example.com/x?a=1&b=2", result.url)
+        assertNull(result.body)
+    }
+
+    @Test
+    fun `-G with an explicit method keeps that method and still sends no body`() {
+        val result = CurlParser.parse("curl -G -X POST -d 'a=b' 'https://example.com/x'")
+        assertEquals("POST", result.method)
+        assertEquals("https://example.com/x?a=b", result.url)
+        assertNull(result.body)
+    }
+
+    @Test
+    fun `-G with no data leaves the url untouched`() {
+        val result = CurlParser.parse("curl -G 'https://example.com/x'")
+        assertEquals("https://example.com/x", result.url)
+        assertEquals("GET", result.method)
+        assertNull(result.body)
+    }
+
+    @Test
+    fun `--get percent-encodes a --data-urlencode value but not a plain -d one`() {
+        // curl appends -d verbatim and --data-urlencode encoded; the query must match either way.
+        val encoded = CurlParser.parse("curl --get --data-urlencode 'q=hello world' 'https://example.com/s'")
+        assertEquals("https://example.com/s?q=hello%20world", encoded.url)
+        val verbatim = CurlParser.parse("curl --get -d 'q=hello+world' 'https://example.com/s'")
+        assertEquals("https://example.com/s?q=hello+world", verbatim.url)
+    }
+
+    @Test
+    fun `-G bundled with other short flags still redirects the data into the query`() {
+        val result = CurlParser.parse("curl -sG -d 'a=b' 'https://example.com/x'")
+        assertEquals("https://example.com/x?a=b", result.url)
+        assertEquals("GET", result.method)
+        assertNull(result.body)
+    }
+
     // ── unknown flags / malformed input never crash ─────────────────────
 
     @Test
@@ -151,6 +265,34 @@ class CurlParserTest {
         val result = CurlParser.parse("curl -s -k --compressed -L 'https://example.com/x'")
         assertEquals("https://example.com/x", result.url)
         assertEquals("GET", result.method)
+    }
+
+    @Test
+    fun `a value-taking flag's argument is consumed instead of being read as the url`() {
+        // --proxy is not mapped to anything, but it does take a value. If its argument is left to
+        // fall through, "localhost:8080" becomes the request URL and the real URL is discarded.
+        val result = CurlParser.parse("curl --proxy localhost:8080 'https://example.com/x'")
+        assertEquals("https://example.com/x", result.url)
+    }
+
+    @Test
+    fun `a value-taking flag whose argument itself looks like a url does not win over the real url`() {
+        val result = CurlParser.parse("curl -x http://127.0.0.1:9090 https://api.example.com/v1/items")
+        assertEquals("https://api.example.com/v1/items", result.url)
+    }
+
+    @Test
+    fun `value-taking flags in inline form do not swallow the following url`() {
+        val result = CurlParser.parse("curl --max-time=30 --output=/tmp/out.json 'https://example.com/x'")
+        assertEquals("https://example.com/x", result.url)
+    }
+
+    @Test
+    fun `a discarded flag value does not become a header or body`() {
+        val result = CurlParser.parse("curl -o out.bin --limit-rate 200K 'https://example.com/x' -H 'X-A: 1'")
+        assertEquals("https://example.com/x", result.url)
+        assertEquals(listOf("X-A" to "1"), result.headers)
+        assertNull(result.body)
     }
 
     @Test

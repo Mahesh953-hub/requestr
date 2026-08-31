@@ -74,10 +74,7 @@ object RequestCryptoManager {
             val cipher = Cipher.getInstance(transformation)
             cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
             val ciphertext = cipher.doFinal(plaintext)
-            val payload = ByteArray(iv.size + ciphertext.size)
-            System.arraycopy(iv, 0, payload, 0, iv.size)
-            System.arraycopy(ciphertext, 0, payload, iv.size, ciphertext.size)
-            CryptoResult.Success(payload)
+            CryptoResult.Success(iv + ciphertext)
         } catch (e: GeneralSecurityException) {
             CryptoResult.Failure("encrypt failed: ${e.message ?: e.javaClass.simpleName}")
         }

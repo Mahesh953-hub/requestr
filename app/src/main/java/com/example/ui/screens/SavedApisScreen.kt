@@ -137,10 +137,14 @@ fun SavedApisScreen(
         }
     }
 
+    // Order is not set here: groupRequestsIntoCollections sorts each collection's requests by
+    // updatedAt descending as part of its contract, and nothing else reads this list's order.
+    // (Sorting outside the remember also produced a fresh list on every recomposition, which
+    // invalidated the grouping's remember key below every time.)
     val filtered = remember(allRequests, showSaved) {
         if (showSaved) allRequests
         else allRequests.filter { it.isFavorite }
-    }.sortedByDescending { it.updatedAt }
+    }
 
     // Dossier Q3 — collections-grouped card list (docs/designs/saved_apis/*.html) instead of the
     // old flat list. Pure grouping/counting/sorting lives in SavedApisGrouping.kt so it can be

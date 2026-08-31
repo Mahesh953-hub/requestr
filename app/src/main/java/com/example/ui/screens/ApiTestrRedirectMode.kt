@@ -9,34 +9,28 @@ package com.example.ui.screens
  * flagged in the final report as a discrepancy, not silently resolved either way.
  *
  * [alwaysFollow] persists across sends (toggled by long-press). [onceArmed] is a one-shot flag
- * (toggled by tap) that is consumed after the next send completes via [consumeOnceAfterSend] so a
- * single "follow once" tap doesn't silently keep following redirects forever.
+ * (toggled by tap) that is consumed after the next send completes via [afterSend] so a single
+ * "follow once" tap doesn't silently keep following redirects forever.
  *
- * The default [RedirectFollowState] evaluates [shouldFollowRedirects] to `true`, matching the
- * screen's pre-existing default (`followRedirects = true`) so this is a backward-compatible
- * replacement for the old plain `Boolean`.
+ * The default state has [shouldFollow] `true`, matching the screen's pre-existing default
+ * (`followRedirects = true`).
  */
 data class RedirectFollowState(
     val alwaysFollow: Boolean = true,
     val onceArmed: Boolean = false
-)
+) {
+    /** Whether the *next* send should follow redirects. */
+    val shouldFollow: Boolean get() = alwaysFollow || onceArmed
 
-/** Whether the *next* send should follow redirects, given the current toggle state. */
-fun shouldFollowRedirects(state: RedirectFollowState): Boolean =
-    state.alwaysFollow || state.onceArmed
+    /** Tap: arms/disarms the one-shot "follow this send only" flag, leaving [alwaysFollow] alone. */
+    fun withOnceToggled(): RedirectFollowState = copy(onceArmed = !onceArmed)
 
-/** Tap: arms/disarms a one-shot "follow this send only" flag without touching [alwaysFollow]. */
-fun toggleOnceArmed(state: RedirectFollowState): RedirectFollowState =
-    state.copy(onceArmed = !state.onceArmed)
+    /** Long-press: flips the persistent "always follow redirects" setting. */
+    fun withAlwaysToggled(): RedirectFollowState = copy(alwaysFollow = !alwaysFollow)
 
-/** Long-press: flips the persistent "always follow redirects" setting. */
-fun toggleAlwaysFollow(state: RedirectFollowState): RedirectFollowState =
-    state.copy(alwaysFollow = !state.alwaysFollow)
-
-/**
- * Call after a send completes so a one-shot "follow once" tap doesn't keep following redirects
- * on every subsequent send. No-op when [RedirectFollowState.onceArmed] is already false, and does
- * not touch [RedirectFollowState.alwaysFollow].
- */
-fun consumeOnceAfterSend(state: RedirectFollowState): RedirectFollowState =
-    if (state.onceArmed) state.copy(onceArmed = false) else state
+    /**
+     * Call after a send completes so a one-shot "follow once" tap doesn't keep following redirects
+     * on every subsequent send. Leaves [alwaysFollow] alone.
+     */
+    fun afterSend(): RedirectFollowState = copy(onceArmed = false)
+}

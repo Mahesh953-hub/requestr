@@ -1,5 +1,8 @@
 package com.example.interception
 
+import com.example.data.local.CaptureRowMethod
+import com.example.data.local.CapturedTrafficEntity
+import com.example.interception.http.HttpBodyDecoder
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
@@ -426,5 +429,75 @@ internal object HttpProxyShared {
         output.write(sb.toString().toByteArray(Charsets.ISO_8859_1))
         output.write(body)
         output.flush()
+    }
+
+    /**
+     * Builds the [CapturedTrafficEntity] for one fully-relayed HTTP transaction.
+     *
+     * Shared by [HttpProxyEngine] (on-device HTTP_PROXY tier) and
+     * [com.example.interception.gateway.GatewayEngine] (T2 LAN-relay tier): both hand raw byte
+     * arrays straight out of [forwardRequest], never a `ParsedHttpMessage`, so both must classify
+     * text-vs-binary themselves via [HttpBodyDecoder.forStorage]'s `ByteArray` overload rather
+     * than force-decoding as UTF-8 (which silently mangles an uploaded image or a protobuf
+     * response into lossy text). Same 2 MiB cap, same truncation flag, and the same three-state
+     * contract (text/no-body, binary stored, binary over cap) as
+     * `MitmProxyEngine.emitTransaction`/`CaptureEngine.persistTransaction`.
+     *
+     * `wasDecrypted`/`isUndecoded` are constants rather than parameters: both callers only reach
+     * here from their fully-decrypted HTTP relay path (a CONNECT tunnel they relay opaquely is
+     * recorded as a `ConnectAttemptEntity` instead), so threading them through would only add two
+     * dead arguments. Each caller keeps its own insert and failure handling.
+     */
+    fun capturedEntityFor(
+        sessionId: Long,
+        rawUrl: String,
+        method: String,
+        statusCode: Int?,
+        latencyMs: Long,
+        reqHeaders: Map<String, String>,
+        respHeaders: Map<String, String>,
+        reqBodyBytes: ByteArray,
+        respBodyBytes: ByteArray,
+        protocol: String,
+        captureMethod: CaptureRowMethod,
+        sourceIp: String? = null,
+        connectionId: String? = null,
+    ): CapturedTrafficEntity {
+        val absoluteUrl = if (rawUrl.startsWith("http")) rawUrl else "http://$rawUrl"
+        val (host, path) = runCatching {
+            val u = URI(absoluteUrl)
+            (u.host ?: rawUrl) to (u.path ?: "")
+        }.getOrDefault(rawUrl to "")
+
+        val reqStorage = HttpBodyDecoder.forStorage(reqBodyBytes)
+        val respStorage = HttpBodyDecoder.forStorage(respBodyBytes)
+
+        return CapturedTrafficEntity(
+            sessionId = sessionId,
+            method = method,
+            url = absoluteUrl,
+            host = host,
+            path = path,
+            statusCode = statusCode,
+            protocol = protocol,
+            requestHeaders = reqHeaders,
+            responseHeaders = respHeaders,
+            requestBody = if (reqStorage.isBinary) null else String(reqBodyBytes, Charsets.UTF_8).ifEmpty { null },
+            responseBody = if (respStorage.isBinary) null else String(respBodyBytes, Charsets.UTF_8).ifEmpty { null },
+            requestSizeBytes = reqStorage.trueSizeBytes,
+            responseSizeBytes = respStorage.trueSizeBytes,
+            isRequestBodyBinary = reqStorage.isBinary,
+            isResponseBodyBinary = respStorage.isBinary,
+            requestBodyBytes = reqStorage.bytes,
+            responseBodyBytes = respStorage.bytes,
+            requestBodyBytesTruncated = reqStorage.truncated,
+            responseBodyBytesTruncated = respStorage.truncated,
+            latencyMs = latencyMs,
+            wasDecrypted = true,
+            isUndecoded = false,
+            sourceIp = sourceIp,
+            connectionId = connectionId,
+            captureMethod = captureMethod,
+        )
     }
 }

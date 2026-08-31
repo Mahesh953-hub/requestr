@@ -130,11 +130,21 @@ object HttpBodyDecoder {
      * @property bytes the BLOB to persist as `requestBodyBytes`/`responseBodyBytes` -- always
      *   null when [isBinary] is false (the text column is authoritative then); may also be null
      *   when [isBinary] is true and [truncated] is true (exceeded [MAX_STORED_BODY_BYTES]).
+     *   SHOULD-FIX (gzip'd-image gallery bug): for a binary body this is
+     *   [ParsedHttpMessage.decodedBodyBytes] (the same, already-decompressed-if-possible bytes
+     *   [isBinary] was actually classified from), never the still-wire-encoded
+     *   [ParsedHttpMessage.rawBodyBytes] -- storing the latter meant a gzip-compressed JPEG was
+     *   classified as binary (correctly) but persisted as gzip bytes, so `BitmapFactory` in
+     *   [com.example.ui.screens.ImageGalleryScreen] tried to decode gzip data as an image and
+     *   always failed. [rawBodyBytes] itself is untouched by this -- MitmProxyEngine's
+     *   serializeRequest/serializeResponse still re-emit it verbatim for wire fidelity.
      * @property truncated write straight to `requestBodyBytesTruncated`/`responseBodyBytesTruncated`.
-     * @property trueSizeBytes the real, un-clamped byte length -- for a binary body this is
-     *   [ParsedHttpMessage.rawBodyBytes]'s length (correct even when [bytes] got dropped by the
-     *   cap); for a text body this matches the pre-existing `body.toByteArray(UTF_8).size`
-     *   computation exactly, so switching a caller over to this for text bodies is a no-op.
+     * @property trueSizeBytes the real, un-clamped *wire* byte length -- deliberately
+     *   [ParsedHttpMessage.rawBodyBytes]'s (still-encoded) length, not the decompressed
+     *   [bytes]'s length, so `requestSizeBytes`/`responseSizeBytes` keep reporting what actually
+     *   crossed the wire even though [bytes] itself is now decompressed content; for a text body
+     *   this matches the pre-existing `body.toByteArray(UTF_8).size` computation exactly, so
+     *   switching a caller over to this for text bodies is a no-op.
      */
     data class BinaryBodyStorage(
         val isBinary: Boolean,
@@ -153,7 +163,13 @@ object HttpBodyDecoder {
             )
         }
         val raw = message.rawBodyBytes ?: ByteArray(0)
-        val clamped = clampForStorage(raw)
+        // SHOULD-FIX (gzip'd-image gallery bug): store the decompressed bytes [isBinary] was
+        // classified from (falling back to the wire-exact raw bytes only when decompression was
+        // never attempted, e.g. a hand-built fixture with no rawBodyBytes at all) -- never the
+        // still-encoded raw bytes. Size accounting (trueSizeBytes below) intentionally still
+        // reads off `raw`, so it keeps reporting true wire size regardless of this.
+        val decoded = message.decodedBodyBytes ?: raw
+        val clamped = clampForStorage(decoded)
         return BinaryBodyStorage(
             isBinary = true,
             bytes = clamped.bytes,
@@ -228,6 +244,21 @@ object HttpBodyDecoder {
         val isBinary: Boolean,
         val encoding: Encoding,
         val encodingConsumed: Boolean,
+        /**
+         * SHOULD-FIX (gzip'd-image gallery bug): the exact bytes [isBinary]/[text] were computed
+         * from -- i.e. [rawBody] after a successful decompression attempt, or [rawBody] itself
+         * unchanged when [encodingConsumed] is false. This is deliberately *not* the same array
+         * [ParsedHttpMessage.rawBodyBytes] carries: that field must stay wire-exact (still
+         * gzip/deflate-encoded) forever, because MitmProxyEngine's serializeRequest/
+         * serializeResponse re-emit it verbatim onto the wire alongside the original, untouched
+         * Content-Encoding header for any non-`bodyReplaced` message -- feeding decompressed
+         * bytes back out under an unchanged "Content-Encoding: gzip" header would corrupt every
+         * relayed message with a compressed body. [decodedBytes] exists purely so storage/display
+         * code (see [HttpBodyDecoder.forStorage]) can persist bytes that actually match what
+         * [isBinary] classified and what a renderer (e.g. the image gallery's `BitmapFactory`)
+         * needs, without touching the wire-serialization contract at all.
+         */
+        val decodedBytes: ByteArray,
     )
 
     /**
@@ -257,7 +288,13 @@ object HttpBodyDecoder {
             runCatching { String(finalBytes, Charsets.UTF_8) }.getOrDefault(BINARY_BODY_PLACEHOLDER)
         }
 
-        return DecodedBody(text = text, isBinary = binary, encoding = encoding, encodingConsumed = encodingConsumed)
+        return DecodedBody(
+            text = text,
+            isBinary = binary,
+            encoding = encoding,
+            encodingConsumed = encodingConsumed,
+            decodedBytes = finalBytes,
+        )
     }
 
     private fun classify(contentEncodingHeader: String?): Encoding {

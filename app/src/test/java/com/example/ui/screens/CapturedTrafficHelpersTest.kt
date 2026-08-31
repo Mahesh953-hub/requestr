@@ -349,7 +349,7 @@ class CapturedTrafficHelpersTest {
         )
     }
 
-    // ── isBodyCryptoAction / impliedCryptoDirection / supportsReplacementValue ──────────
+    // ── isBodyCryptoAction / impliedCryptoDirection / supportsFileFixtureBody ──────────
 
     @Test
     fun `isBodyCryptoAction is true only for the two AES actions`() {
@@ -367,12 +367,12 @@ class CapturedTrafficHelpersTest {
     }
 
     @Test
-    fun `supportsReplacementValue is true only for the three body-replacement actions`() {
-        assertTrue(supportsReplacementValue(com.example.data.local.RuleAction.MOCK_RESPONSE))
-        assertTrue(supportsReplacementValue(com.example.data.local.RuleAction.MODIFY_REQUEST))
-        assertTrue(supportsReplacementValue(com.example.data.local.RuleAction.MODIFY_RESPONSE))
-        assertFalse(supportsReplacementValue(com.example.data.local.RuleAction.BLOCK))
-        assertFalse(supportsReplacementValue(com.example.data.local.RuleAction.BODY_ENCRYPT_AES))
+    fun `supportsFileFixtureBody is true only for the three body-replacement actions`() {
+        assertTrue(supportsFileFixtureBody(com.example.data.local.RuleAction.MOCK_RESPONSE))
+        assertTrue(supportsFileFixtureBody(com.example.data.local.RuleAction.MODIFY_REQUEST))
+        assertTrue(supportsFileFixtureBody(com.example.data.local.RuleAction.MODIFY_RESPONSE))
+        assertFalse(supportsFileFixtureBody(com.example.data.local.RuleAction.BLOCK))
+        assertFalse(supportsFileFixtureBody(com.example.data.local.RuleAction.BODY_ENCRYPT_AES))
     }
 
     // ── cryptoKeyAliasError ──────────────────────────────────────────────────────────────

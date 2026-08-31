@@ -194,7 +194,10 @@ fun computeCaptureStats(items: List<CapturedTrafficItem>): CaptureStats {
     )
 }
 
-/** `0` (never decoded) maps to "0xx" rather than the misleading "0xx"-looking "-xx". */
+/**
+ * Buckets a status code by its hundreds digit ("2xx", "4xx", ...). A never-decoded capture's `0`
+ * therefore lands in its own "0xx" bucket rather than being folded into a real status class.
+ */
 private fun statusClassOf(statusCode: Int): String = "${statusCode / 100}xx"
 
 // ── image gallery ────────────────────────────────────────────────────────
@@ -306,8 +309,13 @@ fun isBodyCryptoAction(action: RuleAction): Boolean =
 fun impliedCryptoDirection(action: RuleAction): String =
     if (action == RuleAction.BODY_DECRYPT_AES) "DECRYPT" else "ENCRYPT"
 
-/** Whether [action]'s `replacementValue` is used at all -- the three body-replacement actions. */
-fun supportsReplacementValue(action: RuleAction): Boolean = when (action) {
+/**
+ * Whether [action]'s `replacementValue` is a message *body* (as opposed to REDIRECT's target URL
+ * or CHAOS's JSON config), which is what makes a `file://` fixture reference meaningful for it.
+ * Use [replacementValueSpecFor] to ask the broader question of whether the action has a
+ * replacement value at all.
+ */
+fun supportsFileFixtureBody(action: RuleAction): Boolean = when (action) {
     RuleAction.MOCK_RESPONSE, RuleAction.MODIFY_REQUEST, RuleAction.MODIFY_RESPONSE -> true
     else -> false
 }

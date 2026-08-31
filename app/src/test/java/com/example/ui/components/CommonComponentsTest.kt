@@ -96,4 +96,21 @@ class CommonComponentsTest {
             ),
         )
     }
+
+    // ── formatByteCount -- the app's single byte-size formatter (chat attachment chips, capture
+    //    status readouts). Cases carried over from the deleted ChatAttachment.formatAttachmentSize.
+
+    @Test
+    fun `formatByteCount picks bytes, KB, MB or GB units`() {
+        assertEquals("512 B", formatByteCount(512))
+        assertEquals("12.3 KB", formatByteCount(12595))
+        assertEquals("1.4 MB", formatByteCount((1.4 * 1024 * 1024).toLong()))
+        assertEquals("2.00 GB", formatByteCount(2L * 1024 * 1024 * 1024))
+    }
+
+    @Test
+    fun `formatByteCount renders zero and negative counters as zero bytes`() {
+        assertEquals("0 B", formatByteCount(0))
+        assertEquals("0 B", formatByteCount(-1))
+    }
 }

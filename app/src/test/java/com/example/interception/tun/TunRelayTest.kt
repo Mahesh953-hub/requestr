@@ -136,15 +136,62 @@ class TunRelayTest {
     }
 
     @Test
+    fun `a genuine peer hard-reset surfaces as IOException Connection reset by peer on the next write`() {
+        // Characterization test, not a TunRelay test: documents the exact real-world failure
+        // [upstreamWriter]'s injected exception below (in the deterministic regression test)
+        // must match. Deliberately a single, immediate write attempt -- no retry loop, no
+        // Thread.sleep, no wall-clock deadline -- because a SO_LINGER(0) reset on loopback is
+        // observed to surface on literally the very first subsequent SocketChannel.write() every
+        // time on this JDK/OS, so there is nothing to race here. If a future JDK/OS ever needs
+        // more than one attempt, this test (not the flaky old one it replaced) is what will
+        // catch that this constant needs revisiting.
+        val server = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
+        try {
+            val client = java.nio.channels.SocketChannel.open()
+            client.connect(InetSocketAddress("127.0.0.1", server.localPort))
+            val accepted = server.accept()
+            accepted.setSoLinger(true, 0)
+            accepted.close()
+
+            val thrown = try {
+                client.write(java.nio.ByteBuffer.wrap("probe".toByteArray()))
+                null
+            } catch (e: Exception) {
+                e
+            }
+            assertNotNull("expected the reset to surface as an exception on the very next write", thrown)
+            assertTrue(thrown is java.io.IOException)
+            assertEquals("Connection reset by peer", thrown?.message)
+            client.close()
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
     fun `peer reset mid-flow increments dropTcpUpstreamWriteFail instead of dropping silently`() {
         // Regression test for the two uncounted TCP write-failure paths: writeUpstream's catch
         // (channel.write throws once the peer has genuinely reset the connection) and
         // flushPendingUpstream's catch. Before this counter existed, a reset upstream connection
         // closed the flow with a log line only -- invisible in the relay-health drop-reason
         // panel, unlike the equivalent UDP write-failure case which was already counted.
+        //
+        // This used to drive the failure via a real SO_LINGER(0) socket reset and then poll
+        // (Thread.sleep, re-sending data, up to a 5s wall-clock deadline) waiting for the OS to
+        // surface it -- occasionally flaky under load, since it compounded two independent
+        // timing uncertainties: the OS's RST propagation *and* the relay's own background
+        // selector thread getting scheduled to notice it. [TunRelay.upstreamWriter] is now an
+        // injectable seam specifically so this test can force the exact real failure (see the
+        // characterization test above for why `IOException("Connection reset by peer")` is
+        // the right thing to inject, not just "some Exception") through the real
+        // writeUpstream()/flushPendingUpstream() catch blocks deterministically, with only the
+        // one ordinary "wait for the relay's background thread to process one offer()" left --
+        // the same bounded wait every other test in this file already relies on via
+        // [awaitAtLeast], not a second compounding race on top of it.
         val server = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
         try {
             val (relay, sink) = startRelay()
+            relay.upstreamWriter = { _, _ -> throw java.io.IOException("Connection reset by peer") }
 
             val guestIp = byteArrayOf(10, 111, 222.toByte(), 6)
             val serverIp = byteArrayOf(127, 0, 0, 1)
@@ -158,32 +205,26 @@ class TunRelayTest {
             )
             relay.offer(syn, syn.size, 4)
 
-            val accepted = server.accept()
+            server.accept()
             awaitAtLeast(sink, 1) // SYN-ACK reached the guest, so the upstream channel is connected.
 
-            // A hard reset (SO_LINGER 0), not a graceful FIN, so the relay's next channel.write()
-            // upstream genuinely throws -- the real "peer reset the connection mid-flow" case
-            // writeUpstream's/flushPendingUpstream's catch blocks exist for.
-            accepted.setSoLinger(true, 0)
-            accepted.close()
+            val dataSeg = IpPacketBuilder.buildIpv4Tcp(
+                srcIp = guestIp, srcPort = guestPort,
+                dstIp = serverIp, dstPort = serverPort,
+                seq = 2001L, ack = 1L, flags = TcpReassembler.FLAG_ACK,
+                payload = "still-trying".toByteArray(),
+            )
+            relay.offer(dataSeg, dataSeg.size, 4)
 
-            val payload = "still-trying".toByteArray()
-            var seq = 2001L
-            val deadline = System.currentTimeMillis() + 5000L
+            val deadline = System.currentTimeMillis() + 3000L
             while (relay.stats.value.dropTcpUpstreamWriteFail == 0 && System.currentTimeMillis() < deadline) {
-                val dataSeg = IpPacketBuilder.buildIpv4Tcp(
-                    srcIp = guestIp, srcPort = guestPort,
-                    dstIp = serverIp, dstPort = serverPort,
-                    seq = seq, ack = 1L, flags = TcpReassembler.FLAG_ACK,
-                    payload = payload,
-                )
-                relay.offer(dataSeg, dataSeg.size, 4)
-                seq += payload.size
-                Thread.sleep(50)
+                Thread.sleep(20)
             }
 
             assertTrue(
-                "expected writeUpstream's catch to bump dropTcpUpstreamWriteFail once the peer reset the connection",
+                "expected writeUpstream's catch to bump dropTcpUpstreamWriteFail once the injected " +
+                    "write failure fired -- a single offer() should be enough since the failure is " +
+                    "no longer racing real OS reset-propagation timing",
                 relay.stats.value.dropTcpUpstreamWriteFail > 0,
             )
             // Every per-reason counter is an honest partition of the relayErrors aggregate --

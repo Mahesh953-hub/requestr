@@ -398,11 +398,19 @@ REOF
         }
     }
 
-    /** Delete the CA material and regenerate fresh. */
+    /**
+     * Delete the CA material and regenerate fresh.
+     *
+     * See [CaTrustGate]'s KDoc: the new CA identity is definitely not yet trusted by the
+     * device (the user hasn't re-installed it), so any already-cached [CaTrustGate.isTrusted]
+     * "trusted" answer from the *old* CA is now stale -- [CaTrustGate.invalidateAll] forces
+     * every live gate (including one already in use by a running capture session) to re-probe
+     * on its next check instead of serving that stale answer for up to the cache TTL.
+     */
     suspend fun regenerate(context: Context) = withContext(Dispatchers.IO) {
         java.io.File(context.cacheDir, "requestr_ca.pem").delete()
         java.io.File(context.cacheDir, "requestr_ca_key.pkcs8").delete()
-        getOrCreate(context)
+        getOrCreate(context).also { CaTrustGate.invalidateAll() }
     }
 
     // ── Remote-certificate mirroring ────────────────────────────────────

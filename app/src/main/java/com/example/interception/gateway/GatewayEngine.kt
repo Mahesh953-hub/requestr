@@ -5,10 +5,8 @@ import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.util.Log
 import com.example.data.local.CaptureTier
-import com.example.data.local.CapturedTrafficEntity
 import com.example.data.local.RequestrDatabase
 import com.example.interception.HttpProxyShared
-import com.example.interception.http.HttpBodyDecoder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -285,57 +283,23 @@ object GatewayEngine {
         connectionId: String?,
     ) {
         val ctx = appContext ?: return
-        val (host, path) = runCatching {
-            val u = if (rawUrl.startsWith("http")) java.net.URI(rawUrl) else java.net.URI("http://$rawUrl")
-            (u.host ?: rawUrl) to (u.path ?: "")
-        }.getOrDefault(rawUrl to "")
-
-        // Binary-body persistence (§6/item-4 follow-up): this relay path forwards raw bytes
-        // straight from HttpProxyShared.forwardRequest, never through a ParsedHttpMessage, so
-        // it must classify text-vs-binary itself via HttpBodyDecoder.forStorage's ByteArray
-        // overload rather than force-decoding as UTF-8 the way this used to (which silently
-        // mangled any binary request/response body, e.g. an uploaded image or a protobuf
-        // response, into garbled/lossy text). Same 2 MiB cap, same truncation flag, same
-        // three-state contract (text/no-body, binary stored, binary exceeded cap) as
-        // MitmProxyEngine.emitTransaction/CaptureEngine.persistTransaction.
-        val reqStorage = HttpBodyDecoder.forStorage(reqBodyBytes)
-        val respStorage = HttpBodyDecoder.forStorage(respBodyBytes)
-        val reqBodyText = if (reqStorage.isBinary) null else String(reqBodyBytes, Charsets.UTF_8).ifEmpty { null }
-        val respBodyText = if (respStorage.isBinary) null else String(respBodyBytes, Charsets.UTF_8).ifEmpty { null }
-
-        val entity = CapturedTrafficEntity(
+        // Entity construction (URL/host/path derivation, binary-vs-text body classification and
+        // the 2 MiB storage cap) is shared with HttpProxyEngine.persistTransaction -- see
+        // HttpProxyShared.capturedEntityFor. Only this tier's identity differs.
+        val entity = com.example.interception.HttpProxyShared.capturedEntityFor(
             sessionId = gatewaySessionId(ctx),
+            rawUrl = rawUrl,
             method = method,
-            url = if (rawUrl.startsWith("http")) rawUrl else "http://$rawUrl",
-            host = host,
-            path = path,
             statusCode = statusCode,
-            protocol = "gateway",
-            requestHeaders = reqHeaders,
-            responseHeaders = respHeaders,
-            requestBody = reqBodyText,
-            responseBody = respBodyText,
-            requestSizeBytes = reqStorage.trueSizeBytes,
-            responseSizeBytes = respStorage.trueSizeBytes,
-            isRequestBodyBinary = reqStorage.isBinary,
-            isResponseBodyBinary = respStorage.isBinary,
-            requestBodyBytes = reqStorage.bytes,
-            responseBodyBytes = respStorage.bytes,
-            requestBodyBytesTruncated = reqStorage.truncated,
-            responseBodyBytesTruncated = respStorage.truncated,
             latencyMs = latencyMs,
-            // E.2: the engine only ever calls this from the fully-decrypted HTTP relay path
-            // below (every CONNECT tunnel it opaquely relays instead goes through
-            // ConnectAttemptEntity, never here) -- wasDecrypted/isUndecoded were always passed
-            // as true/false at the single call site, so they are inlined as constants rather
-            // than threaded through as dead parameters.
-            wasDecrypted = true,
-            isUndecoded = false,
+            reqHeaders = reqHeaders,
+            respHeaders = respHeaders,
+            reqBodyBytes = reqBodyBytes,
+            respBodyBytes = respBodyBytes,
+            protocol = "gateway",
+            captureMethod = com.example.data.local.CaptureRowMethod.GATEWAY,
             sourceIp = sourceIp,
             connectionId = connectionId,
-            // Item 1: every row this engine persists is genuinely GATEWAY-tier -- see the
-            // same E.2 note above about this being the single call site for this path.
-            captureMethod = com.example.data.local.CaptureRowMethod.GATEWAY,
         )
         runCatching { RequestrDatabase.get(ctx).capturedTrafficDao().insert(entity) }
             .onFailure { Log.w(TAG, "Failed to persist gateway transaction: ${it.message}") }

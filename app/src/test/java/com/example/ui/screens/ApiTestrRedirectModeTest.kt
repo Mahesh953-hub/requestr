@@ -9,41 +9,25 @@ class ApiTestrRedirectModeTest {
 
     @Test
     fun `default state follows redirects, matching the screen's old default of true`() {
-        assertTrue(shouldFollowRedirects(RedirectFollowState()))
+        assertTrue(RedirectFollowState().shouldFollow)
     }
 
     @Test
-    fun `always-follow on, once not armed - follows`() {
-        val state = RedirectFollowState(alwaysFollow = true, onceArmed = false)
-        assertTrue(shouldFollowRedirects(state))
-    }
-
-    @Test
-    fun `always-follow off, once not armed - does not follow`() {
-        val state = RedirectFollowState(alwaysFollow = false, onceArmed = false)
-        assertFalse(shouldFollowRedirects(state))
-    }
-
-    @Test
-    fun `always-follow off, once armed - follows for this send`() {
-        val state = RedirectFollowState(alwaysFollow = false, onceArmed = true)
-        assertTrue(shouldFollowRedirects(state))
-    }
-
-    @Test
-    fun `always-follow on, once armed - still follows`() {
-        val state = RedirectFollowState(alwaysFollow = true, onceArmed = true)
-        assertTrue(shouldFollowRedirects(state))
+    fun `a send follows redirects when always-follow is on or a once-tap is armed`() {
+        assertTrue(RedirectFollowState(alwaysFollow = true, onceArmed = false).shouldFollow)
+        assertTrue(RedirectFollowState(alwaysFollow = false, onceArmed = true).shouldFollow)
+        assertTrue(RedirectFollowState(alwaysFollow = true, onceArmed = true).shouldFollow)
+        assertFalse(RedirectFollowState(alwaysFollow = false, onceArmed = false).shouldFollow)
     }
 
     @Test
     fun `tap toggles once-armed without touching always-follow`() {
         val start = RedirectFollowState(alwaysFollow = false, onceArmed = false)
-        val armed = toggleOnceArmed(start)
+        val armed = start.withOnceToggled()
         assertTrue(armed.onceArmed)
         assertFalse(armed.alwaysFollow)
 
-        val disarmed = toggleOnceArmed(armed)
+        val disarmed = armed.withOnceToggled()
         assertFalse(disarmed.onceArmed)
         assertFalse(disarmed.alwaysFollow)
     }
@@ -51,30 +35,23 @@ class ApiTestrRedirectModeTest {
     @Test
     fun `long-press toggles always-follow without touching once-armed`() {
         val start = RedirectFollowState(alwaysFollow = true, onceArmed = true)
-        val toggled = toggleAlwaysFollow(start)
+        val toggled = start.withAlwaysToggled()
         assertFalse(toggled.alwaysFollow)
         assertTrue(toggled.onceArmed)
     }
 
     @Test
-    fun `consuming once after send disarms a one-shot follow`() {
-        val armed = RedirectFollowState(alwaysFollow = false, onceArmed = true)
-        val consumed = consumeOnceAfterSend(armed)
-        assertFalse(consumed.onceArmed)
-        assertFalse(consumed.alwaysFollow)
-    }
+    fun `a send disarms a one-shot follow and leaves always-follow alone`() {
+        val armedOnceOnly = RedirectFollowState(alwaysFollow = false, onceArmed = true)
+        assertEquals(RedirectFollowState(alwaysFollow = false, onceArmed = false), armedOnceOnly.afterSend())
 
-    @Test
-    fun `consuming once after send is a no-op when not armed`() {
-        val notArmed = RedirectFollowState(alwaysFollow = true, onceArmed = false)
-        assertEquals(notArmed, consumeOnceAfterSend(notArmed))
-    }
-
-    @Test
-    fun `consuming once after send never touches always-follow`() {
         val armedAndAlways = RedirectFollowState(alwaysFollow = true, onceArmed = true)
-        val consumed = consumeOnceAfterSend(armedAndAlways)
-        assertTrue(consumed.alwaysFollow)
-        assertFalse(consumed.onceArmed)
+        assertEquals(RedirectFollowState(alwaysFollow = true, onceArmed = false), armedAndAlways.afterSend())
+    }
+
+    @Test
+    fun `a send leaves an unarmed state unchanged`() {
+        val notArmed = RedirectFollowState(alwaysFollow = true, onceArmed = false)
+        assertEquals(notArmed, notArmed.afterSend())
     }
 }

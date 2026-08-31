@@ -26,7 +26,7 @@ class InterceptionStateRepositoryTest {
 
     @Test
     fun `runStop converges to CONFIGURED_IDLE after a clean teardown`() {
-        InterceptionStateRepository.markActive(sessionId = 1L, tier = ActiveTier.PROXY, port = 8080)
+        InterceptionStateRepository.markActive(sessionId = 1L, tier = ActiveTier.PROXY, port = 8080, lifecycleOwner = CaptureLifecycleOwner.MITM_PROXY_ENGINE)
 
         InterceptionStateRepository.runStop { /* pretend teardown succeeded */ }
 
@@ -41,7 +41,7 @@ class InterceptionStateRepositoryTest {
         // This is the exact bug: MITM_PROXY/ROOT_IPTABLES/SHIZUKU_TUN/HTTP_PROXY had no
         // guaranteed markStopped() call at all, so a stuck ACTIVE state after the first stop
         // was reproducible on device. The fix must converge regardless of how teardown behaves.
-        InterceptionStateRepository.markActive(sessionId = 2L, tier = ActiveTier.ROOT, port = 8080)
+        InterceptionStateRepository.markActive(sessionId = 2L, tier = ActiveTier.ROOT, port = 8080, lifecycleOwner = CaptureLifecycleOwner.ROOT_IPTABLES_ENGINE)
 
         val thrown = runCatching {
             InterceptionStateRepository.runStop { throw IllegalStateException("iptables -D failed") }
@@ -55,7 +55,7 @@ class InterceptionStateRepositoryTest {
 
     @Test
     fun `runStop from ARMED (never actually started) still converges cleanly`() {
-        InterceptionStateRepository.markArmed(tier = ActiveTier.SHIZUKU, port = 8080)
+        InterceptionStateRepository.markArmed(tier = ActiveTier.SHIZUKU, port = 8080, lifecycleOwner = CaptureLifecycleOwner.SHIZUKU_TUN_ENGINE)
 
         InterceptionStateRepository.runStop { }
 
@@ -66,12 +66,12 @@ class InterceptionStateRepositoryTest {
 
     @Test
     fun `runStart returns true and does not touch state when the engine reports success`() {
-        InterceptionStateRepository.markArmed(tier = ActiveTier.PROXY, port = 8080)
+        InterceptionStateRepository.markArmed(tier = ActiveTier.PROXY, port = 8080, lifecycleOwner = CaptureLifecycleOwner.MITM_PROXY_ENGINE)
 
         val started = InterceptionStateRepository.runStart("MITM_PROXY") {
             // Real engines call markActive() themselves on success; runStart must not
             // second-guess that by also mutating state on a true result.
-            InterceptionStateRepository.markActive(sessionId = 3L, tier = ActiveTier.PROXY, port = 8080)
+            InterceptionStateRepository.markActive(sessionId = 3L, tier = ActiveTier.PROXY, port = 8080, lifecycleOwner = CaptureLifecycleOwner.MITM_PROXY_ENGINE)
             true
         }
 
@@ -84,7 +84,7 @@ class InterceptionStateRepositoryTest {
         // Reproduces RootIptablesEngine/ShizukuTunEngine.start() returning false (a real
         // su/binder failure) with nothing above them to notice -- previously left the ARMED
         // state PreflightController.run() had already set stuck forever.
-        InterceptionStateRepository.markArmed(tier = ActiveTier.ROOT, port = 8080)
+        InterceptionStateRepository.markArmed(tier = ActiveTier.ROOT, port = 8080, lifecycleOwner = CaptureLifecycleOwner.ROOT_IPTABLES_ENGINE)
 
         val started = InterceptionStateRepository.runStart("ROOT_IPTABLES") { false }
 
@@ -98,7 +98,7 @@ class InterceptionStateRepositoryTest {
     fun `runStart converts a thrown exception into a clean ERROR instead of a stuck ARMED state`() {
         // Reproduces MitmProxyEngine/HttpProxyEngine's ServerSocket(port) throwing
         // IOException (e.g. address already in use) with nothing above them to catch it.
-        InterceptionStateRepository.markArmed(tier = ActiveTier.PROXY, port = 8080)
+        InterceptionStateRepository.markArmed(tier = ActiveTier.PROXY, port = 8080, lifecycleOwner = CaptureLifecycleOwner.MITM_PROXY_ENGINE)
 
         val started = InterceptionStateRepository.runStart("MITM_PROXY") {
             throw java.io.IOException("Address already in use")
@@ -112,7 +112,7 @@ class InterceptionStateRepositoryTest {
 
     @Test
     fun `runStart never swallows the failing engine's own exception as a silent no-op`() {
-        InterceptionStateRepository.markArmed(tier = ActiveTier.PROXY, port = 8080)
+        InterceptionStateRepository.markArmed(tier = ActiveTier.PROXY, port = 8080, lifecycleOwner = CaptureLifecycleOwner.MITM_PROXY_ENGINE)
 
         val started = InterceptionStateRepository.runStart("HTTP_PROXY") {
             throw RuntimeException()

@@ -1,7 +1,8 @@
 package com.example.interception
 
 import android.util.Log
-import com.example.data.interception.ActiveTier
+import com.example.data.interception.engineLifecycleOwner
+import com.example.data.interception.engineTier
 import com.example.data.interception.CaptureMethod
 import com.example.data.interception.InterceptionStateRepository
 
@@ -47,8 +48,9 @@ class ShizukuTunEngine {
         if (success) {
             active = true
             InterceptionStateRepository.markActive(
-                sessionId = sessionId, tier = ActiveTier.SHIZUKU,
+                sessionId = sessionId, tier = CaptureMethod.SHIZUKU_TUN.engineTier(),
                 port = port, method = CaptureMethod.SHIZUKU_TUN,
+                lifecycleOwner = CaptureMethod.SHIZUKU_TUN.engineLifecycleOwner(),
             )
             Log.i(TAG, "Shizuku iptables applied for port $port")
         }

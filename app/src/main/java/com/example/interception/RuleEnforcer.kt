@@ -155,18 +155,25 @@ object RuleEnforcer {
      * On success, sets [ParsedHttpMessage.replacedBodyBytes] (byte-exact -- ciphertext and
      * decrypted binary payloads both survive intact, unlike routing through [ParsedHttpMessage.body]
      * which is UTF-8 text) and [ParsedHttpMessage.bodyReplaced]`= true` so the existing
-     * serializers ([MitmProxyEngine.bodyBytesFor]) pick it up. On failure (bad key, corrupted/
-     * foreign ciphertext, blank alias -- see [RequestCryptoManager]), the message is left
-     * completely untouched and the failure is logged -- never a silent pass-through of
-     * ciphertext as if it were plaintext, and never a broken connection either.
+     * serializers ([MitmProxyEngine.bodyBytesFor]) pick it up.
+     *
+     * Security audit fix (fail-open AES crypto): a bad key, an invalid/blank alias, or a decrypt
+     * of data never encrypted under that key used to leave [message] "completely untouched" on
+     * failure -- which for an *encrypt* rule means the exact plaintext the user asked to encrypt
+     * kept forwarding, silently, as a successful-looking transaction. [message] is deliberately
+     * left unmodified here too (the caller must not forward it at all on [CryptoApplyResult.Failed]
+     * -- see [MitmProxyEngine.handleParsedRequest]/[MitmProxyEngine.handleParsedResponse], which
+     * now substitute a visibly-failed synthetic response instead, exactly like [RuleAction.BLOCK]).
+     * [result]'s `reason` string comes only from [RequestCryptoManager] (never the key or the
+     * plaintext/ciphertext bytes themselves), so logging it here is safe.
      */
-    fun applyBodyCrypto(message: ParsedHttpMessage, rule: InterceptRuleEntity, encrypt: Boolean) {
+    fun applyBodyCrypto(message: ParsedHttpMessage, rule: InterceptRuleEntity, encrypt: Boolean): CryptoApplyResult {
         val appliesToThisMessage = when (rule.cryptoScope.uppercase()) {
             "REQUEST" -> message.isRequest
             "RESPONSE" -> !message.isRequest
             else -> true // "BOTH" or unrecognized
         }
-        if (!appliesToThisMessage) return
+        if (!appliesToThisMessage) return CryptoApplyResult.NotApplicable
 
         val inputBytes = message.rawBodyBytes ?: message.body.toByteArray(Charsets.UTF_8)
         val result = if (encrypt) {
@@ -174,16 +181,58 @@ object RuleEnforcer {
         } else {
             RequestCryptoManager.decrypt(rule.cryptoKeyAlias, inputBytes, rule.cryptoAlgorithm)
         }
-        when (result) {
+        return when (result) {
             is RequestCryptoManager.CryptoResult.Success -> {
                 message.replacedBodyBytes = result.bytes
                 message.bodyReplaced = true
+                CryptoApplyResult.Applied
             }
             is RequestCryptoManager.CryptoResult.Failure -> {
                 val op = if (encrypt) "BODY_ENCRYPT_AES" else "BODY_DECRYPT_AES"
-                Log.w(TAG, "$op rule '${rule.name}' failed: ${result.reason}")
+                Log.w(TAG, "$op rule '${rule.name}' failed, blocking rather than forwarding untransformed: ${result.reason}")
+                CryptoApplyResult.Failed(result.reason)
             }
         }
+    }
+
+    /** Outcome of [applyBodyCrypto]. */
+    sealed interface CryptoApplyResult {
+        /** [InterceptRuleEntity.cryptoScope] excluded this message (e.g. a REQUEST-only rule seeing a response). */
+        data object NotApplicable : CryptoApplyResult
+        /** Transformed successfully; [ParsedHttpMessage.replacedBodyBytes] is set. */
+        data object Applied : CryptoApplyResult
+        /** Key unavailable, alias blank, or the ciphertext did not authenticate. Never forward [message] as-is on this. */
+        data class Failed(val reason: String) : CryptoApplyResult
+    }
+
+    /**
+     * Security audit fix (fail-open AES crypto): the synthetic response a caller must substitute
+     * for the real one when [applyBodyCrypto] returns [CryptoApplyResult.Failed] -- for a
+     * REQUEST-side failure this replaces the response the client would otherwise have gotten
+     * from upstream (the real request is never sent, same as [RuleAction.BLOCK]); for a
+     * RESPONSE-side failure this replaces what upstream actually sent back, since forwarding it
+     * untransformed would leak the exact plaintext/ciphertext the rule was supposed to act on.
+     * [reason] is [RequestCryptoManager]'s own diagnosable failure string -- never key material
+     * or the plaintext/ciphertext body -- so it is safe to put in the response body for the UI.
+     */
+    fun buildCryptoFailureResponse(ruleName: String, encrypt: Boolean, reason: String): ParsedHttpMessage {
+        val op = if (encrypt) "encrypt" else "decrypt"
+        val body = "requestr crypto rule '$ruleName' failed to $op this body and was blocked: $reason"
+        val headers = linkedMapOf(
+            "content-type" to "text/plain; charset=utf-8",
+            "content-length" to body.toByteArray(Charsets.UTF_8).size.toString(),
+            // Machine-checkable marker distinguishing this from a real 502 upstream ever sent.
+            "x-requestr-crypto-failed" to "true",
+        )
+        return ParsedHttpMessage(
+            isRequest = false,
+            method = null,
+            statusCode = 502,
+            statusMessage = "Crypto rule failed (requestr)",
+            headers = headers,
+            body = body,
+            bodyReplaced = true,
+        )
     }
 
     /**

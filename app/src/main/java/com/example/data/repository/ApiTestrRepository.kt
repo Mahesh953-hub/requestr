@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.example.data.env.Environment
 import com.example.data.env.EnvironmentRepository
+import com.example.data.export.CurlParser
 import com.example.data.models.ApiKeyLocation
 import com.example.data.models.ApiRequestItem
 import com.example.data.models.ApiResponseData
@@ -1108,58 +1109,81 @@ func main() {
         }
     }
 
-    fun parseCurl(curlCommand: String): ApiRequestItem {
-        var method = HttpMethod.GET
-        var url = "https://httpbin.org/get"
-        val headers = mutableListOf<com.example.data.models.KeyValueItem>()
-        var body = ""
-        var bodyType = RequestBodyType.NONE
+    /**
+     * Turns a pasted `curl ...` command into an [ApiRequestItem], or explains why it cannot.
+     *
+     * Tokenizing is delegated to [CurlParser], the app's single shell-aware cURL parser. This
+     * function maps that result onto API Testr's model and refuses anything it would otherwise
+     * have to guess at:
+     *  - an unrecognized short flag is named back to the user, because a glued short form is
+     *    ambiguous with a bundle (`-Wfoo` could be `-W foo` or `-W -f -o -o`);
+     *  - the URL must be absolute with a supported scheme, which is what catches a value-taking
+     *    flag whose argument leaked through as the URL (`--proxy localhost:8080 ...`);
+     *  - a method outside [HttpMethod] is reported, not silently downgraded to GET -- pasting
+     *    `-X TRACE` and getting a GET is worse than being told TRACE is unsupported;
+     *  - the body type is inferred from `Content-Type` and falls back to
+     *    [RequestBodyType.RAW] rather than assuming JSON.
+     */
+    fun parseCurl(curlCommand: String): CurlImportResult {
+        val parsed = CurlParser.parse(curlCommand)
 
-        val tokens = curlCommand.replace("\\\n", " ").split("\\s+".toRegex())
-        var i = 0
-        while (i < tokens.size) {
-            val token = tokens[i]
-            when (token) {
-                "-X", "--request" -> {
-                    if (i + 1 < tokens.size) {
-                        method = try { HttpMethod.valueOf(tokens[i + 1].uppercase()) } catch (e: Exception) { HttpMethod.GET }
-                        i++
-                    }
-                }
-                "-H", "--header" -> {
-                    if (i + 1 < tokens.size) {
-                        val headerStr = tokens[i + 1].removeSurrounding("\"").removeSurrounding("'")
-                        val parts = headerStr.split(":", limit = 2)
-                        if (parts.size == 2) {
-                            headers.add(com.example.data.models.KeyValueItem(key = parts[0].trim(), value = parts[1].trim()))
-                        }
-                        i++
-                    }
-                }
-                "-d", "--data", "--data-raw" -> {
-                    if (i + 1 < tokens.size) {
-                        body = tokens[i + 1].removeSurrounding("\"").removeSurrounding("'")
-                        bodyType = RequestBodyType.JSON
-                        if (method == HttpMethod.GET) method = HttpMethod.POST
-                        i++
-                    }
-                }
-                else -> {
-                    if (token.startsWith("http://") || token.startsWith("https://")) {
-                        url = token.removeSurrounding("\"").removeSurrounding("'")
-                    }
-                }
-            }
-            i++
+        parsed.unsupportedFlag?.let {
+            return CurlImportResult.Failure("\"$it\" is not a curl flag this importer recognises.")
         }
+        if (parsed.url.isBlank()) {
+            return CurlImportResult.Failure("Could not find a URL in this curl command.")
+        }
+        val scheme = parsed.url.substringBefore("://", missingDelimiterValue = "").lowercase()
+        if (scheme !in SUPPORTED_CURL_SCHEMES) {
+            return CurlImportResult.Failure(
+                "\"${parsed.url}\" is not an absolute ${SUPPORTED_CURL_SCHEMES.joinToString("/")} URL. " +
+                    "If the command uses a flag this importer does not know, its value may have been read as the URL."
+            )
+        }
+        val method = runCatching { HttpMethod.valueOf(parsed.method) }.getOrNull()
+            ?: return CurlImportResult.Failure("${parsed.method} is not a supported method.")
 
-        return ApiRequestItem(
-            name = "Imported cURL",
-            method = method,
-            url = url,
-            headers = if (headers.isEmpty()) listOf(com.example.data.models.KeyValueItem(key = "Accept", value = "*/*")) else headers,
-            bodyType = bodyType,
-            bodyContent = body.ifBlank { "{\n  \"imported\": true\n}" }
+        val headers = parsed.headers.map { (key, value) -> KeyValueItem(key = key, value = value) }
+        return CurlImportResult.Success(
+            ApiRequestItem(
+                name = "Imported cURL",
+                method = method,
+                url = parsed.url,
+                headers = headers.ifEmpty { listOf(KeyValueItem(key = "Accept", value = "*/*")) },
+                bodyType = if (parsed.body == null) RequestBodyType.NONE else curlBodyType(parsed.headers),
+                bodyContent = parsed.body.orEmpty(),
+            )
         )
     }
+
+    /** Schemes [parseCurl] will import. Anything else is a leaked flag value or an unsupported protocol. */
+    private val SUPPORTED_CURL_SCHEMES = setOf("http", "https", "ws", "wss")
+
+    /**
+     * Body type implied by the pasted command's `Content-Type`. Falls back to
+     * [RequestBodyType.RAW] when there is no `Content-Type` or it is unrecognized: the body is
+     * still sent verbatim, but it is not mislabelled as JSON.
+     */
+    private fun curlBodyType(headers: List<Pair<String, String>>): RequestBodyType {
+        val contentType = headers
+            .firstOrNull { it.first.equals("Content-Type", ignoreCase = true) }
+            ?.second
+            ?.lowercase()
+            ?: return RequestBodyType.RAW
+        return when {
+            contentType.contains("json") -> RequestBodyType.JSON
+            contentType.contains("x-www-form-urlencoded") -> RequestBodyType.FORM
+            contentType.contains("multipart/") -> RequestBodyType.MULTIPART
+            contentType.contains("graphql") -> RequestBodyType.GRAPHQL
+            else -> RequestBodyType.RAW
+        }
+    }
+}
+
+/** Outcome of importing a pasted `curl ...` command -- see [ApiTestrRepository.parseCurl]. */
+sealed interface CurlImportResult {
+    data class Success(val request: ApiRequestItem) : CurlImportResult
+
+    /** [message] is user-facing: show it verbatim next to the paste field. */
+    data class Failure(val message: String) : CurlImportResult
 }

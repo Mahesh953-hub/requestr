@@ -6,20 +6,18 @@ import java.util.Base64
  * Parses a pasted `curl ...` command back into a request (the reverse of [CodeExporter]'s
  * `ExportFormat.CURL` export), for Master Plan §3 LOW-ADD "copy/paste cURL for live traffic" (C11).
  *
- * The Interceptr screen already had a "Paste cURL" header action before this file existed, but it
- * called straight into [com.example.data.repository.ApiTestrRepository.parseCurl] -- a
- * whitespace-`split("\\s+")` tokenizer that breaks on any quoted value containing a space (e.g.
- * `-d '{"a": "b c"}'` or `-H 'User-Agent: My App 1.0'`), has no line-continuation handling, and
- * silently mis-assigns an unrecognized flag's argument as the URL. That implementation lives in
- * `data/repository/ApiTestrRepository.kt`, which is out of this file's ownership scope (owned by
- * a sibling agent, and `ApiTestrScreen.kt` -- also out of scope -- calls it directly for its own,
- * unrelated "paste cURL into a saved request" feature), so it cannot be edited or deleted here.
- * This parser is the hardened replacement Interceptr's own paste-cURL dialog now calls instead;
- * see `InterceptScreen.kt`'s `PasteCurlDialog`.
+ * This is the single cURL parser in the app: both Interceptr's `PasteCurlDialog` (see
+ * `InterceptScreen.kt`) and API Testr's paste-cURL
+ * ([com.example.data.repository.ApiTestrRepository.parseCurl], which delegates here) go through
+ * it. It replaced an earlier whitespace-`split("\\s+")` tokenizer that broke on any quoted value
+ * containing a space (e.g. `-d '{"a": "b c"}'` or `-H 'User-Agent: My App 1.0'`), had no
+ * line-continuation handling, and silently mis-assigned an unrecognized flag's argument as the URL.
  *
  * [parse] never throws: any malformed input -- unbalanced quotes, no `curl` keyword, truncated
  * flags, garbage text -- degrades to the best-effort [ParsedCurlCommand] it can build (an empty
- * URL/method GET/no headers/no body in the worst case) rather than crashing the caller.
+ * URL/method GET/no headers/no body in the worst case) rather than crashing the caller. Input it
+ * cannot interpret at all is reported instead of guessed at: see
+ * [ParsedCurlCommand.unsupportedFlag].
  */
 object CurlParser {
 
@@ -27,11 +25,42 @@ object CurlParser {
         val method: String,
         val url: String,
         val headers: List<Pair<String, String>>,
+        /**
+         * `null` when the command sends no body -- including a `-G`/`--get` command, whose `-d`
+         * payload has been folded into [url]'s query string instead.
+         */
         val body: String?,
+        /**
+         * The first short flag whose meaning could not be determined, or `null` when every token
+         * was understood.
+         *
+         * Short flags can be glued to their value (`-XPOST`) and bundled (`-sS`), so an
+         * unrecognized letter is genuinely ambiguous: `-Wfoo` could be `-W foo` or the bundle
+         * `-W -f -o -o`. Rather than pick one, [parse] records the flag here and leaves the rest
+         * of the command parsed on a best-effort basis; callers refuse the import and name the
+         * flag -- see [com.example.data.repository.ApiTestrRepository.parseCurl].
+         */
+        val unsupportedFlag: String? = null,
     )
 
-    /** Flags that always consume the following token as their value. */
+    /**
+     * Every flag known to consume the following token as its value.
+     *
+     * The `when (flag)` in [parse] maps the subset it understands (`-X`, `-H`, `-d`, ...); this
+     * table exists for the rest. Without it, `curl --proxy localhost:8080 https://example.com`
+     * parses `localhost:8080` as the request URL, because an unrecognized flag deliberately does
+     * not consume its argument and the orphaned value then looks like a bare URL token.
+     *
+     * [splitFlag] also reads it to tell a glued short-form value (`-XPOST`) from a bundle of
+     * value-less short flags (`-sS`), so every single-letter curl flag that takes a value must be
+     * listed here even when it is not mapped below.
+     *
+     * An unlisted *long* value-taking flag can still leak its argument as the URL (long flags are
+     * open-ended and cannot be enumerated), which is why callers must reject a result whose URL is
+     * not absolute -- see [com.example.data.repository.ApiTestrRepository.parseCurl].
+     */
     private val VALUE_FLAGS = setOf(
+        // Mapped below.
         "-X", "--request",
         "-H", "--header",
         "-d", "--data", "--data-raw", "--data-binary", "--data-ascii",
@@ -41,6 +70,35 @@ object CurlParser {
         "-A", "--user-agent",
         "-b", "--cookie",
         "-e", "--referer",
+        // Not mapped: the value is consumed and discarded so it cannot be mistaken for the URL.
+        "-x", "--proxy", "-U", "--proxy-user", "--noproxy", "--preproxy",
+        "-o", "--output", "-D", "--dump-header", "--trace", "--trace-ascii",
+        "-m", "--max-time", "--connect-timeout", "--expect100-timeout",
+        "--retry", "--retry-delay", "--retry-max-time",
+        "--cacert", "--capath", "-E", "--cert", "--cert-type", "--key", "--key-type",
+        "--pass", "--ciphers", "--tls13-ciphers", "--pinnedpubkey", "--pubkey",
+        "-F", "--form", "--form-string", "-T", "--upload-file",
+        "--resolve", "--interface", "--dns-servers", "--local-port", "--unix-socket",
+        "-w", "--write-out", "--limit-rate", "--max-filesize", "--max-redirs",
+        "-r", "--range", "-C", "--continue-at", "-z", "--time-cond",
+        "--oauth2-bearer", "--aws-sigv4", "--proto", "--socks4", "--socks5",
+        "--socks5-hostname", "--service-name", "--url-query",
+        "-c", "--cookie-jar", "--netrc-file", "--libcurl", "--krb", "--engine",
+        "-Y", "--speed-limit", "-y", "--speed-time", "--happy-eyeballs-timeout-ms",
+        "-K", "--config", "-P", "--ftp-port", "-Q", "--quote", "-t", "--telnet-option",
+    )
+
+    /**
+     * Every curl short flag that takes no value, and so may appear anywhere in a bundle.
+     *
+     * Together with the single-letter entries in [VALUE_FLAGS] this covers curl's complete
+     * (and effectively frozen) short-option set, which is what lets [splitFlag] treat a letter in
+     * neither table as an error worth reporting instead of guessing at it.
+     */
+    private val BOOLEAN_SHORT_FLAGS = setOf(
+        "-a", "-B", "-f", "-g", "-G", "-h", "-i", "-I", "-j", "-J", "-k", "-l", "-L",
+        "-M", "-n", "-N", "-O", "-p", "-q", "-R", "-s", "-S", "-v", "-V", "-Z", "-#",
+        "-0", "-1", "-2", "-3", "-4", "-6", "-:",
     )
 
     fun parse(input: String): ParsedCurlCommand {
@@ -49,6 +107,8 @@ object CurlParser {
         var url: String? = null
         val headers = mutableListOf<Pair<String, String>>()
         val dataParts = mutableListOf<String>()
+        var unsupportedFlag: String? = null
+        var dataAsQuery = false
 
         var i = 0
         // Skip a leading "curl" keyword (and any leading shell variable assignments like
@@ -58,7 +118,12 @@ object CurlParser {
 
         while (i < tokens.size) {
             val raw = tokens[i]
-            val (flag, inlineValue) = splitInlineValue(raw)
+            val (flag, inlineValue, badFlag, bundledFlags) = splitFlag(raw)
+            unsupportedFlag = unsupportedFlag ?: badFlag
+            // -G/--get modifies how the -d payloads are used rather than contributing anything
+            // itself, and it may appear anywhere -- including bundled (-sG), which is why the
+            // short form is matched against the bundle rather than the effective flag.
+            if (flag == "--get" || "-G" in bundledFlags) dataAsQuery = true
 
             fun nextValue(): String? {
                 if (inlineValue != null) return inlineValue
@@ -71,7 +136,10 @@ object CurlParser {
                 "-X", "--request" -> nextValue()?.let { method = it.uppercase() }
                 "-H", "--header" -> nextValue()?.let { splitHeader(it)?.let(headers::add) }
                 "-d", "--data", "--data-raw", "--data-binary", "--data-ascii" ->
-                    nextValue()?.let { dataParts.add(stripAtFilePrefix(it)) }
+                    // Real curl treats `--data @file.json` as "read this file"; there is no
+                    // filesystem to read here, so the argument is kept verbatim (including any
+                    // leading `@`) rather than dropped, leaving non-`@` data round-trips exact.
+                    nextValue()?.let { dataParts.add(it) }
                 "--data-urlencode" -> nextValue()?.let { dataParts.add(urlEncodeDataArg(it)) }
                 "--url" -> nextValue()?.let { url = it }
                 "-u", "--user" -> nextValue()?.let { cred ->
@@ -82,14 +150,17 @@ object CurlParser {
                 "-b", "--cookie" -> nextValue()?.let { headers.add("Cookie" to it) }
                 "-e", "--referer" -> nextValue()?.let { headers.add("Referer" to it) }
                 else -> {
-                    if (flag.startsWith("-")) {
-                        // Unrecognized flag (e.g. -s, --compressed, -L, -k, --insecure, -v, -i,
-                        // --http2, an unknown future flag). Deliberately does NOT consume the
-                        // next token: we cannot tell whether an unknown flag is boolean or
-                        // value-taking, and wrongly eating the real URL token is worse than
-                        // leaving an unrecognized value flag's argument to fall through (it will
-                        // just be ignored below since it won't look like a URL/won't overwrite
-                        // an already-found one -- see "else" branch).
+                    if (flag in VALUE_FLAGS) {
+                        // A value-taking flag this parser does not map (--proxy, -o, --max-time,
+                        // ...). Consume and discard its argument: leaving it to fall through is
+                        // what turned `--proxy localhost:8080 https://example.com` into a request
+                        // aimed at "localhost:8080".
+                        nextValue()
+                    } else if (flag.startsWith("-")) {
+                        // Value-less flag: a long boolean (--compressed, --insecure, an unknown
+                        // future flag) or a bundle of short booleans (-sSLk). Nothing to consume.
+                        // An unlisted long value-taking flag lands here and can still leak its
+                        // argument as the URL, which the caller's absolute-URL check catches.
                     } else if (url == null) {
                         url = raw
                     }
@@ -98,24 +169,98 @@ object CurlParser {
             i++
         }
 
-        val body = if (dataParts.isNotEmpty()) dataParts.joinToString("&") else null
-        val resolvedMethod = method ?: if (body != null) "POST" else "GET"
+        // `-G` turns the accumulated payload into query parameters on a bodiless request. The
+        // parts are already in the form curl would send them: `-d` verbatim, `--data-urlencode`
+        // percent-encoded, joined with `&`.
+        val data = if (dataParts.isNotEmpty()) dataParts.joinToString("&") else null
+        val query = if (dataAsQuery) data else null
+        val body = if (dataAsQuery) null else data
         return ParsedCurlCommand(
-            method = resolvedMethod,
-            url = url ?: "",
+            method = method ?: if (body != null) "POST" else "GET",
+            url = (url ?: "").let { if (query == null) it else appendQuery(it, query) },
             headers = headers,
             body = body,
+            unsupportedFlag = unsupportedFlag,
         )
     }
 
-    /** Handles both `--header value` and `--header=value`/`-Hvalue`-style inline forms. */
-    private fun splitInlineValue(token: String): Pair<String, String?> {
-        if (!token.startsWith("-")) return token to null
-        val eq = token.indexOf('=')
-        if (token.startsWith("--") && eq > 0) {
-            return token.substring(0, eq) to token.substring(eq + 1)
+    /**
+     * Adds `-G`'s payload to [url]'s query string.
+     *
+     * curl merges with any query the URL already carries rather than replacing it, so the
+     * separator depends on what is already there: `?` for a URL with no query, `&` for one that
+     * has, and nothing at all when the URL already ends in a separator (`.../x?` or `.../x?a=1&`),
+     * which would otherwise produce an empty parameter.
+     */
+    private fun appendQuery(url: String, query: String): String {
+        val separator = when {
+            url.endsWith("?") || url.endsWith("&") -> ""
+            url.contains("?") -> "&"
+            else -> "?"
         }
-        return token to null
+        return "$url$separator$query"
+    }
+
+    /** [splitFlag]'s decomposition of one token: see [ParsedCurlCommand.unsupportedFlag]. */
+    private data class FlagToken(
+        val flag: String,
+        val inlineValue: String?,
+        val unsupportedFlag: String?,
+        /**
+         * The value-less short flags in the token, whether or not it is a bundle (`-sSG` gives
+         * `-s`, `-S`, `-G`; a lone `-G` gives `-G`). Only `-G` is acted on; the rest are no-ops
+         * here but are cheaper to carry than to distinguish.
+         */
+        val bundledFlags: List<String>,
+    )
+
+    /**
+     * Splits one token into the flag [parse] should act on and any value glued to it, so that the
+     * spellings curl accepts interchangeably parse identically:
+     *
+     *  - `--header=value` / `--header value` (long form, value after `=` or in the next token);
+     *  - `-XPOST` / `-X POST` (short form, value glued or in the next token) -- likewise
+     *    `-H'A: b'` and `-d'{"a": 1}'`, whose quotes the tokenizer has already removed;
+     *  - `-sS` (a bundle of value-less short flags), optionally ending in a value-taking flag:
+     *    `-sSXPOST` and `-sSX POST` both mean `-s -S -X POST`.
+     *
+     * A bundle's value-less flags are returned in [FlagToken.bundledFlags] rather than dropped,
+     * because one of them changes the meaning of the command: `-G` moves the `-d` payload into the
+     * query string, and `curl -sG -d a=b url` must not import as a POST. A letter in neither
+     * [VALUE_FLAGS] nor [BOOLEAN_SHORT_FLAGS] cannot be classified as either, so it is returned in
+     * [FlagToken.unsupportedFlag] for the caller to refuse.
+     */
+    private fun splitFlag(token: String): FlagToken {
+        if (!token.startsWith("-") || token.length < 2) {
+            return FlagToken(token, null, null, emptyList())
+        }
+        if (token.startsWith("--")) {
+            val eq = token.indexOf('=')
+            return if (eq > 0) {
+                FlagToken(token.substring(0, eq), token.substring(eq + 1), null, emptyList())
+            } else {
+                FlagToken(token, null, null, emptyList())
+            }
+        }
+        var unsupported: String? = null
+        val bundled = mutableListOf<String>()
+        for (offset in 1 until token.length) {
+            val short = "-${token[offset]}"
+            when {
+                // A value-taking flag ends the bundle: everything after it is its value.
+                short in VALUE_FLAGS -> return FlagToken(
+                    flag = short,
+                    inlineValue = token.substring(offset + 1).ifEmpty { null },
+                    unsupportedFlag = unsupported,
+                    bundledFlags = bundled,
+                )
+                short in BOOLEAN_SHORT_FLAGS -> bundled.add(short)
+                else -> unsupported = unsupported ?: short
+            }
+        }
+        // An all-boolean bundle. Handing the whole token back keeps it in parse's value-less
+        // branch, which discards it.
+        return FlagToken(token, null, unsupported, bundled)
     }
 
     private fun splitHeader(raw: String): Pair<String, String>? {
@@ -123,11 +268,6 @@ object CurlParser {
         if (idx <= 0) return null
         return raw.substring(0, idx).trim() to raw.substring(idx + 1).trim()
     }
-
-    /** `--data @file.json` reads a local file in real curl; here there's no filesystem to read,
-     * so the `@` marker is stripped and the (otherwise unusable) literal path/text is kept as-is
-     * rather than silently dropped, so a round-trip on non-`@` data is unaffected. */
-    private fun stripAtFilePrefix(value: String): String = value
 
     /** `--data-urlencode [name=]content` URL-encodes the content portion only. */
     private fun urlEncodeDataArg(raw: String): String {

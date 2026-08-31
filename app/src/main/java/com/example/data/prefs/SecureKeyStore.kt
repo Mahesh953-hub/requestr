@@ -66,6 +66,29 @@ object SecureKeyStore {
      */
     internal fun getOrCreateAesGcmKey(alias: String): SecretKey = getOrCreateSecretKey(alias)
 
+    /**
+     * Whether [alias] already exists as a real `AndroidKeyStore` entry -- checked WITHOUT
+     * creating one, unlike [getOrCreateAesGcmKey]/[getOrCreateSecretKey] which auto-provision on
+     * first use. Exists so a caller that must distinguish "this alias is usable on this device"
+     * from "this alias would silently generate a brand-new (unrelated) key on first use" --
+     * e.g. [com.example.data.export.WorkspaceExporter]'s crypto-rule import gate, where an
+     * imported alias frequently names a `AndroidKeyStore` entry from a *different* device that
+     * will never exist here -- can do so without a real (destructive) crypto operation.
+     *
+     * Returns `false`, never throws, if the check itself can't be performed (e.g. no
+     * `AndroidKeyStore` provider -- see [SecureKeyStoreTest]'s documented Robolectric boundary,
+     * where `KeyStore.getInstance("AndroidKeyStore")` itself throws). A caller that treats
+     * `false` conservatively (as "cannot confirm this alias is usable here") fails closed
+     * instead of the check crashing the caller.
+     */
+    fun hasKey(alias: String): Boolean = try {
+        val keyStore = java.security.KeyStore.getInstance(ANDROID_KEYSTORE)
+        keyStore.load(null)
+        keyStore.containsAlias(alias)
+    } catch (e: Exception) {
+        false
+    }
+
     /** Generates (first use) or fetches the AES-256 Keystore key for [alias]. */
     private fun getOrCreateSecretKey(alias: String): SecretKey {
         val keyStore = java.security.KeyStore.getInstance(ANDROID_KEYSTORE)

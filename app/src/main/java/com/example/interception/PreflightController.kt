@@ -5,8 +5,11 @@ import android.content.Intent
 import android.net.VpnService
 import com.example.data.interception.ActiveTier
 import com.example.data.interception.CapabilityState
+import com.example.data.interception.CaptureLifecycleOwner
 import com.example.data.interception.CaptureMethod
 import com.example.data.interception.InterceptionStateRepository
+import com.example.data.interception.engineLifecycleOwner
+import com.example.data.interception.engineTier
 import com.example.data.prefs.AppFilterMode
 import com.example.data.prefs.CaptureTierPreference
 import com.example.data.prefs.SettingsDataStore
@@ -71,9 +74,13 @@ object PreflightController {
         }
         prefs.setCaInstalledHint(caInstalled)
 
-        // Resolve capture method and tier
+        // Resolve capture method and port. Tier and lifecycle owner are deliberately *not*
+        // restated per-branch below (each used to hardcode its own ActiveTier/CaptureLifecycleOwner
+        // literal that happened to agree with CaptureMethod.engineTier()/.engineLifecycleOwner());
+        // they are derived once, right after this `when`, from the single canonical function so
+        // this resolver and every engine's own markActive() call can no longer independently drift
+        // apart -- see CaptureMethod.engineTier()'s KDoc for the HttpProxyEngine bug this closes.
         val method: CaptureMethod
-        val tier: ActiveTier
         val port: Int
 
         when {
@@ -83,24 +90,20 @@ object PreflightController {
             // never read here, so choosing it had zero effect on which tier actually ran).
             tierPreference == CaptureTierPreference.FORCE_VPN_ONLY -> {
                 method = CaptureMethod.VPN_TUN
-                tier = ActiveTier.VPN
                 port = 0
             }
             // Root/Shizuku always win
             capabilities.isRootUsable -> {
                 method = CaptureMethod.ROOT_IPTABLES
-                tier = ActiveTier.ROOT
                 port = prefs.proxyPort.first()
                 if (!caInstalled) return Result.CaRequired(CertificateAuthority.buildInstallIntent(context))
             }
             capabilities.isShizukuUsable -> {
                 method = CaptureMethod.SHIZUKU_TUN
-                tier = ActiveTier.SHIZUKU
                 port = prefs.proxyPort.first()
                 if (!caInstalled) return Result.CaRequired(CertificateAuthority.buildInstallIntent(context))
             }
             recordMode == "PROXY" -> {
-                tier = ActiveTier.PROXY
                 port = prefs.proxyPort.first()
                 if (caInstalled) { method = CaptureMethod.MITM_PROXY }
                 else { method = CaptureMethod.HTTP_PROXY }
@@ -108,15 +111,19 @@ object PreflightController {
             else -> {
                 if (caInstalled) {
                     method = CaptureMethod.MITM_PROXY
-                    tier = ActiveTier.PROXY
                     port = prefs.proxyPort.first()
                 } else {
                     method = CaptureMethod.VPN_TUN
-                    tier = ActiveTier.VPN
                     port = 0
                 }
             }
         }
+        // Safe: none of the branches above can ever resolve `method` to ROOT_FRIDA (it has no
+        // single true tier -- see engineTier()'s KDoc), so this cannot throw in practice. If a
+        // future branch ever adds ROOT_FRIDA here, this throwing loudly is exactly the right
+        // failure mode -- silently picking a tier for it would be the same "copy-pasted value
+        // nobody deliberately chose" defect this refactor exists to close.
+        val tier: ActiveTier = method.engineTier()
 
         if (method == CaptureMethod.MITM_PROXY && !caInstalled) {
             return Result.CaRequired(CertificateAuthority.buildInstallIntent(context))
@@ -124,7 +131,14 @@ object PreflightController {
 
         val consent = if (method == CaptureMethod.VPN_TUN) VpnService.prepare(context) else null
 
-        InterceptionStateRepository.markArmed(tier = tier, port = port, method = method)
+        // Which engine's stop() will actually own this session once armed -- see
+        // CaptureLifecycleOwner's KDoc for why this must not be derived from `method` at the
+        // point of stopping (this is the one place it is safe to derive it, since `method` and
+        // `tier` were both *just* resolved together above, fresh, for this exact capture attempt).
+        // Same ROOT_FRIDA note as `tier` above applies here.
+        val lifecycleOwner: CaptureLifecycleOwner = method.engineLifecycleOwner()
+
+        InterceptionStateRepository.markArmed(tier = tier, port = port, method = method, lifecycleOwner = lifecycleOwner)
         if (enhanced) {
             android.util.Log.i("Preflight", "Enhanced: mode=$recordMode method=$method port=$port tier=$tier")
         }
@@ -222,44 +236,57 @@ object PreflightController {
     }
 
     /**
-     * Stops capture for the resolved [CaptureMethod].
+     * Stops capture for whichever engine actually owns the active session's lifecycle.
+     *
+     * Audit fix (stop routes to the wrong engine for native-bridge VPN sessions): this used to
+     * be keyed by [CaptureMethod], which doubles as row-attribution -- a native-bridge VPN
+     * session is owned by [RequestrVpnService] but genuinely attributes captured rows to
+     * [CaptureMethod.MITM_PROXY], so routing the *stop* off that same field tore down this
+     * controller's unrelated singleton [mitmProxy] while the real owning service (and its tun
+     * interface) stayed alive -- the FAB then confidently showed "stopped" while capture kept
+     * running. [owner] (see [CaptureLifecycleOwner]) is a field that exists for exactly one
+     * purpose -- which `.stop()` to call -- so this class of bug cannot recur for a future tier.
      *
      * Audit fix (capture start/stop state desync): every tier converges to `CONFIGURED_IDLE`
      * exactly once, but *how* differs by whether the tier already owns a real completion signal:
      *
-     * - VPN_TUN/ROOT_FRIDA are handled by [RequestrVpnService], which now (lifecycle-race fix)
-     *   runs its own `cleanup()` before calling [InterceptionStateRepository.markStopped] itself
-     *   from inside its internal `stopCapture(reason)` -- so by the time the shared state
-     *   converges, the tun interface really is torn down, not just "an intent got sent". These
-     *   two tiers are deliberately called *outside* [InterceptionStateRepository.runStop] here:
-     *   wrapping them too would make `runStop`'s `finally` fire `markStopped` immediately after
-     *   dispatching the (fire-and-forget) stop `Intent`, i.e. before the service's real teardown
-     *   even starts -- reintroducing the exact "stopped shown before the tun is actually torn
-     *   down" race this whole fix exists to close, at an even earlier point than before.
-     * - MITM_PROXY/ROOT_IPTABLES/SHIZUKU_TUN/HTTP_PROXY have no equivalent owned completion
-     *   signal -- their `.stop()` calls just tear down a socket/process synchronously with
-     *   nothing to guarantee the transition -- so they route through
-     *   [InterceptionStateRepository.runStop], which unconditionally converges to `markStopped`
-     *   right after that synchronous teardown returns, even if it throws. This is what fixed the
-     *   original bug: previously these four tiers had no call to `markStopped` anywhere, so the
-     *   FAB stayed permanently on "Stop capture" after the first real stop.
+     * - VPN_SERVICE is handled by [RequestrVpnService], which now (lifecycle-race fix) runs its
+     *   own `cleanup()` before calling [InterceptionStateRepository.markStopped] itself from
+     *   inside its internal `stopCapture(reason)` -- so by the time the shared state converges,
+     *   the tun interface really is torn down, not just "an intent got sent". This tier is
+     *   deliberately called *outside* [InterceptionStateRepository.runStop] here: wrapping it
+     *   too would make `runStop`'s `finally` fire `markStopped` immediately after dispatching the
+     *   (fire-and-forget) stop `Intent`, i.e. before the service's real teardown even starts --
+     *   reintroducing the exact "stopped shown before the tun is actually torn down" race this
+     *   whole fix exists to close, at an even earlier point than before.
+     * - MITM_PROXY_ENGINE/ROOT_IPTABLES_ENGINE/SHIZUKU_TUN_ENGINE/HTTP_PROXY_ENGINE have no
+     *   equivalent owned completion signal -- their `.stop()` calls just tear down a
+     *   socket/process synchronously with nothing to guarantee the transition -- so they route
+     *   through [InterceptionStateRepository.runStop], which unconditionally converges to
+     *   `markStopped` right after that synchronous teardown returns, even if it throws.
+     * - NONE/FRIDA_ENGINE own nothing reachable through this controller (no active session, or
+     *   [FridaCaptureEngine] which is never wired into [startCapture]/[stopCapture] and manages
+     *   its own lifecycle directly) -- a no-op here is correct.
      *
      * A future tier added to this `when` should default to the `runStop` branch unless it gains
-     * its own service-owned convergence signal the way VPN_TUN/ROOT_FRIDA have.
+     * its own service-owned convergence signal the way VPN_SERVICE has.
      */
-    fun stopCapture(context: Context, method: CaptureMethod = CaptureMethod.VPN_TUN) {
-        when (method) {
-            CaptureMethod.VPN_TUN, CaptureMethod.ROOT_FRIDA -> RequestrVpnService.stop(context)
-            CaptureMethod.MITM_PROXY -> InterceptionStateRepository.runStop { mitmProxy?.stop() }
-            CaptureMethod.ROOT_IPTABLES -> InterceptionStateRepository.runStop {
+    fun stopCapture(context: Context, owner: CaptureLifecycleOwner = CaptureLifecycleOwner.VPN_SERVICE) {
+        when (owner) {
+            CaptureLifecycleOwner.VPN_SERVICE -> RequestrVpnService.stop(context)
+            CaptureLifecycleOwner.MITM_PROXY_ENGINE -> InterceptionStateRepository.runStop { mitmProxy?.stop() }
+            CaptureLifecycleOwner.ROOT_IPTABLES_ENGINE -> InterceptionStateRepository.runStop {
                 rootEngine.stop(android.os.Process.myUid())
                 mitmProxy?.stop()
             }
-            CaptureMethod.SHIZUKU_TUN -> InterceptionStateRepository.runStop {
+            CaptureLifecycleOwner.SHIZUKU_TUN_ENGINE -> InterceptionStateRepository.runStop {
                 shizukuEngine.stop(mitmProxy?.port ?: 0)
                 mitmProxy?.stop()
             }
-            CaptureMethod.HTTP_PROXY -> InterceptionStateRepository.runStop { httpProxy.stop() }
+            CaptureLifecycleOwner.HTTP_PROXY_ENGINE -> InterceptionStateRepository.runStop { httpProxy.stop() }
+            CaptureLifecycleOwner.NONE, CaptureLifecycleOwner.FRIDA_ENGINE -> {
+                // Nothing reachable through this controller owns an active session.
+            }
         }
     }
 }

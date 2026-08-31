@@ -32,11 +32,8 @@ fun parseClampedNonNegativeIntInput(raw: String, max: Int): Int {
     return parsed.coerceIn(0, max)
 }
 
-/** Parses a user-typed packet-loss percent field, clamped to `[0, 100]`. Same fallback-to-0 rule as [parseClampedNonNegativeIntInput]. */
-fun parseClampedPercentInput(raw: String): Int {
-    val parsed = raw.trim().toIntOrNull() ?: return 0
-    return parsed.coerceIn(0, 100)
-}
+/** Parses a user-typed packet-loss percent field, clamped to `[0, 100]`. */
+fun parseClampedPercentInput(raw: String): Int = parseClampedNonNegativeIntInput(raw, max = 100)
 
 /**
  * Builds a [NetworkCondition] that can never throw regardless of how out-of-range [latencyMs]/

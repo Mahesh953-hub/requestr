@@ -109,14 +109,15 @@ import com.example.data.models.buildQuoteReplyPrefix
 import com.example.data.models.decodeAttachment
 import com.example.data.models.deriveChatTitle
 import com.example.data.models.encodeAttachment
-import com.example.data.models.formatAttachmentSize
 import com.example.data.models.formatCapturedTrafficAsContext
 import com.example.data.models.formatClockTime
 import com.example.data.models.isBlockedCleartextHost
 import com.example.data.models.validateProviderFields
 import com.example.data.prefs.ChatSettingsStore
 import com.example.data.repository.ChatRepository
+import com.example.data.repository.SaveProviderResult
 import com.example.ui.components.SectionHeader
+import com.example.ui.components.formatByteCount
 import com.example.ui.components.rememberAppHapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.semantics.contentDescription
@@ -687,7 +688,7 @@ private fun AttachmentPreview(attachment: ChatAttachment) {
                 )
             }
             Text(
-                text = "\uD83D\uDDBC ${attachment.name} (${formatAttachmentSize(attachment.sizeBytes)})",
+                text = "\uD83D\uDDBC ${attachment.name} (${formatByteCount(attachment.sizeBytes)})",
                 fontSize = 10.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -705,7 +706,7 @@ private fun AttachmentPreview(attachment: ChatAttachment) {
                 )
             }
             Text(
-                text = "\uD83D\uDCF7 ${attachment.name} (${formatAttachmentSize(attachment.sizeBytes)})",
+                text = "\uD83D\uDCF7 ${attachment.name} (${formatByteCount(attachment.sizeBytes)})",
                 fontSize = 10.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -724,7 +725,7 @@ private fun AttachmentChip(icon: androidx.compose.ui.graphics.vector.ImageVector
             .padding(horizontal = 8.dp, vertical = 6.dp)
     ) {
         Icon(icon, contentDescription = null, modifier = Modifier.size(14.dp))
-        Text(text = "${attachment.name} \u00b7 ${formatAttachmentSize(attachment.sizeBytes)}", fontSize = 10.sp)
+        Text(text = "${attachment.name} \u00b7 ${formatByteCount(attachment.sizeBytes)}", fontSize = 10.sp)
     }
 }
 
@@ -1010,7 +1011,7 @@ private fun ReqyComposerBar(
                     modifier = Modifier.size(16.dp),
                 )
                 Text(
-                    "${attachment.name} \u00b7 ${formatAttachmentSize(attachment.sizeBytes)}",
+                    "${attachment.name} \u00b7 ${formatByteCount(attachment.sizeBytes)}",
                     fontSize = 11.sp,
                     modifier = Modifier.weight(1f),
                 )
@@ -1104,7 +1105,7 @@ private fun AttachmentSheet(
         if (uri == null) return@rememberLauncherForActivityResult
         val info = pickedFileInfo(context, uri)
         if (info.second > MAX_ATTACHMENT_SIZE_BYTES) {
-            sizeError = "${info.first} is ${formatAttachmentSize(info.second)} -- over the 8 MB attachment limit."
+            sizeError = "${info.first} is ${formatByteCount(info.second)} -- over the 8 MB attachment limit."
             return@rememberLauncherForActivityResult
         }
         onImagePicked(ChatAttachment(ChatAttachmentKind.IMAGE, info.first, info.second, uri.toString()))
@@ -1113,7 +1114,7 @@ private fun AttachmentSheet(
         if (uri == null) return@rememberLauncherForActivityResult
         val info = pickedFileInfo(context, uri)
         if (info.second > MAX_ATTACHMENT_SIZE_BYTES) {
-            sizeError = "${info.first} is ${formatAttachmentSize(info.second)} -- over the 8 MB attachment limit."
+            sizeError = "${info.first} is ${formatByteCount(info.second)} -- over the 8 MB attachment limit."
             return@rememberLauncherForActivityResult
         }
         onFilePicked(ChatAttachment(ChatAttachmentKind.FILE, info.first, info.second, uri.toString()))
@@ -1585,17 +1586,32 @@ private fun ReqySettingsScreen(onClose: () -> Unit) {
             return
         }
         validationError = null
-        ChatRepository.saveProviderConfig(
-            ChatProviderConfig(
-                id = selectedKind.id,
-                name = selectedKind.displayName,
-                baseUrl = baseUrl.ifBlank { selectedKind.defaultBaseUrl },
-                model = model.ifBlank { selectedKind.defaultModel },
-                apiKey = apiKey,
-                isActive = true,
-            )
-        )
-        savedNotice = true
+        savedNotice = false
+        // The confirmation below must follow the REAL outcome of both the Room write and the
+        // Keystore write -- not just this optimistic-in-memory-update call returning. Awaiting
+        // the suspend result is what stops the UI from claiming "Saved and activated." while a
+        // write is still in flight or has actually failed (see saveProviderConfig's kdoc).
+        scope.launch {
+            when (val result = ChatRepository.saveProviderConfig(
+                ChatProviderConfig(
+                    id = selectedKind.id,
+                    name = selectedKind.displayName,
+                    baseUrl = baseUrl.ifBlank { selectedKind.defaultBaseUrl },
+                    model = model.ifBlank { selectedKind.defaultModel },
+                    apiKey = apiKey,
+                    isActive = true,
+                )
+            )) {
+                is SaveProviderResult.Success -> {
+                    savedNotice = true
+                    validationError = null
+                }
+                is SaveProviderResult.Failure -> {
+                    savedNotice = false
+                    validationError = result.reason
+                }
+            }
+        }
     }
 
     Column(

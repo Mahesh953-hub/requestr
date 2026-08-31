@@ -48,26 +48,13 @@ class NetworkConditionUiHelpersTest {
         assertEquals(42, parseClampedNonNegativeIntInput("  42  ", 10_000))
     }
 
-    // ── parseClampedPercentInput ─────────────────────────────────────────────────────────────
+    // ── parseClampedPercentInput -- delegates to the above, so only the 0..100 ceiling is new ──
 
     @Test
-    fun `percent input within range is unchanged`() {
+    fun `percent input is passed through in range and clamped to 100 above it`() {
         assertEquals(50, parseClampedPercentInput("50"))
-    }
-
-    @Test
-    fun `percent input above 100 clamps to 100`() {
+        assertEquals(100, parseClampedPercentInput("100"))
         assertEquals(100, parseClampedPercentInput("250"))
-    }
-
-    @Test
-    fun `percent input below zero clamps to zero`() {
-        assertEquals(0, parseClampedPercentInput("-10"))
-    }
-
-    @Test
-    fun `percent non-numeric input falls back to zero`() {
-        assertEquals(0, parseClampedPercentInput("nope"))
     }
 
     // ── sanitizedNetworkCondition -- must never throw regardless of input ──────────────────

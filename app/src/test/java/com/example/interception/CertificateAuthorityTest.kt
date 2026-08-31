@@ -214,4 +214,21 @@ class CertificateAuthorityTest {
         tempPath.delete()
         Unit
     }
+
+    // ── CaTrustGate wiring (SHOULD-FIX: per-CONNECT re-check honesty) ──
+
+    @Test
+    fun `regenerate invalidates every live CaTrustGate, forcing a fresh probe`() = runBlocking {
+        var probeCalls = 0
+        val gate = CaTrustGate(probe = { probeCalls++; true }, cacheTtlMs = 60_000L, clock = { 0L })
+        assertTrue(gate.isTrusted())
+        assertEquals(1, probeCalls)
+
+        CertificateAuthority.regenerate(context)
+
+        // Still within the 60s TTL by the gate's own clock, so this only re-probes because
+        // regenerate() called CaTrustGate.invalidateAll() -- not because the cache expired.
+        assertTrue(gate.isTrusted())
+        assertEquals(2, probeCalls)
+    }
 }

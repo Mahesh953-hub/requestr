@@ -49,13 +49,6 @@ class ChatAttachmentTest {
     }
 
     @Test
-    fun `formatAttachmentSize picks bytes, KB or MB units`() {
-        assertEquals("512 B", formatAttachmentSize(512))
-        assertEquals("12.3 KB", formatAttachmentSize(12595))
-        assertEquals("1.4 MB", formatAttachmentSize((1.4 * 1024 * 1024).toLong()))
-    }
-
-    @Test
     fun `MAX_ATTACHMENT_SIZE_BYTES is exactly 8 MB`() {
         assertEquals(8L * 1024 * 1024, MAX_ATTACHMENT_SIZE_BYTES)
     }

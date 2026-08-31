@@ -46,26 +46,49 @@ object InterceptionStateRepository {
         }
     }
 
-    /** Pre-flight passed; awaiting VPN consent / user confirm. Renders the FAB yellow. */
-    fun markArmed(tier: ActiveTier, port: Int, method: CaptureMethod = CaptureMethod.VPN_TUN) {
+    /**
+     * Pre-flight passed; awaiting VPN consent / user confirm. Renders the FAB yellow.
+     *
+     * [lifecycleOwner] has no default: see [CaptureLifecycleOwner]'s KDoc for why every call
+     * site must state it explicitly rather than inherit a guess.
+     */
+    fun markArmed(
+        tier: ActiveTier,
+        port: Int,
+        method: CaptureMethod = CaptureMethod.VPN_TUN,
+        lifecycleOwner: CaptureLifecycleOwner,
+    ) {
         _state.update {
             it.copy(
                 status = InterceptionStatus.ARMED,
                 tier = tier,
                 captureMethod = method,
+                lifecycleOwner = lifecycleOwner,
                 port = port,
                 errorText = null,
             )
         }
     }
 
-    /** Capture genuinely began. Renders the FAB and logo dot green. */
-    fun markActive(sessionId: Long, tier: ActiveTier, port: Int, method: CaptureMethod = CaptureMethod.VPN_TUN) {
+    /**
+     * Capture genuinely began. Renders the FAB and logo dot green.
+     *
+     * [lifecycleOwner] has no default: see [CaptureLifecycleOwner]'s KDoc for why every call
+     * site must state it explicitly rather than inherit a guess.
+     */
+    fun markActive(
+        sessionId: Long,
+        tier: ActiveTier,
+        port: Int,
+        method: CaptureMethod = CaptureMethod.VPN_TUN,
+        lifecycleOwner: CaptureLifecycleOwner,
+    ) {
         _state.update {
             it.copy(
                 status = InterceptionStatus.ACTIVE,
                 tier = tier,
                 captureMethod = method,
+                lifecycleOwner = lifecycleOwner,
                 port = port,
                 sessionId = sessionId,
                 startedAt = System.currentTimeMillis(),
@@ -84,6 +107,7 @@ object InterceptionStateRepository {
             it.copy(
                 status = InterceptionStatus.CONFIGURED_IDLE,
                 tier = ActiveTier.NONE,
+                lifecycleOwner = CaptureLifecycleOwner.NONE,
                 activeConnections = 0,
                 sessionId = null,
                 startedAt = null,
@@ -101,6 +125,7 @@ object InterceptionStateRepository {
             it.copy(
                 status = InterceptionStatus.ERROR,
                 tier = ActiveTier.NONE,
+                lifecycleOwner = CaptureLifecycleOwner.NONE,
                 activeConnections = 0,
                 errorText = message,
             )

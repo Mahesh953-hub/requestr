@@ -111,6 +111,50 @@ class HttpBodyDecoderStorageTest {
     }
 
     @Test
+    fun `binary body stores decodedBodyBytes, not the still-encoded rawBodyBytes, when they differ`() {
+        // SHOULD-FIX (gzip'd-image gallery bug): simulates what HttpParser now produces for a
+        // gzip-compressed body -- rawBodyBytes stays wire-exact (still "compressed"),
+        // decodedBodyBytes carries what isBodyBinary was actually classified from and what a
+        // renderer needs. forStorage must persist the latter.
+        val stillCompressed = byteArrayOf(0x1f, 0x8b.toByte(), 0x08, 0x00, 0x01, 0x02, 0x03)
+        val realImageBytes = ByteArray(2048) { (it % 200).toByte() }
+        val message = ParsedHttpMessage(
+            isRequest = false,
+            method = null,
+            body = HttpBodyDecoder.BINARY_BODY_PLACEHOLDER,
+            isBodyBinary = true,
+            rawBodyBytes = stillCompressed,
+            decodedBodyBytes = realImageBytes,
+        )
+        val storage = HttpBodyDecoder.forStorage(message)
+        assertTrue(storage.isBinary)
+        assertFalse(storage.truncated)
+        assertTrue(storage.bytes!!.contentEquals(realImageBytes))
+        assertFalse(storage.bytes!!.contentEquals(stillCompressed))
+        // trueSizeBytes must keep reflecting the true *wire* size (the still-compressed
+        // length), never the decompressed length -- requestSizeBytes/responseSizeBytes must
+        // not silently change meaning.
+        assertEquals(stillCompressed.size.toLong(), storage.trueSizeBytes)
+    }
+
+    @Test
+    fun `binary body with no decodedBodyBytes set falls back to rawBodyBytes (pre-fix behavior preserved)`() {
+        val jpegLike = ByteArray(4096) { (it % 251).toByte() }
+        val message = ParsedHttpMessage(
+            isRequest = false,
+            method = null,
+            body = HttpBodyDecoder.BINARY_BODY_PLACEHOLDER,
+            isBodyBinary = true,
+            rawBodyBytes = jpegLike,
+            decodedBodyBytes = null,
+        )
+        val storage = HttpBodyDecoder.forStorage(message)
+        assertTrue(storage.isBinary)
+        assertTrue(storage.bytes!!.contentEquals(jpegLike))
+        assertEquals(4096L, storage.trueSizeBytes)
+    }
+
+    @Test
     fun `binary flagged with null rawBodyBytes degrades to zero-length rather than throwing`() {
         val message = ParsedHttpMessage(
             isRequest = true,

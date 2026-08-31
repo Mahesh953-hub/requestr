@@ -1,7 +1,8 @@
 package com.example.interception
 
 import android.util.Log
-import com.example.data.interception.ActiveTier
+import com.example.data.interception.engineLifecycleOwner
+import com.example.data.interception.engineTier
 import com.example.data.interception.CaptureMethod
 import com.example.data.interception.InterceptionStateRepository
 import java.io.BufferedReader
@@ -61,8 +62,9 @@ class RootIptablesEngine {
         if (success) {
             active = true
             InterceptionStateRepository.markActive(
-                sessionId = sessionId, tier = ActiveTier.ROOT,
+                sessionId = sessionId, tier = CaptureMethod.ROOT_IPTABLES.engineTier(),
                 port = port, method = CaptureMethod.ROOT_IPTABLES,
+                lifecycleOwner = CaptureMethod.ROOT_IPTABLES.engineLifecycleOwner(),
             )
             Log.i(TAG, "iptables rules installed for port $port (uid=$excludeUid)")
         }

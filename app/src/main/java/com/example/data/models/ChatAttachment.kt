@@ -63,13 +63,6 @@ fun decodeAttachment(content: String): Pair<ChatAttachment?, String> {
     }
 }
 
-/** Human-readable "512 B" / "12.3 KB" / "1.4 MB" formatting for an attachment chip. */
-fun formatAttachmentSize(bytes: Long): String = when {
-    bytes < 1024 -> "$bytes B"
-    bytes < 1024 * 1024 -> "%.1f KB".format(bytes / 1024.0)
-    else -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
-}
-
 /** Pure helpers for the attachment sheet's "Code Snippet" and "Request/Response" fenced blocks. */
 object ChatCodeFence {
     /** Wraps [code] in a fenced block the bubble renderer recognizes, tagged with [language]. */

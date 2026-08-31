@@ -104,6 +104,7 @@ object HttpParser {
             rawHeaderNames = rawHeaderNames,
             isBodyBinary = decoded.isBinary,
             rawBodyBytes = rawBodyBytes,
+            decodedBodyBytes = decoded.decodedBytes,
         )
     }
 
@@ -206,6 +207,7 @@ object HttpParser {
             consumedBytes = totalNeeded,
             isBodyBinary = decoded.isBinary,
             rawBodyBytes = rawBodyBytes,
+            decodedBodyBytes = decoded.decodedBytes,
         )
     }
 
@@ -468,6 +470,29 @@ data class ParsedHttpMessage(
      * `equals`/`hashCode` overrides) rather than being trusted to just work.
      */
     val rawBodyBytes: ByteArray? = null,
+    /**
+     * SHOULD-FIX (gzip'd-image gallery bug): [rawBodyBytes] after [HttpBodyDecoder.decode]'s
+     * decompression attempt -- i.e. the exact bytes [isBodyBinary] was classified from, and
+     * (when [isBodyBinary] is true) the bytes [HttpBodyDecoder.forStorage] persists as the
+     * `requestBodyBytes`/`responseBodyBytes` BLOB. Equal to [rawBodyBytes] whenever no
+     * decompression happened (identity encoding, an undecodable Content-Encoding like `br`, or
+     * a failed decompression attempt); a genuinely different, decompressed array only when
+     * gzip/deflate decoding actually succeeded. Both [HttpParser] entry points populate this
+     * alongside [rawBodyBytes]; null only for the same never-parsed-off-a-real-wire messages
+     * [rawBodyBytes] is null for.
+     *
+     * Deliberately NOT used by re-serialization: MitmProxyEngine's serializeRequest/
+     * serializeResponse must keep writing [rawBodyBytes] (still wire-encoded) verbatim for any
+     * non-`bodyReplaced` message, since the original, unmodified Content-Encoding header ships
+     * right alongside it -- feeding these decompressed bytes back out under that header would
+     * corrupt the relayed body. This field exists solely for storage/display, where the bytes
+     * classified as binary and the bytes persisted/rendered must be the same bytes (previously
+     * they weren't: a gzip-compressed JPEG was correctly flagged binary but persisted as raw
+     * gzip data, so the image gallery's `BitmapFactory` could never decode it).
+     *
+     * Same array-identity/mutation caveat as [rawBodyBytes]'s EQUALITY NOTE applies here too.
+     */
+    val decodedBodyBytes: ByteArray? = null,
     /**
      * MUST-FIX 1: true only when a rule actually overwrote [body] via the `bodyReplace` config
      * key -- set at the exact two sites in RuleEnforcer.kt (`applyRequestModification` /

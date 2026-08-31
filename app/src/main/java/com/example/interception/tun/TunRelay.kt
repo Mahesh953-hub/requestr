@@ -39,6 +39,20 @@ class TunRelay(
     private val pendingActions = ConcurrentLinkedQueue<() -> Unit>()
     private val fragReassembler = IpFragmentReassembler()
 
+    /**
+     * Test seam for [writeUpstream]/[flushPendingUpstream]: defaults to the real
+     * `channel.write(buf)`. A test can replace this with a lambda that throws to exercise the
+     * "peer reset mid-flow" drop-accounting path deterministically -- driving a real loopback
+     * socket through an actual `SO_LINGER 0` reset and then racing the relay's own background
+     * selector thread to notice it (via `Thread.sleep` polling with a wall-clock deadline) is
+     * exactly the kind of scheduling-dependent flake this seam exists to avoid. See
+     * [TunRelayTest]'s regression test: it verifies (elsewhere, empirically) that a genuine
+     * `SO_LINGER 0` reset surfaces as `java.io.IOException: Connection reset by peer` on the
+     * very next `SocketChannel.write()`, then injects exactly that exception here so the
+     * assertion still proves something about the real failure mode, not just "some Exception".
+     */
+    internal var upstreamWriter: (SocketChannel, ByteBuffer) -> Int = { channel, buf -> channel.write(buf) }
+
     @Volatile private var running = true
 
     // ── observable health, following GatewayEngine's MutableStateFlow/asStateFlow pattern
@@ -260,7 +274,7 @@ class TunRelay(
         }
         try {
             val buf = ByteBuffer.wrap(payload)
-            channel.write(buf)
+            upstreamWriter(channel, buf)
             if (buf.hasRemaining()) {
                 flow.pendingUpstreamWrites.add(buf.remaining().let { rem ->
                     ByteArray(rem).also { buf.get(it) }
@@ -283,7 +297,7 @@ class TunRelay(
             while (flow.pendingUpstreamWrites.isNotEmpty()) {
                 val head = flow.pendingUpstreamWrites.peekFirst() ?: break
                 val buf = ByteBuffer.wrap(head)
-                channel.write(buf)
+                upstreamWriter(channel, buf)
                 if (buf.hasRemaining()) {
                     flow.pendingUpstreamWrites.removeFirst()
                     val rem = ByteArray(buf.remaining()).also { buf.get(it) }
