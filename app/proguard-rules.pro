@@ -190,3 +190,17 @@
 -dontwarn javax.annotation.**
 -dontwarn javax.lang.model.**
 -dontwarn sun.misc.Unsafe
+
+# ── Rhino (org.mozilla:rhino) JS engine ─────────────────────────────
+# Rhino's JavaToJSONConverters uses java.beans.Introspector to convert POJOs to JSON.
+# The java.beans package does not exist on Android/ART, so R8 reports these as missing
+# classes and fails the release build. The code path is never reached by requestr: we
+# only evaluate scripts through Context/Scriptable (JsScriptEngine), never Rhino's
+# Java-bean-to-JSON bridge. Suppressing the warning is safe and required for
+# `assembleRelease` to complete.
+-dontwarn java.beans.**
+# Rhino resolves interpreter/optimizer classes reflectively; keep the public surface so
+# the interpreter-only configuration keeps working after minification.
+-keep class org.mozilla.javascript.** { *; }
+-keep interface org.mozilla.javascript.** { *; }
+-dontwarn org.mozilla.javascript.**
