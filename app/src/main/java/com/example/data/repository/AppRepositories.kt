@@ -1111,6 +1111,10 @@ object SettingsRepository {
                     headerBackgroundOpacity = p[K.HEADER_OPACITY] ?: _settings.value.headerBackgroundOpacity,
                     headerBlurStyle = com.example.data.prefs.canonicalGlassStyle(p[K.HEADER_BLUR_STYLE] ?: _settings.value.headerBlurStyle),
                     fabBottomSpacingDp = p[K.FAB_BOTTOM_SPACING] ?: _settings.value.fabBottomSpacingDp,
+                    glassTuneBlurDp = p[K.GLASS_TUNE_BLUR_DP] ?: _settings.value.glassTuneBlurDp,
+                    glassTuneTintOpacity = p[K.GLASS_TUNE_TINT_OPACITY] ?: _settings.value.glassTuneTintOpacity,
+                    glassTuneBorderOpacity = p[K.GLASS_TUNE_BORDER_OPACITY] ?: _settings.value.glassTuneBorderOpacity,
+                    glassTuneShadowDp = p[K.GLASS_TUNE_SHADOW_DP] ?: _settings.value.glassTuneShadowDp,
                 )
             }
         }
@@ -1349,6 +1353,30 @@ object SettingsRepository {
         persist(K.FAB_BOTTOM_SPACING, spacingDp)
     }
 
+    // Phase B — TUNE_GLASS setters. Each clamps to the range its renderer can actually honour, so
+    // a bad caller cannot produce an unreadable surface (a 0-alpha tint with a 0-alpha border is
+    // an invisible nav bar) or an absurd blur radius that tanks the frame budget.
+    fun updateGlassTuneBlur(blurDp: Int) {
+        val clamped = blurDp.coerceIn(0, 48)
+        _settings.value = _settings.value.copy(glassTuneBlurDp = clamped)
+        persist(K.GLASS_TUNE_BLUR_DP, clamped)
+    }
+    fun updateGlassTuneTintOpacity(opacity: Float) {
+        val clamped = opacity.coerceIn(0.15f, 1f)
+        _settings.value = _settings.value.copy(glassTuneTintOpacity = clamped)
+        persist(K.GLASS_TUNE_TINT_OPACITY, clamped)
+    }
+    fun updateGlassTuneBorderOpacity(opacity: Float) {
+        val clamped = opacity.coerceIn(0f, 1f)
+        _settings.value = _settings.value.copy(glassTuneBorderOpacity = clamped)
+        persist(K.GLASS_TUNE_BORDER_OPACITY, clamped)
+    }
+    fun updateGlassTuneShadowDp(shadowDp: Int) {
+        val clamped = shadowDp.coerceIn(0, 24)
+        _settings.value = _settings.value.copy(glassTuneShadowDp = clamped)
+        persist(K.GLASS_TUNE_SHADOW_DP, clamped)
+    }
+
     fun updateSettings(newSettings: UserSettingsState) {
         _settings.value = newSettings
         val ctx = appContext ?: return
@@ -1394,6 +1422,10 @@ object SettingsRepository {
                 prefs[K.HEADER_OPACITY] = newSettings.headerBackgroundOpacity
                 prefs[K.HEADER_BLUR_STYLE] = newSettings.headerBlurStyle
                 prefs[K.FAB_BOTTOM_SPACING] = newSettings.fabBottomSpacingDp
+                prefs[K.GLASS_TUNE_BLUR_DP] = newSettings.glassTuneBlurDp
+                prefs[K.GLASS_TUNE_TINT_OPACITY] = newSettings.glassTuneTintOpacity
+                prefs[K.GLASS_TUNE_BORDER_OPACITY] = newSettings.glassTuneBorderOpacity
+                prefs[K.GLASS_TUNE_SHADOW_DP] = newSettings.glassTuneShadowDp
             }
         }
     }

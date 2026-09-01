@@ -601,7 +601,16 @@ data class UserSettingsState(
     val headerTopPaddingDp: Int = 8,
     val headerBackgroundOpacity: Float = 0.90f,
     val headerBlurStyle: String = "FROSTED_GLASS",
-    val fabBottomSpacingDp: Int = 84
+    val fabBottomSpacingDp: Int = 84,
+    // Phase B — TUNE_GLASS parameters. Read ONLY when the corresponding glass style is
+    // TUNE_GLASS; every other mode ignores them, so switching away to compare and switching back
+    // preserves the user's dialled-in look. Defaults deliberately match FROSTED_GLASS so the
+    // first time a user selects Tune Glass nothing jumps — they start from the familiar look and
+    // tune outward from there.
+    val glassTuneBlurDp: Int = 24,
+    val glassTuneTintOpacity: Float = 0.90f,
+    val glassTuneBorderOpacity: Float = 0.35f,
+    val glassTuneShadowDp: Int = 6
 )
 
 /** Chat message for the Chats section (#44). */

@@ -150,6 +150,17 @@ object AppSettingsKeys {
     val HEADER_OPACITY = floatPreferencesKey("header_opacity")
     val HEADER_BLUR_STYLE = stringPreferencesKey("header_blur_style")
     val FAB_BOTTOM_SPACING = intPreferencesKey("fab_bottom_spacing")
+
+    // Phase B glass modes. LIQUID_GLASS and TUNE_GLASS join the canonical set; "Clear Glass" is
+    // the existing TRANSLUCENT mode relabelled rather than a new key, so the legacy
+    // CLEAR_GLASS→TRANSLUCENT alias below stays correct and nobody's saved choice changes meaning.
+    //
+    // TUNE_GLASS is the only mode driven by these four values — every other mode ignores them, so
+    // a user can dial in a custom look, switch away to compare, and switch back without losing it.
+    val GLASS_TUNE_BLUR_DP = intPreferencesKey("glass_tune_blur_dp")
+    val GLASS_TUNE_TINT_OPACITY = floatPreferencesKey("glass_tune_tint_opacity")
+    val GLASS_TUNE_BORDER_OPACITY = floatPreferencesKey("glass_tune_border_opacity")
+    val GLASS_TUNE_SHADOW_DP = intPreferencesKey("glass_tune_shadow_dp")
 }
 
 /**
@@ -273,18 +284,29 @@ object LegacyDataMigration {
 /**
  * v6.0 transplant (DESIGN-RECORD §11) — canonicalizes legacy glass-style key values that
  * main's Settings screen wrote into the single canonical set the glass components read:
- * `FROSTED_GLASS` / `SOLID_M3` / `OLED_BLACK` / `TRANSLUCENT`. Without this, OLED and M3
- * settings silently fell through the component `else → FROSTED_GLASS` branch.
+ * `FROSTED_GLASS` / `SOLID_M3` / `OLED_BLACK` / `TRANSLUCENT` / `LIQUID_GLASS` / `TUNE_GLASS`.
+ * Without this, OLED and M3 settings silently fell through the component
+ * `else → FROSTED_GLASS` branch.
  *
  * Legacy mappings (per §11):
  *  - Header: `FROSTED→FROSTED_GLASS`, `M3_MINIMAL→SOLID_M3`, `CLEAR_GLASS→TRANSLUCENT`, `DEEP_DARK→OLED_BLACK`
  *  - Nav:    `FROSTED→FROSTED_GLASS`, `M3→SOLID_M3`, `OLED→OLED_BLACK`, `TRANSLUCENT→TRANSLUCENT`
  *  - Unknown/blank → `FROSTED_GLASS`
+ *
+ * Phase B adds `LIQUID_GLASS` (real blur + refraction of content passing underneath) and
+ * `TUNE_GLASS` (same renderer, but driven by the user's own blur/tint/border/shadow values).
+ *
+ * `CLEAR_GLASS` deliberately remains an ALIAS of `TRANSLUCENT` and is NOT a distinct mode: the
+ * user-facing label for `TRANSLUCENT` is now "Clear Glass". Making Clear Glass its own key would
+ * have silently repointed every install that had already stored the legacy `CLEAR_GLASS` value at
+ * a different-looking mode. Keep it an alias.
  */
 fun canonicalGlassStyle(raw: String?): String = when (raw?.uppercase()?.trim()) {
     "FROSTED_GLASS", "FROSTED" -> "FROSTED_GLASS"
     "SOLID_M3", "M3_MINIMAL", "M3" -> "SOLID_M3"
     "OLED_BLACK", "DEEP_DARK", "OLED" -> "OLED_BLACK"
     "TRANSLUCENT", "CLEAR_GLASS" -> "TRANSLUCENT"
+    "LIQUID_GLASS", "LIQUID" -> "LIQUID_GLASS"
+    "TUNE_GLASS", "TUNE" -> "TUNE_GLASS"
     else -> "FROSTED_GLASS"
 }
