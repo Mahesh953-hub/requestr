@@ -1,0 +1,805 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>RichResponseInspector — Editorial Light</title>
+<meta name="description" content="Pixel-for-pixel static HTML reproduction of the RichResponseInspector composable (ResponseInspectorView.kt:402) rendered in the Editorial Light theme (isDark=false).">
+<!--
+==================================================================================
+  RichResponseInspector — point-for-point HTML reproduction
+  Kotlin source : app/src/main/java/com/example/ui/screens/ResponseInspectorView.kt
+  Composable     : RichResponseInspector  (signature @ line 402, body lines 486-1281)
+  Theme          : Editorial Light (isDark = false)  — Theme.kt EditorialLightColorScheme
+  Tokens         : ui/theme/Color.kt (exact hex)  ·  Typography : ui/theme/Type.kt
+  Helpers        : CapturedTrafficHelpers.kt  (detectBodyRenderKind, exceededCapMessage,
+                   maskHeaderValue, isSensitiveHeaderName, prettyPrintJsonOrFallback)
+  Sub-components : StatusCodeBadge/ProtocolBadge (CommonComponents.kt:391/442),
+                   AssertionResultRow/TimelineMetricBar (ApiTestrScreen.kt:1671/1751),
+                   CookieFlagBadge/formatDataSize (ResponseInspectorView.kt:1289/1306)
+
+  dp→px mapping : 3x  (xxhdpi — 1dp = 3px).   sp→px : 1sp = 3px (default font scale).
+  So 14dp = 42px, 11sp = 33px, 16dp radius = 48px, etc.
+
+  Section → HTML map (Kotlin line → block):
+    STATUS & PROTOCOL HEADER BAR  (487-543)  -> .status-bar
+    RESPONSE TABS ROW             (547-598)  -> .tabs
+    BODY TAB  · Text/Hex toolbar  (610-790)  -> .body-toolbar
+    BODY TAB  · Text syntax view  (857-907)  -> .code-view   (pretty JSON, beautified)
+    BODY TAB  · Hex viewer        (808-856)  -> .hex-view
+    BODY TAB  · Empty body        (799-807)  -> .empty-body
+    BODY TAB  · Image body        (CapturedTrafficHelpers.kt:43 detectBodyRenderKind=IMAGE) -> .image-body
+    BODY TAB  · Gated exceeds-cap (CapturedTrafficHelpers.kt:393 exceededCapMessage)        -> .cap-body
+    HEADERS TAB                   (913-983)  -> .headers-tab   (masking: helpers maskHeaderValue/isSensitiveHeaderName)
+    SET-COOKIES TAB               (985-1125) -> .cookies-tab   (CookieFlagBadge 1108-1119)
+    METRICS TAB                   (1127-1216)-> .metrics-tab   (TimelineMetricBar ApiTestrScreen.kt:1751)
+    TESTS TAB                     (1218-1281)-> .tests-tab     (AssertionResultRow ApiTestrScreen.kt:1671)
+
+  NOTE on the Body editor chrome: ResponseInspectorView.kt hard-codes the body
+  toolbar/content surfaces to dark editor colors REGARDLESS of theme
+  (line 615: if(isDark) #0D111A else #1E2430 ; line 796: if(isDark) #05080E else #141924).
+  So even in this light theme the Body viewer is a dark code panel — reproduced exactly.
+  NOTE on Tests/Metrics text: AssertionResultRow & TimelineMetricBar use the FIXED common
+  tokens TextPrimary(#111111)/TextSecondary(#555555) from Color.kt (not theme roles), so
+  they do not swap with the theme. Light theme: correct contrast, reproduced verbatim.
+==================================================================================
+-->
+<style>
+  :root{
+    /* EditorialLightColorScheme (Theme.kt:116-134) — exact hex from Color.kt */
+    --bg:#F4F2EC;            /* EditorialLightBackground */
+    --surface:#FFFFFF;       /* EditorialLightSurface */
+    --surface-variant:#FAF8F3; /* EditorialLightSurfaceVariant */
+    --on-surface:#111111;    /* onSurface */
+    --on-surface-variant:#555555; /* onSurfaceVariant */
+    --primary:#F28C28;       /* EditorialLightPrimary (warm orange) */
+    --on-primary:#111111;    /* onPrimary */
+    --secondary:#111111;     /* secondary */
+    --tertiary:#2B2D42;      /* tertiary */
+    --on-tertiary:#FFFFFF;   /* onTertiary (M3 light default — scheme leaves it unset) */
+    --outline:#E5E2D8;       /* EditorialLightBorder */
+    --outline-variant:#DAD6CA; /* outlineVariant */
+    --ov-50:rgba(218,214,202,0.5); /* outlineVariant.copy(0.5) */
+
+    /* Fixed common tokens (Color.kt:140-142) — used by AssertionResultRow/TimelineMetricBar */
+    --text-primary:#111111;
+    --text-secondary:#555555;
+
+    /* Body editor chrome — hard-coded in the composable for isDark=false */
+    --ed-toolbar:#1E2430;    /* line 615 else-branch */
+    --ed-content:#141924;    /* line 796 else-branch */
+  }
+
+  *{box-sizing:border-box;margin:0;padding:0;}
+  html,body{background:#E9E6DF;}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+    display:flex;flex-direction:column;align-items:center;
+    padding:24px 12px 64px;
+  }
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;}
+
+  /* ---- meta caption (documentation, not app chrome) ---- */
+  .meta-caption{
+    width:1080px;max-width:100%;margin-bottom:18px;
+    font-size:13px;color:#555;line-height:1.5;
+    border-left:3px solid var(--primary);padding:8px 14px;background:#FFFFFF;
+    border-radius:6px;
+  }
+  .meta-caption b{color:#111;}
+  .meta-caption code{font-family:ui-monospace,monospace;background:#FAF8F3;padding:1px 5px;border-radius:4px;font-size:12px;}
+
+  /* ---- device frame: 360dp wide @ 3x = 1080px ---- */
+  .device{
+    width:1080px;max-width:100%;background:var(--bg);
+    border-radius:36px;overflow:hidden;
+    box-shadow:0 18px 50px rgba(0,0,0,0.18);
+  }
+  .inspector{padding:48px;} /* host screen content padding (not part of the composable itself) */
+
+  /* ============ 1. STATUS & PROTOCOL HEADER BAR (487-543) ============ */
+  .status-bar{
+    background:var(--surface);
+    border:3px solid var(--outline-variant); /* 1dp border */
+    border-radius:48px; /* 16dp */
+    display:flex;justify-content:space-between;align-items:center;
+    padding:30px 42px; /* 10dp x 14dp */
+  }
+  .status-left{display:flex;align-items:center;}
+  .status-left .gap8{width:24px;} /* Spacer 8dp */
+
+  /* StatusCodeBadge (CommonComponents.kt:423-438) — statusCode=200 -> Status2xx */
+  .status-code-badge{
+    background:rgba(34,197,94,0.15); /* #22C55E @ 0.15 */
+    border:2px solid rgba(34,197,94,0.5); /* @ 0.5 */
+    border-radius:18px; /* 6dp */
+    padding:6px 18px; /* 2dp x 6dp */
+    color:#22C55E;font-weight:700;font-size:33px; /* 11sp Bold mono */
+  }
+  /* ProtocolBadge (CommonComponents.kt:442-457) */
+  .protocol-badge{
+    background:var(--surface-variant);
+    border-radius:12px; /* 4dp */
+    padding:6px 15px; /* 2dp x 5dp */
+    color:var(--on-surface-variant);font-weight:500;font-size:30px; /* 10sp Medium mono */
+  }
+
+  .status-right{display:flex;align-items:center;}
+  .badge-chip{border-radius:24px;padding:12px 24px;} /* clip 8dp, padding 4dp x 8dp */
+  .latency-badge{background:var(--surface-variant);color:var(--primary);font-weight:800;font-size:34px;} /* 11.5sp ExtraBold */
+  .size-badge{background:var(--surface-variant);color:var(--on-surface-variant);font-weight:700;font-size:33px;} /* 11sp Bold */
+  .gap6{width:18px;} /* Spacer 6dp */
+
+  /* ============ 2. RESPONSE TABS ROW (547-598) ============ */
+  .spacer10{height:30px;} /* Spacer 10dp */
+  .tabs{display:flex;gap:18px;} /* spacedBy 6dp */
+  .tab{
+    border-radius:36px; /* 12dp (unselected) */
+    padding:21px 42px; /* 7dp x 14dp */
+    font-size:36px; /* 12sp */
+    font-weight:500; /* Medium (unselected) */
+    color:var(--on-surface-variant);
+    background:var(--surface-variant);
+    border:2px solid var(--ov-50); /* outlineVariant.copy(0.5), 1dp */
+    white-space:nowrap;
+  }
+  .tab.selected{
+    border-radius:72px; /* 24dp */
+    font-weight:700; /* Bold */
+    color:var(--on-primary);
+    background:var(--primary);
+    border:none;
+  }
+
+  /* ============ shared panel scaffolding ============ */
+  .panel-marker{
+    margin:30px 0 18px; /* top spacer 10dp-ish + label gap */
+    font-size:22px;font-weight:800;color:var(--on-surface-variant);
+    letter-spacing:1px;text-transform:uppercase;
+    display:flex;align-items:center;gap:12px;
+  }
+  .panel-marker .dot{width:9px;height:9px;border-radius:50%;background:var(--primary);display:inline-block;}
+  .panel-marker code{font-family:ui-monospace,monospace;font-size:18px;font-weight:600;color:var(--on-surface-variant);text-transform:none;letter-spacing:0;}
+
+  /* ============ BODY TAB (606-911) ============ */
+  .body-toolbar{
+    background:var(--ed-toolbar);
+    border:3px solid #263345; /* 1dp border, hard-coded */
+    border-radius:48px 48px 0 0; /* topStart/topEnd 16dp */
+  }
+  .body-toolbar-row{
+    display:flex;justify-content:space-between;align-items:center;
+    padding:18px 30px; /* 6dp x 10dp */
+  }
+  /* Text/Hex selector (627-655): clip 20dp, bg #182232, padding 2dp, spacedBy 2dp */
+  .mode-selector{background:#182232;border-radius:60px;padding:6px;display:flex;gap:6px;}
+  .mode-chip{
+    border-radius:48px; /* 16dp */
+    padding:12px 36px; /* 4dp x 12dp */
+    font-size:33px;font-weight:700; /* 11sp Bold mono */
+    color:#8B95A6; /* unselected */
+    cursor:pointer;
+  }
+  .mode-chip.sel{background:var(--primary);color:var(--on-primary);}
+  .actions{display:flex;gap:12px;align-items:center;} /* spacedBy 4dp */
+  .icon-btn{width:84px;height:84px;display:flex;align-items:center;justify-content:center;cursor:pointer;border-radius:50%;}
+  .icon-btn svg{width:45px;height:45px;} /* 15dp icon */
+  .icon-btn.lg svg{width:48px;height:48px;} /* 16dp export icon */
+  .icon-btn.gray svg{color:#8B95A6;}
+  .icon-btn.primary svg{color:var(--primary);}
+  .icon-btn.on svg{color:var(--primary);} /* search active */
+
+  /* search bar (728-788): bg #141C28, padding 6dp x 12dp */
+  .search-bar{
+    background:#141C28;
+    padding:18px 36px; /* 6dp x 12dp */
+    display:flex;align-items:center;gap:18px; /* Spacer 6dp */
+  }
+  .search-bar svg{width:42px;height:42px;color:var(--primary);} /* 14dp search icon */
+  .search-input{flex:1;font-size:34px;color:#FFFFFF;} /* 11.5sp mono white */
+  .search-input .ph{color:#64748B;}
+  .search-matches{color:#FBBF24;font-weight:700;font-size:30px;} /* 10sp Bold */
+  .search-clear{width:60px;height:60px;display:flex;align-items:center;justify-content:center;}
+  .search-clear svg{width:36px;height:36px;color:#64748B;} /* 12dp */
+
+  /* content viewer (792-908): bottom radius 16dp, dark surface */
+  .body-content{
+    background:var(--ed-content);
+    border:3px solid #263345;
+    border-top:none;
+    border-radius:0 0 48px 48px; /* bottomStart/bottomEnd 16dp */
+  }
+  .body-content.no-toolbar{border-radius:48px;border-top:3px solid #263345;}
+
+  /* empty body (799-807) */
+  .empty-body{padding:96px;text-align:center;color:#64748B;font-size:36px;} /* 32dp, 12sp */
+
+  /* code view (857-907) */
+  .code-view{padding:24px 0;} /* vertical 8dp */
+  .code-line{display:flex;align-items:flex-start;}
+  .ln{width:102px;text-align:right;padding-right:24px;color:#475569;font-size:32px;font-weight:400;} /* 34dp, end 8dp, 10.5sp */
+  .ln-div{width:3px;height:54px;background:#1E293B;} /* 1dp x 18dp */
+  .code-spacer{width:24px;} /* 8dp */
+  .code-text{flex:1;font-size:33px;line-height:48px;white-space:pre;} /* 11sp, lineHeight 16sp */
+  .k{color:#38BDF8;font-weight:600;}   /* JSON key (235) */
+  .cl{color:#94A3B8;}                  /* colon (239) */
+  .s{color:#4ADE80;}                   /* string value (245) */
+  .n{color:#FBBF24;}                   /* number (248) */
+  .b{color:#F472B6;}                   /* boolean (246) */
+  .nu{color:#FB7185;}                  /* null (247) */
+  .d{color:#94A3B8;}                   /* default / braces (255) */
+  .hl{background:#FBBF24;color:#0F172A;font-weight:700;} /* search highlight (378-384) */
+
+  /* hex view (808-856) */
+  .hex-view{padding:24px;max-height:1140px;overflow:auto;} /* 8dp, heightIn max 380dp */
+  .hex-row{display:flex;align-items:center;padding:3px 0;} /* vertical 1dp */
+  .hex-off{width:108px;color:#64748B;font-weight:700;font-size:30px;} /* 36dp, 10sp Bold */
+  .hex-gap{width:24px;} /* 8dp */
+  .hex-bytes{flex:1;color:#38BDF8;font-size:30px;} /* 10sp */
+  .hex-ascii{color:#4ADE80;font-size:30px;white-space:pre;} /* 10sp */
+
+  /* image body (detectBodyRenderKind=IMAGE) */
+  .image-body{padding:60px;display:flex;flex-direction:column;align-items:center;gap:24px;}
+  .image-placeholder{
+    width:640px;height:360px;border-radius:24px;
+    background:repeating-linear-gradient(45deg,#1B2433,#1B2433 24px,#222D40 24px,#222D40 48px);
+    border:3px solid #263345;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;
+  }
+  .image-placeholder svg{width:96px;height:96px;color:#64748B;}
+  .image-meta{color:#8B95A6;font-size:30px;text-align:center;} /* mono-ish muted */
+
+  /* gated exceeds-cap (exceededCapMessage) */
+  .cap-body{padding:72px 60px;display:flex;flex-direction:column;align-items:center;gap:24px;text-align:center;}
+  .cap-body svg{width:90px;height:90px;color:#F59E0B;}
+  .cap-title{color:#E2E8F0;font-size:36px;font-weight:700;}
+  .cap-msg{color:#94A3B8;font-size:30px;line-height:1.5;max-width:780px;}
+
+  /* ============ HEADERS TAB (913-983) ============ */
+  .headers-tab{display:flex;flex-direction:column;gap:18px;} /* spacedBy 6dp */
+  .list-head{display:flex;justify-content:space-between;align-items:center;}
+  .list-head .title{font-size:32px;font-weight:800;color:var(--on-surface-variant);letter-spacing:3px;} /* 10.5sp ExtraBold, letterSpacing 1sp */
+  .header-card,.cookie-card,.metric-card{
+    background:var(--surface);border:3px solid var(--outline-variant); /* 1dp */
+  }
+  .header-card{border-radius:30px;} /* 10dp */
+  .header-card .row{display:flex;justify-content:space-between;align-items:center;padding:24px 36px;} /* 8dp x 12dp */
+  .header-card .kv{flex:1;}
+  .header-key{font-size:33px;font-weight:700;color:var(--primary);} /* 11sp Bold mono */
+  .header-val{font-size:33px;color:var(--on-surface);} /* 11sp mono */
+  .header-val.masked{color:var(--on-surface-variant);}
+  .reveal-note{font-size:24px;color:var(--on-surface-variant);margin-top:6px;}
+  .icon-btn.sm{width:72px;height:72px;}
+  .icon-btn.sm svg{width:39px;height:39px;color:var(--on-surface-variant);} /* 13dp */
+  .icon-btn.md{width:78px;height:78px;}
+  .icon-btn.md svg{width:42px;height:42px;}
+  .icon-btn.head-copy-all svg{color:var(--primary);}
+
+  /* ============ SET-COOKIES TAB (985-1125) ============ */
+  .cookies-tab{display:flex;flex-direction:column;gap:24px;} /* spacedBy 8dp */
+  .cookie-card{border-radius:42px;} /* 14dp */
+  .cookie-card .body{padding:36px;} /* 12dp */
+  .cookie-name-row{display:flex;justify-content:space-between;align-items:center;}
+  .lbl-sm{font-size:30px;color:var(--on-surface-variant);font-weight:600;} /* 10sp SemiBold */
+  .lbl-sm.plain{font-weight:400;}
+  .cookie-name{font-size:36px;font-weight:800;color:var(--primary);} /* 12sp ExtraBold mono */
+  .cookie-value{font-size:33px;color:var(--on-surface);} /* 11sp mono */
+  .sp6{height:18px;} /* Spacer 6dp */
+  .sp8{height:24px;} /* Spacer 8dp */
+  .attr-row{display:flex;}
+  .attr-col{flex:1;}
+  .flags{display:flex;gap:18px;} /* spacedBy 6dp */
+  /* CookieFlagBadge (1289-1304): clip 6dp, color@0.15, padding 2dp x 6dp, 9.5sp ExtraBold mono */
+  .flag{border-radius:18px;padding:6px 18px;font-size:29px;font-weight:800;}
+  .flag.secure{background:rgba(16,185,129,0.15);color:#10B981;}
+  .flag.httponly{background:rgba(59,130,246,0.15);color:#3B82F6;}
+  .flag.samesite{background:rgba(139,92,246,0.15);color:#8B5CF6;}
+  .empty-card{border-radius:36px;} /* 12dp */
+  .empty-card .inner{padding:84px;text-align:center;color:var(--on-surface-variant);font-size:36px;} /* 28dp, 12sp */
+
+  /* ============ METRICS TAB (1127-1216) ============ */
+  .metrics-tab{display:flex;flex-direction:column;gap:30px;} /* spacedBy 10dp */
+  .metric-card{border-radius:36px;} /* 12dp req-id ; 14dp others override below */
+  .metric-card.r14{border-radius:42px;} /* 14dp */
+  .metric-card .pad14{padding:42px;} /* 14dp */
+  .metric-card .row{display:flex;justify-content:space-between;align-items:center;padding:24px 36px;} /* 8dp x 12dp */
+  .req-id-lbl{font-size:30px;color:var(--on-surface-variant);font-weight:700;} /* 10sp Bold */
+  .req-id-val{font-size:34px;color:var(--on-surface);} /* 11.5sp mono */
+  .sec-title{font-size:32px;font-weight:800;color:var(--on-surface-variant);letter-spacing:3px;} /* 10.5sp ExtraBold */
+  /* TimelineMetricBar (ApiTestrScreen.kt:1751) */
+  .tmb{display:flex;flex-direction:column;}
+  .tmb-row{display:flex;justify-content:space-between;}
+  .tmb-label{color:var(--text-secondary);font-size:33px;} /* TextSecondary, 11sp */
+  .tmb-time{color:var(--text-primary);font-size:33px;font-weight:700;} /* TextPrimary, 11sp Bold mono */
+  .tmb-track{height:18px;background:var(--surface-variant);border-radius:9px;margin-top:9px;} /* 6dp, 3dp, Spacer 3dp */
+  .tmb-fill{height:18px;border-radius:9px;}
+  .size-row{display:flex;}
+  .size-col{flex:1;}
+  .size-lbl{font-size:32px;color:var(--on-surface-variant);} /* 10.5sp */
+  .size-val{font-size:36px;font-weight:700;color:var(--on-surface);} /* 12sp Bold mono */
+  .size-val.primary{color:var(--primary);}
+
+  /* ============ TESTS TAB (1218-1281) ============ */
+  .tests-tab{display:flex;flex-direction:column;gap:24px;} /* spacedBy 8dp */
+  .rerun-btn{
+    background:var(--tertiary);color:var(--on-tertiary);
+    border:none;border-radius:24px; /* 8dp */
+    padding:18px 30px;display:flex;align-items:center;gap:12px; /* 4dp Spacer */
+    font-size:33px;font-weight:700;cursor:pointer;
+  }
+  .rerun-btn svg{width:39px;height:39px;} /* 13dp */
+  .pass-count{font-size:39px;font-weight:700;color:#EF4444;} /* 13sp Bold (not all passed) */
+  .pass-count.all{color:#22C55E;}
+  /* AssertionResultRow (ApiTestrScreen.kt:1671) — bg surface, clip 8dp, padding 10dp */
+  .assert-row{background:var(--surface);border-radius:24px;padding:30px;display:flex;align-items:flex-start;gap:24px;} /* 8dp, 10dp, Spacer 8dp */
+  .assert-row svg{width:48px;height:48px;flex:none;margin-top:3px;} /* 16dp */
+  .assert-row .pass{color:#22C55E;}
+  .assert-row .fail{color:#EF4444;}
+  .assert-label{font-size:36px;font-weight:700;color:var(--text-primary);} /* 12sp Bold, TextPrimary */
+  .assert-sub{font-size:33px;color:var(--text-secondary);} /* 11sp, TextSecondary (passed) */
+  .assert-sub.fail{color:#EF4444;} /* failed -> message in red */
+  .not-run-card{border-radius:36px;background:var(--surface);border:3px solid var(--outline-variant);}
+  .not-run-card .inner{padding:72px;text-align:center;color:var(--on-surface-variant);font-size:36px;} /* 24dp, 12sp */
+</style>
+</head>
+<body>
+
+<div class="meta-caption">
+  <b>RichResponseInspector</b> · Editorial Light (<code>isDark=false</code>) ·
+  source: <code>ResponseInspectorView.kt:402</code> · tokens: <code>Color.kt</code> exact hex ·
+  dp→px <b>3x</b> (1dp=3px, 1sp=3px). Each block is tagged with its Kotlin source line. The
+  composable shows one tab at a time; all five panels are stacked here so every state is visible.
+</div>
+
+<div class="device">
+  <div class="inspector">
+
+    <!-- ===================== 1. STATUS & PROTOCOL HEADER BAR (487-543) ===================== -->
+    <section class="status-bar" aria-label="Response status and protocol">
+      <div class="status-left">
+        <!-- StatusCodeBadge (CommonComponents.kt:391) : 200 OK -> Status2xx #22C55E -->
+        <span class="status-code-badge mono" data-component-id="status-code-badge">200 OK</span>
+        <span class="gap8"></span>
+        <!-- ProtocolBadge (CommonComponents.kt:442) : protocol.uppercase() -->
+        <span class="protocol-badge mono" data-component-id="protocol-badge">H2</span>
+      </div>
+      <div class="status-right">
+        <!-- Latency badge (511-524) : "{latencyMs} ms", primary, 11.5sp ExtraBold mono -->
+        <span class="badge-chip latency-badge mono">142 ms</span>
+        <span class="gap6"></span>
+        <!-- Size badge (527-540) : formatDataSize(sizeBytes)=1.0 KB, onSurfaceVariant, 11sp Bold mono -->
+        <span class="badge-chip size-badge mono">1.0 KB</span>
+      </div>
+    </section>
+
+    <div class="spacer10"></div>
+
+    <!-- ===================== 2. RESPONSE TABS ROW (547-598) ===================== -->
+    <!-- tabs list (423-435): Body / Headers (7) / Set-Cookies (3) / Metrics / Tests (3/4) -->
+    <nav class="tabs" aria-label="Response inspector tabs">
+      <span class="tab selected mono" data-component-id="tab-body">Body</span>
+      <span class="tab mono" data-component-id="tab-headers">Headers (7)</span>
+      <span class="tab mono" data-component-id="tab-cookies">Set-Cookies (3)</span>
+      <span class="tab mono" data-component-id="tab-metrics">Metrics</span>
+      <span class="tab mono" data-component-id="tab-tests">Tests (3/4)</span>
+    </nav>
+
+    <div class="spacer10"></div>
+
+    <!-- ===================== 3. TAB CONTENTS ===================== -->
+
+    <!-- ===================== BODY TAB (606-911) ===================== -->
+    <div class="panel-marker"><span class="dot"></span>Body panel <code>ResponseInspectorView.kt:606–911</code></div>
+
+    <!-- (a) TEXT mode — toolbar with Text selected + Beautify visible (679-691) -->
+    <div class="body-toolbar">
+      <div class="body-toolbar-row">
+        <!-- Text/Hex selector (627-655) -->
+        <div class="mode-selector" role="tablist" aria-label="Body view mode">
+          <span class="mode-chip sel mono" data-component-id="mode-text">Text</span>
+          <span class="mode-chip mono" data-component-id="mode-hex">Hex</span>
+        </div>
+        <!-- Actions toolbar (657-725) : Search, Beautify, Copy, Export -->
+        <div class="actions">
+          <span class="icon-btn gray" aria-label="Search in response" data-component-id="act-search">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+          </span>
+          <span class="icon-btn gray" aria-label="Beautify" data-component-id="act-beautify">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 9l1.25-2.75L23 5l-2.75-1.25L19 1l-1.25 2.75L15 5l2.75 1.25L19 9zm-7.5.5L9 4 5.5 9.5 0 12l5.5 2.5L9 20l3.5-5.5L18 12l-5.5-2.5zM19 15l-1.25 2.75L15 19l2.75 1.25L19 23l1.25-2.75L23 19l-2.75-1.25L19 15z"/></svg>
+          </span>
+          <span class="icon-btn gray" aria-label="Copy" data-component-id="act-copy">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+          </span>
+          <span class="icon-btn primary lg" aria-label="Save and export" data-component-id="act-export">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+          </span>
+        </div>
+      </div>
+      <!-- search bar (728-788) shown expanded w/ a query + match count -->
+      <div class="search-bar">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+        <span class="search-input mono">octocat</span>
+        <span class="search-matches mono">1 matches</span>
+        <span class="search-clear" aria-label="Clear">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </span>
+      </div>
+    </div>
+    <!-- Text syntax-highlighted code view (857-907) : pretty JSON (beautified, 2-space) -->
+    <div class="body-content">
+      <div class="code-view mono">
+        <!-- line 1 --> <div class="code-line"><span class="ln">1</span><span class="ln-div"></span><span class="code-spacer"></span><span class="code-text"><span class="d">{</span></span></div>
+        <!-- line 2 --> <div class="code-line"><span class="ln">2</span><span class="ln-div"></span><span class="code-spacer"></span><span class="code-text"><span class="k">  "login"</span><span class="cl">:</span><span class="s"> "octocat_org",</span></span></div>
+        <!-- line 3 --> <div class="code-line"><span class="ln">3</span><span class="ln-div"></span><span class="code-spacer"></span><span class="code-text"><span class="k">  "id"</span><span class="cl">:</span><span class="n"> 583231,</span></span></div>
+        <!-- line 4 --> <div class="code-line"><span class="ln">4</span><span class="ln-div"></span><span class="code-spacer"></span><span class="code-text"><span class="k">  "type"</span><span class="cl">:</span><span class="s"> "User",</span></span></div>
+        <!-- line 5 --> <div class="code-line"><span class="ln">5</span><span class="ln-div"></span><span class="code-spacer"></span><span class="code-text"><span class="k">  "public_repos"</span><span class="cl">:</span><span class="n"> 8,</span></span></div>
+        <!-- line 6 --> <div class="code-line"><span class="ln">6</span><span class="ln-div"></span><span class="code-spacer"></span><span class="code-text"><span class="k">  "active"</span><span class="cl">:</span><span class="b"> true,</span></span></div>
+        <!-- line 7 --> <div class="code-line"><span class="ln">7</span><span class="ln-div"></span><span class="code-spacer"></span><span class="code-text"><span class="k">  "token"</span><span class="cl">:</span><span class="nu"> null,</span></span></div>
+        <!-- line 8 --> <div class="code-line"><span class="ln">8</span><span class="ln-div"></span><span class="code-spacer"></span><span class="code-text"><span class="k">  "avatar_url"</span><span class="cl">:</span><span class="s"> "https://avatars.githubusercontent.com/u/583231"</span></span></div>
+        <!-- line 9 --> <div class="code-line"><span class="ln">9</span><span class="ln-div"></span><span class="code-spacer"></span><span class="code-text"><span class="d">}</span></span></div>
+      </div>
+    </div>
+
+    <!-- (b) HEX mode — toolbar with Hex selected (Beautify hidden, per line 679) -->
+    <div class="body-toolbar" style="margin-top:30px;">
+      <div class="body-toolbar-row">
+        <div class="mode-selector" role="tablist" aria-label="Body view mode">
+          <span class="mode-chip mono" data-component-id="mode-text-2">Text</span>
+          <span class="mode-chip sel mono" data-component-id="mode-hex-2">Hex</span>
+        </div>
+        <div class="actions">
+          <span class="icon-btn gray" aria-label="Search in response"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg></span>
+          <span class="icon-btn gray" aria-label="Copy"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></span>
+          <span class="icon-btn primary lg" aria-label="Save and export"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg></span>
+        </div>
+      </div>
+    </div>
+    <!-- Hex viewer (808-856) : offset | hex(upper) | ascii ; generateHexRows, 16 bytes/row -->
+    <div class="body-content">
+      <div class="hex-view mono">
+        <div class="hex-row"><span class="hex-off">0000</span><span class="hex-gap"></span><span class="hex-bytes">7B 0A 20 20 22 6C 6F 67 69 6E 22 3A 20 22 6F 63</span><span class="hex-gap"></span><span class="hex-ascii">{.  "login": "oc</span></div>
+        <div class="hex-row"><span class="hex-off">0010</span><span class="hex-gap"></span><span class="hex-bytes">74 6F 63 61 74 5F 6F 72 67 22 2C 0A 20 20 22 69</span><span class="hex-gap"></span><span class="hex-ascii">tocat_org",.  "i</span></div>
+        <div class="hex-row"><span class="hex-off">0020</span><span class="hex-gap"></span><span class="hex-bytes">64 22 3A 20 35 38 33 32 33 31 2C 0A 20 20 22 74</span><span class="hex-gap"></span><span class="hex-ascii">d": 583231,.  "t</span></div>
+        <div class="hex-row"><span class="hex-off">0030</span><span class="hex-gap"></span><span class="hex-bytes">79 70 65 22 3A 20 22 55 73 65 72 22 2C 0A 20 20</span><span class="hex-gap"></span><span class="hex-ascii">ype": "User",.  </span></div>
+        <div class="hex-row"><span class="hex-off">0040</span><span class="hex-gap"></span><span class="hex-bytes">22 70 75 62 6C 69 63 5F 72 65 70 6F 73 22 3A 20</span><span class="hex-gap"></span><span class="hex-ascii">"public_repos": </span></div>
+        <div class="hex-row"><span class="hex-off">0050</span><span class="hex-gap"></span><span class="hex-bytes">38 2C 0A 20 20 22 61 63 74 69 76 65 22 3A 20 74</span><span class="hex-gap"></span><span class="hex-ascii">8,.  "active": t</span></div>
+        <div class="hex-row"><span class="hex-off">0060</span><span class="hex-gap"></span><span class="hex-bytes">72 75 65 2C 0A 20 20 22 74 6F 6B 65 6E 22 3A 20</span><span class="hex-gap"></span><span class="hex-ascii">rue,.  "token": </span></div>
+        <div class="hex-row"><span class="hex-off">0070</span><span class="hex-gap"></span><span class="hex-bytes">6E 75 6C 6C 2C 0A 20 20 22 61 76 61 74 61 72 5F</span><span class="hex-gap"></span><span class="hex-ascii">null,.  "avatar_</span></div>
+        <div class="hex-row"><span class="hex-off">0080</span><span class="hex-gap"></span><span class="hex-bytes">75 72 6C 22 3A 20 22 68 74 74 70 73 3A 2F 2F 61</span><span class="hex-gap"></span><span class="hex-ascii">url": "https://a</span></div>
+        <div class="hex-row"><span class="hex-off">0090</span><span class="hex-gap"></span><span class="hex-bytes">76 61 74 61 72 73 2E 67 69 74 68 75 62 75 73 65</span><span class="hex-gap"></span><span class="hex-ascii">vatars.githubuse</span></div>
+        <div class="hex-row"><span class="hex-off">00A0</span><span class="hex-gap"></span><span class="hex-bytes">72 63 6F 6E 74 65 6E 74 2E 63 6F 6D 2F 75 2F 35</span><span class="hex-gap"></span><span class="hex-ascii">rcontent.com/u/5</span></div>
+        <div class="hex-row"><span class="hex-off">00B0</span><span class="hex-gap"></span><span class="hex-bytes">38 33 32 33 31 22 0A 7D</span><span class="hex-gap"></span><span class="hex-ascii">83231".}</span></div>
+      </div>
+    </div>
+
+    <!-- (c) IMAGE body — detectBodyRenderKind=IMAGE (CapturedTrafficHelpers.kt:43,49) -->
+    <div class="panel-marker" style="margin-top:30px;"><span class="dot"></span>Body · IMAGE render kind <code>CapturedTrafficHelpers.kt:43 (detectBodyRenderKind)</code></div>
+    <div class="body-content no-toolbar">
+      <div class="image-body">
+        <div class="image-placeholder" role="img" aria-label="image/png response body placeholder">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>
+        </div>
+        <div class="image-meta mono">image/png · 512 × 288 · 1.4 KB</div>
+      </div>
+    </div>
+
+    <!-- (d) GATED "exceeds cap" — exceededCapMessage (CapturedTrafficHelpers.kt:393) -->
+    <div class="panel-marker" style="margin-top:30px;"><span class="dot"></span>Body · exceeds capture cap <code>CapturedTrafficHelpers.kt:393 (exceededCapMessage)</code></div>
+    <div class="body-content no-toolbar">
+      <div class="cap-body">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>
+        <div class="cap-title">Body too large to render</div>
+        <div class="cap-msg mono">This body is 1.4 MB -- larger than the 100.0 KB capture cap, so its bytes weren't stored. Only the size is known.</div>
+      </div>
+    </div>
+
+    <!-- (e) EMPTY body (799-807) -->
+    <div class="panel-marker" style="margin-top:30px;"><span class="dot"></span>Body · empty <code>ResponseInspectorView.kt:799</code></div>
+    <div class="body-content no-toolbar">
+      <div class="empty-body">Empty response body</div>
+    </div>
+
+    <!-- ===================== HEADERS TAB (913-983) ===================== -->
+    <div class="panel-marker"><span class="dot"></span>Headers panel <code>ResponseInspectorView.kt:913–983</code></div>
+    <div class="headers-tab">
+      <!-- header row (921-942) : "{size} RESPONSE HEADERS" + copy-all -->
+      <div class="list-head">
+        <span class="title mono">7 RESPONSE HEADERS</span>
+        <span class="icon-btn sm head-copy-all" aria-label="Copy all"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></span>
+      </div>
+
+      <!-- normal header (944-981) : content-type -->
+      <div class="header-card">
+        <div class="row">
+          <div class="kv">
+            <div class="header-key mono">content-type</div>
+            <div class="header-val mono">application/json; charset=utf-8</div>
+          </div>
+          <span class="icon-btn sm" aria-label="Copy"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></span>
+        </div>
+      </div>
+      <div class="header-card">
+        <div class="row">
+          <div class="kv">
+            <div class="header-key mono">server</div>
+            <div class="header-val mono">requestr-proxy/2.0</div>
+          </div>
+          <span class="icon-btn sm" aria-label="Copy"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></span>
+        </div>
+      </div>
+      <div class="header-card">
+        <div class="row">
+          <div class="kv">
+            <div class="header-key mono">x-request-id</div>
+            <div class="header-val mono">a1b2c3d4</div>
+          </div>
+          <span class="icon-btn sm" aria-label="Copy"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></span>
+        </div>
+      </div>
+      <div class="header-card">
+        <div class="row">
+          <div class="kv">
+            <div class="header-key mono">cache-control</div>
+            <div class="header-val mono">public, max-age=3600</div>
+          </div>
+          <span class="icon-btn sm" aria-label="Copy"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></span>
+        </div>
+      </div>
+
+      <!-- SENSITIVE headers, masked by default (helpers maskHeaderValue/isSensitiveHeaderName, CapturedTrafficHelpers.kt:404-440).
+           RichResponseInspector itself shows raw values; the live header view masks these, shown masked + one revealed. -->
+      <div class="header-card">
+        <div class="row">
+          <div class="kv">
+            <div class="header-key mono">set-cookie</div>
+            <div class="header-val masked mono">••••••••• (126 bytes)</div>
+            <div class="reveal-note">masked — tap to reveal</div>
+          </div>
+          <span class="icon-btn sm" aria-label="Copy"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></span>
+        </div>
+      </div>
+      <div class="header-card">
+        <div class="row">
+          <div class="kv">
+            <div class="header-key mono">authorization</div>
+            <div class="header-val masked mono">••••••••• (76 bytes)</div>
+            <div class="reveal-note">masked — tap to reveal</div>
+          </div>
+          <span class="icon-btn sm" aria-label="Copy"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></span>
+        </div>
+      </div>
+      <!-- revealed state of a sensitive header (Cookie) -->
+      <div class="header-card">
+        <div class="row">
+          <div class="kv">
+            <div class="header-key mono">cookie</div>
+            <div class="header-val mono">theme=dark; lang=en; sid=8f2a9c1b</div>
+            <div class="reveal-note">revealed</div>
+          </div>
+          <span class="icon-btn sm" aria-label="Copy"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SET-COOKIES TAB (985-1125) ===================== -->
+    <div class="panel-marker"><span class="dot"></span>Set-Cookies panel <code>ResponseInspectorView.kt:985–1125</code></div>
+    <div class="cookies-tab">
+      <div class="list-head">
+        <span class="title mono">3 SET-COOKIES PARSED</span>
+        <span class="icon-btn sm head-copy-all" aria-label="Copy all cookies"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></span>
+      </div>
+
+      <!-- Cookie 1: session — every flag present (Secure, HttpOnly, SameSite=Lax) + Expires -->
+      <div class="cookie-card">
+        <div class="body">
+          <div class="cookie-name-row">
+            <div>
+              <div class="lbl-sm">Name</div>
+              <div class="cookie-name mono">session</div>
+            </div>
+            <span class="icon-btn sm" aria-label="Copy cookie"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></span>
+          </div>
+          <div class="sp6"></div>
+          <div class="lbl-sm">Value</div>
+          <div class="cookie-value mono">s%3Aabc123.Zx9pQr</div>
+          <div class="sp6"></div>
+          <div class="attr-row">
+            <div class="attr-col"><div class="lbl-sm plain">Domain</div><div class="cookie-value mono">.requestr.dev</div></div>
+            <div class="attr-col"><div class="lbl-sm plain">Path</div><div class="cookie-value mono">/</div></div>
+          </div>
+          <div class="sp6"></div>
+          <div class="lbl-sm plain">Expires</div>
+          <div class="cookie-value mono">Wed, 09 Jun 2027 10:18:14 GMT</div>
+          <div class="sp8"></div>
+          <!-- Flags row (1108-1119) : Secure #10B981, HttpOnly #3B82F6, SameSite=Lax #8B5CF6 -->
+          <div class="flags">
+            <span class="flag secure mono">Secure</span>
+            <span class="flag httponly mono">HttpOnly</span>
+            <span class="flag samesite mono">SameSite=Lax</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Cookie 2: csrf — Secure + SameSite=Strict (no HttpOnly, no Expires) -->
+      <div class="cookie-card">
+        <div class="body">
+          <div class="cookie-name-row">
+            <div>
+              <div class="lbl-sm">Name</div>
+              <div class="cookie-name mono">csrf</div>
+            </div>
+            <span class="icon-btn sm" aria-label="Copy cookie"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></span>
+          </div>
+          <div class="sp6"></div>
+          <div class="lbl-sm">Value</div>
+          <div class="cookie-value mono">tK8fN2pQ9xR1</div>
+          <div class="sp6"></div>
+          <div class="attr-row">
+            <div class="attr-col"><div class="lbl-sm plain">Domain</div><div class="cookie-value mono">.requestr.dev</div></div>
+            <div class="attr-col"><div class="lbl-sm plain">Path</div><div class="cookie-value mono">/</div></div>
+          </div>
+          <div class="sp8"></div>
+          <div class="flags">
+            <span class="flag secure mono">Secure</span>
+            <span class="flag samesite mono">SameSite=Strict</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Cookie 3: prefs — HttpOnly + SameSite=None (no Secure) -->
+      <div class="cookie-card">
+        <div class="body">
+          <div class="cookie-name-row">
+            <div>
+              <div class="lbl-sm">Name</div>
+              <div class="cookie-name mono">prefs</div>
+            </div>
+            <span class="icon-btn sm" aria-label="Copy cookie"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></span>
+          </div>
+          <div class="sp6"></div>
+          <div class="lbl-sm">Value</div>
+          <div class="cookie-value mono">theme=dark&amp;compact=1</div>
+          <div class="sp6"></div>
+          <div class="attr-row">
+            <div class="attr-col"><div class="lbl-sm plain">Domain</div><div class="cookie-value mono">.requestr.dev</div></div>
+            <div class="attr-col"><div class="lbl-sm plain">Path</div><div class="cookie-value mono">/settings</div></div>
+          </div>
+          <div class="sp8"></div>
+          <div class="flags">
+            <span class="flag httponly mono">HttpOnly</span>
+            <span class="flag samesite mono">SameSite=None</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Empty cookies state (1020-1039) -->
+      <div class="panel-marker" style="margin-top:18px;"><span class="dot"></span>Set-Cookies · empty <code>ResponseInspectorView.kt:1020</code></div>
+      <div class="empty-card metric-card">
+        <div class="inner">No Set-Cookie headers in this response.</div>
+      </div>
+    </div>
+
+    <!-- ===================== METRICS TAB (1127-1216) ===================== -->
+    <div class="panel-marker"><span class="dot"></span>Metrics panel <code>ResponseInspectorView.kt:1127–1216</code></div>
+    <div class="metrics-tab">
+      <!-- Request-Id card (1135-1161) -->
+      <div class="metric-card">
+        <div class="row">
+          <div class="kv" style="flex:1;">
+            <div class="req-id-lbl">Request-Id</div>
+            <div class="req-id-val mono">a1b2c3d4</div>
+          </div>
+          <span class="icon-btn sm" aria-label="Copy"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></span>
+        </div>
+      </div>
+
+      <!-- Timing breakdown card (1163-1185). total=18+24+38+12+50=142; fractions coerced [0.05,1] -->
+      <div class="metric-card r14">
+        <div class="pad14">
+          <div class="sec-title mono">TIMING BREAKDOWN</div>
+          <div class="spacer10"></div>
+          <!-- DNS 18ms -> 18/142=0.127 ; #3B82F6 -->
+          <div class="tmb">
+            <div class="tmb-row"><span class="tmb-label">DNS Resolution</span><span class="tmb-time mono">18 ms</span></div>
+            <div class="tmb-track"><div class="tmb-fill" style="width:12.7%;background:#3B82F6;"></div></div>
+          </div>
+          <div class="sp6"></div>
+          <!-- TCP 24ms -> 0.169 ; #06B6D4 -->
+          <div class="tmb">
+            <div class="tmb-row"><span class="tmb-label">TCP Connect</span><span class="tmb-time mono">24 ms</span></div>
+            <div class="tmb-track"><div class="tmb-fill" style="width:16.9%;background:#06B6D4;"></div></div>
+          </div>
+          <div class="sp6"></div>
+          <!-- TLS 38ms -> 0.268 ; #8B5CF6 -->
+          <div class="tmb">
+            <div class="tmb-row"><span class="tmb-label">TLS Handshake</span><span class="tmb-time mono">38 ms</span></div>
+            <div class="tmb-track"><div class="tmb-fill" style="width:26.8%;background:#8B5CF6;"></div></div>
+          </div>
+          <div class="sp6"></div>
+          <!-- TTFB 12ms -> 0.0845 ; #F59E0B -->
+          <div class="tmb">
+            <div class="tmb-row"><span class="tmb-label">TTFB / Request Sent</span><span class="tmb-time mono">12 ms</span></div>
+            <div class="tmb-track"><div class="tmb-fill" style="width:8.5%;background:#F59E0B;"></div></div>
+          </div>
+          <div class="sp6"></div>
+          <!-- Download 50ms -> 0.352 ; #22C55E -->
+          <div class="tmb">
+            <div class="tmb-row"><span class="tmb-label">Content Download</span><span class="tmb-time mono">50 ms</span></div>
+            <div class="tmb-track"><div class="tmb-fill" style="width:35.2%;background:#22C55E;"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Size breakdown card (1187-1214). headerSize=412B, body=1.0KB, total=1.4KB -->
+      <div class="metric-card r14">
+        <div class="pad14">
+          <div class="sec-title mono">PAYLOAD SIZE</div>
+          <div class="sp8" style="height:24px;"></div>
+          <div class="size-row">
+            <div class="size-col"><div class="size-lbl">Headers</div><div class="size-val mono">412 B</div></div>
+            <div class="size-col"><div class="size-lbl">Body</div><div class="size-val primary mono">1.0 KB</div></div>
+            <div class="size-col"><div class="size-lbl">Total</div><div class="size-val mono">1.4 KB</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== TESTS TAB (1218-1281) ===================== -->
+    <div class="panel-marker"><span class="dot"></span>Tests panel <code>ResponseInspectorView.kt:1218–1281</code></div>
+    <div class="tests-tab">
+      <div class="list-head">
+        <span class="title mono">ASSERTION CHECKS</span>
+        <!-- Re-run Tests button (1238-1246) : containerColor=tertiary, content=onTertiary -->
+        <button class="rerun-btn mono" data-component-id="rerun-tests">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.53 11.7l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+          Re-run Tests
+        </button>
+      </div>
+
+      <!-- passedCount summary (1267-1273) : 3/4 -> not all passed -> #EF4444 -->
+      <div class="pass-count">3 / 4 assertions passed</div>
+
+      <!-- AssertionResultRow (ApiTestrScreen.kt:1671) : PASS — status code equals 200 -->
+      <div class="assert-row">
+        <svg class="pass" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.53 11.7l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+        <div style="flex:1;">
+          <div class="assert-label">Status code equals "200"</div>
+          <div class="assert-sub">Actual: "200"</div>
+        </div>
+      </div>
+      <!-- PASS — response time less than 500 -->
+      <div class="assert-row">
+        <svg class="pass" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.53 11.7l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+        <div style="flex:1;">
+          <div class="assert-label">Response time less than "500"</div>
+          <div class="assert-sub">Actual: "142"</div>
+        </div>
+      </div>
+      <!-- PASS — header content-type contains json -->
+      <div class="assert-row">
+        <svg class="pass" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.53 11.7l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+        <div style="flex:1;">
+          <div class="assert-label">Header "content-type" contains "json"</div>
+          <div class="assert-sub">Actual: "application/json; charset=utf-8"</div>
+        </div>
+      </div>
+      <!-- FAIL — JSON field login equals octocat (message in red) -->
+      <div class="assert-row">
+        <svg class="fail" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        <div style="flex:1;">
+          <div class="assert-label">JSON field "login" equals "octocat"</div>
+          <div class="assert-sub fail">Expected "octocat" for JSON field "login", got "octocat_org"</div>
+        </div>
+      </div>
+
+      <!-- Not-run (testResults == null) state (1249-1265) -->
+      <div class="panel-marker" style="margin-top:18px;"><span class="dot"></span>Tests · not yet run <code>ResponseInspectorView.kt:1249</code></div>
+      <div class="not-run-card">
+        <div class="inner">Tap "Re-run Tests" above to evaluate test assertions.</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+</body>
+</html>
