@@ -80,6 +80,18 @@ class ReqyAssistantHelpersTest {
         assertFalse(isReqyProviderError(""))
     }
 
+    @Test
+    fun `configuration error string from the provider dispatch validation is detected as a provider error`() {
+        // Mirrors ChatRepository.callProvider's defensive validateProviderFields() short-circuit:
+        // "Configuration error: $reason" -- new in the multi-provider-catalog pass.
+        assertTrue(isReqyProviderError("Configuration error: OpenAI needs an API key."))
+    }
+
+    @Test
+    fun `configuration error with leading whitespace is still detected`() {
+        assertTrue(isReqyProviderError("  Configuration error: Ollama (Local) needs a base URL (e.g. an Ollama host, or your custom endpoint)."))
+    }
+
     // ─── formatReqyTimestamp ─────────────────────────────────────────────
 
     @Test

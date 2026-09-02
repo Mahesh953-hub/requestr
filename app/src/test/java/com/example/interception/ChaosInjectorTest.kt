@@ -68,4 +68,22 @@ class ChaosInjectorTest {
     fun `corrupt leaves empty body untouched`() {
         assertEquals("", ChaosInjector.corrupt("", random = Random(1)))
     }
+
+    @Test
+    fun `corruptBytes flips bytes in a copy, keeps length, never mutates the input`() {
+        val original = ByteArray(200) { (it % 251).toByte() }
+        val snapshot = original.copyOf()
+        val corrupted = ChaosInjector.corruptBytes(original, random = Random(7))
+        assertEquals(original.size, corrupted.size)
+        assertTrue("some byte must differ", !corrupted.contentEquals(original))
+        assertTrue("input must not be mutated", original.contentEquals(snapshot))
+        // ~5% flips, at least one: never a wholesale replacement.
+        val differing = original.indices.count { original[it] != corrupted[it] }
+        assertTrue("differing=$differing", differing in 1..(original.size / 20))
+    }
+
+    @Test
+    fun `corruptBytes on an empty array returns an empty array`() {
+        assertEquals(0, ChaosInjector.corruptBytes(ByteArray(0), random = Random(1)).size)
+    }
 }

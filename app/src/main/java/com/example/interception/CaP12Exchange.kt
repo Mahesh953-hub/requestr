@@ -96,6 +96,10 @@ object CaP12Exchange {
                     Arrays.fill(newPassword, '\u0000')
                     if (ok) {
                         Log.i(TAG, "Imported CA installed as the active requestr CA")
+                        // See CaTrustGate's KDoc: a different CA identity is now active, and the
+                        // device hasn't necessarily been told to trust it -- any cached
+                        // CaTrustGate.isTrusted "trusted" answer from the previous CA is stale.
+                        CaTrustGate.invalidateAll()
                         Result.success(Unit)
                     } else {
                         Result.failure(IllegalStateException("Failed to persist imported CA to disk"))

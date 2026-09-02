@@ -2,7 +2,7 @@ package com.example.ui.screens
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -19,15 +19,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Star
@@ -52,6 +55,7 @@ import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -60,6 +64,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -71,9 +76,13 @@ import com.example.data.models.ApiRequestItem
 import com.example.data.models.CollectionTestReport
 import com.example.data.models.HttpMethod
 import com.example.data.models.RequestTestResult
+import com.example.data.repository.RelativeTimeFormatter
 import com.example.data.repository.ApiCollectionsRepository
+import com.example.ui.components.DriveParallaxFrom
 import com.example.ui.components.MethodBadge
-import com.example.ui.components.SectionHeader
+import com.example.ui.theme.animateStateColor
+import com.example.ui.components.FloatingCapsuleHeader
+import com.example.ui.components.GlassActionCluster
 import kotlinx.coroutines.launch
 
 /**
@@ -132,98 +141,107 @@ fun SavedApisScreen(
         }
     }
 
+    // Order is not set here: groupRequestsIntoCollections sorts each collection's requests by
+    // updatedAt descending as part of its contract, and nothing else reads this list's order.
+    // (Sorting outside the remember also produced a fresh list on every recomposition, which
+    // invalidated the grouping's remember key below every time.)
     val filtered = remember(allRequests, showSaved) {
         if (showSaved) allRequests
         else allRequests.filter { it.isFavorite }
-    }.sortedByDescending { it.updatedAt }
+    }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-    ) {
-        // Header
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = onBack) {
-                Icon(
-                    Icons.AutoMirrored.Filled.ArrowBack, "Back",
-                    tint = MaterialTheme.colorScheme.onSurface
-                )
-            }
-            Text(
-                "Saved APIs",
-                fontWeight = FontWeight.Bold,
-                fontSize = 18.sp,
-                color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.weight(1f)
-            )
+    // Dossier Q3 — collections-grouped card list (docs/designs/saved_apis/*.html) instead of the
+    // old flat list. Pure grouping/counting/sorting lives in SavedApisGrouping.kt so it can be
+    // unit tested without Compose; this screen only owns per-card expand/collapse UI state.
+    val collectionGroups = remember(filtered, allFolders) {
+        groupRequestsIntoCollections(filtered, allFolders)
+    }
+    // Collapsed-state set rather than expanded-state: a freshly created folder (not yet in this
+    // set either way) defaults to expanded, matching the pre-restructure flat list where every
+    // request was always visible.
+    var collapsedCollectionIds by remember { mutableStateOf(setOf<String>()) }
 
-            // Master plan §1.6 — Postman Collection v2.1 export/import. Export always available
-            // (an empty collection is still a valid, if pointless, export); import is always
-            // available too since it starts from zero saved requests.
-            IconButton(
-                onClick = {
-                    coroutineScope.launch {
-                        runCatching {
-                            val json = PostmanCollectionCodec.export(
-                                collectionName = "requestr export",
-                                requests = allRequests,
-                                folders = allFolders,
-                            )
-                            val target = com.example.data.export.MediaStoreExporter.writeText(
-                                context,
-                                "requestr-collection-${System.currentTimeMillis()}.postman_collection.json",
-                                "application/json",
-                                json,
-                            ) ?: error("Failed to write Postman collection JSON")
-                            com.example.data.export.FileExporter.shareFile(
-                                context, target, "application/json", "requestr Postman Collection"
-                            )
-                        }.onFailure { e ->
-                            android.widget.Toast.makeText(context, "Export failed: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+    // The collection list is the screen's scroll container: bind it to the parallax layer.
+    val listState = rememberLazyListState()
+    DriveParallaxFrom(listState)
+
+    // Transparent root so the ParallaxBackground hosted in MainActivity shows through.
+    Column(modifier = Modifier.fillMaxSize()) {
+        // Header — floating glass capsules (DESIGN-SYSTEM §9.3 / §14.7, shared-context §6).
+        // docs/designs/saved_apis/ draws one `.header-capsule` bar around the controls; the
+        // global rule that header shapes are independent floating capsules over a transparent
+        // page wins, so the back capsule, identity capsule and the export/import/run cluster
+        // float separately here. Title/actions are the screen's real ones (no "New Folder"
+        // action exists in this screen, so the mockup's accent button is not fabricated).
+        FloatingCapsuleHeader(
+            title = "Saved APIs",
+            icon = Icons.Default.Bookmark,
+            onBack = onBack,
+            trailingContent = {
+                GlassActionCluster {
+                    // Master plan §1.6 — Postman Collection v2.1 export/import. Export always available
+                    // (an empty collection is still a valid, if pointless, export); import is always
+                    // available too since it starts from zero saved requests.
+                    IconButton(
+                        onClick = {
+                            coroutineScope.launch {
+                                runCatching {
+                                    val json = PostmanCollectionCodec.export(
+                                        collectionName = "requestr export",
+                                        requests = allRequests,
+                                        folders = allFolders,
+                                    )
+                                    val target = com.example.data.export.MediaStoreExporter.writeText(
+                                        context,
+                                        "requestr-collection-${System.currentTimeMillis()}.postman_collection.json",
+                                        "application/json",
+                                        json,
+                                    ) ?: error("Failed to write Postman collection JSON")
+                                    com.example.data.export.FileExporter.shareFile(
+                                        context, target, "application/json", "requestr Postman Collection"
+                                    )
+                                }.onFailure { e ->
+                                    android.widget.Toast.makeText(context, "Export failed: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        }
+                    ) {
+                        Icon(Icons.Default.Upload, "Export as Postman Collection", tint = MaterialTheme.colorScheme.onSurface)
+                    }
+                    IconButton(onClick = { postmanImportLauncher.launch(arrayOf("application/json")) }) {
+                        Icon(Icons.Default.Download, "Import Postman Collection", tint = MaterialTheme.colorScheme.onSurface)
+                    }
+
+                    // v3.4 Part C — C3: only shown when at least one saved request actually has an
+                    // enabled assertion — otherwise there is nothing to run and the button would just
+                    // be a dead end.
+                    if (testableCount > 0) {
+                        IconButton(
+                            onClick = {
+                                isRunningTests = true
+                                coroutineScope.launch {
+                                    testReport = ApiCollectionsRepository.runCollectionTests(
+                                        folderId = null,
+                                        haltOnFailure = haltOnFailure,
+                                    )
+                                    isRunningTests = false
+                                }
+                            },
+                            enabled = !isRunningTests
+                        ) {
+                            if (isRunningTests) {
+                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(
+                                    Icons.Default.PlayArrow, "Run All Tests ($testableCount)",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
                         }
                     }
                 }
-            ) {
-                Icon(Icons.Default.Upload, "Export as Postman Collection", tint = MaterialTheme.colorScheme.onSurface)
             }
-            IconButton(onClick = { postmanImportLauncher.launch(arrayOf("application/json")) }) {
-                Icon(Icons.Default.Download, "Import Postman Collection", tint = MaterialTheme.colorScheme.onSurface)
-            }
-
-            // v3.4 Part C — C3: only shown when at least one saved request actually has an
-            // enabled assertion — otherwise there is nothing to run and the button would just
-            // be a dead end.
-            if (testableCount > 0) {
-                IconButton(
-                    onClick = {
-                        isRunningTests = true
-                        coroutineScope.launch {
-                            testReport = ApiCollectionsRepository.runCollectionTests(
-                                folderId = null,
-                                haltOnFailure = haltOnFailure,
-                            )
-                            isRunningTests = false
-                        }
-                    },
-                    enabled = !isRunningTests
-                ) {
-                    if (isRunningTests) {
-                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                    } else {
-                        Icon(
-                            Icons.Default.PlayArrow, "Run All Tests ($testableCount)",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                }
-            }
-        }
+        )
 
         // Master plan §2.12 — halt-on-failure toggle for the test runner. Kept outside the
         // header row (which is already tight) but still above the request list so it is always
@@ -268,7 +286,7 @@ fun SavedApisScreen(
         Spacer(modifier = Modifier.height(8.dp))
         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
 
-        // List
+        // List — dossier Q3: collections-grouped cards (was a flat LazyColumn of requests).
         if (filtered.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -293,52 +311,75 @@ fun SavedApisScreen(
             }
         } else {
             LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(
                     horizontal = 16.dp, vertical = 8.dp
                 ),
                 verticalArrangement = Arrangement.spacedBy(com.example.ui.theme.LocalAppSpacing.current.listItemSpacing)
             ) {
-                items(filtered, key = { it.id }) { request ->
-                    val swipeState = rememberSwipeToDismissBoxState(
-                        confirmValueChange = { value ->
-                            if (value == SwipeToDismissBoxValue.EndToStart) {
-                                ApiCollectionsRepository.deleteRequest(request.id)
-                                true
-                            } else false
+                items(collectionGroups, key = { it.id }) { group ->
+                    val expanded = group.id !in collapsedCollectionIds
+                    CollectionGroupCard(
+                        group = group,
+                        expanded = expanded,
+                        onToggleExpanded = {
+                            collapsedCollectionIds = if (expanded) {
+                                collapsedCollectionIds + group.id
+                            } else {
+                                collapsedCollectionIds - group.id
+                            }
                         }
-                    )
-                    SwipeToDismissBox(
-                        state = swipeState,
-                        backgroundContent = {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .background(MaterialTheme.colorScheme.error)
-                                    .padding(horizontal = 20.dp),
-                                contentAlignment = Alignment.CenterEnd
-                            ) {
-                                Icon(Icons.Default.Delete, null, tint = Color.White)
-                            }
-                        },
-                        enableDismissFromStartToEnd = false,
-                        enableDismissFromEndToStart = true
                     ) {
-                        SavedApiCard(
-                            request = request,
-                            allRequests = allRequests,
-                            onClick = { onOpenRequest(request) },
-                            onToggleFavorite = {
-                                ApiCollectionsRepository.toggleFavorite(request.id)
+                        if (group.requests.isEmpty()) {
+                            EmptyCollectionPlaceholder()
+                        } else {
+                            group.requests.forEach { request ->
+                                key(request.id) {
+                                    val swipeState = rememberSwipeToDismissBoxState(
+                                        confirmValueChange = { value ->
+                                            if (value == SwipeToDismissBoxValue.EndToStart) {
+                                                ApiCollectionsRepository.deleteRequest(request.id)
+                                                true
+                                            } else false
+                                        }
+                                    )
+                                    SwipeToDismissBox(
+                                        state = swipeState,
+                                        backgroundContent = {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .clip(RoundedCornerShape(14.dp))
+                                                    .background(MaterialTheme.colorScheme.error)
+                                                    .padding(horizontal = 20.dp),
+                                                contentAlignment = Alignment.CenterEnd
+                                            ) {
+                                                Icon(Icons.Default.Delete, null, tint = Color.White)
+                                            }
+                                        },
+                                        enableDismissFromStartToEnd = false,
+                                        enableDismissFromEndToStart = true
+                                    ) {
+                                        SavedApiCard(
+                                            request = request,
+                                            allRequests = allRequests,
+                                            onClick = { onOpenRequest(request) },
+                                            onToggleFavorite = {
+                                                ApiCollectionsRepository.toggleFavorite(request.id)
+                                            }
+                                        )
+                                    }
+                                }
                             }
-                        )
+                        }
                     }
                 }
                 item { Spacer(modifier = Modifier.height(80.dp)) }
             }
         }
     }
+
 
     // v3.4 Part C — C3: summary report modal for "Run All Tests" — X passed / Y failed overall,
     // with a per-request breakdown so a failure can be traced back to which saved request and
@@ -479,15 +520,20 @@ private fun TabChip(
     selected: Boolean,
     onClick: () -> Unit
 ) {
-    val bgColor by animateColorAsState(
-        if (selected) MaterialTheme.colorScheme.primary
-        else MaterialTheme.colorScheme.surfaceVariant,
-        animationSpec = com.example.ui.theme.scaledTween(250), label = "tabBg"
+    // Selection animates on a gated tween; theme colours resolve instantly.
+    val bgColor by animateStateColor(
+        active = selected,
+        activeColor = MaterialTheme.colorScheme.primary,
+        inactiveColor = MaterialTheme.colorScheme.surfaceVariant,
+        animationSpec = com.example.ui.theme.scaledTween(250),
+        label = "tabBg"
     )
-    val textColor by animateColorAsState(
-        if (selected) MaterialTheme.colorScheme.onPrimary
-        else MaterialTheme.colorScheme.onSurfaceVariant,
-        animationSpec = com.example.ui.theme.scaledTween(250), label = "tabText"
+    val textColor by animateStateColor(
+        active = selected,
+        activeColor = MaterialTheme.colorScheme.onPrimary,
+        inactiveColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        animationSpec = com.example.ui.theme.scaledTween(250),
+        label = "tabText"
     )
     Row(
         modifier = Modifier
@@ -518,6 +564,102 @@ private fun TabChip(
                 color = textColor.copy(alpha = 0.8f)
             )
         }
+    }
+}
+
+@Composable
+private fun CollectionGroupCard(
+    group: CollectionSummary,
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
+    content: @Composable () -> Unit
+) {
+    val chevronRotation by animateFloatAsState(
+        targetValue = if (expanded) 180f else 0f,
+        animationSpec = com.example.ui.theme.scaledTween(200),
+        label = "collectionChevron"
+    )
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+            .border(
+                width = 1.dp,
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f),
+                shape = RoundedCornerShape(16.dp)
+            )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onToggleExpanded() }
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Default.Folder,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    group.name,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 15.sp,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                // Dossier Q3: only the endpoint count is truthfully sourceable here.
+                // ApiFolderItem has no environment field and EnvironmentRepository models
+                // environments as a single global list, not one scoped per collection — so
+                // unlike the mockup's "2 environments" line, we deliberately omit any
+                // environment count rather than fabricate one.
+                Text(
+                    if (group.endpointCount == 1) "1 endpoint" else "${group.endpointCount} endpoints",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                )
+            }
+            Icon(
+                Icons.Default.ExpandMore,
+                contentDescription = if (expanded) "Collapse" else "Expand",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .size(22.dp)
+                    .graphicsLayer { rotationZ = chevronRotation }
+            )
+        }
+        if (expanded) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(com.example.ui.theme.LocalAppSpacing.current.listItemSpacing)
+            ) {
+                content()
+                Spacer(modifier = Modifier.height(4.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmptyCollectionPlaceholder() {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 16.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            "No requests yet",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+        )
     }
 }
 
@@ -570,7 +712,7 @@ private fun SavedApiCard(
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    formatTimestamp(request.updatedAt),
+                    RelativeTimeFormatter.format(request.updatedAt),
                     fontSize = 10.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                 )
@@ -684,13 +826,3 @@ private fun chainSources(request: ApiRequestItem, all: List<ApiRequestItem>): Li
         .map { it.name }
 }
 
-private fun formatTimestamp(millis: Long): String {
-    val now = System.currentTimeMillis()
-    val diff = now - millis
-    return when {
-        diff < 60_000 -> "Just now"
-        diff < 3600_000 -> "${diff / 60_000}m ago"
-        diff < 86_400_000 -> "${diff / 3600_000}h ago"
-        else -> "${diff / 86_400_000}d ago"
-    }
-}

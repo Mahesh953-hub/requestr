@@ -199,6 +199,16 @@ internal fun CapturedTrafficEntity.toUiModel(): CapturedTrafficItem = CapturedTr
         else -> TrafficSource.NATIVE
     },
     tags = if (sourceIp != null) listOf("gateway:$sourceIp") else emptyList(),
+    // Item 1: derive the UI model's plain boolean from this row's own captureMethod, never
+    // from the current global CaptureRecordMode setting -- a single database can contain rows
+    // captured under different tiers across sessions/restarts.
+    routedViaVpnRelay = captureMethod == com.example.data.local.CaptureRowMethod.VPN_TUN,
+    // Audit fix (StatusCodeBadge "0" defect): derive truthfully from the entity's own nullable
+    // statusCode -- the only point where that real nullability is collapsed to the `0`
+    // placeholder above for legacy numeric call sites. Deriving this anywhere else (e.g. from
+    // the already-collapsed `statusCode ?: 0` value via `statusCode == 0`) would just be the
+    // same magic-number check moved one file over.
+    hasKnownStatus = statusCode != null,
 )
 
 private fun httpStatusMessage(code: Int): String = when (code) {

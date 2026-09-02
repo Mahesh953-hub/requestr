@@ -334,6 +334,31 @@ data class CapturedTrafficItem(
     val alpnProtocol: String = "",
     // ── V3: Tags ───────────────────────────────────────────────────────
     val tags: List<String> = emptyList(),
+    /**
+     * Item 1 (dossier Q2 / audit §7.5): true iff THIS row's own
+     * [com.example.data.local.CapturedTrafficEntity.captureMethod] is
+     * [com.example.data.local.CaptureRowMethod.VPN_TUN] -- the exact boolean the traffic row's
+     * VPN-relay icon needs, derived from the richer per-row enum at mapping time
+     * ([com.example.data.interception.CaptureLogRepository.toUiModel]) rather than duplicating
+     * the enum itself onto this UI-facing model. Defaults to false, matching
+     * [com.example.data.local.CaptureRowMethod.UNKNOWN]'s "render as absent" contract -- a false
+     * value here must never be read as "confirmed not VPN," only as "not confirmed VPN."
+     */
+    val routedViaVpnRelay: Boolean = false,
+    /**
+     * Audit fix (StatusCodeBadge "0" defect): true iff [statusCode] is a real, decoded
+     * HTTP/QUIC status. False means no status line was ever decoded for this row (an HTTP/3
+     * OBSERVED/DETECTED row, or a fully opaque undecoded-TLS row) and [statusCode] is only
+     * carrying the historical `0` placeholder that legacy numeric call sites (sorting,
+     * `statusCode >= 400` filters) already rely on — UI code that renders a label/badge for a
+     * human MUST check this flag rather than testing `statusCode == 0` itself, since 0 is not
+     * a reserved "unknown" sentinel for those numeric call sites, just a convenient default.
+     * Defaults to true so every pre-existing construction site (previews, tests, exporters,
+     * mocked responses) — none of which ever had a genuinely statusless row — is unaffected.
+     * Set truthfully from the entity's own nullable status in
+     * [com.example.data.interception.CaptureLogRepository.toUiModel].
+     */
+    val hasKnownStatus: Boolean = true,
 )
 
 enum class RuleAction(val label: String, val colorHex: Long) {
@@ -376,6 +401,36 @@ data class AppPackageItem(
     val isInterceptEnabled: Boolean = true,
     val isSystemApp: Boolean = false
 )
+
+/**
+ * Master plan §3 LOW-ADD (C9) — launcher-label fallback chain for the VPN app-picker.
+ *
+ * `PackageManager.getApplicationLabel()` occasionally returns a blank string or the raw
+ * package name for apps whose `android:label` resolution is broken (mislabelled/obfuscated
+ * manifests, some OEM system apps). Android's own launcher instead resolves a package's
+ * display name via the *launcher activity's* `ResolveInfo.loadLabel()` (from
+ * `queryIntentActivities` against `ACTION_MAIN`/`CATEGORY_LAUNCHER`), which is frequently
+ * correct even when the application-level label lookup fails — so it is tried first here.
+ *
+ * Resolution order: [launcherLabel] -> [applicationLabel] -> [packageName]. Each rung is
+ * skipped if it is blank or is literally the package name (i.e. that lookup silently fell
+ * back to the identifier instead of producing a real label). The final rung, [packageName],
+ * is never blank for a well-formed package name, so this function never returns an empty
+ * string.
+ */
+fun resolveAppDisplayLabel(
+    launcherLabel: String?,
+    applicationLabel: String?,
+    packageName: String
+): String {
+    val launcher = launcherLabel?.trim().orEmpty()
+    if (launcher.isNotEmpty() && launcher != packageName) return launcher
+
+    val application = applicationLabel?.trim().orEmpty()
+    if (application.isNotEmpty() && application != packageName) return application
+
+    return packageName
+}
 
 enum class NoteFormatType(val label: String) {
     PLAIN("Plain"),
@@ -546,7 +601,16 @@ data class UserSettingsState(
     val headerTopPaddingDp: Int = 8,
     val headerBackgroundOpacity: Float = 0.90f,
     val headerBlurStyle: String = "FROSTED_GLASS",
-    val fabBottomSpacingDp: Int = 84
+    val fabBottomSpacingDp: Int = 84,
+    // Phase B — TUNE_GLASS parameters. Read ONLY when the corresponding glass style is
+    // TUNE_GLASS; every other mode ignores them, so switching away to compare and switching back
+    // preserves the user's dialled-in look. Defaults deliberately match FROSTED_GLASS so the
+    // first time a user selects Tune Glass nothing jumps — they start from the familiar look and
+    // tune outward from there.
+    val glassTuneBlurDp: Int = 24,
+    val glassTuneTintOpacity: Float = 0.90f,
+    val glassTuneBorderOpacity: Float = 0.35f,
+    val glassTuneShadowDp: Int = 6
 )
 
 /** Chat message for the Chats section (#44). */

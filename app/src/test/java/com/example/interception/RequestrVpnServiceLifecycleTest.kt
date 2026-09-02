@@ -1,0 +1,124 @@
+package com.example.interception
+
+import android.os.ParcelFileDescriptor
+import com.example.data.interception.ActiveTier
+import com.example.data.interception.CaptureLifecycleOwner
+import com.example.data.interception.InterceptionStateRepository
+import com.example.data.interception.InterceptionStatus
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.Robolectric
+import org.robolectric.RobolectricTestRunner
+
+/**
+ * Lifecycle-race fix regression tests: [RequestrVpnService.stopCapture] used to call
+ * [InterceptionStateRepository.markStopped] *before* `cleanup()` (private, so not referenced
+ * directly here) actually tore [RequestrVpnService.tunInterface] down. A UI collector reacting to
+ * the state converging to [InterceptionStatus.CONFIGURED_IDLE] (e.g. re-enabling the Start
+ * button) could therefore still observe a genuinely non-null `tunInterface` -- exactly the window
+ * a fast stop-then-start double-tap needed to hit `startCapture()`'s `tunInterface != null` guard
+ * and silently no-op the restart, leaving nothing capturing with no error surfaced.
+ *
+ * Two tests, deliberately for different reasons:
+ * - [`stopCapture converges tunInterface to null and state to CONFIGURED_IDLE`] exercises the
+ *   real, unmodified `stopCapture(reason)` production code path end-to-end (via a real, seeded
+ *   [ParcelFileDescriptor] standing in for "a tun genuinely established" -- deliberately not
+ *   [android.net.VpnService.Builder.establish], impossible on this emulator, a documented Redroid
+ *   limitation, and out of scope for this fix) and proves the *outcome* invariant: cleanup and the
+ *   state transition both genuinely happen.
+ * - [`stopCapture calls cleanup before markStopped in real runtime order`] (SHOULD-FIX, code
+ *   review) replaces a prior version of this test that read `RequestrVpnService.kt`'s source text
+ *   off disk and asserted substring ordering of the `cleanup()`/`markStopped()` calls -- brittle
+ *   (breaks on an unrelated rename/reformat, and proves nothing about actual runtime behavior).
+ *
+ *   An earlier attempt at replacing it swapped in a `Dispatchers.Unconfined`
+ *   [RequestrVpnService.scope] and asserted what a concurrent [InterceptionStateRepository.state]
+ *   collector observed at the moment `markStopped()` fired, reasoning that Unconfined resumes a
+ *   waiting collector synchronously, mid-stack, inside `_state.update {}`. That turned out to be
+ *   false: Unconfined dispatches through a thread-local event loop, and a *nested* resume
+ *   triggered from inside an already-running Unconfined coroutine is queued rather than run
+ *   immediately -- so the collector only ever observed the state after `stopCapture`'s entire
+ *   launched block (cleanup, markStopped, and stopSelf) had already finished, regardless of which
+ *   statement ran first inside it. Confirmed empirically: that version of the test passed even
+ *   with the two statements deliberately swapped back to the buggy order.
+ *
+ *   [RequestrVpnService.stopCaptureStepRecorder] is a narrower, honest seam instead: it records,
+ *   in real invocation order, which of the two real production calls (`cleanup()` /
+ *   `markStopped()`) actually ran first, at runtime -- not by reading source text, and without
+ *   relying on any coroutine-dispatcher scheduling nuance. Reverting the production ordering
+ *   fails this test deterministically every run (verified).
+ */
+@RunWith(RobolectricTestRunner::class)
+class RequestrVpnServiceLifecycleTest {
+
+    @After
+    fun tearDown() {
+        InterceptionStateRepository.resetAll()
+    }
+
+    @Test
+    fun `stopCapture converges tunInterface to null and state to CONFIGURED_IDLE`() {
+        val service = Robolectric.buildService(RequestrVpnService::class.java).create().get()
+        val (readEnd, writeEnd) = ParcelFileDescriptor.createPipe()
+        writeEnd.close() // only need a genuinely non-null, closeable fd -- not a real tun.
+        service.tunInterface = readEnd
+
+        InterceptionStateRepository.markActive(
+            sessionId = 1L,
+            tier = ActiveTier.VPN,
+            port = 8080,
+            lifecycleOwner = CaptureLifecycleOwner.VPN_SERVICE,
+        )
+
+        service.stopCapture("test stop")
+
+        runBlocking {
+            withTimeout(5_000) {
+                InterceptionStateRepository.state.first { it.status == InterceptionStatus.CONFIGURED_IDLE }
+            }
+        }
+
+        assertNull("tunInterface must be torn down once capture has stopped", service.tunInterface)
+    }
+
+    @Test
+    fun `stopCapture calls cleanup before markStopped in real runtime order`() {
+        val service = Robolectric.buildService(RequestrVpnService::class.java).create().get()
+        val (readEnd, writeEnd) = ParcelFileDescriptor.createPipe()
+        writeEnd.close() // only need a genuinely non-null, closeable fd -- not a real tun.
+        service.tunInterface = readEnd
+
+        InterceptionStateRepository.markActive(
+            sessionId = 1L,
+            tier = ActiveTier.VPN,
+            port = 8080,
+            lifecycleOwner = CaptureLifecycleOwner.VPN_SERVICE,
+        )
+
+        val callOrder = mutableListOf<String>()
+        service.stopCaptureStepRecorder = { step -> callOrder.add(step) }
+
+        service.stopCapture("test stop")
+
+        runBlocking {
+            withTimeout(5_000) {
+                InterceptionStateRepository.state.first { it.status == InterceptionStatus.CONFIGURED_IDLE }
+            }
+        }
+
+        assertEquals(
+            "cleanup() (which nulls out tunInterface) must have genuinely run, at runtime, " +
+                "before markStopped() emits CONFIGURED_IDLE -- otherwise a collector reacting to " +
+                "that emission (e.g. re-enabling the Start button) can still see a stale non-null " +
+                "tunInterface and a fast stop-then-start double-tap silently no-ops the restart",
+            listOf("cleanup", "markStopped"),
+            callOrder,
+        )
+    }
+}

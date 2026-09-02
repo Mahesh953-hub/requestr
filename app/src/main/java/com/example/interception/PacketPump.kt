@@ -7,6 +7,7 @@ import com.example.data.local.QuicConnectionEntity
 import com.example.data.local.QuicDecodeStatus
 import com.example.data.local.RequestrDatabase
 import com.example.data.local.UdpFlowEntity
+import com.example.interception.http.HttpBodyDecoder
 import com.example.interception.tun.IpAddressCodec
 import com.example.interception.tun.IpFragmentReassembler
 import com.example.interception.tun.TunRelay
@@ -836,6 +837,59 @@ class PacketPump(
      * An exchange whose revision has not moved since its last write is skipped, so a stream that is only
      * being ACKed costs neither a body serialization nor a database round trip.
      */
+    /**
+     * Item 4 / gap B: what [flushHttp3Writes] needs to persist for one direction (request or
+     * response) of an HTTP/3 exchange -- computed once per flush so the two call sites (the
+     * `UPDATE` path and the fresh-insert path below) can't drift from each other.
+     *
+     * @property text the text column value: real UTF-8 text for a text body, or
+     *   [HttpBodyDecoder.BINARY_BODY_PLACEHOLDER] for a binary one -- never the old
+     *   `"<binary N bytes>"` marker string, which was neither the real content nor a clear
+     *   "this is binary" signal the UI could act on structurally.
+     * @property isBinary mirrors [com.example.data.local.CapturedTrafficEntity.isRequestBodyBinary]/
+     *   `.isResponseBodyBinary`.
+     * @property bytes the BLOB to persist, or null when [isBinary] is false, or when [truncated]
+     *   is true -- same "store nothing beyond the cap, not a partial prefix" contract
+     *   [HttpBodyDecoder.clampForStorage] documents.
+     * @property truncated write straight to `requestBodyBytesTruncated`/`responseBodyBytesTruncated`.
+     */
+    internal data class Http3BodyForPersist(
+        val text: String,
+        val isBinary: Boolean,
+        val bytes: ByteArray?,
+        val truncated: Boolean,
+    )
+
+    /**
+     * Classifies [bytes] (already buffered by [com.example.interception.quic.QuicConnectionDecoder.Http3Exchange],
+     * up to its own in-flight bound) via the same [HttpBodyDecoder.isProbablyUtf8]/
+     * [HttpBodyDecoder.MAX_STORED_BODY_BYTES] rules every other capture path
+     * (MitmProxyEngine/CaptureEngine/GatewayEngine) uses, instead of the old ad-hoc
+     * "does a UTF-8 round trip survive" check that only ever produced a text marker string and
+     * never stored real bytes.
+     *
+     * [decoderTruncated] is [com.example.interception.quic.QuicConnectionDecoder.Http3Exchange.requestBodyTruncated]/
+     * `.responseBodyTruncated` -- true when the decoder's own per-exchange buffering bound was
+     * hit, meaning [bytes] is already only a *prefix* of the real body, not the whole thing. A
+     * binary body in that state always degrades to "not stored" (bytes = null, truncated = true)
+     * regardless of whether the prefix itself is under [HttpBodyDecoder.MAX_STORED_BODY_BYTES] --
+     * storing a partial JPEG/protobuf/gzip blob as if it were complete would misrepresent it as
+     * a whole, decodable payload, exactly what [HttpBodyDecoder.MAX_STORED_BODY_BYTES]'s own
+     * "never a truncated prefix" rule exists to avoid.
+     */
+    internal fun bodyForPersist(bytes: ByteArray, decoderTruncated: Boolean): Http3BodyForPersist {
+        val storage = HttpBodyDecoder.forStorage(bytes)
+        if (!storage.isBinary) {
+            return Http3BodyForPersist(text = String(bytes, Charsets.UTF_8), isBinary = false, bytes = null, truncated = false)
+        }
+        return Http3BodyForPersist(
+            text = HttpBodyDecoder.BINARY_BODY_PLACEHOLDER,
+            isBinary = true,
+            bytes = if (decoderTruncated) null else storage.bytes,
+            truncated = decoderTruncated || storage.truncated,
+        )
+    }
+
     private suspend fun flushHttp3Writes() {
         val queued = synchronized(quicStateLock) {
             val snapshot = pendingHttp3Writes.values.toList()
@@ -849,10 +903,12 @@ class PacketPump(
             val revision = exchange.revision
             if (revision == write.writtenRevision) continue
             val rowId = synchronized(quicStateLock) { http3RowIds[write.rowKey] }
-            val requestBody = exchange.requestBody().takeIf { it.isNotEmpty() }
-                ?.let { decodeBody(it, exchange.requestBodyTruncated) }
-            val responseBody = exchange.responseBody().takeIf { it.isNotEmpty() }
-                ?.let { decodeBody(it, exchange.responseBodyTruncated) }
+            val requestBodyInfo = exchange.requestBody().takeIf { it.isNotEmpty() }
+                ?.let { bodyForPersist(it, exchange.requestBodyTruncated) }
+            val responseBodyInfo = exchange.responseBody().takeIf { it.isNotEmpty() }
+                ?.let { bodyForPersist(it, exchange.responseBodyTruncated) }
+            val requestBody = requestBodyInfo?.text
+            val responseBody = responseBodyInfo?.text
             val authority = exchange.authority ?: write.fallbackAuthority
             val host = exchange.authority?.substringBefore(':') ?: write.fallbackAuthority
             val path = exchange.path ?: ""
@@ -877,6 +933,12 @@ class PacketPump(
                         requestSizeBytes = exchange.requestBodyBytes,
                         responseSizeBytes = exchange.responseBodyBytes,
                         latencyMs = exchange.latencyMs,
+                        isRequestBodyBinary = requestBodyInfo?.isBinary ?: false,
+                        isResponseBodyBinary = responseBodyInfo?.isBinary ?: false,
+                        requestBodyBytes = requestBodyInfo?.bytes,
+                        responseBodyBytes = responseBodyInfo?.bytes,
+                        requestBodyBytesTruncated = requestBodyInfo?.truncated ?: false,
+                        responseBodyBytesTruncated = responseBodyInfo?.truncated ?: false,
                     )
                 }.onSuccess { write.writtenRevision = revision }
                     .onFailure { e -> Log.w(TAG, "Failed to update HTTP/3 exchange: ${e.message}") }
@@ -897,11 +959,21 @@ class PacketPump(
                 responseBody = responseBody,
                 requestSizeBytes = exchange.requestBodyBytes,
                 responseSizeBytes = exchange.responseBodyBytes,
+                isRequestBodyBinary = requestBodyInfo?.isBinary ?: false,
+                isResponseBodyBinary = responseBodyInfo?.isBinary ?: false,
+                requestBodyBytes = requestBodyInfo?.bytes,
+                responseBodyBytes = responseBodyInfo?.bytes,
+                requestBodyBytesTruncated = requestBodyInfo?.truncated ?: false,
+                responseBodyBytesTruncated = responseBodyInfo?.truncated ?: false,
                 latencyMs = exchange.latencyMs,
                 timestamp = System.currentTimeMillis(),
                 wasDecrypted = true,
                 isUndecoded = false,
                 connectionId = write.connectionId,
+                // Item 1: PacketPump is only ever instantiated by RequestrVpnService, so this
+                // HTTP/3 row -- like every row this class's tun-driven pipeline produces -- is
+                // genuinely VPN_TUN-tier.
+                captureMethod = com.example.data.local.CaptureRowMethod.VPN_TUN,
             )
             runCatching { db.capturedTrafficDao().insert(entity) }
                 .onSuccess { newId ->
@@ -942,19 +1014,6 @@ class PacketPump(
         }
         val excess = http3RowIds.size - MAX_TRACKED_HTTP3_ROWS
         http3RowIds.keys.take(excess).toList().forEach { http3RowIds.remove(it) }
-    }
-
-    /**
-     * Renders decoded DATA-frame bytes for storage. HTTP/3 bodies are arbitrary octets, so a body that
-     * is not valid UTF-8 (an image, a gRPC frame, a compressed payload) is recorded as an explicit
-     * byte-count marker rather than as mojibake that would misrepresent what was captured. A body
-     * clipped by the decoder's per-exchange bound is marked as truncated for the same reason.
-     */
-    private fun decodeBody(bytes: ByteArray, truncated: Boolean): String {
-        val text = String(bytes, Charsets.UTF_8)
-        val roundTrips = text.toByteArray(Charsets.UTF_8).contentEquals(bytes)
-        val body = if (roundTrips) text else "<binary ${bytes.size} bytes>"
-        return if (truncated) "$body\n<truncated>" else body
     }
 
     /**

@@ -1,12 +1,11 @@
 package com.example.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -14,7 +13,7 @@ import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -30,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -41,7 +41,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -58,15 +60,18 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 
 import com.example.data.repository.SettingsRepository
+import com.example.ui.theme.animateStateColor
 import com.example.ui.theme.scaledSpring
 
 data class NavDestination(val route: String, val label: String, val icon: ImageVector)
@@ -82,15 +87,37 @@ private val DEFAULT_NAV = listOf(
     NavDestination("music", "Music", Icons.Default.MusicNote)
 )
 
+/** Routes the pill can show, in tab order, before hidden-items filtering. */
+fun defaultNavPillRoutes(): List<String> = DEFAULT_NAV.map { it.route }
+
+/** Applies the user's hidden-items setting to the default tab order. */
+fun visibleNavPillRoutes(hiddenItems: Collection<String>): List<String> =
+    DEFAULT_NAV.map { it.route }.filter { it !in hiddenItems }
+
+/**
+ * Index of the tab matching [currentRoute] in [routes], or null when the current screen is not
+ * one of the pill's tabs (Notes, Settings, Saved APIs, tool workspaces, ...).
+ *
+ * Deliberately no `coerceAtLeast(0)` fallback: the previous behaviour lit up Home whenever the
+ * route was not a tab, which told the user they were somewhere they were not.
+ */
+fun resolveActiveNavIndex(routes: List<String>, currentRoute: String): Int? =
+    routes.indexOf(currentRoute).takeIf { it >= 0 }
+
 /**
  * v6.0 transplant — Rebranded Dynamic iOS-style Frosted Glass Navigation Pill.
  *
  * Semantically recreated from main against backup settings (manifest §5.2, DESIGN-RECORD §6).
- * - Frosted-glass capsule with configurable opacity, blur style, and hidden items
+ * - Floating glass capsule with configurable opacity, glass mode, and hidden items
  * - Spring-driven animated tab transitions with active dot indicator
  * - Haptic tactile response on tab selection
  * - Scroll-driven collapse/expand preserved from backup (backup behavior wins functional conflicts)
- * - Canonical glass-style keys: FROSTED_GLASS / SOLID_M3 / OLED_BLACK / TRANSLUCENT (§11)
+ * - Glass look resolved once through [rememberGlassSurface] (DESIGN-SYSTEM §14.7): six modes,
+ *   real backdrop blur + refraction on API 31+ when a [backdrop] is supplied
+ *
+ * @param backdrop the content layer beneath the pill to blur/refract. MainActivity supplies the
+ *                 state of the [GlassBackdropSource] wrapping the NavHost; null keeps the
+ *                 gradient-only look.
  */
 @Composable
 fun CollapsibleNavPill(
@@ -98,61 +125,43 @@ fun CollapsibleNavPill(
     onNavigate: (String) -> Unit,
     scrollCollapseSignal: Boolean = false,
     scrollExpandSignal: Boolean = false,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    backdrop: GlassBackdropState? = LocalGlassBackdropState.current
 ) {
     val haptics = rememberAppHapticFeedback()
     val settings by SettingsRepository.settings.collectAsState()
-    val opacity = settings.navBarBackgroundOpacity.coerceIn(0.2f, 1f)
-    val blurEffect = settings.navBarBlurEffect
     val hiddenItems = settings.navBarHiddenItems
 
     val activeNavList = remember(hiddenItems) {
         DEFAULT_NAV.filter { it.route !in hiddenItems }
     }
-    val activeIdx = activeNavList.indexOfFirst { it.route == currentRoute }.coerceAtLeast(0)
+    val activeIdx = resolveActiveNavIndex(activeNavList.map { it.route }, currentRoute)
 
-    // Backup scroll-collapse behavior preserved.
+    // Backup scroll-collapse behavior preserved. One Animatable drives everything; the specs are
+    // resolved in composition so the accessibility gating (animations off / reduced) applies.
     val scope = rememberCoroutineScope()
     var collapsed by remember { mutableStateOf(false) }
     val progressAnim = remember { Animatable(0f) }
-    val progress by animateFloatAsState(progressAnim.value, spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessLow), label = "p")
+    val collapseSpec = scaledSpring<Float>(Spring.DampingRatioLowBouncy, Spring.StiffnessLow)
+    val expandSpec = scaledSpring<Float>(Spring.DampingRatioMediumBouncy, Spring.StiffnessLow)
+    val tapExpandSpec = scaledSpring<Float>()
 
-    if (scrollCollapseSignal && !collapsed) {
-        scope.launch { progressAnim.animateTo(1f, spring(Spring.DampingRatioLowBouncy, Spring.StiffnessLow)); collapsed = true }
-    }
-    if (scrollExpandSignal && collapsed) {
-        scope.launch { progressAnim.animateTo(0f, spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessLow)); collapsed = false }
+    LaunchedEffect(scrollCollapseSignal, scrollExpandSignal) {
+        if (scrollCollapseSignal && !collapsed) {
+            collapsed = true
+            progressAnim.animateTo(1f, collapseSpec)
+        } else if (scrollExpandSignal && collapsed) {
+            collapsed = false
+            progressAnim.animateTo(0f, expandSpec)
+        }
     }
 
-    val f = progress.coerceIn(0f, 1f)
+    val f = progressAnim.value.coerceIn(0f, 1f)
     val widthMod = if (f > 0.95f) Modifier.wrapContentWidth() else Modifier.fillMaxWidth()
 
-    val bgBrush = when (blurEffect) {
-        "SOLID_M3" -> Brush.verticalGradient(
-            listOf(MaterialTheme.colorScheme.surface, MaterialTheme.colorScheme.surfaceVariant)
-        )
-        "OLED_BLACK" -> Brush.verticalGradient(
-            listOf(Color.Black.copy(alpha = opacity), Color(0xFF0F172A).copy(alpha = opacity))
-        )
-        "TRANSLUCENT" -> Brush.verticalGradient(
-            listOf(
-                MaterialTheme.colorScheme.surface.copy(alpha = (opacity * 0.7f).coerceIn(0.2f, 1f)),
-                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = (opacity * 0.5f).coerceIn(0.2f, 1f))
-            )
-        )
-        else -> Brush.verticalGradient( // FROSTED_GLASS
-            listOf(
-                MaterialTheme.colorScheme.surface.copy(alpha = opacity),
-                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = (opacity * 0.95f).coerceIn(0.2f, 1f))
-            )
-        )
-    }
-
-    val borderColor = when (blurEffect) {
-        "SOLID_M3" -> MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
-        "OLED_BLACK" -> Color.White.copy(alpha = 0.15f)
-        else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
-    }
+    val glass = rememberGlassSurface(GlassRole.NAV, backdrop)
+    val pillShape = RoundedCornerShape(28.dp)
+    val expandInteraction = remember { MutableInteractionSource() }
 
     Box(
         modifier = modifier
@@ -164,27 +173,29 @@ fun CollapsibleNavPill(
         Box(
             modifier = Modifier
                 .then(widthMod)
-                .shadow(
-                    elevation = 12.dp,
-                    shape = RoundedCornerShape(28.dp),
+                .glassSurface(
+                    surface = glass,
+                    shape = pillShape,
+                    defaultElevation = 12.dp,
                     ambientColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
-                    spotColor = Color.Black.copy(alpha = 0.25f)
+                    spotColor = Color.Black.copy(alpha = 0.25f),
+                    borderWidth = 0.9.dp
                 )
-                .clip(RoundedCornerShape(28.dp))
-                .background(bgBrush)
-                .border(0.9.dp, borderColor, RoundedCornerShape(28.dp))
-                .pointerInput(collapsed) {
-                    if (collapsed) {
-                        detectTapGestures {
-                            scope.launch { progressAnim.animateTo(0f, spring()); collapsed = false }
-                        }
-                    }
+                .clickable(
+                    enabled = collapsed,
+                    interactionSource = expandInteraction,
+                    indication = ripple(),
+                    role = Role.Button,
+                    onClickLabel = "Expand navigation"
+                ) {
+                    collapsed = false
+                    scope.launch { progressAnim.animateTo(0f, tapExpandSpec) }
                 }
                 .padding(horizontal = 6.dp, vertical = 6.dp),
             contentAlignment = Alignment.Center
         ) {
             if (f > 0.90f && activeNavList.isNotEmpty()) {
-                CollapsedChip(activeNavList[activeIdx])
+                CollapsedChip(activeIdx?.let { activeNavList[it] })
             } else {
                 Row(
                     modifier = Modifier.wrapContentWidth(),
@@ -214,6 +225,19 @@ fun CollapsibleNavPill(
     }
 }
 
+/** Active-tab tint: mockup `.nav-pill .tab.active` = primary @ 0.12–0.20; delta spec (f) fixes 0.20. */
+private const val NAV_TAB_ACTIVE_TINT_ALPHA = 0.20f
+private const val NAV_TAB_ACTIVE_BORDER_ALPHA = 0.40f
+
+/**
+ * One tab of the nav pill. The active tab is itself a small tinted glass shape that expands to
+ * show its label: tint, border, corner radius, elevation and width all animate on the same
+ * gated spring so a tab change reads as one motion.
+ *
+ * Deviation from delta spec (f) `if (isActive) 8.dp else 4.dp`: an inactive tab has a fully
+ * transparent background, and a 4dp shadow under nothing renders as a floating grey smudge.
+ * Inactive elevation is therefore 0 and the active tab lifts to 6dp.
+ */
 @Composable
 private fun NavPillTab(
     dest: NavDestination,
@@ -221,41 +245,69 @@ private fun NavPillTab(
     onClick: () -> Unit,
     contentAlpha: Float = 1f
 ) {
-    val bgAnim by animateColorAsState(
-        targetValue = if (isActive) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f) else Color.Transparent,
-        animationSpec = spring(dampingRatio = 0.75f, stiffness = 350f),
+    // Theme colours are resolved at read time (animateStateColor), so a theme switch repaints the
+    // tabs on the next frame while an active-tab change still eases on the gated spring.
+    val colorSpec = scaledSpring<Float>(dampingRatio = 0.75f, stiffness = 350f)
+    val bgAnim by animateStateColor(
+        active = isActive,
+        activeColor = MaterialTheme.colorScheme.primary.copy(alpha = NAV_TAB_ACTIVE_TINT_ALPHA),
+        inactiveColor = Color.Transparent,
+        animationSpec = colorSpec,
         label = "tabBg"
     )
-    val fgAnim by animateColorAsState(
-        targetValue = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
-        animationSpec = spring(dampingRatio = 0.75f, stiffness = 350f),
+    val fgAnim by animateStateColor(
+        active = isActive,
+        activeColor = MaterialTheme.colorScheme.primary,
+        inactiveColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+        animationSpec = colorSpec,
         label = "tabFg"
+    )
+    val borderAnim by animateStateColor(
+        active = isActive,
+        activeColor = MaterialTheme.colorScheme.primary.copy(alpha = NAV_TAB_ACTIVE_BORDER_ALPHA),
+        inactiveColor = Color.Transparent,
+        animationSpec = colorSpec,
+        label = "tabBorder"
     )
     val scaleAnim by animateFloatAsState(
         targetValue = if (isActive) 1.04f else 1.0f,
         animationSpec = scaledSpring(dampingRatio = 0.65f, stiffness = 400f),
         label = "tabScale"
     )
+    val dpSpec = scaledSpring<Dp>(dampingRatio = 0.75f, stiffness = 350f)
+    val cornerAnim by animateDpAsState(
+        targetValue = if (isActive) 24.dp else 10.dp,
+        animationSpec = dpSpec,
+        label = "tabCorner"
+    )
+    val elevationAnim by animateDpAsState(
+        targetValue = if (isActive) 6.dp else 0.dp,
+        animationSpec = dpSpec,
+        label = "tabElevation"
+    )
+    val labelSpec = scaledSpring<Float>(dampingRatio = 0.75f, stiffness = 400f)
+    val labelSizeSpec = scaledSpring<IntSize>(dampingRatio = 0.75f, stiffness = 400f)
+    val contentSizeSpec = scaledSpring<IntSize>(
+        dampingRatio = Spring.DampingRatioMediumBouncy,
+        stiffness = Spring.StiffnessMediumLow
+    )
 
-    val tabShape = if (isActive) RoundedCornerShape(24.dp) else RoundedCornerShape(10.dp)
+    val tabShape = RoundedCornerShape(cornerAnim)
 
     Box(
         modifier = Modifier
             .alpha(contentAlpha)
             .scale(scaleAnim)
-            .animateContentSize(
-                animationSpec = spring(
-                    dampingRatio = Spring.DampingRatioMediumBouncy,
-                    stiffness = Spring.StiffnessMediumLow
-                )
+            .animateContentSize(animationSpec = contentSizeSpec)
+            .shadow(
+                elevation = elevationAnim,
+                shape = tabShape,
+                ambientColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
+                spotColor = Color.Black.copy(alpha = 0.18f)
             )
             .clip(tabShape)
             .background(bgAnim)
-            .border(
-                width = if (isActive) 0.8.dp else 0.dp,
-                color = if (isActive) MaterialTheme.colorScheme.primary.copy(alpha = 0.35f) else Color.Transparent,
-                shape = tabShape
-            )
+            .border(width = 1.dp, color = borderAnim, shape = tabShape)
             .clickable(onClick = onClick)
             .padding(horizontal = if (isActive) 13.dp else 10.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center
@@ -272,10 +324,8 @@ private fun NavPillTab(
             )
             AnimatedVisibility(
                 visible = isActive,
-                enter = fadeIn(animationSpec = spring(dampingRatio = 0.75f, stiffness = 400f)) +
-                        expandHorizontally(animationSpec = spring(dampingRatio = 0.75f, stiffness = 400f)),
-                exit = fadeOut(animationSpec = spring(dampingRatio = 0.75f, stiffness = 400f)) +
-                        shrinkHorizontally(animationSpec = spring(dampingRatio = 0.75f, stiffness = 400f))
+                enter = fadeIn(animationSpec = labelSpec) + expandHorizontally(animationSpec = labelSizeSpec),
+                exit = fadeOut(animationSpec = labelSpec) + shrinkHorizontally(animationSpec = labelSizeSpec)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Spacer(Modifier.width(6.dp))
@@ -299,16 +349,30 @@ private fun NavPillTab(
     }
 }
 
+/**
+ * Collapsed-state chip. With an active tab it names that tab; on a non-tab route (Notes, ...)
+ * it degrades to the mockup's `nav-pill-collapsed` chevron-up affordance so the pill never
+ * claims a destination the user is not on.
+ */
 @Composable
-private fun CollapsedChip(dest: NavDestination) {
+private fun CollapsedChip(dest: NavDestination?) {
     Row(
         Modifier.clip(RoundedCornerShape(24.dp)).background(MaterialTheme.colorScheme.primaryContainer)
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(imageVector = dest.icon, contentDescription = dest.label, tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(19.dp))
-        Spacer(Modifier.width(7.dp))
-        Text(dest.label, color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif)
+        if (dest != null) {
+            Icon(imageVector = dest.icon, contentDescription = dest.label, tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(19.dp))
+            Spacer(Modifier.width(7.dp))
+            Text(dest.label, color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif)
+        } else {
+            Icon(
+                imageVector = Icons.Default.KeyboardArrowUp,
+                contentDescription = "Expand navigation",
+                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                modifier = Modifier.size(19.dp)
+            )
+        }
     }
 }
 

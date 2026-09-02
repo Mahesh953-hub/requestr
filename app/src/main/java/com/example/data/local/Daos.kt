@@ -174,6 +174,13 @@ interface CapturedTrafficDao {
      * guard the row's body would be replaced by the shorter one while its size stayed large. Re-applying
      * the same write repeatedly is a no-op.
      *
+     * The 6 binary-body columns ([isRequestBodyBinary]/[isResponseBodyBinary]/[requestBodyBytes]/
+     * [responseBodyBytes]/[requestBodyBytesTruncated]/[responseBodyBytesTruncated], item 4 / gap B
+     * follow-up) are gated by the exact same `:requestSizeBytes >= requestSizeBytes` /
+     * `:responseSizeBytes >= responseSizeBytes` monotonic guard as [requestBody]/[responseBody] --
+     * they describe the same body those columns describe, so they must advance/hold in lockstep with
+     * it, never independently.
+     *
      * **Every column here only ever moves from less-known to more-known.** A response can decode before
      * its request HEADERS do (a capture that started mid-stream, or reordering), in which case the row
      * is first written with empty request metadata; this fills `method`/`url`/`host`/`path`/
@@ -195,6 +202,18 @@ interface CapturedTrafficDao {
             "  THEN :requestBody ELSE requestBody END, " +
             "responseBody = CASE WHEN :responseBody IS NOT NULL AND :responseSizeBytes >= responseSizeBytes " +
             "  THEN :responseBody ELSE responseBody END, " +
+            "isRequestBodyBinary = CASE WHEN :requestSizeBytes >= requestSizeBytes " +
+            "  THEN :isRequestBodyBinary ELSE isRequestBodyBinary END, " +
+            "isResponseBodyBinary = CASE WHEN :responseSizeBytes >= responseSizeBytes " +
+            "  THEN :isResponseBodyBinary ELSE isResponseBodyBinary END, " +
+            "requestBodyBytes = CASE WHEN :requestSizeBytes >= requestSizeBytes " +
+            "  THEN :requestBodyBytes ELSE requestBodyBytes END, " +
+            "responseBodyBytes = CASE WHEN :responseSizeBytes >= responseSizeBytes " +
+            "  THEN :responseBodyBytes ELSE responseBodyBytes END, " +
+            "requestBodyBytesTruncated = CASE WHEN :requestSizeBytes >= requestSizeBytes " +
+            "  THEN :requestBodyBytesTruncated ELSE requestBodyBytesTruncated END, " +
+            "responseBodyBytesTruncated = CASE WHEN :responseSizeBytes >= responseSizeBytes " +
+            "  THEN :responseBodyBytesTruncated ELSE responseBodyBytesTruncated END, " +
             "requestSizeBytes = MAX(requestSizeBytes, :requestSizeBytes), " +
             "responseSizeBytes = MAX(responseSizeBytes, :responseSizeBytes), " +
             "latencyMs = CASE WHEN :latencyMs > 0 THEN :latencyMs ELSE latencyMs END " +
@@ -216,6 +235,12 @@ interface CapturedTrafficDao {
         requestSizeBytes: Long,
         responseSizeBytes: Long,
         latencyMs: Long,
+        isRequestBodyBinary: Boolean = false,
+        isResponseBodyBinary: Boolean = false,
+        requestBodyBytes: ByteArray? = null,
+        responseBodyBytes: ByteArray? = null,
+        requestBodyBytesTruncated: Boolean = false,
+        responseBodyBytesTruncated: Boolean = false,
     )
 
     @Delete
@@ -340,6 +365,14 @@ interface FlowNodeDao {
     @Query("SELECT * FROM flow_nodes WHERE flowId = :flowId")
     suspend fun getAll(flowId: String = "default"): List<FlowNodeEntity>
 
+    /**
+     * Every node in every flow, not just one -- used by [com.example.data.export.WorkspaceExporter],
+     * which must export a user's whole multi-flow workspace, not only the "default" flow that
+     * [getAll]'s default argument scopes to.
+     */
+    @Query("SELECT * FROM flow_nodes ORDER BY flowId ASC, createdAt ASC")
+    suspend fun getAllAcrossFlows(): List<FlowNodeEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(node: FlowNodeEntity)
 
@@ -363,6 +396,10 @@ interface FlowConnectionDao {
 
     @Query("SELECT * FROM flow_connections WHERE flowId = :flowId")
     suspend fun getAll(flowId: String = "default"): List<FlowConnectionEntity>
+
+    /** Every connection in every flow -- same rationale as [FlowNodeDao.getAllAcrossFlows]. */
+    @Query("SELECT * FROM flow_connections ORDER BY flowId ASC, createdAt ASC")
+    suspend fun getAllAcrossFlows(): List<FlowConnectionEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(connection: FlowConnectionEntity)
@@ -714,16 +751,49 @@ interface CustomToolDao {
 @Dao
 interface ChatMessageDao {
 
+    // Kept for backward compatibility (ChatRepositoryRoomTest + pre-multi-conversation callers
+    // operate across every conversation at once); conversation-scoped queries below are additive.
     @Query("SELECT * FROM chat_messages ORDER BY timestamp ASC")
     fun observeAll(): Flow<List<ChatMessageEntity>>
 
     @Query("SELECT * FROM chat_messages ORDER BY timestamp ASC")
     suspend fun getAll(): List<ChatMessageEntity>
 
+    @Query("SELECT * FROM chat_messages WHERE conversationId = :conversationId ORDER BY timestamp ASC")
+    fun observeByConversation(conversationId: String): Flow<List<ChatMessageEntity>>
+
+    @Query("SELECT * FROM chat_messages WHERE conversationId = :conversationId ORDER BY timestamp ASC")
+    suspend fun getByConversation(conversationId: String): List<ChatMessageEntity>
+
+    @Query("SELECT COUNT(*) FROM chat_messages WHERE conversationId = :conversationId")
+    suspend fun countForConversation(conversationId: String): Int
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(message: ChatMessageEntity)
 
     @Query("DELETE FROM chat_messages WHERE id = :id")
+    suspend fun deleteById(id: String)
+
+    @Query("DELETE FROM chat_messages WHERE conversationId = :conversationId")
+    suspend fun deleteByConversation(conversationId: String)
+}
+
+@Dao
+interface ChatConversationDao {
+
+    @Query("SELECT * FROM chat_conversations ORDER BY updatedAt DESC")
+    fun observeAll(): Flow<List<ChatConversationEntity>>
+
+    @Query("SELECT * FROM chat_conversations ORDER BY updatedAt DESC")
+    suspend fun getAll(): List<ChatConversationEntity>
+
+    @Query("SELECT * FROM chat_conversations WHERE id = :id")
+    suspend fun getById(id: String): ChatConversationEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(conversation: ChatConversationEntity)
+
+    @Query("DELETE FROM chat_conversations WHERE id = :id")
     suspend fun deleteById(id: String)
 }
 
@@ -741,6 +811,59 @@ interface ChatProviderDao {
 
     @Query("DELETE FROM chat_providers WHERE id = :id")
     suspend fun deleteById(id: String)
+}
+
+/**
+ * Backs [com.example.data.repository.RecentActivityRepository] (v18). Every write is scoped by
+ * the composite (itemType, itemId) key, so a repeated open of the same item is a single-row
+ * update; [pruneOlderThanNewest] is what keeps the table bounded.
+ */
+@Dao
+interface RecentActivityDao {
+
+    @Query("SELECT * FROM recent_activity ORDER BY openedAt DESC LIMIT :limit")
+    fun observeRecent(limit: Int): Flow<List<RecentActivityEntity>>
+
+    @Query("SELECT * FROM recent_activity ORDER BY openedAt DESC")
+    suspend fun getAll(): List<RecentActivityEntity>
+
+    @Query("SELECT COUNT(*) FROM recent_activity")
+    suspend fun count(): Int
+
+    /** REPLACE on the composite key = "re-opening updates the existing row", never a duplicate. */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(entry: RecentActivityEntity)
+
+    /**
+     * Refreshes the rendered snapshot of an item that is already in the history (e.g. a note was
+     * re-saved under a new title) WITHOUT touching [RecentActivityEntity.openedAt] -- editing an
+     * item is not the same as opening it. No-op when the item was never opened.
+     */
+    @Query(
+        "UPDATE recent_activity SET subtype = :subtype, title = :title, preview = :preview " +
+            "WHERE itemType = :itemType AND itemId = :itemId"
+    )
+    suspend fun updateSnapshot(itemType: String, itemId: String, subtype: String, title: String, preview: String)
+
+    /**
+     * Deletes every row except the [keep] most recently opened. Keyed on SQLite's implicit
+     * `rowid` (this is an ordinary rowid table, not WITHOUT ROWID) so the delete is exact even
+     * when two rows share the same [RecentActivityEntity.openedAt] millisecond.
+     */
+    @Query(
+        "DELETE FROM recent_activity WHERE rowid NOT IN " +
+            "(SELECT rowid FROM recent_activity ORDER BY openedAt DESC LIMIT :keep)"
+    )
+    suspend fun pruneOlderThanNewest(keep: Int)
+
+    @Query("DELETE FROM recent_activity WHERE itemType = :itemType AND itemId = :itemId")
+    suspend fun delete(itemType: String, itemId: String)
+
+    @Query("DELETE FROM recent_activity WHERE itemType = :itemType")
+    suspend fun deleteAllOfType(itemType: String)
+
+    @Query("DELETE FROM recent_activity")
+    suspend fun clear()
 }
 
 // ═══════════════════════════════════════════════════════════════

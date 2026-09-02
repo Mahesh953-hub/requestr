@@ -4,8 +4,12 @@ import android.content.Context
 import android.util.Log
 import com.example.data.interception.CaptureMethod
 import com.example.data.interception.InterceptionStateRepository
+import com.example.data.interception.engineLifecycleOwner
+import com.example.data.interception.engineTier
+import com.example.data.local.CaptureRowMethod
 import com.example.data.local.ConnectAttemptEntity
 import com.example.data.local.RequestrDatabase
+import com.example.data.prefs.SettingsDataStore
 import com.example.interception.HttpProxyShared.copyToStream
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -13,6 +17,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.first
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
@@ -61,9 +66,14 @@ class HttpProxyEngine(
 
         InterceptionStateRepository.markActive(
             sessionId = sessionId.get(),
-            tier = com.example.data.interception.ActiveTier.VPN,
+            // Audit fix: this used to hardcode ActiveTier.VPN even though
+            // PreflightController.run() resolves ActiveTier.PROXY for HTTP_PROXY -- see
+            // CaptureMethod.engineTier()'s KDoc. Derived, not restated, so it cannot silently
+            // diverge from what PreflightController resolved for this same method again.
+            tier = CaptureMethod.HTTP_PROXY.engineTier(),
             port = serverSocket!!.localPort,
             method = CaptureMethod.HTTP_PROXY,
+            lifecycleOwner = CaptureMethod.HTTP_PROXY.engineLifecycleOwner(),
         )
 
         acceptJob = scope.launch {
@@ -116,6 +126,13 @@ class HttpProxyEngine(
 
                 val isConnect = method.equals("CONNECT", ignoreCase = true)
 
+                // §3 (C2) -- read fresh per connection. Disabled (NONE) by default, and also if
+                // appContext isn't set yet (shouldn't happen -- see the CONNECT branch's own
+                // null-check below), so this never blocks a connection on a missing context.
+                val networkCondition = appContext?.let {
+                    SettingsDataStore.get(it).networkCondition.first()
+                } ?: NetworkConditionInjector.NetworkCondition.NONE
+
                 if (isConnect) {
                     val (host, connectPort) = HttpProxyShared.parseHostPort(rawUrl, 443)
                     val ctx = appContext
@@ -143,7 +160,10 @@ class HttpProxyEngine(
                             "MITM not available in HTTP_PROXY tier"
                         } else null,
                     )
-                    HttpProxyShared.handleConnectAttempt(sock, rawUrl, disposition, output) { sentBytes, recvBytes ->
+                    HttpProxyShared.handleConnectAttempt(
+                        sock, rawUrl, disposition, output,
+                        networkCondition = networkCondition,
+                    ) { sentBytes, recvBytes ->
                         runCatching {
                             runBlocking {
                                 db.connectAttemptDao().insert(
@@ -165,31 +185,67 @@ class HttpProxyEngine(
                     }
                 } else {
                     val bodyLen = headers["Content-Length"]?.toIntOrNull() ?: 0
-                    val bodyBytes = if (bodyLen > 0) input.readNBytes(bodyLen) else ByteArray(0)
-                    val bodyStr = String(bodyBytes, Charsets.UTF_8)
+                    val bodyBytes = if (bodyLen > 0) HttpProxyShared.readExactBytes(input, bodyLen) else ByteArray(0)
 
                     // Forward to upstream
                     val t0 = System.currentTimeMillis()
-                    val (status, respHeaders, respBody) = HttpProxyShared.forwardRequest(rawUrl, method, headers, bodyStr)
+                    val (status, respHeaders, respBody) = HttpProxyShared.forwardRequest(
+                        rawUrl, method, headers, bodyBytes,
+                        networkCondition = networkCondition,
+                    )
                     val latency = System.currentTimeMillis() - t0
 
-                    // Send response back
-                    val responseLine = "$httpVersion $status OK\r\n"
-                    output.write(responseLine.toByteArray())
-                    respHeaders.forEach { (k, v) ->
-                        output.write("$k: $v\r\n".toByteArray())
-                    }
-                    output.write("\r\n".toByteArray())
-                    output.write(respBody.toByteArray())
-                    output.flush()
+                    HttpProxyShared.writeResponse(output, httpVersion, status, respHeaders, respBody)
 
                     packetCount.incrementAndGet()
                     InterceptionStateRepository.updateCounters(packetCount = packetCount.get().toInt())
                     Log.d(TAG, "$method $rawUrl → $status (${latency}ms)")
+
+                    // Item: the HTTP_PROXY tier's plain-HTTP relay forwarded and logged every
+                    // request (see the Log.d above and the packetCount increment) but never
+                    // persisted a CapturedTrafficEntity, so the Intercept traffic list stayed
+                    // permanently empty for this tier ("No HTTP transaction decoded yet.") even
+                    // though the relay itself worked -- GatewayEngine.persistTransaction is the
+                    // proven pattern for this exact same HttpProxyShared.forwardRequest shape;
+                    // mirrored here rather than duplicated ad hoc.
+                    runCatching {
+                        persistTransaction(rawUrl, method, status, latency, headers, respHeaders, bodyBytes, respBody)
+                    }.onFailure { Log.w(TAG, "Failed to persist HTTP proxy transaction: ${it.message}") }
                 }
             }
         } catch (e: Exception) {
             if (running.get()) Log.w(TAG, "Client handler error: ${e.message}")
         }
+    }
+
+    // internal (not private): gives HttpProxyEngine's tests a direct, no-socket-plumbing-required
+    // entry point. Entity construction is shared with GatewayEngine.persistTransaction via
+    // HttpProxyShared.capturedEntityFor so this on-device HTTP_PROXY tier and the T2 LAN-relay
+    // tier cannot drift apart on how they classify/store binary bodies.
+    internal suspend fun persistTransaction(
+        rawUrl: String,
+        method: String,
+        statusCode: Int?,
+        latencyMs: Long,
+        reqHeaders: Map<String, String>,
+        respHeaders: Map<String, String>,
+        reqBodyBytes: ByteArray,
+        respBodyBytes: ByteArray,
+    ) {
+        val ctx = appContext ?: return
+        val entity = HttpProxyShared.capturedEntityFor(
+            sessionId = sessionId.get(),
+            rawUrl = rawUrl,
+            method = method,
+            statusCode = statusCode,
+            latencyMs = latencyMs,
+            reqHeaders = reqHeaders,
+            respHeaders = respHeaders,
+            reqBodyBytes = reqBodyBytes,
+            respBodyBytes = respBodyBytes,
+            protocol = "http-proxy",
+            captureMethod = CaptureRowMethod.HTTP_PROXY,
+        )
+        RequestrDatabase.get(ctx).capturedTrafficDao().insert(entity)
     }
 }

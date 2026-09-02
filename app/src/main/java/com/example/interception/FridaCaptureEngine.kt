@@ -3,6 +3,7 @@ package com.example.interception
 import android.content.Context
 import android.util.Log
 import com.example.data.interception.ActiveTier
+import com.example.data.interception.CaptureLifecycleOwner
 import com.example.data.interception.CaptureMethod
 import com.example.data.interception.FridaState
 import com.example.data.interception.InterceptionStateRepository
@@ -55,9 +56,15 @@ class FridaCaptureEngine {
             activeProcess = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
 
             active = true
+            // Deliberately literal, not CaptureMethod.ROOT_FRIDA.engineTier()/
+            // .engineLifecycleOwner() -- ROOT_FRIDA has no single true tier/owner (see
+            // engineTier()'s KDoc): PreflightController.startCapture's ROOT_FRIDA branch starts
+            // RequestrVpnService as a fallback instead, but this standalone engine (never wired
+            // into PreflightController) genuinely owns its own lifecycle at ActiveTier.ROOT.
             InterceptionStateRepository.markActive(
                 sessionId = sessionId, tier = ActiveTier.ROOT,
                 port = 0, method = CaptureMethod.ROOT_FRIDA,
+                lifecycleOwner = CaptureLifecycleOwner.FRIDA_ENGINE,
             )
 
             // Background reader for Frida output

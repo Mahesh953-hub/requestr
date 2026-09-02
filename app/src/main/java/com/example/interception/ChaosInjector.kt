@@ -6,19 +6,20 @@ import kotlin.random.Random
  * Master plan §3 LOW-ADD — chaos/fault injection.
  *
  * Reference repos (`easy-api`, some `proxypin` rule types) let a rule randomly fail/delay/corrupt
- * traffic to exercise a client's error handling. This is deliberately **not** a new
- * [com.example.data.local.RuleAction] value (that enum is consumed by exhaustive `when` blocks in
- * `CaptureEngine.kt`/`CdpFetchAdapter.kt`/`MitmProxyEngine.kt`, all out of scope here) and not
- * wired into [RuleEnforcer] ([RuleEnforcer.kt] itself is also out of scope). Instead this is a
- * fully standalone, side-effect-free decision function: given a [ChaosConfig], [decide] returns
- * what a caller *should* do, and the caller (a future edit to `RuleEnforcer`/`MitmProxyEngine`)
- * is responsible for actually doing it (dropping the connection, sleeping, or corrupting bytes).
+ * traffic to exercise a client's error handling. This object is the pure, side-effect-free
+ * decision half: given a [ChaosConfig], [decide] returns what a caller *should* do, and
+ * [corrupt]/[corruptBytes] are the pure body transforms for the [ChaosOutcome.CorruptBody] case.
  *
- * Exact integration point once `RuleEnforcer.kt` is back in scope: add a `CHAOS` schema field to
- * `applyResponseModification`'s existing `{"statusCode",...,"bodyReplace"}` JSON config (e.g.
- * `"chaos": {"failRate": 0.1, "delayMs": [100, 3000], "corruptBodyRate": 0.05}`), parse it into a
- * [ChaosConfig], call [decide], and act on the returned [ChaosOutcome] right where the response
- * modification would otherwise be applied.
+ * Live wiring (the half that actually does it): a [com.example.data.local.RuleAction.CHAOS] rule's
+ * `replacementValue` (`{"failRate":0.1,"delayMs":[100,3000],"corruptBodyRate":0.05,...}`) is
+ * parsed by [RuleEnforcer.parseChaosConfig] and dispatched by
+ * [com.example.interception.MitmProxyEngine] on the TLS-MITM path in two legs --
+ * [RuleEnforcer.applyChaosToRequest] (fail: answer the client with a synthetic error and never
+ * dial upstream) before the upstream connection is opened, and [RuleEnforcer.applyChaosToResponse]
+ * (corrupt body / delay) on the real upstream response. Every injected outcome is stamped with
+ * [RuleEnforcer.CHAOS_ATTRIBUTION_HEADER] so the client and the captured row can tell it apart
+ * from a genuine server failure. The plain-TCP/tun path (`CaptureEngine`) and the CDP path
+ * (`CdpFetchAdapter`) do not run chaos -- see their respective CHAOS-branch comments.
  */
 object ChaosInjector {
 
@@ -76,5 +77,23 @@ object ChaosInjector {
             chars[idx] = ((chars[idx].code xor 0xFF) and 0x7F).toChar()
         }
         return String(chars)
+    }
+
+    /**
+     * Byte-level twin of [corrupt] for binary bodies (images, protobuf, anything
+     * [com.example.interception.http.ParsedHttpMessage.isBodyBinary]), where corrupting the lossy
+     * text rendering would replace the payload with garbage-of-the-placeholder instead of
+     * damaging the real bytes. Flips roughly 5% of bytes (at least one) in a copy; the input is
+     * never mutated. Empty input is returned as-is (a fresh empty array).
+     */
+    fun corruptBytes(body: ByteArray, random: Random = Random.Default): ByteArray {
+        if (body.isEmpty()) return ByteArray(0)
+        val out = body.copyOf()
+        val flips = (out.size / 20).coerceAtLeast(1)
+        repeat(flips) {
+            val idx = random.nextInt(out.size)
+            out[idx] = (out[idx].toInt() xor 0xFF).toByte()
+        }
+        return out
     }
 }

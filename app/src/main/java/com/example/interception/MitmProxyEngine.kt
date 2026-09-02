@@ -3,9 +3,11 @@ package com.example.interception
 import android.content.Context
 import android.net.ConnectivityManager
 import android.util.Log
-import com.example.data.interception.ActiveTier
+import com.example.data.interception.engineLifecycleOwner
+import com.example.data.interception.engineTier
 import com.example.data.interception.CaptureMethod
 import com.example.data.interception.InterceptionStateRepository
+import com.example.data.local.CaptureRowMethod
 import com.example.data.local.CapturedTrafficEntity
 import com.example.data.local.ConnectAttemptEntity
 import com.example.data.local.RequestrDatabase
@@ -15,6 +17,7 @@ import com.example.data.prefs.SettingsDataStore
 import com.example.interception.grpc.GrpcDetector
 import com.example.interception.grpc.ProtobufDecoder
 import com.example.interception.http.GrpcEvent
+import com.example.interception.http.HttpBodyDecoder
 import com.example.interception.http.Http2Parser
 import com.example.interception.http.Http2Session
 import com.example.interception.http.HttpParser
@@ -83,6 +86,11 @@ import javax.net.ssl.SSLSocket
  * request/response pair via [onDecryptedTransaction]. Non-HTTP/1.x traffic
  * (HTTP/2 preface, WebSocket frames after upgrade, ...) falls back to a blind
  * relay for the remainder of that connection so it is never broken.
+ *
+ * Item 1: [emitTransaction]/[emitWsFrame]/[emitGrpcMessage] are only ever reached via the
+ * `FORCE_MITM` disposition above (`AllowOpaque`/`Redirect`/`Block` never decrypt, so they never
+ * emit a [CapturedTrafficEntity] at all) -- every row this class persists is genuinely
+ * `captureMethod = CaptureRowMethod.MITM_PROXY`, unconditionally.
  */
 class MitmProxyEngine(
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
@@ -100,6 +108,26 @@ class MitmProxyEngine(
      * that prevents startHandshake() on a socket that already exchanged plain HTTP data.
      */
     private val sslContextProvider: String? = null,
+    /**
+     * C12: gates `FORCE_MITM` on requestr's CA actually being trusted client-side -- see
+     * [CaTrustGate]'s KDoc and the `ForceMitm` branch of [handleClient]. Exposed as a
+     * constructor param (rather than a hardcoded `CaTrustGate()`) purely as a test seam, so
+     * tests can inject a fake/deterministic probe instead of touching the real KeyStore.
+     */
+    private val caTrustGate: CaTrustGate = CaTrustGate(),
+    /**
+     * RNG every [RuleAction.CHAOS] roll ([RuleEnforcer.applyChaosToRequest] /
+     * [RuleEnforcer.applyChaosToResponse]) draws from. Test seam only -- production uses the
+     * default so a `failRate` of 0.1 really is a 10% chance per matched exchange.
+     */
+    private val chaosRandom: kotlin.random.Random = kotlin.random.Random.Default,
+    /**
+     * How a [RuleEnforcer.ChaosApplyResult.Delay] is served. Production sleeps the calling
+     * server→client relay thread (only that one connection stalls; the sleep happens OUTSIDE the
+     * per-connection `clientWriteLock`); tests inject a recorder so a `[5000, 5000]` delay rule
+     * can be asserted without actually waiting five seconds.
+     */
+    private val chaosSleep: (Long) -> Unit = { millis -> Thread.sleep(millis) },
 ) {
     private var serverSocket: ServerSocket? = null
     private var acceptJob: Job? = null
@@ -137,8 +165,9 @@ class MitmProxyEngine(
         running.set(true)
 
         InterceptionStateRepository.markActive(
-            sessionId = sessionId.get(), tier = ActiveTier.PROXY,
+            sessionId = sessionId.get(), tier = CaptureMethod.MITM_PROXY.engineTier(),
             port = serverSocket!!.localPort, method = CaptureMethod.MITM_PROXY,
+            lifecycleOwner = CaptureMethod.MITM_PROXY.engineLifecycleOwner(),
         )
 
         acceptJob = scope.launch {
@@ -186,6 +215,10 @@ class MitmProxyEngine(
 
             val db = RequestrDatabase.get(context)
             val disposition = ConnectControl.evaluate(db, host, port)
+            // §3 (C2) -- read fresh per CONNECT for the non-MITM (opaque tunnel) paths below.
+            // The MITM path re-reads this itself just before dialing upstream (see
+            // `networkCondition` a few lines further down, passed into LazyUpstreamConnection).
+            val opaqueNetworkCondition = SettingsDataStore.get(context).networkCondition.first()
 
             when (disposition) {
                 is ConnectControl.Disposition.Block -> {
@@ -201,6 +234,7 @@ class MitmProxyEngine(
                     // HttpProxyShared.handleConnectAttempt writes the 200 response itself.
                     HttpProxyShared.handleConnectAttempt(
                         client, disposition.target, ConnectControl.Disposition.AllowOpaque, output,
+                        networkCondition = opaqueNetworkCondition,
                     ) { sent, recv ->
                         persistConnectAttempt(
                             context, client, db, host, port, "REDIRECTED",
@@ -215,6 +249,7 @@ class MitmProxyEngine(
                     // HttpProxyShared.handleConnectAttempt writes the 200 response itself.
                     HttpProxyShared.handleConnectAttempt(
                         client, target, ConnectControl.Disposition.AllowOpaque, output,
+                        networkCondition = opaqueNetworkCondition,
                     ) { sent, recv ->
                         persistConnectAttempt(
                             context, client, db, host, port, "ALLOWED_OPAQUE",
@@ -224,6 +259,32 @@ class MitmProxyEngine(
                     return
                 }
                 is ConnectControl.Disposition.ForceMitm -> {
+                    // C12: a FORCE_MITM rule matching is necessary but not sufficient -- if
+                    // requestr's own CA isn't trusted client-side (never installed, or removed
+                    // since), terminating TLS with our per-host leaf would just break the
+                    // client-facing handshake outright. Degrade to the same opaque relay path
+                    // AllowOpaque uses, with a descriptive failureReason, rather than failing
+                    // silently or ignoring the rule without explanation.
+                    if (shouldDegradeForUntrustedCa(disposition, caTrustGate.isTrusted())) {
+                        Log.i(
+                            TAG,
+                            "FORCE_MITM rule matched for $host but requestr's CA is not trusted " +
+                                "client-side -- degrading to raw relay",
+                        )
+                        HttpProxyShared.handleConnectAttempt(
+                            client, target, ConnectControl.Disposition.AllowOpaque, output,
+                            networkCondition = opaqueNetworkCondition,
+                        ) { sent, recv ->
+                            persistConnectAttempt(
+                                context, client, db, host, port, "ALLOWED_OPAQUE",
+                                failureReason = "FORCE_MITM rule matched, but requestr's CA is not trusted " +
+                                    "on this device (install it in Settings to enable MITM decryption for " +
+                                    "this host) -- degraded to raw relay",
+                                bytesToUpstream = sent, bytesToClient = recv,
+                            )
+                        }
+                        return
+                    }
                     // Fall through to the existing MITM path below.
                 }
             }
@@ -235,7 +296,17 @@ class MitmProxyEngine(
             // Get or create per-host certificate. ExpiringLruCertCache.getOrCompute (§3) keeps
             // the same "generate at most once per host, even under concurrent callers" semantics
             // the old computeIfAbsent call site relied on, plus a 200-entry LRU cap + TTL.
-            val (cert, keyPair) = certCache.getOrCompute(host) { h -> generateHostCert(context, h) }
+            // §1.10: remote-cert mirroring is a discrete opt-in (default OFF) read fresh per
+            // CONNECT -- see SettingsDataStore.remoteCertMirrorEnabled's KDoc for why this isn't
+            // unconditional (it means an extra real upstream probe on every first-seen
+            // FORCE_MITM host, which a user who leaves the toggle off never pays for).
+            val mirrorEnabled = SettingsDataStore.get(context).remoteCertMirrorEnabled.first()
+            // §3 (C2) -- read fresh per CONNECT, same convention as mirrorEnabled above. Disabled
+            // (all-zero/no-op) by default, so a user who never touches this setting pays nothing.
+            val networkCondition = SettingsDataStore.get(context).networkCondition.first()
+            val (cert, keyPair) = certCache.getOrCompute(host) { h ->
+                generateHostCertOrMirror(context, h, mirrorEnabled)
+            }
 
             // Real JA3 (M6): peek the raw ClientHello record directly off the accepted socket
             // BEFORE handing it to JSSE -- by the time startHandshake() below returns, JSSE has
@@ -305,6 +376,7 @@ class MitmProxyEngine(
             val upstream = LazyUpstreamConnection(
                 host, port,
                 preferredAlpnProtocols = negotiatedAlpn?.let { listOf(it) } ?: emptyList(),
+                networkCondition = networkCondition,
             ) { connected ->
                 // W5: the MITM proxy terminates TLS itself, so tlsSessionId/connectionId have
                 // historically been keyed as "$host:$port" -- a real key, but a different
@@ -478,8 +550,12 @@ class MitmProxyEngine(
      * for WebSocket traffic (§5). [clientAssembler]/[serverAssembler] reassemble fragmented
      * messages (RFC 6455 §5.4) independently per direction, matching the per-direction
      * [Http2Parser.HpackDecoder] convention used for HTTP/2.
+     *
+     * `internal` (not `private`): [handleParsedResponse] takes this as a parameter and is
+     * itself `internal` for testability (security audit fix, MUST-FIX 2) -- a `private` type
+     * can't appear in an `internal` function's signature.
      */
-    private class ConnectionProtocolState {
+    internal class ConnectionProtocolState {
         val webSocketMode = AtomicBoolean(false)
         @Volatile var wsUrl: String = ""
         val clientAssembler = WsMessageAssembler()
@@ -871,6 +947,26 @@ class MitmProxyEngine(
                 // forward tail, since this path never forwards anything upstream.
                 return
             }
+            RuleAction.CHAOS -> {
+                // Master plan §3 LOW-ADD: the `failRate` die is rolled HERE, before upstream is
+                // ever dialed, so an injected failure really behaves like an unreachable server
+                // -- the request never reaches the backend (no real side effect), the client gets
+                // the synthetic 503 (or the rule's failStatusCode), and the exchange is still
+                // persisted (0ms, stamped x-requestr-chaos) so it is not invisible in the list.
+                // Same short-circuit shape as BLOCK / MOCK_RESPONSE above. The corrupt/delay dice
+                // are rolled on the real response in handleParsedResponse.
+                val chaos = rule?.let { RuleEnforcer.applyChaosToRequest(it, chaosRandom) }
+                if (chaos is RuleEnforcer.ChaosApplyResult.Fail) {
+                    synchronized(clientWriteLock) {
+                        clientOut.write(serializeResponse(chaos.failureResponse))
+                        clientOut.flush()
+                    }
+                    Log.i(TAG, "CHAOS fail (decrypted): ${request.method?.name} ${request.url.take(80)} -> ${chaos.failureResponse.statusCode}")
+                    emitTransaction(request, chaos.failureResponse, 0L, "$host:$port", logRequests, logResponses)
+                    return
+                }
+                raw
+            }
             RuleAction.REDIRECT -> {
                 if (rule?.replacementValue?.isNotBlank() == true) {
                     request.url = rule.replacementValue!!
@@ -886,7 +982,41 @@ class MitmProxyEngine(
                 serializeRequest(request)
             }
             RuleAction.SCRIPT_REWRITE -> {
-                RuleEnforcer.applyScriptRewrite(request, rule?.replacementValue)
+                val scriptError = RuleEnforcer.applyScriptRewrite(request, rule?.replacementValue)
+                val bytes = serializeRequest(request)
+                if (scriptError != null && rule != null) {
+                    // Added AFTER serialization on purpose: this diagnostic must reach the
+                    // persisted row (emitTransaction keeps x-requestr-* request headers even with
+                    // request logging off) but must never be sent to the origin server.
+                    request.headers = request.headers +
+                        (RuleEnforcer.SCRIPT_ERROR_HEADER to RuleEnforcer.scriptErrorHeaderValue(scriptError, rule.name))
+                }
+                bytes
+            }
+            RuleAction.BODY_ENCRYPT_AES, RuleAction.BODY_DECRYPT_AES -> {
+                val cryptoResult = rule?.let {
+                    RuleEnforcer.applyBodyCrypto(request, it, encrypt = it.action == RuleAction.BODY_ENCRYPT_AES)
+                }
+                if (cryptoResult is RuleEnforcer.CryptoApplyResult.Failed) {
+                    // Security audit fix (fail-open AES crypto): never forward the
+                    // untransformed request -- for BODY_ENCRYPT_AES that would be exactly the
+                    // plaintext the rule was supposed to encrypt. Same short-circuit shape as
+                    // BLOCK above: the real request never reaches upstream, and the client (and
+                    // the captured-traffic UI) see a visibly-failed transaction rather than one
+                    // that looks like it succeeded.
+                    val failureResponse = RuleEnforcer.buildCryptoFailureResponse(
+                        ruleName = rule!!.name,
+                        encrypt = rule.action == RuleAction.BODY_ENCRYPT_AES,
+                        reason = cryptoResult.reason,
+                    )
+                    synchronized(clientWriteLock) {
+                        clientOut.write(serializeResponse(failureResponse))
+                        clientOut.flush()
+                    }
+                    Log.w(TAG, "BLOCKED (crypto failure): ${request.method?.name} ${request.url.take(80)}")
+                    emitTransaction(request, failureResponse, 0L, "$host:$port", logRequests, logResponses)
+                    return
+                }
                 serializeRequest(request)
             }
             else -> raw // LOG_ONLY / response-only actions — forward the exact original bytes
@@ -903,7 +1033,13 @@ class MitmProxyEngine(
         upstreamOut.flush()
     }
 
-    private fun handleParsedResponse(
+    /**
+     * `internal` (not `private`), same rationale as [handleParsedRequest]/[emitTransaction]:
+     * asserting the BODY_ENCRYPT_AES/BODY_DECRYPT_AES fail-closed contract (security audit fix)
+     * needs direct access to drive a synthesized response through this function with fake
+     * streams, without standing up a real TLS/socket pair end-to-end.
+     */
+    internal fun handleParsedResponse(
         db: RequestrDatabase,
         response: ParsedHttpMessage,
         raw: ByteArray,
@@ -929,31 +1065,79 @@ class MitmProxyEngine(
         val pair = pending.poll()
         val request = pair?.first
         var out = raw
+        // Security audit fix (fail-open AES crypto): what actually gets persisted/shown in the
+        // UI for this transaction. Defaults to the real [response]; overridden below to a
+        // synthetic failure response when a BODY_ENCRYPT_AES/BODY_DECRYPT_AES rule fails, so the
+        // client and the captured-traffic list both see a visibly-failed transaction rather than
+        // the untransformed body forwarded as if it had succeeded.
+        var responseToEmit = response
+        // Master plan §3 LOW-ADD (CHAOS delay): served AFTER the rule block and BEFORE taking
+        // clientWriteLock, so only this connection's server→client relay thread stalls and the
+        // client-observed latency persisted below honestly includes the injected delay.
+        var chaosDelayMs = 0L
         if (request != null) {
             val rule = RuleEnforcer.getMatchingRule(db, request.url, request.host)
-            if (rule?.action == RuleAction.MODIFY_RESPONSE) {
+            if (rule?.action == RuleAction.CHAOS) {
+                when (val chaos = RuleEnforcer.applyChaosToResponse(response, rule, chaosRandom)) {
+                    is RuleEnforcer.ChaosApplyResult.Applied -> {
+                        Log.i(TAG, "CHAOS corrupt-body (decrypted): ${request.method?.name} ${request.url.take(80)}")
+                        out = serializeResponse(response)
+                    }
+                    is RuleEnforcer.ChaosApplyResult.Delay -> {
+                        Log.i(TAG, "CHAOS delay ${chaos.millis}ms (decrypted): ${request.method?.name} ${request.url.take(80)}")
+                        chaosDelayMs = chaos.millis
+                        out = serializeResponse(response) // carries the x-requestr-chaos header
+                    }
+                    // Fail is only ever produced on the request leg; PassThrough forwards raw.
+                    is RuleEnforcer.ChaosApplyResult.Fail, RuleEnforcer.ChaosApplyResult.PassThrough -> Unit
+                }
+            } else if (rule?.action == RuleAction.MODIFY_RESPONSE) {
                 rule.replacementValue?.let { RuleEnforcer.applyResponseModification(response, it) }
                 out = serializeResponse(response)
             } else if (rule?.action == RuleAction.SCRIPT_REWRITE) {
-                RuleEnforcer.applyScriptRewrite(response, rule.replacementValue)
+                val scriptError = RuleEnforcer.applyScriptRewrite(response, rule.replacementValue)
+                if (scriptError != null) {
+                    // On the wire AND persisted: the client under test can see the rewrite did
+                    // not happen, and the traffic list badges the row instead of logcat-only.
+                    response.headers = response.headers +
+                        (RuleEnforcer.SCRIPT_ERROR_HEADER to RuleEnforcer.scriptErrorHeaderValue(scriptError, rule.name))
+                }
                 out = serializeResponse(response)
+            } else if (rule?.action == RuleAction.BODY_ENCRYPT_AES || rule?.action == RuleAction.BODY_DECRYPT_AES) {
+                val cryptoResult = RuleEnforcer.applyBodyCrypto(response, rule, encrypt = rule.action == RuleAction.BODY_ENCRYPT_AES)
+                if (cryptoResult is RuleEnforcer.CryptoApplyResult.Failed) {
+                    // The real request already went out and a real response came back -- that
+                    // round trip cannot be undone. What can still be stopped is forwarding the
+                    // untransformed response body to the client: for BODY_DECRYPT_AES that would
+                    // be the raw ciphertext the rule was supposed to decrypt, silently passed
+                    // through looking like a normal successful response.
+                    responseToEmit = RuleEnforcer.buildCryptoFailureResponse(
+                        ruleName = rule.name,
+                        encrypt = rule.action == RuleAction.BODY_ENCRYPT_AES,
+                        reason = cryptoResult.reason,
+                    )
+                    out = serializeResponse(responseToEmit)
+                } else {
+                    out = serializeResponse(response)
+                }
             }
         }
+        if (chaosDelayMs > 0L) chaosSleep(chaosDelayMs)
         synchronized(clientWriteLock) {
             clientOut.write(out)
             clientOut.flush()
         }
         if (request != null) {
             val latencyMs = System.currentTimeMillis() - pair!!.second
-            emitTransaction(request, response, latencyMs, "$host:$port", logRequests, logResponses)
+            emitTransaction(request, responseToEmit, latencyMs, "$host:$port", logRequests, logResponses)
             // §4/§5: a successful WebSocket upgrade handshake is terminal for HTTP/1.x framing
             // on this connection -- everything from here on is WS frames, in both directions.
             // Switching modes here (rather than, say, only in inspectClientToServer) means both
             // relay threads see the flip at the same logical point: right after the 101 that
             // caused it, before either side's next read.
-            if (response.statusCode == 101 &&
+            if (responseToEmit.statusCode == 101 &&
                 WebSocketParser.looksLikeUpgrade(request.headers, true) &&
-                WebSocketParser.looksLikeUpgrade(response.headers, false)
+                WebSocketParser.looksLikeUpgrade(responseToEmit.headers, false)
             ) {
                 wsState.wsUrl = buildWsUrl(request.url)
                 wsState.webSocketMode.set(true)
@@ -979,6 +1163,11 @@ class MitmProxyEngine(
         logRequests: Boolean,
         logResponses: Boolean,
     ) {
+        // Binary-body persistence (image gallery / hex viewer support): [HttpBodyDecoder.forStorage]
+        // is the single source of truth for what to write to the *BodyBytes/isXBodyBinary/
+        // XBodyBytesTruncated columns -- see that function's doc for the three-state contract.
+        val reqStorage = HttpBodyDecoder.forStorage(request)
+        val respStorage = HttpBodyDecoder.forStorage(response)
         val entity = CapturedTrafficEntity(
             sessionId = sessionId.get(),
             method = (request.method ?: HttpMethod.GET).name,
@@ -987,12 +1176,28 @@ class MitmProxyEngine(
             path = request.path,
             statusCode = if (response.statusCode == 0) null else response.statusCode,
             protocol = response.version.ifEmpty { request.version },
-            requestHeaders = if (logRequests) request.headers else emptyMap(),
-            responseHeaders = if (logResponses) response.headers else emptyMap(),
-            requestBody = if (logRequests) request.body.ifEmpty { null } else null,
-            responseBody = if (logResponses) response.body.ifEmpty { null } else null,
-            requestSizeBytes = request.body.toByteArray(Charsets.UTF_8).size.toLong(),
-            responseSizeBytes = response.body.toByteArray(Charsets.UTF_8).size.toLong(),
+            // requestr's own metadata about what IT did to this exchange is kept even when header
+            // logging is off, so the CHAOS / SCRIPT ERROR / crypto-failed badges never silently
+            // disappear with that toggle. Matched against the closed
+            // RuleEnforcer.METADATA_HEADER_KEYS allow-list rather than an `x-requestr-` prefix: a
+            // prefix match would also retain a header the client app under test happened to send
+            // with that prefix, and client content is precisely what the toggle suppresses.
+            requestHeaders = if (logRequests) request.headers
+            else request.headers.filterKeys { it in RuleEnforcer.METADATA_HEADER_KEYS },
+            responseHeaders = if (logResponses) response.headers
+            else response.headers.filterKeys { it in RuleEnforcer.METADATA_HEADER_KEYS },
+            // storage.text (not message.body): for a bodyReplaced message the text column must
+            // hold what was actually sent -- see HttpBodyDecoder.BinaryBodyStorage's contract.
+            requestBody = if (logRequests) reqStorage.text.ifEmpty { null } else null,
+            responseBody = if (logResponses) respStorage.text.ifEmpty { null } else null,
+            requestSizeBytes = reqStorage.trueSizeBytes,
+            responseSizeBytes = respStorage.trueSizeBytes,
+            isRequestBodyBinary = logRequests && reqStorage.isBinary,
+            isResponseBodyBinary = logResponses && respStorage.isBinary,
+            requestBodyBytes = if (logRequests) reqStorage.bytes else null,
+            responseBodyBytes = if (logResponses) respStorage.bytes else null,
+            requestBodyBytesTruncated = logRequests && reqStorage.truncated,
+            responseBodyBytesTruncated = logResponses && respStorage.truncated,
             latencyMs = latencyMs,
             timestamp = System.currentTimeMillis(),
             wasDecrypted = true,
@@ -1002,6 +1207,10 @@ class MitmProxyEngine(
             // the CONNECT target, so this is the exact identity ConnectionLineage.findTlsFor's
             // two-step lookup already handles.
             connectionId = connectionId,
+            // Item 1: handleClient only ever reaches this call after terminating TLS itself via
+            // MITM (see the class-level MITM_PROXY note below) -- every row here is genuinely
+            // MITM_PROXY-tier.
+            captureMethod = CaptureRowMethod.MITM_PROXY,
         )
         deliverEntity(entity)
     }
@@ -1039,6 +1248,8 @@ class MitmProxyEngine(
             timestamp = System.currentTimeMillis(),
             wasDecrypted = true,
             connectionId = "$host:$port",
+            // Item 1: see the class-level MITM_PROXY note below.
+            captureMethod = CaptureRowMethod.MITM_PROXY,
         )
         deliverEntity(entity)
     }
@@ -1088,6 +1299,8 @@ class MitmProxyEngine(
             timestamp = System.currentTimeMillis(),
             wasDecrypted = true,
             connectionId = "$host:$port",
+            // Item 1: see the class-level MITM_PROXY note below.
+            captureMethod = CaptureRowMethod.MITM_PROXY,
         )
         deliverEntity(entity)
     }
@@ -1185,7 +1398,10 @@ class MitmProxyEngine(
     private fun bodyBytesFor(msg: ParsedHttpMessage, headers: MutableMap<String, String>): ByteArray {
         return if (msg.bodyReplaced) {
             headers.remove("Content-Encoding")
-            msg.body.toByteArray(Charsets.UTF_8)
+            // §2.14(b)/§6: prefer the byte-exact replacement when one was set (binary fixture
+            // files, RequestCryptoManager ciphertext, ...) -- re-encoding msg.body as UTF-8
+            // would corrupt anything that isn't representable as text.
+            msg.replacedBodyBytes ?: msg.body.toByteArray(Charsets.UTF_8)
         } else {
             msg.rawBodyBytes ?: msg.body.toByteArray(Charsets.UTF_8)
         }
@@ -1206,6 +1422,28 @@ class MitmProxyEngine(
     }
 
     // ── Per-host cert generation ────────────────────────────────────────
+
+    /**
+     * §1.10: when remote-cert mirroring is enabled, tries [CertificateAuthority.issueMirroredLeaf]
+     * first (an independent direct probe of the real host, subject/SANs/validity copied into our
+     * self-signed leaf) and falls back to the plain [generateHostCert] leaf whenever mirroring
+     * fails for any reason (unreachable host, handshake failure, timeout -- issueMirroredLeaf
+     * never throws, only returns null). When mirroring is disabled (the default), this is
+     * exactly the pre-existing [generateHostCert] behaviour with zero extra I/O.
+     */
+    internal fun generateHostCertOrMirror(
+        context: Context,
+        host: String,
+        mirrorEnabled: Boolean,
+    ): Pair<X509Certificate, KeyPair> {
+        if (mirrorEnabled) {
+            val mirrored = kotlinx.coroutines.runBlocking {
+                CertificateAuthority.issueMirroredLeaf(context, host)
+            }
+            if (mirrored != null) return mirrored
+        }
+        return generateHostCert(context, host)
+    }
 
     private fun generateHostCert(context: Context, host: String): Pair<X509Certificate, KeyPair> {
         val ca = kotlinx.coroutines.runBlocking { CertificateAuthority.getOrCreate(context) }

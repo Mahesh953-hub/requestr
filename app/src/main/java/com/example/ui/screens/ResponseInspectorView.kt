@@ -4,7 +4,6 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
@@ -83,6 +82,8 @@ import com.example.ui.components.StatusCodeBadge
 import com.example.ui.components.rememberAppHapticFeedback
 import kotlinx.coroutines.launch
 import java.util.Locale
+import com.example.ui.theme.animateStateColor
+import com.example.ui.theme.scaledTween
 
 // ====================================================================
 // COOKIE DATA MODEL & PARSER
@@ -555,12 +556,20 @@ fun RichResponseInspector(
             tabs.forEachIndexed { idx, (title, badge) ->
                 val isSelected = selectedTab == idx
                 val targetShape = if (isSelected) RoundedCornerShape(24.dp) else RoundedCornerShape(12.dp)
-                val bgColor by animateColorAsState(
-                    targetValue = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                // Selection animates; the theme does not. Both endpoints are theme tokens, so
+                // animating the colour itself made every tab cross-fade on a theme swap.
+                val bgColor by animateStateColor(
+                    active = isSelected,
+                    activeColor = MaterialTheme.colorScheme.primary,
+                    inactiveColor = MaterialTheme.colorScheme.surfaceVariant,
+                    animationSpec = scaledTween(200),
                     label = "tabBg"
                 )
-                val contentColor by animateColorAsState(
-                    targetValue = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                val contentColor by animateStateColor(
+                    active = isSelected,
+                    activeColor = MaterialTheme.colorScheme.onPrimary,
+                    inactiveColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    animationSpec = scaledTween(200),
                     label = "tabContent"
                 )
 

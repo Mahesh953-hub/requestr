@@ -178,4 +178,29 @@ class RuleEnforcerScriptRewriteTest {
         assertEquals("original", req.body)
         assertFalse(req.bodyReplaced)
     }
+
+    @Test
+    fun `a throwing script returns its error text so the engine can surface it -- a clean run returns null`() {
+        val error = RuleEnforcer.applyScriptRewrite(request(), config("throw new Error('boom');"))
+            ?: throw AssertionError("a throwing script must report its error")
+        assertTrue(error, error.contains("boom"))
+        assertEquals(null, RuleEnforcer.applyScriptRewrite(request(), config("pm.request.body = 'x';")))
+        assertEquals(null, RuleEnforcer.applyScriptRewrite(request(), null))
+        assertEquals(null, RuleEnforcer.applyScriptRewrite(request(), """{"script":""}"""))
+    }
+
+    @Test
+    fun `a malformed config is reported, not swallowed`() {
+        val error = RuleEnforcer.applyScriptRewrite(request(), "{not valid json")
+            ?: throw AssertionError("malformed config must be reported")
+        assertTrue(error, error.startsWith("invalid SCRIPT_REWRITE config"))
+    }
+
+    @Test
+    fun `scriptErrorHeaderValue folds newlines and appends the rule name`() {
+        assertEquals(
+            "ReferenceError: x is not defined at line 2; rule=\"js\"",
+            RuleEnforcer.scriptErrorHeaderValue("ReferenceError: x is not defined\r\nat line 2\n", "js"),
+        )
+    }
 }

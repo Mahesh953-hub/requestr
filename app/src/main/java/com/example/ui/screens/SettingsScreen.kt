@@ -2,10 +2,8 @@ package com.example.ui.screens
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,19 +15,23 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
@@ -37,7 +39,10 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Tune
@@ -49,12 +54,14 @@ import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material.icons.outlined.DarkMode
 import androidx.compose.material.icons.outlined.SettingsBrightness
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -64,7 +71,9 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -75,9 +84,18 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.BlurredEdgeTreatment
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -86,12 +104,19 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import android.content.Intent
 import com.example.data.interception.CaptureLogRepository
+import com.example.data.models.AppPackageItem
 import com.example.data.repository.SettingsRepository
+import com.example.data.repository.AppUtils
+import com.example.data.repository.P12ImportErrorClassifier
+import com.example.data.repository.P12ImportFailureKind
+import com.example.data.repository.TrafficInterceptorRepository
 import com.example.data.interception.CaState
 import com.example.data.interception.FridaState
 import com.example.data.interception.InterceptionStateRepository
@@ -99,15 +124,29 @@ import com.example.data.interception.RootState
 import com.example.data.interception.ShizukuState
 import com.example.interception.CapabilityProbe
 import com.example.interception.CertificateAuthority
+import com.example.interception.CaP12Exchange
+import com.example.interception.TargetAppDatabaseBrowser
+import com.example.interception.isSafeSqlIdentifier
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.example.ui.components.BadgePill
+import com.example.ui.components.DriveParallaxFrom
 import com.example.ui.components.CdpCard
 import com.example.ui.components.GlassCard
 import com.example.ui.components.RequestrWordmark
 import com.example.ui.components.RuntimeInstrumentationCard
 import com.example.ui.components.SectionHeader
+import com.example.ui.components.ConfirmActionDialog
+import com.example.ui.components.DynamicGlassSwitch
+import com.example.ui.components.RequestrSegmentedTabs
+import com.example.data.models.UserSettingsState
 import com.example.ui.theme.AppAccent
 import com.example.ui.theme.AppThemeMode
+import com.example.ui.theme.GlassStyleOption
+import com.example.ui.theme.GlassStyles
+import com.example.ui.theme.GlassTuneRanges
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
@@ -155,7 +194,48 @@ fun SettingsScreen(
         }
     }
 
+    // `.p12` CA import (master plan §3 LOW-ADD): CaP12Exchange.importP12 is complete and
+    // unit-tested (CaP12ExchangeTest) but had no UI counterpart to the existing .p12 export
+    // button. This launcher only reads the picked file's bytes; the password prompt (rendered
+    // next to the CA export row, below) drives the actual import via CaP12Exchange.
+    var p12ImportPendingBytes by remember { mutableStateOf<ByteArray?>(null) }
+    var p12ImportPendingFileName by remember { mutableStateOf<String?>(null) }
+    var p12ImportPickError by remember { mutableStateOf<String?>(null) }
+    val p12ImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri == null) {
+            // User backed out of the picker — a real, distinct state, not a crash or a silent no-op.
+            p12ImportPickError = "No file selected — the picker was cancelled."
+            return@rememberLauncherForActivityResult
+        }
+        val bytes = runCatching {
+            settingsContext.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        }.getOrNull()
+        if (bytes == null || bytes.isEmpty()) {
+            p12ImportPickError = "Could not read the selected file — it may be unreadable or empty."
+            p12ImportPendingBytes = null
+            return@rememberLauncherForActivityResult
+        }
+        p12ImportPickError = null
+        p12ImportPendingBytes = bytes
+        p12ImportPendingFileName = runCatching {
+            settingsContext.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                val nameIdx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (nameIdx >= 0 && cursor.moveToFirst()) cursor.getString(nameIdx) else null
+            }
+        }.getOrNull() ?: uri.lastPathSegment
+    }
+
     val capabilities by InterceptionStateRepository.capabilities.collectAsState()
+
+    // VPN app picker observability (master plan §3 LOW-ADD, C8) — mirrors the same
+    // repository-level filter state InterceptScreen.kt's picker reads, so this screen's toggle
+    // and counts stay in sync with whatever that screen last loaded (and vice versa).
+    val appPickerInternetOnly by TrafficInterceptorRepository.internetOnlyFilterEnabled.collectAsState()
+    val appPickerTotal by TrafficInterceptorRepository.totalInstalledAppCount.collectAsState()
+    val appPickerFilteredOut by TrafficInterceptorRepository.filteredOutAppCount.collectAsState()
+    val appPickerApps by TrafficInterceptorRepository.installedApps.collectAsState()
     // B9: the port editable here MUST be the same value PreflightController/InterceptScreen
     // actually read (SettingsDataStore), not the separate, unconsumed SettingsRepository copy
     // that previously made this field a no-op on the real capture engine.
@@ -170,10 +250,25 @@ fun SettingsScreen(
         initial = com.example.data.prefs.CaptureTierPreference.AUTO
     )
     val rememberLastAppFilter by interceptionDataStore.rememberLastAppFilter.collectAsState(initial = true)
+    // §3 (C2) — weak-network simulation. Collected from the Flow (not a local-only toggle) so
+    // this reflects process death and any external change; the three text inputs below are
+    // `remember(networkCondition.*)`-keyed so an external update overwrites in-progress local
+    // edits the same way `proxyPortInput` already does for `realProxyPort` above.
+    val networkCondition by interceptionDataStore.networkCondition.collectAsState(
+        initial = com.example.interception.NetworkConditionInjector.NetworkCondition.NONE
+    )
+    var networkLatencyInput by remember(networkCondition.latencyMs) { mutableStateOf(networkCondition.latencyMs.toString()) }
+    var networkJitterInput by remember(networkCondition.jitterMs) { mutableStateOf(networkCondition.jitterMs.toString()) }
+    var networkLossInput by remember(networkCondition.packetLossPercent) { mutableStateOf(networkCondition.packetLossPercent.toString()) }
     val capturedCount by remember(settingsContext) {
         CaptureLogRepository.observeCount(settingsContext)
     }.collectAsState(initial = 0)
-    val caSummary by produceState<Triple<String, String, String>?>(initialValue = null) {
+    // `.p12` import (§3 LOW-ADD) and "Regenerate CA" both replace the active CA keystore on
+    // disk; bumping this key forces caSummary's produceState block to re-read the new
+    // certificate instead of continuing to show the one that was active when Settings first
+    // composed, so a successful import/regenerate is visibly reflected without leaving the screen.
+    var caRefreshTrigger by remember { mutableStateOf(0) }
+    val caSummary by produceState<Triple<String, String, String>?>(initialValue = null, caRefreshTrigger) {
         value = runCatching {
             val cert = CertificateAuthority.getOrCreate(settingsContext).certificate
             val fp = java.security.MessageDigest.getInstance("SHA-256")
@@ -209,17 +304,19 @@ fun SettingsScreen(
     // the plan's stub-or-remove standard they are removed rather than left as switches
     // that flip with zero effect.
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-    ) {
+    // Settings is the primary scroll container here: bind it to the app-wide parallax layer.
+    val settingsListState = rememberLazyListState()
+    DriveParallaxFrom(settingsListState)
+
+    // Transparent root so the ParallaxBackground hosted in MainActivity shows through.
+    Column(modifier = Modifier.fillMaxSize()) {
         SectionHeader(
             title = "Settings & Config",
             onBack = onBack
         )
 
         LazyColumn(
+            state = settingsListState,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(horizontal = 16.dp),
@@ -255,13 +352,13 @@ fun SettingsScreen(
                 }
             }
 
-            // Section 2: Theme — Fix 01
+            // Section 2: Appearance — Phase B (theme family × accent × glass, all live)
             item {
-                SettingsSectionHeader("Theme")
+                SettingsSectionHeader("Appearance")
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
             }
 
-            // Appearance Selector — System / Light / Dark
+            // Appearance mode — System / Light / Dark
             item {
                 AppearanceSelector(
                     currentMode = settings.appearanceMode,
@@ -281,12 +378,67 @@ fun SettingsScreen(
                 )
             }
 
+            // Theme family picker — all nine families, filtered by the appearance mode.
+            item {
+                ThemeFamilyPicker(
+                    settings = settings,
+                    onThemeSelected = { theme -> SettingsRepository.updateThemeSelection(theme) }
+                )
+            }
+
             // Accent Color Grid
             item {
                 AccentColorGrid(
                     currentAccent = settings.selectedAccent,
                     appearanceMode = settings.appearanceMode,
                     onAccentSelected = SettingsRepository::updateAccent
+                )
+            }
+
+            // Live preview of the effective theme family × accent, rendered through the
+            // same buildColorScheme() the app theme wrapper uses.
+            item {
+                ThemeLivePreviewCard(settings = settings)
+            }
+
+            // Density — reads/writes the same densityMode LocalAppSpacing is derived from.
+            item {
+                DensitySelector(
+                    currentMode = settings.densityMode,
+                    onModeSelected = { SettingsRepository.updateDensityMode(it) }
+                )
+            }
+
+            // v6.0 transplant (manifest §5.10): LiveRoundnessSettingCard replaces the
+            // basic corner-radius slider with presets, live preview, and themed slider.
+            item { Spacer(modifier = Modifier.height(8.dp)) }
+            item { SubsectionTitle("UI Roundness & Geometry") }
+            item {
+                LiveRoundnessSettingCard(
+                    cornerRadiusDp = settings.cornerRadiusDp,
+                    onCornerRadiusChange = { SettingsRepository.updateCornerRadius(it) }
+                )
+            }
+
+            // v6.0 transplant (manifest §5.10): Navigation & Header glass modifiers
+            // (header top offset, header/nav opacity, glass styles, Tune Glass sliders,
+            // FAB spacing, hidden items)
+            item { Spacer(modifier = Modifier.height(8.dp)) }
+            item { SubsectionTitle("Navigation & Header Glass") }
+            item {
+                NavigationAndHeaderModifiersCard(
+                    settings = settings,
+                    onUpdateNavOpacity = { SettingsRepository.updateNavBarOpacity(it) },
+                    onUpdateNavBlurStyle = { SettingsRepository.updateNavBarBlurEffect(it) },
+                    onToggleHiddenNavItem = { SettingsRepository.toggleNavHiddenItem(it) },
+                    onUpdateHeaderTopPadding = { SettingsRepository.updateHeaderTopPadding(it) },
+                    onUpdateHeaderOpacity = { SettingsRepository.updateHeaderOpacity(it) },
+                    onUpdateHeaderBlurStyle = { SettingsRepository.updateHeaderBlurStyle(it) },
+                    onUpdateFabBottomSpacing = { SettingsRepository.updateFabBottomSpacing(it) },
+                    onUpdateGlassTuneBlur = { SettingsRepository.updateGlassTuneBlur(it) },
+                    onUpdateGlassTuneTintOpacity = { SettingsRepository.updateGlassTuneTintOpacity(it) },
+                    onUpdateGlassTuneBorderOpacity = { SettingsRepository.updateGlassTuneBorderOpacity(it) },
+                    onUpdateGlassTuneShadowDp = { SettingsRepository.updateGlassTuneShadowDp(it) }
                 )
             }
 
@@ -297,6 +449,7 @@ fun SettingsScreen(
             // no underlying capability to attach real behavior to.
 
             // Re-run Setup Wizard — Fix 03
+            item { Spacer(modifier = Modifier.height(8.dp)) }
             item {
                 SettingRow(
                     title = "Re-run Setup Wizard",
@@ -323,9 +476,8 @@ fun SettingsScreen(
             item { SwitchPreference("Haptic Feedback", settings.hapticFeedbackEnabled, "Short vibration on touch interactions") { SettingsRepository.updateHapticFeedback(it) } }
             item { SwitchPreference("Gesture Navigation", settings.gestureNavigationEnabled, "Allow edge-swipe to open the navigation drawer (disable if it conflicts with your system back gesture)") { SettingsRepository.updateGestureNavigation(it) } }
 
-            // Display Behavior
-            item { Spacer(modifier = Modifier.height(8.dp)) }
-            item { SubsectionTitle("Display Behavior") }
+            // Display Behavior: density moved up into the Appearance section (DensitySelector)
+            // so every visual preference lives in one place.
             // Picture-in-Picture removed (B2): no video/camera surface exists anywhere in this
             // app's feature set — only an audio-only mini-player with no PiP manifest support —
             // so the toggle had no applicable target behavior and was removed per the plan's
@@ -334,14 +486,6 @@ fun SettingsScreen(
             // directly overlaps with the not-yet-built adaptive/multi-pane tablet layout
             // (Part C roadmap item #9). Per the plan, this must stay removed until #9 is
             // actually implemented, then reintroduced as a real, functional toggle.
-            item {
-                SelectPreference(
-                    "Compact / Comfortable Density",
-                    settings.densityMode,
-                    "Control information density across the app",
-                    listOf("COMPACT" to "Compact", "COMFORTABLE" to "Comfortable")
-                ) { SettingsRepository.updateDensityMode(it) }
-            }
 
             // Update Tips
             item { Spacer(modifier = Modifier.height(8.dp)) }
@@ -374,36 +518,6 @@ fun SettingsScreen(
                     "Adjust the overall UI scaling",
                     listOf("SMALL" to "Small", "NORMAL" to "Normal", "LARGE" to "Large")
                 ) { SettingsRepository.updateDisplayScale(it) }
-            }
-
-            // Card Corner Radius (moved from old Section 3)
-            item { Spacer(modifier = Modifier.height(8.dp)) }
-            // v6.0 transplant (manifest §5.10): LiveRoundnessSettingCard replaces the
-            // basic corner-radius slider with presets, live preview, and themed slider.
-            item { Spacer(modifier = Modifier.height(8.dp)) }
-            item { SubsectionTitle("UI Roundness & Geometry") }
-            item {
-                LiveRoundnessSettingCard(
-                    cornerRadiusDp = settings.cornerRadiusDp,
-                    onCornerRadiusChange = { SettingsRepository.updateCornerRadius(it) }
-                )
-            }
-
-            // v6.0 transplant (manifest §5.10): Navigation & Header glass modifiers
-            // (header top offset, header/nav opacity, blur styles, FAB spacing, hidden items)
-            item { Spacer(modifier = Modifier.height(8.dp)) }
-            item { SubsectionTitle("Navigation & Header Glass Modifiers") }
-            item {
-                NavigationAndHeaderModifiersCard(
-                    settings = settings,
-                    onUpdateNavOpacity = { SettingsRepository.updateNavBarOpacity(it) },
-                    onUpdateNavBlurStyle = { SettingsRepository.updateNavBarBlurEffect(it) },
-                    onToggleHiddenNavItem = { SettingsRepository.toggleNavHiddenItem(it) },
-                    onUpdateHeaderTopPadding = { SettingsRepository.updateHeaderTopPadding(it) },
-                    onUpdateHeaderOpacity = { SettingsRepository.updateHeaderOpacity(it) },
-                    onUpdateHeaderBlurStyle = { SettingsRepository.updateHeaderBlurStyle(it) },
-                    onUpdateFabBottomSpacing = { SettingsRepository.updateFabBottomSpacing(it) }
-                )
             }
 
             // FEATURES section — Fix 02
@@ -713,152 +827,12 @@ fun SettingsScreen(
                 }
             }
 
-            // Section 5.5: Local REST API & CLI
+            // Section 5.5: Local REST API & CLI — server control, endpoint discovery, CLI usage
+            // and the SDK/extension pairing token (previously a separate "SDK PAIRING" card)
+            // in one place, all driven by LocalApiServer / SettingsDataStore state.
             item {
                 SettingsSectionHeader("LOCAL REST API & CLI")
-                GlassCard(
-                    modifier = Modifier.fillMaxWidth(),
-                    backgroundColor = MaterialTheme.colorScheme.surface
-                ) {
-                    // Compose-observable: collectAsState() on the StateFlow so the label
-                    // and Switch recompose immediately when start()/stop() flip the flag,
-                    // instead of reading the old plain @Volatile field which never
-                    // triggered recomposition.
-                    val apiServerRunning by com.example.api.LocalApiServer.isRunningFlow.collectAsState()
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(imageVector = Icons.Default.Terminal, contentDescription = "Terminal", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Embedded HTTP API Server", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
-                        }
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text("Exposes captures, flows, tools, rules, and sessions on 127.0.0.1:9876 for CLI and automation access.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column {
-                                Text(if (apiServerRunning) "Server running on port 9876" else "Server stopped", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
-                                if (apiServerRunning) {
-                                    Text("curl http://127.0.0.1:9876/api/ping", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = MaterialTheme.colorScheme.primary)
-                                }
-                            }
-                            Switch(
-                                checked = apiServerRunning,
-                                onCheckedChange = { checked ->
-                                    if (checked) {
-                                        com.example.api.LocalApiServer.start(9876)
-                                    } else {
-                                        com.example.api.LocalApiServer.stop()
-                                    }
-                                }
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text("CLI module available at cli/build/libs/cli-all.jar. Run with: java -jar cli-all.jar --api-base http://127.0.0.1:9876 captures", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
-            }
-
-            // Section 5.4b: SDK Pairing (SDK & CONNECT scope, Task 6) -- the bearer token
-            // gating `/api/observe`, which the embedded `requestr-sdk` (RequestrObserver) and the
-            // MV3 browser extension both need before their POSTs are accepted. The token itself
-            // is only ever revealed here, and only while "Show Pairing Token" is on.
-            item {
-                SettingsSectionHeader("SDK PAIRING")
-                GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surface) {
-                    val pairingTokenValue by interceptionDataStore.pairingToken.collectAsState(initial = null)
-                    val showPairingToken by interceptionDataStore.showPairingToken.collectAsState(initial = false)
-                    val clipboardManager = LocalClipboardManager.current
-                    var copiedSnackbar by remember { mutableStateOf(false) }
-
-                    // Auto-disable the reveal 5 minutes after it was turned on -- mirrors the
-                    // LocalApiServer-side revealUntil check so the UI and the API agree.
-                    LaunchedEffect(showPairingToken) {
-                        if (showPairingToken) {
-                            kotlinx.coroutines.delay(com.example.data.prefs.SettingsDataStore.PAIRING_REVEAL_DURATION_MS)
-                            interceptionDataStore.setShowPairingToken(false)
-                        }
-                    }
-
-                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(imageVector = Icons.Default.Security, contentDescription = "Pairing", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Third-Party App / Extension Pairing", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
-                        }
-                        Text(
-                            "A third-party app's embedded requestr-sdk, or the browser extension, must present this bearer token on every /api/observe call. Reveal it here to copy it into that app/extension's setup.",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text("Show Pairing Token", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
-                            Switch(
-                                checked = showPairingToken,
-                                onCheckedChange = { checked ->
-                                    settingsScope.launch { interceptionDataStore.setShowPairingToken(checked) }
-                                }
-                            )
-                        }
-
-                        if (showPairingToken) {
-                            if (pairingTokenValue != null) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth().clickable {
-                                        clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(pairingTokenValue!!))
-                                        copiedSnackbar = true
-                                    },
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Text(
-                                        pairingTokenValue!!,
-                                        fontFamily = FontFamily.Monospace,
-                                        fontSize = 10.sp,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.weight(1f),
-                                    )
-                                    Icon(imageVector = Icons.Default.ContentCopy, contentDescription = "Copy", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
-                                }
-                                if (copiedSnackbar) {
-                                    Text("Copied to clipboard", fontSize = 10.sp, color = MaterialTheme.colorScheme.secondary)
-                                }
-                                Text(
-                                    "Auto-hides in 5 minutes. GET /api/pairing-info returns this token + port ${com.example.api.LocalApiServer.port} while this toggle is on.",
-                                    fontSize = 9.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            } else {
-                                Text(
-                                    "No pairing token yet -- start the Embedded HTTP API Server above to generate one.",
-                                    fontSize = 11.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                        }
-
-                        Button(
-                            onClick = {
-                                settingsScope.launch {
-                                    runCatching { com.example.api.LocalApiServer.regeneratePairingToken() }
-                                }
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                            shape = RoundedCornerShape(10.dp),
-                        ) {
-                            Icon(Icons.Default.Refresh, contentDescription = "Regenerate", modifier = Modifier.size(14.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Regenerate Token", fontSize = 12.sp)
-                        }
-                    }
-                }
+                LocalApiAndCliCard(interceptionDataStore = interceptionDataStore)
             }
 
             // Task 12: AI Provider — configures the OpenAI-compatible endpoint ChatRepository
@@ -934,14 +908,25 @@ fun SettingsScreen(
 
                         Button(
                             onClick = {
-                                com.example.data.repository.ChatRepository.saveProviderConfig(
-                                    providerConfig.copy(
-                                        baseUrl = urlInput.trim(),
-                                        model = modelInput.trim(),
-                                        apiKey = keyInput,
-                                    )
-                                )
-                                android.widget.Toast.makeText(settingsContext, "AI provider saved.", android.widget.Toast.LENGTH_SHORT).show()
+                                // Wait for the real Room + Keystore outcome before telling the
+                                // user anything was saved -- an optimistic "AI provider saved."
+                                // Toast fired before the writes complete/fail is exactly the
+                                // defect this call site was flagged for (see saveProviderConfig's
+                                // kdoc in ChatRepository).
+                                settingsScope.launch {
+                                    when (val result = com.example.data.repository.ChatRepository.saveProviderConfig(
+                                        providerConfig.copy(
+                                            baseUrl = urlInput.trim(),
+                                            model = modelInput.trim(),
+                                            apiKey = keyInput,
+                                        )
+                                    )) {
+                                        is com.example.data.repository.SaveProviderResult.Success ->
+                                            android.widget.Toast.makeText(settingsContext, "AI provider saved.", android.widget.Toast.LENGTH_SHORT).show()
+                                        is com.example.data.repository.SaveProviderResult.Failure ->
+                                            android.widget.Toast.makeText(settingsContext, result.reason, android.widget.Toast.LENGTH_LONG).show()
+                                    }
+                                }
                             },
                             modifier = Modifier.fillMaxWidth(),
                         ) {
@@ -1057,46 +1042,7 @@ fun SettingsScreen(
             // Section 5.6: Plugin Manager
             item {
                 SettingsSectionHeader("PLUGIN MANAGER")
-                GlassCard(
-                    modifier = Modifier.fillMaxWidth(),
-                    backgroundColor = MaterialTheme.colorScheme.surface
-                ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        val plugins = com.example.plugin.PluginManager.plugins.collectAsState()
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(imageVector = Icons.Default.Extension, contentDescription = "Plugin", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Installed Plugins", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
-                        }
-                        Spacer(modifier = Modifier.height(4.dp))
-                        if (plugins.value.isEmpty()) {
-                            Text("No plugins loaded", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        } else {
-                            plugins.value.values.forEach { entry ->
-                                val p = entry.plugin
-                                Row(
-                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text("${p.name} v${p.version}", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
-                                        Text(p.description, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                        Text("${p.author} · ${entry.permissions.size} permissions", fontSize = 9.sp, color = MaterialTheme.colorScheme.primary)
-                                    }
-                                    Switch(
-                                        checked = entry.enabled,
-                                        onCheckedChange = { on ->
-                                            com.example.plugin.PluginManager.setPluginEnabled(p.id, on)
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text("External plugins: /sdcard/requestr/plugins/*.jar", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
+                PluginManagerCard()
             }
 
             // Section 5.7: Device Capabilities
@@ -1359,6 +1305,29 @@ fun SettingsScreen(
                             modifier = Modifier.padding(top = 4.dp)
                         )
 
+                        // `.p12` import (master plan §3 LOW-ADD) — the export half above already
+                        // existed; CaP12Exchange.importP12 is complete + unit-tested but had no
+                        // file-picker/password UI. Placed right next to the export row per the
+                        // task's "add the import counterpart right next to it" instruction.
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = {
+                                p12ImportPickError = null
+                                p12ImportLauncher.launch("*/*")
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)
+                        ) {
+                            Icon(imageVector = Icons.Default.Upload, contentDescription = "Upload", tint = MaterialTheme.colorScheme.onTertiaryContainer, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Import .p12 (with password)", color = MaterialTheme.colorScheme.onTertiaryContainer, fontSize = 11.sp)
+                        }
+                        val pickError = p12ImportPickError
+                        if (pickError != null && p12ImportPendingBytes == null) {
+                            Text(pickError, fontSize = 10.sp, color = MaterialTheme.colorScheme.error)
+                        }
+
                         // Regenerate CA button
                         Spacer(modifier = Modifier.height(8.dp))
                         Button(
@@ -1368,6 +1337,8 @@ fun SettingsScreen(
                                         CertificateAuthority.regenerate(settingsContext)
                                         android.widget.Toast.makeText(settingsContext, "CA regenerated — re-export and re-install", android.widget.Toast.LENGTH_SHORT).show()
                                     }
+                                    caRefreshTrigger++
+                                    CapabilityProbe.probeAll(settingsContext)
                                 }
                             },
                             modifier = Modifier.fillMaxWidth(),
@@ -1461,6 +1432,205 @@ fun SettingsScreen(
                 }
             }
 
+            // Section 6b (§1.10): remote-cert mirror opt-in -- a deliberately non-default,
+            // expert setting. Placed right after the CA root cert section since it changes what
+            // metadata ends up baked into the per-host leaf certs that section is about.
+            item {
+                SettingsSectionHeader("REMOTE CERT MIRRORING (EXPERT)")
+                GlassCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    backgroundColor = MaterialTheme.colorScheme.surface
+                ) {
+                    val remoteCertMirrorEnabled by interceptionDataStore.remoteCertMirrorEnabled.collectAsState(initial = false)
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "Mirror real cert metadata into generated leafs",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    if (remoteCertMirrorEnabled) "On" else "Off (default)",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (remoteCertMirrorEnabled) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = remoteCertMirrorEnabled,
+                                onCheckedChange = { checked ->
+                                    settingsScope.launch { interceptionDataStore.setRemoteCertMirrorEnabled(checked) }
+                                }
+                            )
+                        }
+                        Text(
+                            "When ON: the first time requestr MITMs a FORCE_MITM host, it opens a " +
+                                "real upstream TLS connection to that host to copy its actual " +
+                                "certificate metadata (subject, SANs, validity) into the generated " +
+                                "per-host leaf cert -- so the leaf you inspect looks like the real " +
+                                "site's cert instead of a generic requestr-issued one.",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            "Trade-off: that means a genuine outbound network call to the target " +
+                                "host on first contact, per host -- which is exactly why this is " +
+                                "OFF by default and must stay off for any host you're mocking or " +
+                                "testing offline (a mocked/offline host has nothing real to mirror, " +
+                                "so this would either fail or leak a real connection attempt you " +
+                                "didn't intend). Leave this off unless you specifically need the " +
+                                "generated cert to carry real upstream metadata.",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            }
+
+            // Section 6c (§3 C2): weak-network simulation -- master enable switch, three clamped
+            // numeric inputs, and one-tap presets. Off by default; see NetworkConditionUiHelpers.kt
+            // for why the clamp maxima and preset numbers are what they are.
+            item {
+                SettingsSectionHeader("WEAK NETWORK SIMULATION")
+                GlassCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    backgroundColor = MaterialTheme.colorScheme.surface
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "Simulate a weak connection",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    if (networkCondition.enabled) "On" else "Off (default)",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (networkCondition.enabled) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = networkCondition.enabled,
+                                onCheckedChange = { checked ->
+                                    settingsScope.launch {
+                                        interceptionDataStore.setNetworkCondition(
+                                            sanitizedNetworkCondition(
+                                                enabled = checked,
+                                                latencyMs = networkCondition.latencyMs,
+                                                jitterMs = networkCondition.jitterMs,
+                                                packetLossPercent = networkCondition.packetLossPercent,
+                                            )
+                                        )
+                                    }
+                                }
+                            )
+                        }
+                        Text(
+                            "Applies only to the HTTP-proxy, MITM-proxy, and gateway relay tiers -- " +
+                                "it has no effect on the VPN-tun packet path or Frida-based interception, " +
+                                "which don't run through this relay code at all. Simulated packet loss " +
+                                "surfaces as a failed connection (a 502 for plain HTTP, a CONNECT tunnel " +
+                                "that never opens for HTTPS) -- not literal dropped bytes mid-stream, " +
+                                "since that isn't reproducible above the OS's own TCP stack.",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        OutlinedTextField(
+                            value = networkLatencyInput,
+                            onValueChange = { networkLatencyInput = it },
+                            label = { Text("Latency (ms, 0-$MAX_NETWORK_LATENCY_MS)", fontSize = 11.sp) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            textStyle = LocalTextStyle.current.copy(fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                        )
+                        OutlinedTextField(
+                            value = networkJitterInput,
+                            onValueChange = { networkJitterInput = it },
+                            label = { Text("Jitter (± ms, 0-$MAX_NETWORK_JITTER_MS)", fontSize = 11.sp) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            textStyle = LocalTextStyle.current.copy(fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                        )
+                        OutlinedTextField(
+                            value = networkLossInput,
+                            onValueChange = { networkLossInput = it },
+                            label = { Text("Packet loss (%, 0-100)", fontSize = 11.sp) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            textStyle = LocalTextStyle.current.copy(fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                        )
+
+                        Button(
+                            onClick = {
+                                val sanitized = sanitizedNetworkCondition(
+                                    enabled = true,
+                                    latencyMs = parseClampedNonNegativeIntInput(networkLatencyInput, MAX_NETWORK_LATENCY_MS),
+                                    jitterMs = parseClampedNonNegativeIntInput(networkJitterInput, MAX_NETWORK_JITTER_MS),
+                                    packetLossPercent = parseClampedPercentInput(networkLossInput),
+                                )
+                                networkLatencyInput = sanitized.latencyMs.toString()
+                                networkJitterInput = sanitized.jitterMs.toString()
+                                networkLossInput = sanitized.packetLossPercent.toString()
+                                settingsScope.launch { interceptionDataStore.setNetworkCondition(sanitized) }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text("Apply")
+                        }
+
+                        Text(
+                            "Presets (tap to apply and enable):",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        NETWORK_CONDITION_PRESETS.forEach { preset ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f))
+                                    .clickable {
+                                        networkLatencyInput = preset.condition.latencyMs.toString()
+                                        networkJitterInput = preset.condition.jitterMs.toString()
+                                        networkLossInput = preset.condition.packetLossPercent.toString()
+                                        settingsScope.launch { interceptionDataStore.setNetworkCondition(preset.condition) }
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                            ) {
+                                Column {
+                                    Text(preset.label, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                                    Text(preset.description, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Section 7: Diagnostics
             item {
                 SettingsSectionHeader("SECURITY TIERS DIAGNOSTICS")
@@ -1528,6 +1698,80 @@ fun SettingsScreen(
                         )
                     }
                 }
+            }
+
+            // Section 7b: VPN app picker (master plan §3 LOW-ADD, C8) — makes the
+            // INTERNET-permission prefilter an observable, user-controlled setting instead of a
+            // silent, invisible change. The picker itself lives in InterceptScreen.kt (not owned
+            // here); this toggle/count display shares the same repository-level filter state
+            // (`TrafficInterceptorRepository.internetOnlyFilterEnabled`), so flipping it here
+            // takes effect the next time the capture-setup app picker loads.
+            item {
+                SettingsSectionHeader("VPN APP PICKER")
+                GlassCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    backgroundColor = MaterialTheme.colorScheme.surface
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        SettingToggleRow(
+                            "Hide apps without INTERNET permission",
+                            appPickerInternetOnly,
+                            onCheckedChange = { enabled ->
+                                TrafficInterceptorRepository.setInternetOnlyFilter(enabled)
+                                settingsScope.launch { TrafficInterceptorRepository.loadInstalledApps(settingsContext, enabled) }
+                            }
+                        )
+                        Text(
+                            "An app with no INTERNET permission can't make network requests, so " +
+                                "it has nothing for the interceptor to ever capture. On: fewer, " +
+                                "more relevant apps in the capture-setup picker. Off: every " +
+                                "launchable app is shown, unfiltered.",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                        if (appPickerTotal == 0) {
+                            Text(
+                                "Not loaded yet — open Interceptr's capture-setup sheet once, or " +
+                                    "tap refresh below, to see live counts.",
+                                fontSize = 11.sp,
+                                fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            AppMetaInfoRow("Launchable apps on this device", "$appPickerTotal")
+                            AppMetaInfoRow("Hidden by this filter", "$appPickerFilteredOut")
+                            AppMetaInfoRow("Shown in picker", "${appPickerApps.size}")
+                        }
+                        Button(
+                            onClick = { settingsScope.launch { TrafficInterceptorRepository.loadInstalledApps(settingsContext, appPickerInternetOnly) } },
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Refresh app list", fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+
+            // Section 7c: Target app database browser (master plan §2.18) — rooted-device-only
+            // feature. Gated on the SAME capability probe used by Interceptr's "Capture setup"
+            // sheet (`capabilities.root`, refreshed via `CapabilityProbe.probeAll`), never a
+            // second independent root check.
+            item {
+                SettingsSectionHeader("TARGET APP DATABASE BROWSER")
+                TargetAppDatabaseBrowserSection(
+                    root = capabilities.root,
+                    installedApps = appPickerApps,
+                    context = settingsContext,
+                    scope = settingsScope,
+                    onProbeAgain = { settingsScope.launch { CapabilityProbe.probeAll(settingsContext) } }
+                )
             }
 
             // Section 8: Backup & Privacy
@@ -1681,6 +1925,507 @@ fun SettingsScreen(
             item { Spacer(modifier = Modifier.height(90.dp)) }
         }
     }
+
+    // `.p12` import password prompt — rendered as a dialog overlay regardless of scroll
+    // position, since the "Import .p12" button that triggers it lives inside the scrolling
+    // LazyColumn above.
+    P12ImportPasswordDialog(
+        pendingBytes = p12ImportPendingBytes,
+        fileName = p12ImportPendingFileName,
+        onDismiss = {
+            p12ImportPendingBytes = null
+            p12ImportPendingFileName = null
+        },
+        onImported = {
+            p12ImportPendingBytes = null
+            p12ImportPendingFileName = null
+            caRefreshTrigger++
+            settingsScope.launch { CapabilityProbe.probeAll(settingsContext) }
+        },
+        context = settingsContext,
+        scope = settingsScope,
+    )
+}
+
+/**
+ * Master plan §3 LOW-ADD — `.p12` CA import password prompt.
+ *
+ * [CaP12Exchange.importP12] is complete and unit-tested ([CaP12ExchangeTest]); this dialog is
+ * the missing UI half: a masked (show/hide-toggleable) password field, clear validation, and
+ * honest, distinct error messaging per [P12ImportErrorClassifier] for wrong-password vs
+ * corrupt-file vs unsupported-content, rather than one generic "import failed" toast.
+ */
+@Composable
+private fun P12ImportPasswordDialog(
+    pendingBytes: ByteArray?,
+    fileName: String?,
+    onDismiss: () -> Unit,
+    onImported: () -> Unit,
+    context: android.content.Context,
+    scope: CoroutineScope,
+) {
+    if (pendingBytes == null) return
+
+    var password by remember(pendingBytes) { mutableStateOf("") }
+    var showPassword by remember(pendingBytes) { mutableStateOf(false) }
+    var importing by remember(pendingBytes) { mutableStateOf(false) }
+    var errorMessage by remember(pendingBytes) { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = { if (!importing) onDismiss() },
+        icon = {
+            Icon(imageVector = Icons.Default.VpnKey, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+        },
+        title = { Text("Import CA (.p12)", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface) },
+        text = {
+            Column {
+                Text(
+                    "File: ${fileName ?: "(unknown name)"} · ${pendingBytes.size} bytes\n\n" +
+                        "Enter the password protecting this PKCS#12 bundle. Importing replaces requestr's " +
+                        "active CA — you'll need to re-install the new CA afterwards.",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it; errorMessage = null },
+                    label = { Text("Password") },
+                    singleLine = true,
+                    enabled = !importing,
+                    visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { showPassword = !showPassword }) {
+                            Icon(
+                                imageVector = if (showPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                contentDescription = if (showPassword) "Hide password" else "Show password"
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
+                )
+                val err = errorMessage
+                if (err != null) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.Top) {
+                        Icon(imageVector = Icons.Default.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(err, fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !importing,
+                onClick = {
+                    if (password.isEmpty()) {
+                        errorMessage = "Enter the bundle's password first."
+                        return@TextButton
+                    }
+                    importing = true
+                    errorMessage = null
+                    scope.launch {
+                        val passwordChars = password.toCharArray()
+                        val result = withContext(Dispatchers.IO) {
+                            CaP12Exchange.importP12(context, pendingBytes, passwordChars)
+                        }
+                        java.util.Arrays.fill(passwordChars, '\u0000')
+                        result.onSuccess {
+                            android.widget.Toast.makeText(
+                                context, "CA imported — this app now trusts and signs with the imported CA.",
+                                android.widget.Toast.LENGTH_LONG
+                            ).show()
+                            importing = false
+                            onImported()
+                        }.onFailure { e ->
+                            val kind = P12ImportErrorClassifier.classify(e.message)
+                            errorMessage = P12ImportErrorClassifier.userMessage(kind, e.message)
+                            importing = false
+                        }
+                    }
+                }
+            ) {
+                Text(if (importing) "Importing..." else "Import", fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(enabled = !importing, onClick = onDismiss) {
+                Text("Cancel", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        },
+        containerColor = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(20.dp)
+    )
+}
+
+/** Small "tap to pick from a list" control shared by the three DB-browser pickers below. */
+@Composable
+private fun LabeledDropdown(
+    label: String,
+    selected: String?,
+    placeholder: String,
+    options: List<String>,
+    enabled: Boolean = true,
+    onSelect: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(label, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, letterSpacing = 0.5.sp)
+        Spacer(modifier = Modifier.height(2.dp))
+        Box {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .then(if (enabled) Modifier.clickable { expanded = true } else Modifier)
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = selected ?: placeholder,
+                    fontSize = 12.sp,
+                    fontFamily = if (selected != null) FontFamily.Monospace else FontFamily.Default,
+                    color = if (selected != null) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Icon(
+                    imageVector = Icons.Default.ChevronRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(14.dp)
+                )
+            }
+            DropdownMenu(expanded = expanded && enabled, onDismissRequest = { expanded = false }) {
+                if (options.isEmpty()) {
+                    DropdownMenuItem(text = { Text("(none)", color = MaterialTheme.colorScheme.onSurfaceVariant) }, onClick = { expanded = false })
+                }
+                options.forEach { option ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                option,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 12.sp,
+                                color = if (option == selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                            )
+                        },
+                        onClick = { onSelect(option); expanded = false }
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Master plan §2.18 — rooted target-app SQLite database browser UI.
+ *
+ * Gated on [root] ([RootState]) — the SAME [CapabilityProbe]/[InterceptionStateRepository]
+ * state Interceptr's "Capture setup" sheet already surfaces, never a second independent check.
+ * On this project's own reference emulator the real probe result is [RootState.UNAVAILABLE]
+ * (no `su` binary at all), which is why that branch below is written as the most complete,
+ * reassuring explanation rather than an afterthought — a blank/crashed-looking screen on the
+ * single most common real-world outcome would be worse than a slightly sparse GRANTED branch
+ * nobody without a rooted device ever sees.
+ */
+@Composable
+private fun TargetAppDatabaseBrowserSection(
+    root: RootState,
+    installedApps: List<AppPackageItem>,
+    context: android.content.Context,
+    scope: CoroutineScope,
+    onProbeAgain: () -> Unit,
+) {
+    var selectedPkg by remember { mutableStateOf<String?>(null) }
+    var databases by remember { mutableStateOf<List<String>?>(null) }
+    var selectedDb by remember { mutableStateOf<String?>(null) }
+    var localFile by remember { mutableStateOf<java.io.File?>(null) }
+    var tables by remember { mutableStateOf<List<String>?>(null) }
+    var selectedTable by remember { mutableStateOf<String?>(null) }
+    var pageOffset by remember { mutableStateOf(0) }
+    var result by remember { mutableStateOf<TargetAppDatabaseBrowser.QueryResult?>(null) }
+    var browserError by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    val pageSize = 50
+
+    // Never leave a stale cache copy behind: the previous local copy is deleted the moment a
+    // new one replaces it, and the last one is deleted if this section leaves composition.
+    DisposableEffect(localFile) {
+        val fileToClean = localFile
+        onDispose { fileToClean?.let { TargetAppDatabaseBrowser.cleanup(it) } }
+    }
+
+    fun resetBelowApp() {
+        databases = null; selectedDb = null; localFile = null; tables = null
+        selectedTable = null; pageOffset = 0; result = null; browserError = null
+    }
+    fun resetBelowDb() {
+        tables = null; selectedTable = null; pageOffset = 0; result = null
+    }
+
+    GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surface) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            when (root) {
+                RootState.UNAVAILABLE -> {
+                    Row(verticalAlignment = Alignment.Top) {
+                        Icon(Icons.Default.Storage, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column {
+                            Text("Root access unavailable", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                "This device has no `su` binary — it isn't rooted (or is running a " +
+                                    "locked-down build). Browsing another app's private SQLite databases " +
+                                    "needs root to read files under /data/data/<package>/databases/, which " +
+                                    "isn't accessible any other way. This isn't a bug — most real devices " +
+                                    "report exactly this. Install Magisk (or use a rooted AVD image) and " +
+                                    "tap \"Re-check\" below to unlock this feature.",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+                RootState.AVAILABLE -> {
+                    Text("Root present, not confirmed", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                    Text(
+                        "A `su` binary exists on this device, but requestr hasn't confirmed it can " +
+                            "actually run as root (the binary may be present but restricted to the shell " +
+                            "user, or a root manager hasn't granted this app access yet). Tap \"Re-check\" " +
+                            "after granting access in Magisk/KernelSU.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                RootState.DENIED -> {
+                    Text("Root access denied", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.error)
+                    Text(
+                        "A root manager (Magisk/KernelSU) is present but explicitly denied requestr " +
+                            "root access. Open your root manager's app list, grant requestr access, then " +
+                            "tap \"Re-check\" below.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                RootState.UNKNOWN -> {
+                    Text("Not probed yet", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                    Text(
+                        "Root access hasn't been checked yet this session. Tap \"Re-check\" to probe it.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                RootState.GRANTED -> {
+                    Text("Root granted", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF10B981))
+                    Text(
+                        "Pick a target app, then one of its databases, then a table to browse its rows " +
+                            "read-only. Nothing here ever writes back to the target app's storage.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    LabeledDropdown(
+                        label = "TARGET APP",
+                        selected = selectedPkg?.let { pkg -> installedApps.find { it.packageName == pkg }?.appName ?: pkg },
+                        placeholder = if (installedApps.isEmpty()) "No apps loaded — use the VPN app picker section above first" else "Choose an app",
+                        options = installedApps.map { it.packageName },
+                        enabled = installedApps.isNotEmpty() && !busy
+                    ) { pkg ->
+                        selectedPkg = pkg
+                        resetBelowApp()
+                        busy = true
+                        scope.launch {
+                            val r = withContext(Dispatchers.IO) { TargetAppDatabaseBrowser.listDatabases(pkg) }
+                            r.onSuccess { databases = it }.onFailure { browserError = it.message ?: "Failed to list databases" }
+                            busy = false
+                        }
+                    }
+
+                    val dbList = databases
+                    if (selectedPkg != null && dbList != null) {
+                        if (dbList.isEmpty()) {
+                            Text("No databases found under this app's databases/ directory.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        } else {
+                            LabeledDropdown(
+                                label = "DATABASE",
+                                selected = selectedDb,
+                                placeholder = "Choose a database",
+                                options = dbList,
+                                enabled = !busy
+                            ) { dbName ->
+                                resetBelowDb()
+                                selectedDb = dbName
+                                busy = true
+                                scope.launch {
+                                    val copyResult = withContext(Dispatchers.IO) { TargetAppDatabaseBrowser.copyDatabaseLocally(context, selectedPkg!!, dbName) }
+                                    copyResult.onSuccess { file ->
+                                        localFile = file
+                                        val tablesResult = withContext(Dispatchers.IO) { TargetAppDatabaseBrowser.listTables(file) }
+                                        tablesResult.onSuccess { tables = it }.onFailure { browserError = it.message ?: "Failed to list tables" }
+                                    }.onFailure { browserError = it.message ?: "Failed to copy database" }
+                                    busy = false
+                                }
+                            }
+                        }
+                    }
+
+                    val tableList = tables
+                    if (selectedDb != null && tableList != null) {
+                        if (tableList.isEmpty()) {
+                            Text("This database has no user tables.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        } else {
+                            LabeledDropdown(
+                                label = "TABLE",
+                                selected = selectedTable,
+                                placeholder = "Choose a table",
+                                options = tableList,
+                                enabled = !busy
+                            ) { table ->
+                                selectedTable = table
+                                pageOffset = 0
+                                result = null
+                                if (!isSafeSqlIdentifier(table)) {
+                                    browserError = "Invalid table identifier: $table"
+                                } else {
+                                    val file = localFile
+                                    if (file != null) {
+                                        busy = true
+                                        scope.launch {
+                                            val r = withContext(Dispatchers.IO) {
+                                                TargetAppDatabaseBrowser.query(file, "SELECT * FROM \"$table\" LIMIT $pageSize OFFSET 0")
+                                            }
+                                            r.onSuccess { result = it }.onFailure { browserError = it.message ?: "Query failed" }
+                                            busy = false
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (busy) {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            androidx.compose.material3.CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Working…", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+
+                    val currentResult = result
+                    if (currentResult != null) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                        Text(
+                            "${currentResult.rows.size} row(s) · rows ${pageOffset + 1}–${pageOffset + currentResult.rows.size} · " +
+                                "${currentResult.columns.size} column(s)",
+                            fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        // Wide/large cell values are truncated for display only — never mutated,
+                        // never re-used to build another query.
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
+                        ) {
+                            Row {
+                                currentResult.columns.forEach { col ->
+                                    Text(
+                                        col.take(40),
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.widthIn(min = 90.dp).padding(end = 8.dp)
+                                    )
+                                }
+                            }
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                            currentResult.rows.forEach { row ->
+                                Row {
+                                    row.forEach { cell ->
+                                        val display = (cell ?: "NULL").let { if (it.length > 200) it.take(200) + "…" else it }
+                                        Text(
+                                            display,
+                                            fontSize = 10.sp,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = if (cell == null) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.widthIn(min = 90.dp).padding(end = 8.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            TextButton(
+                                enabled = pageOffset > 0 && !busy,
+                                onClick = {
+                                    val newOffset = (pageOffset - pageSize).coerceAtLeast(0)
+                                    val file = localFile
+                                    val table = selectedTable
+                                    if (file != null && table != null) {
+                                        busy = true
+                                        scope.launch {
+                                            val r = withContext(Dispatchers.IO) {
+                                                TargetAppDatabaseBrowser.query(file, "SELECT * FROM \"$table\" LIMIT $pageSize OFFSET $newOffset")
+                                            }
+                                            r.onSuccess { result = it; pageOffset = newOffset }.onFailure { browserError = it.message }
+                                            busy = false
+                                        }
+                                    }
+                                }
+                            ) { Text("‹ Prev page", fontSize = 11.sp) }
+                            TextButton(
+                                enabled = currentResult.rows.size == pageSize && !busy,
+                                onClick = {
+                                    val newOffset = pageOffset + pageSize
+                                    val file = localFile
+                                    val table = selectedTable
+                                    if (file != null && table != null) {
+                                        busy = true
+                                        scope.launch {
+                                            val r = withContext(Dispatchers.IO) {
+                                                TargetAppDatabaseBrowser.query(file, "SELECT * FROM \"$table\" LIMIT $pageSize OFFSET $newOffset")
+                                            }
+                                            r.onSuccess { result = it; pageOffset = newOffset }.onFailure { browserError = it.message }
+                                            busy = false
+                                        }
+                                    }
+                                }
+                            ) { Text("Next page ›", fontSize = 11.sp) }
+                        }
+                    }
+                }
+            }
+
+            val err = browserError
+            if (err != null) {
+                Row(verticalAlignment = Alignment.Top) {
+                    Icon(Icons.Default.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(14.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(err, fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+                }
+            }
+
+            Button(
+                onClick = onProbeAgain,
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Re-check root access", fontSize = 12.sp)
+            }
+        }
+    }
 }
 
 @Composable
@@ -1747,7 +2492,30 @@ fun DiagnosticRow(name: String, status: String, isOk: Boolean) {
     }
 }
 
-// ─── Fix 01 composables ────────────────────────────────────────────────
+// ─── Appearance composables (Phase B) ─────────────────────────────────
+
+/**
+ * Mirrors RequestrApp()'s theme resolution exactly: SYSTEM follows the OS dark flag and
+ * picks the remembered per-family slot; LIGHT / DARK render `themeMode` as-is. Pure so it
+ * can be unit-tested and so the Settings preview can never disagree with what the app draws.
+ */
+internal fun resolveEffectiveThemeKey(
+    appearanceMode: String,
+    themeMode: String,
+    selectedLightTheme: String,
+    selectedDarkTheme: String,
+    systemInDarkTheme: Boolean,
+): String = when (appearanceMode.uppercase()) {
+    "SYSTEM" -> if (systemInDarkTheme) selectedDarkTheme else selectedLightTheme
+    else -> themeMode
+}
+
+/** Which theme families the picker should offer for an appearance mode. */
+internal fun themeFamiliesFor(appearanceMode: String): List<AppThemeMode> = when (appearanceMode.uppercase()) {
+    "LIGHT" -> AppThemeMode.lightThemes()
+    "DARK" -> AppThemeMode.darkThemes()
+    else -> AppThemeMode.lightThemes() + AppThemeMode.darkThemes()
+}
 
 @Composable
 private fun AppearanceSelector(
@@ -1759,50 +2527,236 @@ private fun AppearanceSelector(
         Triple("LIGHT", "Light", Icons.Filled.LightMode),
         Triple("DARK", "Dark", Icons.Outlined.DarkMode)
     )
+    Text("Appearance mode", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
+    Spacer(modifier = Modifier.height(8.dp))
+    // Theme colours here are read straight from MaterialTheme with no animateColorAsState:
+    // when the theme flips, this row must flip in the same frame as the rest of the app.
     Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceEvenly
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+            .padding(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         modes.forEach { (mode, label, icon) ->
-            val isSelected = currentMode == mode
-            val bgColor by animateColorAsState(
-                if (isSelected) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-                else Color.Transparent,
-                animationSpec = com.example.ui.theme.scaledTween(200),
-                label = "bg"
-            )
-            val iconTint by animateColorAsState(
-                if (isSelected) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.onSurfaceVariant,
-                animationSpec = com.example.ui.theme.scaledTween(200),
-                label = "iconTint"
-            )
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
+            val isSelected = currentMode.equals(mode, ignoreCase = true)
+            val bgColor = if (isSelected) MaterialTheme.colorScheme.surface else Color.Transparent
+            val fg = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+            Row(
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
+                    .weight(1f)
+                    .clip(RoundedCornerShape(11.dp))
                     .background(bgColor)
+                    .then(
+                        if (isSelected) Modifier.border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f), RoundedCornerShape(11.dp))
+                        else Modifier
+                    )
                     .clickable { onModeSelected(mode) }
-                    .padding(horizontal = 20.dp, vertical = 10.dp)
+                    .semantics { contentDescription = "Appearance mode $label" + if (isSelected) ", selected" else "" }
+                    .padding(vertical = 10.dp)
             ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = label,
-                    tint = iconTint,
-                    modifier = Modifier.size(22.dp)
-                )
-                Spacer(modifier = Modifier.height(4.dp))
+                Icon(imageVector = icon, contentDescription = null, tint = fg, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
                 Text(
                     text = label,
-                    fontSize = 11.sp,
+                    fontSize = 12.sp,
                     fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-                    color = if (isSelected) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onSurfaceVariant
+                    color = fg
                 )
             }
         }
     }
+    Spacer(modifier = Modifier.height(6.dp))
+    Text(
+        text = when (currentMode.uppercase()) {
+            "LIGHT" -> "Always light. Your light theme below is what renders."
+            "DARK" -> "Always dark. Your dark theme below is what renders."
+            else -> "Follows your device's dark-mode setting and remembers a separate theme for light and dark."
+        },
+        fontSize = 11.sp,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        lineHeight = 15.sp
+    )
     Spacer(modifier = Modifier.height(8.dp))
+}
+
+/**
+ * Nine-family theme picker. Swatches are painted with the family's real canvas
+ * (background / surface / outline) plus the user's current accent through the same
+ * [buildColorScheme] the app theme uses, so a swatch is a truthful thumbnail of the result.
+ * Selection routes through the unified `updateThemeSelection` write path.
+ */
+@Composable
+private fun ThemeFamilyPicker(
+    settings: UserSettingsState,
+    onThemeSelected: (AppThemeMode) -> Unit,
+) {
+    val accent = remember(settings.selectedAccent) { AppAccent.fromKey(settings.selectedAccent) }
+    val systemDark = androidx.compose.foundation.isSystemInDarkTheme()
+    val activeKey = resolveEffectiveThemeKey(
+        settings.appearanceMode, settings.themeMode, settings.selectedLightTheme, settings.selectedDarkTheme, systemDark
+    )
+    val activeTheme = AppThemeMode.fromKey(activeKey)
+    val selectedLight = AppThemeMode.fromKey(settings.selectedLightTheme)
+    val selectedDark = AppThemeMode.fromKey(settings.selectedDarkTheme)
+    val isSystem = settings.appearanceMode.equals("SYSTEM", ignoreCase = true)
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("Theme", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
+        Text(
+            text = "${AppThemeMode.values().size} families",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+    Spacer(modifier = Modifier.height(10.dp))
+
+    @Composable
+    fun familyRow(label: String?, themes: List<AppThemeMode>, selected: AppThemeMode?) {
+        if (label != null) {
+            Text(
+                text = label,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.8.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            themes.forEach { theme ->
+                ThemeSwatchCard(
+                    theme = theme,
+                    scheme = remember(theme, accent) { com.example.ui.theme.buildColorScheme(theme, accent) },
+                    selected = theme == selected,
+                    activeNow = theme == activeTheme,
+                    onClick = { onThemeSelected(theme) }
+                )
+            }
+        }
+    }
+
+    if (isSystem) {
+        familyRow("LIGHT  ·  used when the device is in light mode", AppThemeMode.lightThemes(), selectedLight)
+        Spacer(modifier = Modifier.height(12.dp))
+        familyRow("DARK  ·  used when the device is in dark mode", AppThemeMode.darkThemes(), selectedDark)
+    } else {
+        val families = themeFamiliesFor(settings.appearanceMode)
+        val selected = if (settings.appearanceMode.equals("LIGHT", ignoreCase = true)) selectedLight else selectedDark
+        familyRow(null, families, selected)
+    }
+    Spacer(modifier = Modifier.height(8.dp))
+}
+
+@Composable
+private fun ThemeSwatchCard(
+    theme: AppThemeMode,
+    scheme: androidx.compose.material3.ColorScheme,
+    selected: Boolean,
+    activeNow: Boolean,
+    onClick: () -> Unit,
+) {
+    val ringColor = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.6f)
+    val ringWidth = if (selected) 2.dp else 1.dp
+    Column(
+        modifier = Modifier
+            .width(96.dp)
+            .semantics {
+                contentDescription = buildString {
+                    append(theme.displayName)
+                    append(if (theme.isLight) ", light theme" else ", dark theme")
+                    if (selected) append(", selected")
+                    if (activeNow) append(", active now")
+                }
+            }
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(64.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(scheme.background)
+                .border(ringWidth, ringColor, RoundedCornerShape(12.dp))
+                .clickable(onClick = onClick)
+                .padding(8.dp)
+        ) {
+            // Miniature "card on canvas": surface panel with an outline, a primary pill and
+            // two text lines in the family's own ink colours.
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(scheme.surface)
+                    .border(0.5.dp, scheme.outline, RoundedCornerShape(6.dp))
+                    .padding(horizontal = 6.dp, vertical = 5.dp),
+                verticalArrangement = Arrangement.SpaceBetween
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(28.dp)
+                        .height(8.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(scheme.primary)
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(scheme.onSurface.copy(alpha = 0.85f))
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.6f)
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(scheme.onSurfaceVariant.copy(alpha = 0.8f))
+                )
+            }
+            if (selected) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .size(16.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Default.Check, null, tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(10.dp))
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(5.dp))
+        Text(
+            text = theme.displayName,
+            fontSize = 11.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            color = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        if (activeNow) {
+            Text(
+                text = "Active now",
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.5.sp,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+    }
 }
 
 @Composable
@@ -1811,23 +2765,27 @@ private fun AccentColorGrid(
     appearanceMode: String,
     onAccentSelected: (String) -> Unit
 ) {
-    val displayName = when (appearanceMode) {
-        "LIGHT" -> "Light"
-        "DARK" -> "Dark"
-        else -> "System"
-    }
+    val selectedAccent = AppAccent.fromKey(currentAccent)
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text("Accent Color", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
-        Text(displayName, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(selectedAccent.displayName, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
     Spacer(modifier = Modifier.height(10.dp))
     // Single horizontally-scrollable row of all 10 accents in M6 declaration order
     // (INDIGO → OBSIDIAN). Selected swatch grows to 40dp with an onSurface ring + check;
     // unselected stays 32dp. Matches settings-main-dark.html .accentrow overflow-x:auto.
+    // The grow animation is gated through scaledTween so Animation off / Transition
+    // Behaviour NONE really disables it.
+    val swatchSpec = com.example.ui.theme.scaledTween<Dp>(200)
+    val isDarkCanvas = when (appearanceMode.uppercase()) {
+        "LIGHT" -> false
+        "DARK" -> true
+        else -> androidx.compose.foundation.isSystemInDarkTheme()
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1836,25 +2794,177 @@ private fun AccentColorGrid(
         verticalAlignment = Alignment.CenterVertically
     ) {
         AppAccent.values().forEach { accent ->
-            val selected = currentAccent.equals(accent.name, ignoreCase = true)
-            val swatchSize by animateDpAsState(if (selected) 40.dp else 32.dp, tween(200), label = "accentSwatch")
+            val selected = accent == selectedAccent
+            val swatchSize by animateDpAsState(if (selected) 40.dp else 32.dp, swatchSpec, label = "accentSwatch")
+            // Show the variant that will actually be used as `primary` on the active canvas.
+            val swatchColor = if (isDarkCanvas) accent.bright else accent.primary
             Box(
                 modifier = Modifier
                     .size(swatchSize)
                     .clip(RoundedCornerShape(8.dp))
-                    .background(accent.primary)
+                    .background(swatchColor)
                     .then(
                         if (selected) Modifier.border(2.dp, MaterialTheme.colorScheme.onSurface, RoundedCornerShape(8.dp))
                         else Modifier
                     )
-                    .clickable { onAccentSelected(accent.name) },
+                    .clickable { onAccentSelected(accent.name) }
+                    .semantics { contentDescription = accent.displayName + if (selected) ", selected" else "" },
                 contentAlignment = Alignment.Center
             ) {
                 if (selected) {
-                    Icon(Icons.Default.Check, "Selected", tint = Color.White, modifier = Modifier.size(14.dp))
+                    Icon(
+                        Icons.Default.Check, null,
+                        tint = com.example.ui.theme.readableInkOn(swatchColor, darkInk = Color(0xFF0B0F17)),
+                        modifier = Modifier.size(14.dp)
+                    )
                 }
             }
         }
+    }
+    Spacer(modifier = Modifier.height(8.dp))
+}
+
+/**
+ * Live preview of the effective theme family × accent. Everything inside is drawn through a
+ * nested MaterialTheme whose colorScheme is `buildColorScheme(effectiveTheme, accent)` — the
+ * identical function the app-level theme wrapper composes with — so this card can only show
+ * colours the rest of the app is (or will be, on the next frame) painting.
+ */
+@Composable
+private fun ThemeLivePreviewCard(settings: UserSettingsState) {
+    val systemDark = androidx.compose.foundation.isSystemInDarkTheme()
+    val key = resolveEffectiveThemeKey(
+        settings.appearanceMode, settings.themeMode, settings.selectedLightTheme, settings.selectedDarkTheme, systemDark
+    )
+    val theme = AppThemeMode.fromKey(key)
+    val accent = AppAccent.fromKey(settings.selectedAccent)
+    if (theme == null) {
+        Text(
+            text = "Stored theme key \"$key\" is not a known family — pick a theme above to repair it.",
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.error
+        )
+        return
+    }
+    val scheme = remember(theme, accent) { com.example.ui.theme.buildColorScheme(theme, accent) }
+    val radius = settings.cornerRadiusDp.dp
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("Preview", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
+        Text(
+            text = "${theme.displayName} · ${accent.displayName}",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+    Spacer(modifier = Modifier.height(10.dp))
+    MaterialTheme(colorScheme = scheme, typography = MaterialTheme.typography) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(radius))
+                .background(MaterialTheme.colorScheme.background)
+                .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(radius))
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            // Header capsule
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(MaterialTheme.colorScheme.surface)
+                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(20.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("requestr", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary)
+                )
+            }
+            // Body card
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape((radius.value * 0.75f).dp))
+                    .background(MaterialTheme.colorScheme.surface)
+                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape((radius.value * 0.75f).dp))
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text("Body text on surface", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+                Text("Secondary text uses onSurfaceVariant.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(MaterialTheme.colorScheme.primary)
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Text("Primary", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onPrimary)
+                    }
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(MaterialTheme.colorScheme.primaryContainer)
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Text("Container", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                    }
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Text("Variant", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                Text("Error text", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.error)
+            }
+        }
+    }
+    Spacer(modifier = Modifier.height(8.dp))
+}
+
+@Composable
+private fun DensitySelector(
+    currentMode: String,
+    onModeSelected: (String) -> Unit,
+) {
+    val options = listOf("COMPACT" to "Compact", "COMFORTABLE" to "Comfortable")
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text("Density", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
+            Text(
+                text = "Tightens list spacing and card padding across Intercept and Saved APIs.",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                lineHeight = 15.sp
+            )
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        RequestrSegmentedTabs(
+            items = options.map { it.first },
+            selectedItem = options.firstOrNull { it.first.equals(currentMode, ignoreCase = true) }?.first ?: "COMFORTABLE",
+            onItemSelected = onModeSelected,
+            label = { key -> options.first { it.first == key }.second }
+        )
     }
     Spacer(modifier = Modifier.height(8.dp))
 }
@@ -2308,16 +3418,353 @@ private fun LiveRoundnessSettingCard(
     }
 }
 
+// ─── Glass modifiers (Phase B) ────────────────────────────────────────
+
+/**
+ * Shared slider row used by every glass control so title / live value / description / track
+ * colours are identical across the card. [enabled]=false greys the track and shows [disabledReason].
+ */
+@Composable
+private fun GlassSliderRow(
+    title: String,
+    valueText: String,
+    description: String?,
+    value: Float,
+    onValueChange: (Float) -> Unit,
+    valueRange: ClosedFloatingPointRange<Float>,
+    steps: Int = 0,
+    enabled: Boolean = true,
+    disabledReason: String? = null,
+) {
+    Column {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                title,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 13.sp,
+                color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                valueText,
+                fontWeight = FontWeight.Bold,
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace,
+                color = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        if (description != null) {
+            Text(description, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 15.sp)
+        }
+        if (!enabled && disabledReason != null) {
+            Text(disabledReason, fontSize = 11.sp, color = MaterialTheme.colorScheme.tertiary, lineHeight = 15.sp)
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        Slider(
+            value = value.coerceIn(valueRange),
+            onValueChange = onValueChange,
+            valueRange = valueRange,
+            steps = steps,
+            enabled = enabled,
+            colors = SliderDefaults.colors(
+                thumbColor = MaterialTheme.colorScheme.primary,
+                activeTrackColor = MaterialTheme.colorScheme.primary,
+                inactiveTrackColor = MaterialTheme.colorScheme.surfaceVariant
+            ),
+            modifier = Modifier.fillMaxWidth().semantics { contentDescription = "$title, $valueText" }
+        )
+    }
+}
+
+/**
+ * The one glass-style picker. Both the header and the nav pill render this, reading labels from
+ * [GlassStyles.options], so the two surfaces can never show different names for the same key.
+ * Selection compares canonical keys so a legacy persisted value ("CLEAR_GLASS", "M3", "OLED")
+ * still highlights the right chip.
+ */
+@Composable
+private fun GlassStyleChipRow(
+    title: String,
+    selectedKey: String,
+    onSelect: (String) -> Unit,
+) {
+    val selected: GlassStyleOption = GlassStyles.option(selectedKey)
+    val sdk = android.os.Build.VERSION.SDK_INT
+    Text(title, fontWeight = FontWeight.Medium, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Spacer(modifier = Modifier.height(6.dp))
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        GlassStyles.options.forEach { option ->
+            val isSel = option.key == selected.key
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(
+                        if (isSel) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                        else MaterialTheme.colorScheme.surfaceVariant
+                    )
+                    .border(
+                        width = 1.dp,
+                        color = if (isSel) MaterialTheme.colorScheme.primary else Color.Transparent,
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                    .clickable { onSelect(option.key) }
+                    .semantics { contentDescription = "$title ${option.label}" + if (isSel) ", selected" else "" }
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    text = option.label,
+                    fontSize = 11.5.sp,
+                    fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
+                    color = if (isSel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                )
+            }
+        }
+    }
+    Spacer(modifier = Modifier.height(4.dp))
+    Text(selected.description, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 15.sp)
+    if (selected.needsBlurApi && !GlassStyles.hasRealBlur(sdk)) {
+        Text(
+            text = "This device runs Android ${android.os.Build.VERSION.RELEASE} (API $sdk). Real backdrop blur needs " +
+                "API ${GlassStyles.REAL_BLUR_MIN_API}+, so ${selected.label} renders its gradient fallback here — " +
+                "tint, border and shadow still apply.",
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.tertiary,
+            lineHeight = 15.sp
+        )
+    }
+}
+
+/** Colourful, hard-edged backdrop the Tune Glass preview blurs — hard edges make blur visible. */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawGlassBackdrop(
+    area: Size,
+    primary: Color,
+    secondary: Color,
+    tertiary: Color,
+    ink: Color,
+) {
+    drawRect(
+        brush = Brush.linearGradient(
+            colors = listOf(primary, tertiary),
+            start = Offset.Zero,
+            end = Offset(area.width, area.height)
+        ),
+        size = area
+    )
+    drawCircle(color = secondary, radius = area.height * 0.42f, center = Offset(area.width * 0.22f, area.height * 0.30f))
+    drawCircle(color = ink.copy(alpha = 0.85f), radius = area.height * 0.30f, center = Offset(area.width * 0.72f, area.height * 0.68f))
+    drawCircle(color = Color.White.copy(alpha = 0.9f), radius = area.height * 0.16f, center = Offset(area.width * 0.55f, area.height * 0.22f))
+    // "Text" lines
+    val lineH = area.height * 0.05f
+    for (i in 0 until 4) {
+        val y = area.height * (0.15f + i * 0.2f)
+        drawRect(
+            color = ink.copy(alpha = 0.9f),
+            topLeft = Offset(area.width * 0.38f, y),
+            size = Size(area.width * (0.5f - i * 0.08f), lineH)
+        )
+    }
+}
+
+/**
+ * Live Tune Glass preview: a nav-pill-shaped capsule floating over a busy backdrop. The capsule
+ * draws its own copy of the backdrop (offset so it lines up) under `Modifier.blur(blurDp)`, then
+ * the tint layer, border and shadow the four sliders control. `Modifier.blur` is a no-op below
+ * API 31, so on Android 7–11 this preview honestly shows an un-blurred capsule — exactly what the
+ * real nav pill and header will render on that device.
+ */
+@Composable
+private fun GlassTunePreview(
+    blurDp: Int,
+    tintOpacity: Float,
+    borderOpacity: Float,
+    shadowDp: Int,
+    cornerRadiusDp: Int,
+) {
+    val previewHeight = 132.dp
+    val capsuleHeight = 56.dp
+    val sidePad = 16.dp
+    val capsuleShape = RoundedCornerShape(28.dp)
+    val primary = MaterialTheme.colorScheme.primary
+    val secondary = MaterialTheme.colorScheme.secondary
+    val tertiary = MaterialTheme.colorScheme.tertiary
+    val ink = MaterialTheme.colorScheme.onBackground
+    val surface = MaterialTheme.colorScheme.surface
+    val outline = MaterialTheme.colorScheme.outline
+    val hasRealBlur = GlassStyles.hasRealBlur(android.os.Build.VERSION.SDK_INT)
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(previewHeight)
+            .clip(RoundedCornerShape(cornerRadiusDp.dp))
+            .drawBehind { drawGlassBackdrop(size, primary, secondary, tertiary, ink) }
+            .semantics {
+                contentDescription = "Tune Glass preview: blur $blurDp dp" +
+                    (if (hasRealBlur) "" else " (no real blur on this Android version)") +
+                    ", tint ${(tintOpacity * 100).toInt()} percent, border ${(borderOpacity * 100).toInt()} percent, shadow $shadowDp dp"
+            }
+    ) {
+        Box(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .fillMaxWidth()
+                .padding(horizontal = sidePad)
+                .height(capsuleHeight)
+                .shadow(elevation = shadowDp.dp, shape = capsuleShape, clip = false)
+                .clip(capsuleShape)
+        ) {
+            // Backdrop copy, aligned to the outer backdrop and blurred by the user's radius.
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .blur(blurDp.dp, BlurredEdgeTreatment.Unbounded)
+                    .drawBehind {
+                        val dx = sidePad.toPx()
+                        val dy = (previewHeight.toPx() - capsuleHeight.toPx()) / 2f
+                        translate(left = -dx, top = -dy) {
+                            drawGlassBackdrop(Size(size.width + dx * 2, previewHeight.toPx()), primary, secondary, tertiary, ink)
+                        }
+                    }
+            )
+            // Tint + border
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(surface.copy(alpha = tintOpacity))
+                    .border(1.dp, outline.copy(alpha = borderOpacity), capsuleShape)
+            )
+            // Capsule content: four "tab" dots, first one active
+            Row(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 18.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                repeat(4) { i ->
+                    Box(
+                        modifier = Modifier
+                            .size(width = if (i == 0) 36.dp else 18.dp, height = 18.dp)
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(
+                                if (i == 0) primary.copy(alpha = 0.9f)
+                                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
+                            )
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Tune Glass sliders — only composed when at least one surface (header / nav pill) has
+ * TUNE_GLASS selected, because these four values are read by nothing else. Slider ranges are
+ * [GlassTuneRanges], the exact clamps the repository setters enforce.
+ */
+@Composable
+private fun TuneGlassPanel(
+    settings: UserSettingsState,
+    appliesTo: List<String>,
+    onUpdateBlur: (Int) -> Unit,
+    onUpdateTintOpacity: (Float) -> Unit,
+    onUpdateBorderOpacity: (Float) -> Unit,
+    onUpdateShadowDp: (Int) -> Unit,
+) {
+    val sdk = android.os.Build.VERSION.SDK_INT
+    val hasRealBlur = GlassStyles.hasRealBlur(sdk)
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Tune, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Tune Glass", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+            }
+            Text(
+                "Applies to: ${appliesTo.joinToString(" + ")}",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        GlassTunePreview(
+            blurDp = settings.glassTuneBlurDp,
+            tintOpacity = settings.glassTuneTintOpacity,
+            borderOpacity = settings.glassTuneBorderOpacity,
+            shadowDp = settings.glassTuneShadowDp,
+            cornerRadiusDp = settings.cornerRadiusDp
+        )
+        GlassSliderRow(
+            title = "Blur strength",
+            valueText = "${settings.glassTuneBlurDp} dp",
+            description = "Radius of the backdrop blur behind the glass.",
+            value = settings.glassTuneBlurDp.toFloat(),
+            onValueChange = { onUpdateBlur(it.toInt()) },
+            valueRange = GlassTuneRanges.blurDp.first.toFloat()..GlassTuneRanges.blurDp.last.toFloat(),
+            steps = GlassTuneRanges.blurDp.last - GlassTuneRanges.blurDp.first - 1,
+            enabled = hasRealBlur,
+            disabledReason = "Blur has no effect on Android ${android.os.Build.VERSION.RELEASE} (API $sdk) — it needs API " +
+                "${GlassStyles.REAL_BLUR_MIN_API}+. Your saved value (${settings.glassTuneBlurDp} dp) is kept for newer devices."
+        )
+        GlassSliderRow(
+            title = "Tint opacity",
+            valueText = "${(settings.glassTuneTintOpacity * 100).toInt()}%",
+            description = "How much of the surface colour sits over the blur. Lower is clearer.",
+            value = settings.glassTuneTintOpacity,
+            onValueChange = onUpdateTintOpacity,
+            valueRange = GlassTuneRanges.tintOpacity
+        )
+        GlassSliderRow(
+            title = "Border opacity",
+            valueText = "${(settings.glassTuneBorderOpacity * 100).toInt()}%",
+            description = "Strength of the 1 dp hairline around the glass.",
+            value = settings.glassTuneBorderOpacity,
+            onValueChange = onUpdateBorderOpacity,
+            valueRange = GlassTuneRanges.borderOpacity
+        )
+        GlassSliderRow(
+            title = "Shadow",
+            valueText = "${settings.glassTuneShadowDp} dp",
+            description = "Drop-shadow elevation under the glass.",
+            value = settings.glassTuneShadowDp.toFloat(),
+            onValueChange = { onUpdateShadowDp(it.toInt()) },
+            valueRange = GlassTuneRanges.shadowDp.first.toFloat()..GlassTuneRanges.shadowDp.last.toFloat(),
+            steps = GlassTuneRanges.shadowDp.last - GlassTuneRanges.shadowDp.first - 1
+        )
+    }
+}
+
+/** Surfaces currently set to Tune Glass, in display order. Pure for unit testing. */
+internal fun tuneGlassSurfaces(headerBlurStyle: String, navBarBlurEffect: String): List<String> = buildList {
+    if (GlassStyles.canonicalKey(headerBlurStyle) == GlassStyles.TUNE_GLASS) add("Header")
+    if (GlassStyles.canonicalKey(navBarBlurEffect) == GlassStyles.TUNE_GLASS) add("Nav pill")
+}
+
 @Composable
 private fun NavigationAndHeaderModifiersCard(
-    settings: com.example.data.models.UserSettingsState,
+    settings: UserSettingsState,
     onUpdateNavOpacity: (Float) -> Unit,
     onUpdateNavBlurStyle: (String) -> Unit,
     onToggleHiddenNavItem: (String) -> Unit,
     onUpdateHeaderTopPadding: (Int) -> Unit,
     onUpdateHeaderOpacity: (Float) -> Unit,
     onUpdateHeaderBlurStyle: (String) -> Unit,
-    onUpdateFabBottomSpacing: (Int) -> Unit
+    onUpdateFabBottomSpacing: (Int) -> Unit,
+    onUpdateGlassTuneBlur: (Int) -> Unit,
+    onUpdateGlassTuneTintOpacity: (Float) -> Unit,
+    onUpdateGlassTuneBorderOpacity: (Float) -> Unit,
+    onUpdateGlassTuneShadowDp: (Int) -> Unit,
 ) {
     GlassCard(
         modifier = Modifier.fillMaxWidth(),
@@ -2330,253 +3777,82 @@ private fun NavigationAndHeaderModifiersCard(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             // ── 1. Header Top Offset ──
-            Column {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "Header Top Offset (Status Bar Padding)",
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Text(
-                        "${settings.headerTopPaddingDp} dp",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-                Text(
-                    "Pulls top floating capsule headers downward so they don't collide with the notification panel.",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Slider(
-                    value = settings.headerTopPaddingDp.toFloat(),
-                    onValueChange = { onUpdateHeaderTopPadding(it.toInt()) },
-                    valueRange = 0f..40f,
-                    steps = 7,
-                    colors = SliderDefaults.colors(
-                        thumbColor = MaterialTheme.colorScheme.primary,
-                        activeTrackColor = MaterialTheme.colorScheme.primary
-                    )
-                )
-            }
+            GlassSliderRow(
+                title = "Header Top Offset",
+                valueText = "${settings.headerTopPaddingDp} dp",
+                description = "Pulls the floating capsule header down so it doesn't collide with the status bar.",
+                value = settings.headerTopPaddingDp.toFloat(),
+                onValueChange = { onUpdateHeaderTopPadding(it.toInt()) },
+                valueRange = 0f..40f,
+                steps = 7
+            )
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
 
-            // ── 2. Header Background Opacity & Blur ──
+            // ── 2. Header glass ──
             Column {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "Header Glass Opacity",
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Text(
-                        "${(settings.headerBackgroundOpacity * 100).toInt()}%",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-                Spacer(modifier = Modifier.height(4.dp))
-                Slider(
+                GlassSliderRow(
+                    title = "Header Glass Opacity",
+                    valueText = "${(settings.headerBackgroundOpacity * 100).toInt()}%",
+                    description = null,
                     value = settings.headerBackgroundOpacity,
-                    onValueChange = { onUpdateHeaderOpacity(it) },
-                    valueRange = 0.1f..1.0f,
-                    colors = SliderDefaults.colors(
-                        thumbColor = MaterialTheme.colorScheme.primary,
-                        activeTrackColor = MaterialTheme.colorScheme.primary
-                    )
-                )
-
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    "Header Glass Effect",
-                    fontWeight = FontWeight.Medium,
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    onValueChange = onUpdateHeaderOpacity,
+                    valueRange = 0.1f..1.0f
                 )
                 Spacer(modifier = Modifier.height(6.dp))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    // DESIGN-RECORD §11: write canonical keys (not main's legacy keys)
-                    listOf(
-                        "FROSTED_GLASS" to "Frosted Glass",
-                        "SOLID_M3" to "Material 3",
-                        "TRANSLUCENT" to "Clear Tint",
-                        "OLED_BLACK" to "OLED Black"
-                    ).forEach { (styleKey, styleLabel) ->
-                        val isSel = settings.headerBlurStyle == styleKey
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(
-                                    if (isSel) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
-                                    else MaterialTheme.colorScheme.surfaceVariant
-                                )
-                                .border(
-                                    width = 1.dp,
-                                    color = if (isSel) MaterialTheme.colorScheme.primary else Color.Transparent,
-                                    shape = RoundedCornerShape(8.dp)
-                                )
-                                .clickable { onUpdateHeaderBlurStyle(styleKey) }
-                                .padding(horizontal = 10.dp, vertical = 6.dp)
-                        ) {
-                            Text(
-                                text = styleLabel,
-                                fontSize = 11.5.sp,
-                                fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
-                                color = if (isSel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-                    }
-                }
+                GlassStyleChipRow(
+                    title = "Header glass style",
+                    selectedKey = settings.headerBlurStyle,
+                    onSelect = onUpdateHeaderBlurStyle
+                )
             }
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
 
-            // ── 3. Navigation Bar Opacity & Blur ──
+            // ── 3. Nav pill glass ──
             Column {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "Bottom Nav Pill Opacity",
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Text(
-                        "${(settings.navBarBackgroundOpacity * 100).toInt()}%",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-                Text(
-                    "Fine-tune the iOS-style glassmorphism blur and transparency of the floating navigation pill.",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Slider(
+                GlassSliderRow(
+                    title = "Bottom Nav Pill Opacity",
+                    valueText = "${(settings.navBarBackgroundOpacity * 100).toInt()}%",
+                    description = "Transparency of the floating navigation pill.",
                     value = settings.navBarBackgroundOpacity,
-                    onValueChange = { onUpdateNavOpacity(it) },
-                    valueRange = 0.3f..1.0f,
-                    colors = SliderDefaults.colors(
-                        thumbColor = MaterialTheme.colorScheme.primary,
-                        activeTrackColor = MaterialTheme.colorScheme.primary
-                    )
+                    onValueChange = onUpdateNavOpacity,
+                    valueRange = 0.3f..1.0f
                 )
+                Spacer(modifier = Modifier.height(6.dp))
+                GlassStyleChipRow(
+                    title = "Nav pill glass style",
+                    selectedKey = settings.navBarBlurEffect,
+                    onSelect = onUpdateNavBlurStyle
+                )
+            }
 
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    "Nav Pill Glass Blur Style",
-                    fontWeight = FontWeight.Medium,
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+            // ── 3b. Tune Glass sliders — only when a surface actually uses TUNE_GLASS ──
+            val tuneSurfaces = tuneGlassSurfaces(settings.headerBlurStyle, settings.navBarBlurEffect)
+            if (tuneSurfaces.isNotEmpty()) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                TuneGlassPanel(
+                    settings = settings,
+                    appliesTo = tuneSurfaces,
+                    onUpdateBlur = onUpdateGlassTuneBlur,
+                    onUpdateTintOpacity = onUpdateGlassTuneTintOpacity,
+                    onUpdateBorderOpacity = onUpdateGlassTuneBorderOpacity,
+                    onUpdateShadowDp = onUpdateGlassTuneShadowDp
                 )
-                Spacer(modifier = Modifier.height(6.dp))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    // DESIGN-RECORD §11: write canonical keys (not main's legacy keys)
-                    listOf(
-                        "FROSTED_GLASS" to "Frosted Glass",
-                        "SOLID_M3" to "Material 3",
-                        "OLED_BLACK" to "OLED Black",
-                        "TRANSLUCENT" to "Translucent"
-                    ).forEach { (effectKey, effectLabel) ->
-                        val isSel = settings.navBarBlurEffect == effectKey
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(
-                                    if (isSel) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
-                                    else MaterialTheme.colorScheme.surfaceVariant
-                                )
-                                .border(
-                                    width = 1.dp,
-                                    color = if (isSel) MaterialTheme.colorScheme.primary else Color.Transparent,
-                                    shape = RoundedCornerShape(8.dp)
-                                )
-                                .clickable { onUpdateNavBlurStyle(effectKey) }
-                                .padding(horizontal = 10.dp, vertical = 6.dp)
-                        ) {
-                            Text(
-                                text = effectLabel,
-                                fontSize = 11.5.sp,
-                                fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
-                                color = if (isSel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-                    }
-                }
             }
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
 
             // ── 4. FAB & Action Spacing from Bottom ──
-            Column {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "FAB & Bottom Elevation Spacing",
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Text(
-                        "${settings.fabBottomSpacingDp} dp",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-                Text(
-                    "Ensures action buttons & FABs float comfortably above the bottom navigation pill and screen bezels.",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Slider(
-                    value = settings.fabBottomSpacingDp.toFloat(),
-                    onValueChange = { onUpdateFabBottomSpacing(it.toInt()) },
-                    valueRange = 48f..140f,
-                    steps = 11,
-                    colors = SliderDefaults.colors(
-                        thumbColor = MaterialTheme.colorScheme.primary,
-                        activeTrackColor = MaterialTheme.colorScheme.primary
-                    )
-                )
-            }
+            GlassSliderRow(
+                title = "FAB & Bottom Elevation Spacing",
+                valueText = "${settings.fabBottomSpacingDp} dp",
+                description = "Keeps action buttons and FABs floating above the navigation pill.",
+                value = settings.fabBottomSpacingDp.toFloat(),
+                onValueChange = { onUpdateFabBottomSpacing(it.toInt()) },
+                valueRange = 48f..140f,
+                steps = 11
+            )
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
 
@@ -2627,6 +3903,7 @@ private fun NavigationAndHeaderModifiersCard(
                                     shape = RoundedCornerShape(8.dp)
                                 )
                                 .clickable { onToggleHiddenNavItem(itemKey) }
+                                .semantics { contentDescription = "$itemLabel, " + if (isHidden) "hidden" else "visible" }
                                 .padding(horizontal = 10.dp, vertical = 6.dp)
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2648,6 +3925,530 @@ private fun NavigationAndHeaderModifiersCard(
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+// ─── Local REST API & CLI (Phase B) ───────────────────────────────────
+
+/** One route the embedded server actually serves (mirrors LocalApiServer.route's `when`). */
+internal data class LocalApiEndpoint(val method: String, val path: String, val bearer: Boolean, val summary: String)
+
+/**
+ * Route table shown in Settings. Kept in the exact order LocalApiServer.route matches them.
+ * `bearer` = true means the route rejects calls without `Authorization: Bearer <pairing token>`.
+ */
+internal val localApiEndpoints: List<LocalApiEndpoint> = listOf(
+    LocalApiEndpoint("GET", "/api/ping", false, "Liveness check, returns status + API version"),
+    LocalApiEndpoint("GET", "/api/status", false, "Server, interception and capture status"),
+    LocalApiEndpoint("GET", "/api/pairing-info", false, "Pairing token + port — only while the reveal toggle is on"),
+    LocalApiEndpoint("GET", "/api/captures", false, "Recent captured transactions"),
+    LocalApiEndpoint("GET", "/api/captures/export", false, "Bulk export (from/to/cursor/limit/format)"),
+    LocalApiEndpoint("GET", "/api/captures/{id}", false, "One capture with full body"),
+    LocalApiEndpoint("GET", "/api/flows", false, "Saved flows"),
+    LocalApiEndpoint("POST", "/api/flows", false, "Create a flow"),
+    LocalApiEndpoint("POST", "/api/flows/{id}/execute", false, "Run a flow"),
+    LocalApiEndpoint("DELETE", "/api/flows/{id}", false, "Delete a flow"),
+    LocalApiEndpoint("GET", "/api/tools", false, "Built-in + plugin tools"),
+    LocalApiEndpoint("POST", "/api/tools/execute", false, "Run a tool with input"),
+    LocalApiEndpoint("GET", "/api/rules", true, "Intercept rules"),
+    LocalApiEndpoint("POST", "/api/rules", true, "Create an intercept rule"),
+    LocalApiEndpoint("PUT", "/api/rules/{id}", true, "Update an intercept rule"),
+    LocalApiEndpoint("DELETE", "/api/rules/{id}", true, "Delete an intercept rule"),
+    LocalApiEndpoint("POST", "/api/observe", true, "Ingest a transaction from the SDK / browser extension"),
+    LocalApiEndpoint("POST", "/api/keylog", true, "Ingest TLS key-log lines"),
+    LocalApiEndpoint("POST", "/api/plugin/execute", false, "Invoke a plugin tool"),
+)
+
+/** "m:ss" countdown text for the pairing-token reveal window. Never negative. */
+internal fun formatRevealCountdown(remainingMs: Long): String {
+    val totalSeconds = (remainingMs.coerceAtLeast(0L) + 999L) / 1000L
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    return "%d:%02d".format(minutes, seconds)
+}
+
+/** Colour for an HTTP method badge, reusing the app's method token palette. */
+private fun methodBadgeColor(method: String): Long = when (method.uppercase()) {
+    "GET" -> 0xFF22C55E
+    "POST" -> 0xFF3B82F6
+    "PUT" -> 0xFFF59E0B
+    "DELETE" -> 0xFFEF4444
+    else -> 0xFF64748B
+}
+
+@Composable
+private fun CopyableCommandRow(label: String, command: String, onCopied: (String) -> Unit) {
+    val clipboard = LocalClipboardManager.current
+    Column {
+        Text(label, fontSize = 11.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(modifier = Modifier.height(3.dp))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
+                .clickable {
+                    clipboard.setText(AnnotatedString(command))
+                    onCopied(label)
+                }
+                .semantics { contentDescription = "Copy $label" }
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                command,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.5.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f),
+                lineHeight = 14.sp
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Icon(Icons.Default.ContentCopy, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp))
+        }
+    }
+}
+
+@Composable
+private fun LocalApiAndCliCard(interceptionDataStore: com.example.data.prefs.SettingsDataStore) {
+    val scope = rememberCoroutineScope()
+    val clipboard = LocalClipboardManager.current
+    val running by com.example.api.LocalApiServer.isRunningFlow.collectAsState()
+    // LocalApiServer.port is the value the socket is bound to; start() below always uses the
+    // same default, so the URL shown here is the URL the server answers on.
+    val port = com.example.api.LocalApiServer.port
+    val baseUrl = "http://127.0.0.1:$port"
+
+    val pairingToken by interceptionDataStore.pairingToken.collectAsState(initial = null)
+    val showToken by interceptionDataStore.showPairingToken.collectAsState(initial = false)
+    val revealUntil by interceptionDataStore.pairingTokenRevealUntil.collectAsState(initial = 0L)
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    var copiedLabel by remember { mutableStateOf<String?>(null) }
+    var regenerateResult by remember { mutableStateOf<String?>(null) }
+    var confirmRegenerate by remember { mutableStateOf(false) }
+    var endpointsExpanded by remember { mutableStateOf(false) }
+
+    // Reveal window: tick once a second while revealed and flip the toggle off at the same
+    // instant the server stops answering /api/pairing-info (revealUntil). Because the deadline
+    // is the persisted timestamp — not a fresh 5-minute delay — leaving and re-entering Settings
+    // cannot extend the window.
+    LaunchedEffect(showToken, revealUntil) {
+        if (!showToken) return@LaunchedEffect
+        while (true) {
+            now = System.currentTimeMillis()
+            if (revealUntil <= now) {
+                interceptionDataStore.setShowPairingToken(false)
+                break
+            }
+            kotlinx.coroutines.delay(1_000L)
+        }
+    }
+    LaunchedEffect(copiedLabel) {
+        if (copiedLabel != null) {
+            kotlinx.coroutines.delay(2_000L)
+            copiedLabel = null
+        }
+    }
+
+    if (confirmRegenerate) {
+        ConfirmActionDialog(
+            title = "Regenerate pairing token?",
+            message = "Every SDK integration and browser extension paired with the current token will be rejected (401) until you paste the new one into it.",
+            confirmLabel = "Regenerate",
+            onConfirm = {
+                confirmRegenerate = false
+                scope.launch {
+                    regenerateResult = runCatching { com.example.api.LocalApiServer.regeneratePairingToken() }
+                        .fold(
+                            onSuccess = { "New token generated. Reveal it below to copy it." },
+                            onFailure = { "Could not regenerate: ${it.message ?: it.javaClass.simpleName}" }
+                        )
+                }
+            },
+            onDismiss = { confirmRegenerate = false }
+        )
+    }
+
+    GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surface) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            // ── Server ──
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Default.Terminal, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Embedded HTTP API Server", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                }
+                BadgePill(text = if (running) "RUNNING" else "STOPPED", color = if (running) 0xFF10B981 else 0xFF64748B)
+            }
+            Text(
+                "Serves captures, flows, tools and rules over plain HTTP on the loopback interface only " +
+                    "(127.0.0.1 — not reachable from Wi-Fi). Off by default; it does not restart itself after the app restarts.",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                lineHeight = 15.sp
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        if (running) "Listening on $baseUrl" else "Server stopped",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        fontFamily = if (running) FontFamily.Monospace else FontFamily.Default,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        if (running) "Port $port · ${localApiEndpoints.size} routes · ${localApiEndpoints.count { it.bearer }} need the pairing token"
+                        else "Turn on to bind port $port",
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                DynamicGlassSwitch(
+                    checked = running,
+                    onCheckedChange = { checked ->
+                        if (checked) com.example.api.LocalApiServer.start(port) else com.example.api.LocalApiServer.stop()
+                    },
+                    modifier = Modifier.semantics { contentDescription = "Local API server " + if (running) "on" else "off" }
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+            // ── Quick start ──
+            Text("Quick start", fontWeight = FontWeight.SemiBold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
+            CopyableCommandRow("Ping from a terminal on this device (Termux / adb shell)", "curl $baseUrl/api/ping") { copiedLabel = it }
+            CopyableCommandRow("Reach it from your computer over USB first", "adb forward tcp:$port tcp:$port") { copiedLabel = it }
+            CopyableCommandRow(
+                "Authenticated call (rules, observe, keylog)",
+                "curl -H \"Authorization: Bearer <pairing token>\" $baseUrl/api/rules"
+            ) { copiedLabel = it }
+
+            // ── Endpoints ──
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { endpointsExpanded = !endpointsExpanded }
+                    .semantics { contentDescription = if (endpointsExpanded) "Collapse endpoint list" else "Expand endpoint list" }
+                    .padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Endpoints (${localApiEndpoints.size})", fontWeight = FontWeight.SemiBold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
+                Text(if (endpointsExpanded) "Hide" else "Show", fontSize = 11.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.primary)
+            }
+            if (endpointsExpanded) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    localApiEndpoints.forEach { ep ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    clipboard.setText(AnnotatedString("$baseUrl${ep.path}"))
+                                    copiedLabel = "${ep.method} ${ep.path}"
+                                }
+                                .semantics { contentDescription = "${ep.method} ${ep.path}, ${ep.summary}" + if (ep.bearer) ", needs pairing token" else "" },
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(modifier = Modifier.width(60.dp)) {
+                                BadgePill(text = ep.method, color = methodBadgeColor(ep.method))
+                            }
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(ep.path, fontFamily = FontFamily.Monospace, fontSize = 10.5.sp, color = MaterialTheme.colorScheme.onSurface)
+                                    if (ep.bearer) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Icon(Icons.Default.Security, contentDescription = "Needs pairing token", tint = MaterialTheme.colorScheme.tertiary, modifier = Modifier.size(11.dp))
+                                    }
+                                }
+                                Text(ep.summary, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                    Text(
+                        "Tap a route to copy its full URL. Routes marked with a shield need Authorization: Bearer <pairing token>.",
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+            // ── CLI ──
+            Text("Command-line client", fontWeight = FontWeight.SemiBold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
+            Text(
+                "The requestr CLI lives in this repository's cli/ module (build it with ./gradlew :cli:fatJar → cli/build/libs/cli-4.0-all.jar). " +
+                    "Commands: captures, flows, tools, tool exec <id> <input>, rules, plugin <name> <json>, status, ping. " +
+                    "Routes marked with a shield need the pairing token: pass --token <token> or export REQUESTR_TOKEN so it stays out of your shell history.",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                lineHeight = 15.sp
+            )
+            CopyableCommandRow("After adb forward, from your computer", "java -jar cli-4.0-all.jar --api-base http://localhost:$port captures") { copiedLabel = it }
+            CopyableCommandRow("Authenticated route via the CLI", "REQUESTR_TOKEN=<pairing token> java -jar cli-4.0-all.jar --api-base http://localhost:$port rules") { copiedLabel = it }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+            // ── Pairing token ──
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Security, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("SDK / extension pairing token", fontWeight = FontWeight.SemiBold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
+            }
+            Text(
+                "Bearer token the embedded requestr-sdk and the browser extension must send on /api/observe, /api/keylog and every /api/rules call. " +
+                    "It is generated the first time the server starts and only ever shown here.",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                lineHeight = 15.sp
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Reveal token", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
+                    Text(
+                        if (showToken) "Hides automatically in ${formatRevealCountdown(revealUntil - now)}"
+                        else "Also unlocks GET /api/pairing-info for ${com.example.data.prefs.SettingsDataStore.PAIRING_REVEAL_DURATION_MS / 60_000} minutes",
+                        fontSize = 10.sp,
+                        color = if (showToken) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                DynamicGlassSwitch(
+                    checked = showToken,
+                    onCheckedChange = { checked -> scope.launch { interceptionDataStore.setShowPairingToken(checked) } },
+                    modifier = Modifier.semantics { contentDescription = "Reveal pairing token " + if (showToken) "on" else "off" }
+                )
+            }
+            if (showToken) {
+                val token = pairingToken
+                if (token != null) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.10f))
+                            .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f), RoundedCornerShape(8.dp))
+                            .clickable {
+                                clipboard.setText(AnnotatedString(token))
+                                copiedLabel = "Pairing token"
+                            }
+                            .semantics { contentDescription = "Copy pairing token" }
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            token,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.weight(1f),
+                            lineHeight = 14.sp
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Icon(Icons.Default.ContentCopy, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp))
+                    }
+                } else {
+                    Text(
+                        "No pairing token yet — turn the server on once to generate it.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.tertiary
+                    )
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(
+                    onClick = { confirmRegenerate = true },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                        contentColor = MaterialTheme.colorScheme.onSurface
+                    ),
+                    shape = RoundedCornerShape(10.dp),
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Regenerate token", fontSize = 12.sp)
+                }
+                if (copiedLabel != null) {
+                    Text("Copied: $copiedLabel", fontSize = 10.sp, color = MaterialTheme.colorScheme.secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            if (regenerateResult != null) {
+                Text(
+                    regenerateResult!!,
+                    fontSize = 10.5.sp,
+                    color = if (regenerateResult!!.startsWith("Could not")) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+// ─── Plugin Manager (Phase B) ─────────────────────────────────────────
+
+@Composable
+private fun PluginManagerCard() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val plugins by com.example.plugin.PluginManager.plugins.collectAsState()
+    val pluginDir = remember { com.example.plugin.PluginManager.externalPluginDir() }
+    var rescanResult by remember { mutableStateOf<com.example.plugin.PluginScanResult?>(null) }
+    var rescanning by remember { mutableStateOf(false) }
+    var unloadTarget by remember { mutableStateOf<com.example.plugin.PluginEntry?>(null) }
+
+    unloadTarget?.let { entry ->
+        ConfirmActionDialog(
+            title = "Unload ${entry.plugin.name}?",
+            message = "Its hooks stop running immediately. The file stays in ${pluginDir.path}; it will load again on the next app start or rescan.",
+            confirmLabel = "Unload",
+            onConfirm = {
+                com.example.plugin.PluginManager.unregisterPlugin(entry.plugin.id)
+                unloadTarget = null
+            },
+            onDismiss = { unloadTarget = null }
+        )
+    }
+
+    GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surface) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Default.Extension, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Installed Plugins", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                }
+                val activeCount = plugins.values.count { it.enabled }
+                BadgePill(text = "$activeCount / ${plugins.size} ACTIVE", color = if (activeCount > 0) 0xFF10B981 else 0xFF64748B)
+            }
+            Text(
+                "Plugins can rewrite requests and responses, decode custom content types and add tools. " +
+                    "Switching one off takes effect immediately and is remembered across app restarts and rescans.",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                lineHeight = 15.sp
+            )
+
+            if (plugins.isEmpty()) {
+                Text("No plugins loaded.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                plugins.values.sortedWith(compareBy({ it.source != com.example.plugin.PluginSource.BUILTIN }, { it.plugin.name })).forEach { entry ->
+                    val p = entry.plugin
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(p.name, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("v${p.version}", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    BadgePill(
+                                        text = if (entry.source == com.example.plugin.PluginSource.BUILTIN) "BUILT-IN" else "EXTERNAL",
+                                        color = if (entry.source == com.example.plugin.PluginSource.BUILTIN) 0xFF64748B else 0xFF8B5CF6
+                                    )
+                                }
+                                Text(p.description, fontSize = 10.5.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 14.sp)
+                                Text("by ${p.author} · ${p.id}", fontSize = 9.5.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            DynamicGlassSwitch(
+                                checked = entry.enabled,
+                                onCheckedChange = { on -> com.example.plugin.PluginManager.setPluginEnabled(p.id, on) },
+                                modifier = Modifier.semantics { contentDescription = "${p.name} " + if (entry.enabled) "enabled" else "disabled" }
+                            )
+                        }
+                        if (entry.permissions.isEmpty()) {
+                            Text("Requests no permissions.", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        } else {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                entry.permissions.forEach { perm ->
+                                    BadgePill(text = perm.displayName, color = 0xFFF59E0B, modifier = Modifier.semantics { contentDescription = "${perm.displayName}: ${perm.description}" })
+                                }
+                            }
+                        }
+                        if (entry.source == com.example.plugin.PluginSource.EXTERNAL) {
+                            TextButton(onClick = { unloadTarget = entry }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
+                                Text("Unload", fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
+                }
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+            Text("External plugins", fontWeight = FontWeight.SemiBold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
+            Text(
+                "Drop a .jar or .dex that lists its Plugin class in META-INF/services/com.example.plugin.Plugin into the folder below, then rescan. " +
+                    "The folder is scanned once at app start.",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                lineHeight = 15.sp
+            )
+            Text(pluginDir.path, fontSize = 10.5.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurface)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(
+                    onClick = {
+                        rescanning = true
+                        scope.launch {
+                            // The scanner reports its own counts (files seen, loaded, already
+                            // loaded, failed) — nothing is inferred from before/after sizes.
+                            val result = withContext(Dispatchers.IO) {
+                                com.example.plugin.PluginManager.scanExternalPlugins(context)
+                            }
+                            rescanResult = result
+                            rescanning = false
+                        }
+                    },
+                    enabled = !rescanning,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                        contentColor = MaterialTheme.colorScheme.onSurface
+                    ),
+                    shape = RoundedCornerShape(10.dp),
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (rescanning) "Scanning…" else "Rescan folder", fontSize = 12.sp)
+                }
+                rescanResult?.let { r ->
+                    Text(
+                        r.summary(),
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                        lineHeight = 13.sp
+                    )
                 }
             }
         }

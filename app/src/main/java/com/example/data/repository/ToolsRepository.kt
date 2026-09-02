@@ -2,6 +2,7 @@ package com.example.data.repository
 
 import android.util.Base64
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Notes
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Calculate
 import androidx.compose.material.icons.filled.Code
@@ -11,7 +12,6 @@ import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Notes
 import androidx.compose.material.icons.filled.Password
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Security
@@ -79,7 +79,7 @@ object ToolsRepository {
         ToolItem("ip-calculator",   "IPv4 Subnet Calculator",   "Calculate CIDR, broadcast, netmask and host range",     ToolCategory.NETWORK,    Ic.Public),
         ToolItem("uuid-gen",        "UUID v4 Generator",        "Generate cryptographically secure RFC 4122 UUIDs",     ToolCategory.GENERATORS, Ic.Token),
         ToolItem("random-string",   "Secure Random String",     "Alphanumeric passwords, tokens, entropy keys",          ToolCategory.GENERATORS, Ic.Password),
-        ToolItem("lorem-ipsum",     "Lorem Ipsum Generator",    "Generate mock payload strings and paragraphs",          ToolCategory.GENERATORS, Ic.Notes)
+        ToolItem("lorem-ipsum",     "Lorem Ipsum Generator",    "Generate mock payload strings and paragraphs",          ToolCategory.GENERATORS, Icons.AutoMirrored.Filled.Notes)
     )
 
     data class CustomTool(
@@ -114,6 +114,7 @@ object ToolsRepository {
         if (appContext != null) return
         val ctx = context.applicationContext
         appContext = ctx
+        RecentActivityRepository.init(ctx)
         val db = com.example.data.local.RequestrDatabase.get(ctx)
         repoScope.launch {
             db.customToolDao().observeAll().collect { entities ->
@@ -154,6 +155,25 @@ object ToolsRepository {
     val catalog: kotlinx.coroutines.flow.StateFlow<List<ToolItem>> = _catalog
 
     fun getToolsCatalog(): List<ToolItem> = _catalog.value
+
+    /**
+     * The single mediating "open this tool" call: resolves [toolId] against the live [catalog]
+     * (built-in and custom tools alike) and, when it exists, records the open in
+     * [RecentActivityRepository] so Home's "Recently opened" reflects it. Returns null for an
+     * unknown id -- nothing is recorded for a tool that cannot be shown. `ToolWorkspaceScreen`
+     * should resolve its `toolId` through this rather than `getToolsCatalog().find { ... }`.
+     */
+    fun openTool(toolId: String): ToolItem? {
+        val tool = _catalog.value.firstOrNull { it.id == toolId } ?: return null
+        RecentActivityRepository.recordOpened(
+            type = RecentItemType.TOOL,
+            itemId = tool.id,
+            subtype = tool.category.name,
+            title = tool.title,
+            preview = tool.description,
+        )
+        return tool
+    }
 
 
     // ==========================================
@@ -451,6 +471,17 @@ Broadcast: $ip (Derived)
         val tool = CustomTool(id = id, name = name, operation = operation, pattern = pattern, replacement = replacement)
         customTools[id] = tool
         _catalog.value = computeCatalog()
+        // Re-adding a tool under the same name replaces its definition; keep any existing
+        // recents row describing it (creation is not opening, so no recordOpened here).
+        customToolToItem(tool).let { item ->
+            RecentActivityRepository.updateSnapshot(
+                type = RecentItemType.TOOL,
+                itemId = item.id,
+                subtype = item.category.name,
+                title = item.title,
+                preview = item.description,
+            )
+        }
 
         val ctx = appContext ?: return
         repoScope.launch {

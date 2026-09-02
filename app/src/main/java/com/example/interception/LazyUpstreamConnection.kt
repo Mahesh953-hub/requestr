@@ -48,6 +48,10 @@ internal class LazyUpstreamConnection(
      * this parameter existed.
      */
     private val preferredAlpnProtocols: List<String> = emptyList(),
+    /** §3 (C2) — weak-network simulation applied once, right before dialing [host]:[port]. */
+    private val networkCondition: NetworkConditionInjector.NetworkCondition = NetworkConditionInjector.NetworkCondition.NONE,
+    private val random: kotlin.random.Random = kotlin.random.Random.Default,
+    private val sleep: (Long) -> Unit = Thread::sleep,
     private val onFirstConnect: (Connected) -> Unit = {},
 ) {
 
@@ -75,13 +79,17 @@ internal class LazyUpstreamConnection(
      * -- callers are responsible for translating an [javax.net.ssl.SSLException] into a
      * persisted failure record, matching the previous eager call site's behaviour of only
      * treating the handshake step (not the raw connect) as a first-class "upstream handshake"
-     * failure.
+     * failure. §3 (C2): also throws [NetworkConditionInjector.SimulatedPacketLossException] (an
+     * [java.io.IOException]) before ever calling [connectionFactory], if [networkCondition] rolls
+     * a simulated loss on this dial attempt -- handled identically to any other raw-connect
+     * failure by every existing caller, since it's just another [java.io.IOException] subtype.
      */
     fun connect(): Connected {
         connected?.let { return it }
         synchronized(connectLock) {
             connected?.let { return it }
             try {
+                NetworkConditionInjector.apply(networkCondition, random, sleep)
                 val socket = connectionFactory(host, port)
                 val sslSocket = SSLContext.getInstance("TLS").apply {
                     init(null, arrayOf(AcceptAllTrustManager), SecureRandom())

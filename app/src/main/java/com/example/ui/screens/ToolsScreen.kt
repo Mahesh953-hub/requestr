@@ -1,7 +1,5 @@
 package com.example.ui.screens
 
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -59,9 +57,13 @@ import androidx.compose.ui.unit.sp
 import com.example.data.repository.ToolCategory
 import com.example.data.repository.ToolItem
 import com.example.data.repository.ToolsRepository
+import com.example.LocalBottomOverlayHeight
+import com.example.ui.components.DriveParallaxFrom
 import com.example.ui.components.GlassCard
 import com.example.ui.components.SearchInputField
 import com.example.ui.components.SectionHeader
+import com.example.ui.theme.animateStateColor
+import com.example.ui.theme.scaledTween
 
 /**
  * Redesigned Tools Library (Fix 07). Category selector with accent underline,
@@ -78,6 +80,8 @@ fun ToolsScreen(
     var selectedCategory by remember { mutableStateOf<ToolCategory?>(null) }
     var showCustomToolSheet by remember { mutableStateOf(false) }
     val gridState = rememberLazyGridState()
+    // The grid is Tools' primary scroll container: bind it to the app-wide parallax layer.
+    DriveParallaxFrom(gridState)
 
     val allTools by ToolsRepository.catalog.collectAsState()
 
@@ -88,11 +92,9 @@ fun ToolsScreen(
         }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-    ) {
+    // Transparent root: the ParallaxBackground hosted in MainActivity shows through, and the
+    // glass header/pill have a real backdrop to refract.
+    Column(modifier = Modifier.fillMaxSize()) {
         SectionHeader(
             title = "Tool Library",
             onMiniSettings = onMiniSettings,
@@ -121,7 +123,12 @@ fun ToolsScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(horizontal = 14.dp),
-            contentPadding = PaddingValues(vertical = 12.dp),
+            // `tools` scrolls under the nav pill (ROUTES_SCROLLING_UNDER_PILL), so the grid
+            // reserves the overlay height itself instead of the NavHost padding the whole screen.
+            contentPadding = PaddingValues(
+                top = 12.dp,
+                bottom = LocalBottomOverlayHeight.current + 16.dp
+            ),
             horizontalArrangement = Arrangement.spacedBy(9.dp),
             verticalArrangement = Arrangement.spacedBy(9.dp)
         ) {
@@ -387,14 +394,19 @@ private fun ToolCategorySelector(
         categories.forEach { (pair, emoji) ->
             val (cat, label) = pair
             val isActive = cat == selected
-            val activeBg by animateColorAsState(
-                targetValue = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                animationSpec = tween(200),
+            // Selection animates on a gated tween; theme colours resolve instantly.
+            val activeBg by animateStateColor(
+                active = isActive,
+                activeColor = MaterialTheme.colorScheme.primary,
+                inactiveColor = MaterialTheme.colorScheme.surfaceVariant,
+                animationSpec = scaledTween(200),
                 label = "catBg"
             )
-            val activeText by animateColorAsState(
-                targetValue = if (isActive) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                animationSpec = tween(200),
+            val activeText by animateStateColor(
+                active = isActive,
+                activeColor = MaterialTheme.colorScheme.onPrimary,
+                inactiveColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                animationSpec = scaledTween(200),
                 label = "catText"
             )
 

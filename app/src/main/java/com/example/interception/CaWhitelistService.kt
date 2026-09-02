@@ -53,6 +53,11 @@ object CaWhitelistService {
         }
 
         if (success) {
+            // See CaTrustGate's KDoc: the CA's trust-store location just changed (user -> system
+            // store), an app-initiated change CaTrustGate has no other way to observe -- force
+            // every live gate to re-probe rather than possibly serve a pre-promotion cached
+            // answer for the remainder of its TTL window.
+            CaTrustGate.invalidateAll()
             // Re-probe to confirm
             val newState = CapabilityProbe.probeCaInstalled()
             InterceptionStateRepository.updateCapabilities(ca = newState)

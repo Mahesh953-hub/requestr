@@ -1,6 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Fix #31 (TODO): restrict cleartext to local proxy/mitm only.
-     The app itself (API Testr requests) should not use cleartext for arbitrary domains. -->
+<!-- Fix #31 (RESOLVED — keep this config strict; do NOT loosen it).
+     Intent: the app *as an HTTP client* (API Testr requests, telemetry, updates) must not use
+     cleartext for arbitrary domains, so base-config stays cleartextTrafficPermitted="false" and
+     only the local loopback/emulator-host/proxy addresses below are exempted.
+
+     The app *as an interception proxy* has the opposite requirement — it must be able to relay
+     plain HTTP to arbitrary upstream hosts on behalf of the app under test. That is deliberately
+     NOT solved by widening this file. HttpProxyShared.forwardRequest dials the upstream leg over a
+     raw Socket/SSLSocket, which is not governed by Network Security Config at all, so the proxy
+     tier works with this config fully locked down. (Before that change it used
+     HttpURLConnection and every cleartext request through the proxy died here with
+     "Cleartext HTTP traffic to <host> not permitted" — see
+     docs/plans/MASTER-PLAN-IMPLEMENTATION-STATUS.md, "Bugs found and fixed".)
+
+     If you add a new outbound *client* call that needs cleartext, that is almost certainly a bug in
+     the caller, not a missing domain-config entry here. -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false" />
     <domain-config cleartextTrafficPermitted="true">

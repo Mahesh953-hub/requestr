@@ -53,7 +53,7 @@ class GlassStyleKeysTest {
     }
 
     @Test
-    fun `every canonical key is one of the four supported values`() {
+    fun `every canonical key is one of the six supported values`() {
         val supported = setOf("FROSTED_GLASS", "SOLID_M3", "OLED_BLACK", "TRANSLUCENT")
         listOf(null, "", "FROSTED", "M3_MINIMAL", "CLEAR_GLASS", "DEEP_DARK",
             "M3", "OLED", "TRANSLUCENT", "FROSTED_GLASS", "SOLID_M3", "OLED_BLACK",

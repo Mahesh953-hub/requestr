@@ -1,11 +1,9 @@
 package com.example.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -14,8 +12,10 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -34,16 +34,20 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.CompareArrows
+import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -104,6 +108,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -135,11 +140,14 @@ import com.example.data.models.RequestBodyType
 import com.example.data.repository.ApiCollectionsRepository
 import com.example.data.repository.ApiTestrRepository
 import com.example.data.repository.AssertionRunner
+import com.example.data.repository.CurlImportResult
 import com.example.data.repository.SettingsRepository
 import com.example.data.repository.ToolsRepository
 import com.example.data.repository.WebSocketSession
 import com.example.data.repository.WsConnectionStatus
 import com.example.data.repository.WsMessage
+import com.example.ui.components.DiffView
+import com.example.ui.components.EmptyState
 import com.example.ui.components.GlassCard
 import com.example.ui.components.MethodBadge
 import com.example.ui.components.ProtocolBadge
@@ -158,6 +166,8 @@ import com.example.ui.theme.MethodWs
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.animateStateColor
+import com.example.ui.theme.scaledTween
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
@@ -177,6 +187,15 @@ fun ApiTestrScreen(
     var reqState by remember(currentRequest) { mutableStateOf(currentRequest) }
     var responseData by remember { mutableStateOf<ApiResponseData?>(null) }
     var isLoading by remember { mutableStateOf(false) }
+
+    // "Compare runs" (DiffView call site, see ApiTestrResponseDiffHelpers.kt): the last completed
+    // send per request id in this session, plus the run currently on screen and the run it
+    // replaced. `responseData` above is the *display* copy (Beautify rewrites its body);
+    // these hold bodies exactly as received so both sides of the diff are like-for-like.
+    var lastRunByRequest by remember { mutableStateOf<Map<String, ApiRunSnapshot>>(emptyMap()) }
+    var currentRun by remember { mutableStateOf<ApiRunSnapshot?>(null) }
+    var previousRun by remember { mutableStateOf<ApiRunSnapshot?>(null) }
+    var showCompareRunsSheet by remember { mutableStateOf(false) }
 
     // v6.0 transplant (manifest §5.5): WebSocket session state — backup had a bare
     // `wsConnected` boolean that was never set to true; the WS method showed "Connect"
@@ -210,7 +229,10 @@ fun ApiTestrScreen(
     var scriptError by remember { mutableStateOf<String?>(null) }
 
     var selectedViewMode by remember { mutableIntStateOf(0) } // 0: Request, 1: Response
-    var followRedirects by remember { mutableStateOf(true) }
+    // Dossier Q7: tap = follow redirects once (this send only), long-press = always follow
+    // (persists across sends). See ApiTestrRedirectMode.kt for the pure state-transition
+    // functions and rationale.
+    var redirectFollowState by remember { mutableStateOf(RedirectFollowState()) }
     var requestTab by remember { mutableIntStateOf(0) } // 0: Query, 1: Headers, 2: Body, 3: Auth, 4: Scripts, 5: Chain, 6: Tests
     var responseTab by remember { mutableIntStateOf(0) } // 0: Body, 1: Headers, 2: Metrics, 3: Test Results
 
@@ -262,6 +284,7 @@ fun ApiTestrScreen(
             return
         }
         isLoading = true
+        val sentRequest = reqState
         coroutineScope.launch {
             // Master plan §1.10/§1.11: {{var}} substitution, pre-/post-request pm.* scripts,
             // and 202-polling are now all sequenced centrally in
@@ -269,9 +292,19 @@ fun ApiTestrScreen(
             // substitution, so a pre-script's pm.environment.set(...) is visible in the SAME
             // send) — pass the original, un-substituted reqState here rather than
             // pre-substituting it ourselves, to avoid double-applying substitution.
-            val outcome = ApiTestrRepository.executeRequestWithScripts(reqState, followRedirects)
+            val outcome = ApiTestrRepository.executeRequestWithScripts(reqState, redirectFollowState.shouldFollow)
+            // A "follow once" tap only applies to this send — consume it now so the next send
+            // reverts to whatever alwaysFollow is set to, instead of silently following forever.
+            redirectFollowState = redirectFollowState.afterSend()
             val resp = outcome.response
             responseData = resp
+            // Record this run against its request id so "Compare runs" can diff it with the
+            // previous send of the same request (other requests' runs are untouched).
+            val run = ApiRunSnapshot(sentRequest.id, sentRequest.method.name, sentRequest.url, resp)
+            val (baseline, updatedRuns) = recordRun(lastRunByRequest, run)
+            previousRun = baseline
+            currentRun = run
+            lastRunByRequest = updatedRuns
             // v3.4 Part C — C3: clear any previous run's pass/fail results —
             // they belong to a different response, not this one.
             testResults = null
@@ -316,11 +349,8 @@ fun ApiTestrScreen(
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-    ) {
+    // Transparent root so the ParallaxBackground hosted in MainActivity shows through.
+    Column(modifier = Modifier.fillMaxSize()) {
         // Section Header
         SectionHeader(
             title = "API Testr",
@@ -359,12 +389,19 @@ fun ApiTestrScreen(
         Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
             TitleAndUrlCard(
                 reqState = reqState,
-                followRedirects = followRedirects,
+                // "Unsaved changes" is only true — dossier §7 item 7: the old label was a static
+                // "Autosaved as draft · unsaved changes" string shown unconditionally, with no
+                // real autosave-to-storage mechanism behind the word "Autosaved". reqState only
+                // diverges from currentRequest (the last value ApiCollectionsRepository.saveRequest
+                // wrote) once the user actually edits something, so this is a real dirty check.
+                isDirty = reqState != currentRequest,
+                redirectFollowState = redirectFollowState,
                 wsStatus = if (reqState.method == HttpMethod.WS) wsStatus else null,
                 onTitleChanged = { reqState = reqState.copy(name = it) },
                 onMethodChanged = { reqState = reqState.copy(method = it) },
                 onUrlChanged = { reqState = reqState.copy(url = it) },
-                onToggleRedirects = { followRedirects = !followRedirects }
+                onTapRedirect = { redirectFollowState = redirectFollowState.withOnceToggled() },
+                onLongPressRedirect = { redirectFollowState = redirectFollowState.withAlwaysToggled() }
             )
         }
 
@@ -417,7 +454,9 @@ fun ApiTestrScreen(
 
             TabRow(
                 selectedTabIndex = requestTab,
-                containerColor = MaterialTheme.colorScheme.background,
+                // Transparent: an opaque `background` strip here would cut a band out of the
+                // parallax layer between the header and the request editor.
+                containerColor = Color.Transparent,
                 contentColor = MaterialTheme.colorScheme.primary,
                 indicator = { tabPositions ->
                     SecondaryIndicator(
@@ -816,6 +855,20 @@ fun ApiTestrScreen(
                                         modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.End
                                     ) {
+                                        // Opens the "Compare runs" sheet: this response's body vs
+                                        // the previous send of the same request (DiffView). Shown
+                                        // whenever a response exists so the "only one run so far"
+                                        // state is reachable and explained, not hidden.
+                                        if (currentRun != null) {
+                                            Button(
+                                                onClick = { showCompareRunsSheet = true },
+                                                shape = RoundedCornerShape(8.dp),
+                                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                                            ) {
+                                                Text("⇄ Compare runs", color = TextPrimary, fontSize = 11.sp)
+                                            }
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                        }
                                         Button(
                                             onClick = {
                                                 responseData = resp.copy(body = ToolsRepository.formatJson(resp.body))
@@ -962,6 +1015,18 @@ fun ApiTestrScreen(
         }
     }
 
+    // Sheet: Compare runs -- DiffView over the previous vs current body of the same request.
+    // Bounded (DiffView.maxHeight) and scrollable, so on 720x1600 the sheet never grows past
+    // the viewport and the control that opened it stays where it was.
+    val compareCurrent = currentRun
+    if (showCompareRunsSheet && compareCurrent != null) {
+        CompareRunsSheet(
+            current = compareCurrent,
+            previous = previousRun,
+            onDismiss = { showCompareRunsSheet = false },
+        )
+    }
+
     // Modal: Code Snippets (Python, JS, Kotlin, Swift, cURL, Go)
     if (showSnippetModal) {
         val snippetCode = remember(reqState, selectedSnippetLang) {
@@ -1044,6 +1109,7 @@ fun ApiTestrScreen(
     // Modal: Import cURL
     if (showImportCurlModal) {
         var curlInput by remember { mutableStateOf("curl -X POST https://httpbin.org/post -H \"Content-Type: application/json\" -d '{\"hello\":\"world\"}'") }
+        var curlError by remember { mutableStateOf<String?>(null) }
 
         ModalBottomSheet(
             onDismissRequest = { showImportCurlModal = false },
@@ -1060,7 +1126,7 @@ fun ApiTestrScreen(
 
                 OutlinedTextField(
                     value = curlInput,
-                    onValueChange = { curlInput = it },
+                    onValueChange = { curlInput = it; curlError = null },
                     placeholder = { Text("Paste cURL here...", color = TextMuted) },
                     textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = TextPrimary),
                     modifier = Modifier
@@ -1069,16 +1135,26 @@ fun ApiTestrScreen(
                     shape = RoundedCornerShape(12.dp)
                 )
 
+                curlError?.let {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(it, fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+                }
+
                 Spacer(modifier = Modifier.height(14.dp))
 
                 Button(
                     onClick = {
-                        val parsed = ApiTestrRepository.parseCurl(curlInput)
-                        reqState = parsed
-                        ApiCollectionsRepository.saveRequest(parsed)
-                        showImportCurlModal = false
-                        performHaptic(HapticFeedbackType.LongPress)
-                        showSavedSnackbar("Imported \"${parsed.name}\"")
+                        when (val result = ApiTestrRepository.parseCurl(curlInput)) {
+                            is CurlImportResult.Failure -> curlError = result.message
+                            is CurlImportResult.Success -> {
+                                val parsed = result.request
+                                reqState = parsed
+                                ApiCollectionsRepository.saveRequest(parsed)
+                                showImportCurlModal = false
+                                performHaptic(HapticFeedbackType.LongPress)
+                                showSavedSnackbar("Imported \"${parsed.name}\"")
+                            }
+                        }
                     },
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp),
@@ -1719,9 +1795,10 @@ private fun RawTextEditor(
     items: List<KeyValueItem>,
     onItemsChanged: (List<KeyValueItem>) -> Unit
 ) {
-    var rawText by remember(items) {
-        mutableStateOf(items.joinToString("\n") { if (it.isEnabled) "${it.key}: ${it.value}" else "// ${it.key}: ${it.value}" })
-    }
+    // Dossier §7 item 6: the raw↔KeyValueItem sync logic now lives in the pure, unit-tested
+    // keyValueItemsToRawText/parseRawTextToKeyValueItems functions (ApiTestrBodyToolbarHelpers.kt)
+    // instead of being inlined here — behavior is unchanged.
+    var rawText by remember(items) { mutableStateOf(keyValueItemsToRawText(items)) }
 
     Text(
         "One per line. Prefix // to disable. Two-way sync with table above.",
@@ -1732,17 +1809,7 @@ private fun RawTextEditor(
         value = rawText,
         onValueChange = { newText ->
             rawText = newText
-            val lines = newText.split("\n")
-            val updated = lines.mapNotNull { line ->
-                if (line.isBlank()) null
-                else {
-                    val disabled = line.startsWith("//")
-                    val content = if (disabled) line.removePrefix("//").trim() else line
-                    val parts = content.split(":", limit = 2)
-                    if (parts.size == 2) KeyValueItem(key = parts[0].trim(), value = parts[1].trim(), isEnabled = !disabled) else null
-                }
-            }
-            onItemsChanged(updated)
+            onItemsChanged(parseRawTextToKeyValueItems(newText))
         },
         textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
         shape = RoundedCornerShape(8.dp),
@@ -1767,16 +1834,20 @@ fun getMethodColor(method: HttpMethod): Color {
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun TitleAndUrlCard(
     reqState: ApiRequestItem,
-    followRedirects: Boolean,
+    isDirty: Boolean,
+    redirectFollowState: RedirectFollowState,
     wsStatus: WsConnectionStatus? = null,
     onTitleChanged: (String) -> Unit,
     onMethodChanged: (HttpMethod) -> Unit,
     onUrlChanged: (String) -> Unit,
-    onToggleRedirects: () -> Unit
+    onTapRedirect: () -> Unit,
+    onLongPressRedirect: () -> Unit
 ) {
+    val followRedirects = redirectFollowState.shouldFollow
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     var isEditingTitle by remember { mutableStateOf(false) }
     var showMethodMenu by remember { mutableStateOf(false) }
@@ -1810,9 +1881,12 @@ private fun TitleAndUrlCard(
         label = "rocketScale"
     )
 
-    val rocketBg by animateColorAsState(
-        targetValue = if (followRedirects) primaryColor.copy(alpha = if (isDark) 0.22f else 0.15f) else Color.Transparent,
-        animationSpec = tween(200),
+    // Toggle state animates on a gated tween; the theme colour resolves instantly.
+    val rocketBg by animateStateColor(
+        active = followRedirects,
+        activeColor = primaryColor.copy(alpha = if (isDark) 0.22f else 0.15f),
+        inactiveColor = Color.Transparent,
+        animationSpec = scaledTween(200),
         label = "rocketBg"
     )
 
@@ -1916,16 +1990,20 @@ private fun TitleAndUrlCard(
                 }
             }
 
-            // Draft Note
-            Spacer(modifier = Modifier.height(3.dp))
-            Text(
-                text = "Autosaved as draft · unsaved changes",
-                style = TextStyle(
-                    fontSize = 9.5.sp,
-                    fontStyle = FontStyle.Italic,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
+            // Draft Note — dossier §7 item 7: only shown when reqState has actually diverged
+            // from the last saved/active request, and no longer claims "Autosaved" since there
+            // is no real autosave-to-storage path behind this label.
+            if (isDirty) {
+                Spacer(modifier = Modifier.height(3.dp))
+                Text(
+                    text = "Unsaved changes",
+                    style = TextStyle(
+                        fontSize = 9.5.sp,
+                        fontStyle = FontStyle.Italic,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
+                    )
                 )
-            )
+            }
 
             Spacer(modifier = Modifier.height(12.dp))
 
@@ -2048,18 +2126,27 @@ private fun TitleAndUrlCard(
                     modifier = Modifier.weight(1f)
                 )
 
-                // Follow Redirects Rocket Toggle with Animated Pill
+                // Follow Redirects Rocket Toggle with Animated Pill — dossier Q7: tap arms/disarms
+                // a one-shot "follow once" flag, long-press flips the persistent "always follow"
+                // setting. See ApiTestrRedirectMode.kt.
                 Box(
                     modifier = Modifier
                         .size(40.dp)
                         .clip(RoundedCornerShape(topEnd = 14.dp, bottomEnd = 14.dp))
                         .background(rocketBg)
-                        .clickable { onToggleRedirects() },
+                        .combinedClickable(
+                            onClick = onTapRedirect,
+                            onLongClick = onLongPressRedirect
+                        ),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = Icons.Default.RocketLaunch,
-                        contentDescription = "Follow redirects",
+                        contentDescription = when {
+                            redirectFollowState.alwaysFollow -> "Follow redirects — always on. Tap to follow once only, long-press to turn off."
+                            redirectFollowState.onceArmed -> "Follow redirects — armed for this send only. Tap to disarm, long-press to always follow."
+                            else -> "Follow redirects — off. Tap to follow once, long-press to always follow."
+                        },
                         tint = if (followRedirects) primaryColor else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
                         modifier = Modifier
                             .size(16.dp)
@@ -2069,7 +2156,24 @@ private fun TitleAndUrlCard(
                                 scaleY = rocketScale
                             }
                     )
+                    // Small lock badge distinguishes "always follow" (persistent) from a
+                    // one-shot "follow once" tap-armed state.
+                    if (redirectFollowState.alwaysFollow) {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = null,
+                            tint = primaryColor,
+                            modifier = Modifier
+                                .size(9.dp)
+                                .align(Alignment.BottomEnd)
+                                // Inset inward (not outward) so the badge stays inside the
+                                // parent Box's clip(RoundedCornerShape(bottomEnd = 14.dp)) region
+                                // instead of being clipped away by the rounded corner.
+                                .offset(x = (-3).dp, y = (-3).dp)
+                        )
+                    }
                 }
+
             }
         }
     }
@@ -2091,11 +2195,13 @@ private fun SendFloatingBar(
         modifier = modifier
             .fillMaxWidth()
             .background(
+                // Scrim, not a wall: the last stop stays slightly translucent so the parallax
+                // layer remains faintly visible behind the send bar instead of being cut off.
                 Brush.verticalGradient(
                     colors = listOf(
                         gradientColor.copy(alpha = 0f),
                         gradientColor.copy(alpha = 0.85f),
-                        gradientColor
+                        gradientColor.copy(alpha = 0.92f)
                     )
                 )
             )
@@ -2203,8 +2309,12 @@ private fun KeyValueTableRow(
         label = "checkboxScale"
     )
 
-    val checkboxBg by animateColorAsState(
-        targetValue = if (item.isEnabled) primaryColor else Color.Transparent,
+    // Enabled state animates on a gated tween; the theme colour resolves instantly.
+    val checkboxBg by animateStateColor(
+        active = item.isEnabled,
+        activeColor = primaryColor,
+        inactiveColor = Color.Transparent,
+        animationSpec = scaledTween(200),
         label = "checkboxBg"
     )
 
@@ -2406,11 +2516,36 @@ private fun HttpRequestBodyTab(
         } else if (bodyType == RequestBodyType.FORM || bodyType == RequestBodyType.MULTIPART) {
             // Master plan §2.9 — reuse the same KeyValueEditorTable pattern already used for
             // query params / headers, rather than inventing a new UI language for form fields.
-            KeyValueEditorTable(
-                title = if (bodyType == RequestBodyType.MULTIPART) "Form Data (multipart/form-data)" else "Form Data (x-www-form-urlencoded)",
-                items = formData,
-                onItemsChanged = onFormDataChanged
-            )
+            //
+            // Bug fix (smoke test): KeyValueEditorTable's root Column is Modifier.fillMaxSize(),
+            // and its internal LazyColumn expands to fill all available height by default. The
+            // enclosing container here is a plain Column (unlike the Query Params/Headers tabs,
+            // which place KeyValueEditorTable + RawEditorToggleRow directly as Box siblings), so
+            // without a bound the table greedily consumed the *entire* remaining Column height,
+            // pushing the RawEditorToggleRow below it thousands of pixels off screen — rendering
+            // the new FORM/MULTIPART raw-editor toggle invisible and unreachable.
+            // `weight(1f, fill = false)` alone still lets fillMaxSize() inside claim ~all of the
+            // remaining space (the toggle row was the only other Column child), so this also caps
+            // the table's max height so the toggle row + optional raw editor always stay visible
+            // directly beneath it, with the row list scrolling internally if it grows past that.
+            Box(modifier = Modifier.weight(1f, fill = false).heightIn(max = 280.dp)) {
+                KeyValueEditorTable(
+                    title = if (bodyType == RequestBodyType.MULTIPART) "Form Data (multipart/form-data)" else "Form Data (x-www-form-urlencoded)",
+                    items = formData,
+                    onItemsChanged = onFormDataChanged
+                )
+            }
+            // Dossier §7 item 6 — Query Params/Headers already have a raw-text ↔ table toggle;
+            // the Body tab's FORM/MULTIPART rows didn't. Reuses the same components + the
+            // now-pure-and-tested parse/format functions.
+            var showRawEditor by remember { mutableStateOf(false) }
+            RawEditorToggleRow(showRawEditor) { showRawEditor = !showRawEditor }
+            if (showRawEditor) {
+                RawTextEditor(
+                    items = formData,
+                    onItemsChanged = onFormDataChanged
+                )
+            }
         } else {
             // Body Editor Surface
             Surface(
@@ -2438,10 +2573,42 @@ private fun HttpRequestBodyTab(
 
                     Spacer(modifier = Modifier.height(8.dp))
 
+                    // Dossier §7 item 6 — the mockup's JSON toolbar also has Copy-as-JSON,
+                    // Copy-as-flat (key=value), and Clear-all buttons next to Beautify. The
+                    // mockup itself ties these to Query/Header rows rather than literally the
+                    // raw HTTP body (flagged in the final report); here they act on the Body
+                    // tab's own bodyContent, which is the closest faithful equivalent for this
+                    // tab. Reuses CodeToolbarAction from LiveJsonAndRawBlock's styling below.
+                    val clipboardManager = LocalClipboardManager.current
+                    val performHaptic = com.example.ui.components.rememberAppHapticFeedback()
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                            CodeToolbarAction(
+                                icon = Icons.Default.ContentCopy,
+                                description = "Copy as JSON",
+                                onClick = {
+                                    clipboardManager.setText(AnnotatedString(ToolsRepository.formatJson(bodyContent)))
+                                    performHaptic(HapticFeedbackType.TextHandleMove)
+                                }
+                            )
+                            CodeToolbarAction(
+                                icon = Icons.AutoMirrored.Filled.FormatListBulleted,
+                                description = "Copy as key=value",
+                                onClick = {
+                                    clipboardManager.setText(AnnotatedString(flattenJsonBodyToKeyValueLines(bodyContent)))
+                                    performHaptic(HapticFeedbackType.TextHandleMove)
+                                }
+                            )
+                            CodeToolbarAction(
+                                icon = Icons.Default.Clear,
+                                description = "Clear all",
+                                onClick = { onBodyContentChanged("") }
+                            )
+                        }
                         Button(
                             onClick = onBeautify,
                             shape = RoundedCornerShape(8.dp),
@@ -3199,218 +3366,112 @@ private fun CodeToolbarAction(
     }
 }
 
-/**
- * Builds syntax highlighted AnnotatedString for JSON lines.
- */
-private fun highlightJsonLine(line: String): AnnotatedString {
-    return buildAnnotatedString {
-        val parts = line.split(":", limit = 2)
-        if (parts.size == 2 && parts[0].trim().startsWith("\"")) {
-            val colonIdx = line.indexOf(':')
-            val beforeColon = line.substring(0, colonIdx)
-            val afterColon = line.substring(colonIdx)
-
-            // Key in cyan/blue
-            withStyle(SpanStyle(color = Color(0xFF7EC8E3))) {
-                append(beforeColon)
-            }
-            // Colon in punctuation color
-            withStyle(SpanStyle(color = Color(0xFF8B95A6))) {
-                append(":")
-            }
-            // Value in green
-            withStyle(SpanStyle(color = Color(0xFF8CE3A0))) {
-                append(afterColon.removePrefix(":"))
-            }
-        } else {
-            // Generic braces / brackets
-            withStyle(SpanStyle(color = Color(0xFFC9D3E8))) {
-                append(line)
-            }
-        }
-    }
-}
-
-@Composable
-private fun LiveJsonAndRawBlock(
-    formattedJson: String,
-    rawText: String,
-    showRawEditor: Boolean,
-    isDark: Boolean,
-    onToggleRawEditor: () -> Unit,
-    onBeautify: () -> Unit,
-    onCopyJson: () -> Unit,
-    onCopyFlat: () -> Unit,
-    onClear: () -> Unit,
-    onRawTextChanged: (String) -> Unit
-) {
-    val codeBg = if (isDark) Color(0xFF04060C) else Color(0xFF141720)
-    val toolbarBg = if (isDark) Color(0xFF0A0E18) else Color(0xFF1B202C)
-    val primaryColor = MaterialTheme.colorScheme.primary
-
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        color = codeBg,
-        border = BorderStroke(1.dp, Color(0xFF1E2838))
-    ) {
-        Column {
-            // JSON Toolbar
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(toolbarBg)
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "JSON",
-                    fontSize = 10.5.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    fontFamily = FontFamily.Monospace,
-                    color = Color(0xFF8B95A6),
-                    letterSpacing = 1.sp
-                )
-
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    CodeToolbarAction(
-                        icon = Icons.Default.AutoAwesome,
-                        description = "Beautify JSON",
-                        onClick = onBeautify
-                    )
-                    CodeToolbarAction(
-                        icon = Icons.Default.ContentCopy,
-                        description = "Copy as JSON",
-                        onClick = onCopyJson
-                    )
-                    CodeToolbarAction(
-                        icon = Icons.Default.Delete,
-                        description = "Clear all",
-                        onClick = onClear
-                    )
-
-                    // Toggle Raw Text Editor
-                    Box(
-                        modifier = Modifier
-                            .size(28.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(if (showRawEditor) primaryColor else Color.Transparent)
-                            .clickable { onToggleRawEditor() },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Edit,
-                            contentDescription = "Toggle Raw Editor",
-                            tint = if (showRawEditor) MaterialTheme.colorScheme.onPrimary else Color(0xFF8B95A6),
-                            modifier = Modifier.size(14.dp)
-                        )
-                    }
-                }
-            }
-
-            // Syntax Highlighted JSON Preview
-            val lines = formattedJson.split("\n")
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 180.dp)
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 12.dp, vertical = 10.dp)
-            ) {
-                lines.forEachIndexed { index, line ->
-                    Row(modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            text = "${index + 1}",
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp,
-                            color = Color(0xFF3B4862),
-                            textAlign = TextAlign.End,
-                            modifier = Modifier.width(22.dp)
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Text(
-                            text = highlightJsonLine(line),
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp,
-                            modifier = Modifier.horizontalScroll(rememberScrollState())
-                        )
-                    }
-                }
-            }
-
-            // Expandable Raw Text Editor Drawer
-            AnimatedVisibility(
-                visible = showRawEditor,
-                enter = expandVertically() + fadeIn(),
-                exit = shrinkVertically() + fadeOut()
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(if (isDark) Color(0xFF030408) else Color(0xFF10131B))
-                        .drawBehind {
-                            drawLine(
-                                color = Color(0xFF1E2838),
-                                start = Offset(0f, 0f),
-                                end = Offset(size.width, 0f),
-                                strokeWidth = 1.dp.toPx()
-                            )
-                        }
-                        .padding(12.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Editor",
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 9.5.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = Color(0xFF5B6B85),
-                            letterSpacing = 1.sp
-                        )
-                        Text(
-                            text = "key: value · // to disable a row",
-                            fontSize = 9.5.sp,
-                            color = Color(0xFF4A556B)
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(6.dp))
-
-                    BasicTextField(
-                        value = rawText,
-                        onValueChange = onRawTextChanged,
-                        textStyle = TextStyle(
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.5.sp,
-                            color = Color(0xFFC9D3E8),
-                            lineHeight = 16.sp
-                        ),
-                        cursorBrush = SolidColor(primaryColor),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 70.dp, max = 150.dp)
-                            .verticalScroll(rememberScrollState())
-                    )
-                }
-            }
-        }
-    }
-}
-
 // ====================================================================
 // v6.0 lane B (manifest §api-testr-response/error/timeout/ws): lane-local
 // helper composables for the redesigned response viewer and WS console.
 // ====================================================================
 
 /** Formats a byte count as a human-readable string (e.g. "1.0 KB", "842 B"). */
+/**
+ * "Compare runs" sheet: the DiffView call site for API Testr. Header names the request, one meta
+ * line per side (status · latency · size · time), then either the "only one run so far" state or
+ * the line diff of the two bodies exactly as received. Which diff state appears (identical /
+ * additions / deletions / mixed / binary / too large / both empty) is decided by
+ * `buildDiffModel` inside DiffView from the real bodies -- nothing here special-cases it.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CompareRunsSheet(
+    current: ApiRunSnapshot,
+    previous: ApiRunSnapshot?,
+    onDismiss: () -> Unit,
+) {
+    val availability = remember(previous) { responseCompareAvailability(previous) }
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(start = 20.dp, end = 20.dp, bottom = 32.dp)
+        ) {
+            Text("Compare runs", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = TextPrimary)
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "${current.method} ${current.url}",
+                color = TextMuted,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+
+            if (previous != null) {
+                CompareRunMetaRow(label = "Previous", run = previous)
+                Spacer(modifier = Modifier.height(6.dp))
+            }
+            CompareRunMetaRow(label = "Current", run = current)
+
+            if (previous != null && runTargetsDiffer(previous, current)) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Previous run was ${previous.method} ${previous.url}",
+                    color = Color(0xFFF59E0B),
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Spacer(modifier = Modifier.height(14.dp))
+
+            when (availability) {
+                ResponseCompareAvailability.NO_PREVIOUS_RUN -> EmptyState(
+                    icon = Icons.AutoMirrored.Filled.CompareArrows,
+                    message = responseCompareMessage(availability)!!,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp),
+                )
+                ResponseCompareAvailability.READY -> DiffView(
+                    oldText = previous!!.response.body,
+                    newText = current.response.body,
+                    title = "Body: previous → current",
+                    maxHeight = 320.dp,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CompareRunMetaRow(label: String, run: ApiRunSnapshot) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = label,
+            color = TextSecondary,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.width(60.dp)
+        )
+        Text(
+            text = runSideLabel(run),
+            color = if (run.response.isSuccess) TextPrimary else Color(0xFFEF4444),
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+    }
+}
+
 private fun formatBytes(bytes: Long): String {
     if (bytes < 1024) return "$bytes B"
     val kb = bytes / 1024.0

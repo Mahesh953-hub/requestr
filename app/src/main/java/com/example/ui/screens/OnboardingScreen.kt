@@ -10,7 +10,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateDpAsState
@@ -85,13 +84,17 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.example.ui.components.RequestrWordmark
 import com.example.ui.theme.AppAccent
 import com.example.ui.theme.AppThemeMode
-import com.example.ui.theme.LocalAnimationsEnabled
+import com.example.ui.theme.rememberAmbientMotionEnabled
+import com.example.ui.theme.scaledSpring
+import com.example.ui.theme.animateStateColor
+import com.example.ui.theme.scaledTween
 
 // ─── Onboarding entry ─────────────────────────────────────────────
 
@@ -150,11 +153,8 @@ fun OnboardingScreen(
         ActivityResultContracts.RequestPermission()
     ) { granted -> musicState = if (granted) PermState.GRANTED else PermState.DENIED }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-    ) {
+    // Transparent root so the ParallaxBackground hosted in MainActivity shows through.
+    Box(modifier = Modifier.fillMaxSize()) {
         Column(
             modifier = Modifier.fillMaxSize()
         ) {
@@ -178,12 +178,16 @@ fun OnboardingScreen(
             Spacer(modifier = Modifier.height(24.dp))
 
             // ── Step content with animation ────────────────────
+            // Every spec below is settings-gated: with animations off these collapse to 0ms so
+            // the step swaps instantly instead of sliding.
+            val stepSlideSpec = scaledSpring<IntOffset>()
+            val stepFadeSpec = scaledTween<Float>(300)
             AnimatedContent(
                 targetState = currentStep,
                 transitionSpec = {
                     val dir = if (targetState > initialState) 1 else -1
-                    (slideInHorizontally(spring()) { it * dir } + fadeIn(tween(300)))
-                        .togetherWith(slideOutHorizontally(spring()) { -it * dir } + fadeOut(tween(300)))
+                    (slideInHorizontally(stepSlideSpec) { it * dir } + fadeIn(stepFadeSpec))
+                        .togetherWith(slideOutHorizontally(stepSlideSpec) { -it * dir } + fadeOut(stepFadeSpec))
                 },
                 label = "step",
                 modifier = Modifier.weight(1f)
@@ -270,7 +274,10 @@ private fun DynamicIslandProgressPill(
     totalSteps: Int,
     accentColor: Color
 ) {
-    val animationsEnabled = LocalAnimationsEnabled.current
+    // Ambient decorative loop: runs only at full motion. REDUCED shortens a loop's period,
+    // which makes it faster and more distracting, so reduced-motion turns it off entirely and
+    // the resting values below take over. See rememberAmbientMotionEnabled().
+    val animationsEnabled = rememberAmbientMotionEnabled()
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
     val animatedPulseAlpha by infiniteTransition.animateFloat(
         initialValue = 0.4f,
@@ -319,7 +326,7 @@ private fun DynamicIslandProgressPill(
                     val isActive = i <= currentStep
                     val barWidth by animateDpAsState(
                         targetValue = if (i == currentStep) 20.dp else 8.dp,
-                        animationSpec = spring(dampingRatio = 0.7f),
+                        animationSpec = scaledSpring(dampingRatio = 0.7f),
                         label = "pillWidth"
                     )
                     Box(
@@ -697,15 +704,20 @@ private fun AppearanceStep(
         ) {
             modes.forEach { (id, label, icon) ->
                 val isActive = selectedMode == id
-                val bg by animateColorAsState(
-                    if (isActive) MaterialTheme.colorScheme.primaryContainer
-                    else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                    tween(200), label = "modeBg"
+                // Selection animates on a gated tween; theme colours resolve instantly.
+                val bg by animateStateColor(
+                    active = isActive,
+                    activeColor = MaterialTheme.colorScheme.primaryContainer,
+                    inactiveColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    animationSpec = scaledTween(200),
+                    label = "modeBg"
                 )
-                val fg by animateColorAsState(
-                    if (isActive) MaterialTheme.colorScheme.onPrimaryContainer
-                    else MaterialTheme.colorScheme.onSurfaceVariant,
-                    tween(200), label = "modeFg"
+                val fg by animateStateColor(
+                    active = isActive,
+                    activeColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    inactiveColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    animationSpec = scaledTween(200),
+                    label = "modeFg"
                 )
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -752,7 +764,7 @@ private fun AppearanceStep(
         ) {
             allAccents.forEach { accent ->
                 val accentSelected = selectedAccent.equals(accent.name, ignoreCase = true)
-                val accentSize by animateDpAsState(if (accentSelected) 40.dp else 32.dp, tween(200), label = "accentSize")
+                val accentSize by animateDpAsState(if (accentSelected) 40.dp else 32.dp, scaledTween(200), label = "accentSize")
                 Box(
                     modifier = Modifier
                         .size(accentSize)
@@ -804,7 +816,7 @@ private fun AppearanceStep(
         ) {
             activeAccents.forEach { theme ->
                 val isSelected = theme.name == currentAccent
-                val size by animateDpAsState(if (isSelected) 44.dp else 36.dp, tween(200), label = "swatchSize")
+                val size by animateDpAsState(if (isSelected) 44.dp else 36.dp, scaledTween(200), label = "swatchSize")
                 Box(
                     modifier = Modifier
                         .size(size)

@@ -112,6 +112,24 @@ object AppSettingsKeys {
     val GATEWAY_MODE_ENABLED = booleanPreferencesKey("gateway_mode_enabled")
     val GATEWAY_PORT = intPreferencesKey("gateway_port")
 
+    // §1.10: opt-in remote-cert mirroring -- when a FORCE_MITM host's leaf cert is generated,
+    // probe the real upstream server first (RemoteCertificateMirror) and mirror its subject/SANs
+    // /validity into our self-signed leaf instead of always synthesizing a generic one. OFF by
+    // default: mirroring means opening a real upstream connection before any mock-short-circuit
+    // decision for that host, which would silently break §1.5's "a MOCK_RESPONSE-only connection
+    // never dials the real endpoint" guarantee if it ran unconditionally -- see
+    // CertificateAuthority.issueMirroredLeaf's KDoc and MitmProxyEngine's cert-cache call site.
+    val REMOTE_CERT_MIRROR_ENABLED = booleanPreferencesKey("remote_cert_mirror_enabled")
+
+    // §3 (C2) — weak-network simulation (added latency/jitter/packet-loss) applied at the proxy
+    // relay tier (HttpProxyShared -- the only tier that runs on this emulator; see
+    // NetworkConditionInjector's KDoc). OFF by default: simulated network degradation must never
+    // silently slow down or fail real traffic unless a user explicitly opts in.
+    val NETWORK_CONDITION_ENABLED = booleanPreferencesKey("network_condition_enabled")
+    val NETWORK_CONDITION_LATENCY_MS = intPreferencesKey("network_condition_latency_ms")
+    val NETWORK_CONDITION_JITTER_MS = intPreferencesKey("network_condition_jitter_ms")
+    val NETWORK_CONDITION_PACKET_LOSS_PCT = intPreferencesKey("network_condition_packet_loss_pct")
+
     // SDK & CONNECT scope, Task 6: pairing token gating `/api/observe` on LocalApiServer.
     // Generated once (SecureRandom, 256-bit) on first LocalApiServer.start() and never rotated
     // automatically -- only the "Regenerate Token" button in Settings changes it.
@@ -132,6 +150,23 @@ object AppSettingsKeys {
     val HEADER_OPACITY = floatPreferencesKey("header_opacity")
     val HEADER_BLUR_STYLE = stringPreferencesKey("header_blur_style")
     val FAB_BOTTOM_SPACING = intPreferencesKey("fab_bottom_spacing")
+
+    // Phase B glass modes. LIQUID_GLASS and TUNE_GLASS join the canonical set; "Clear Glass" is
+    // the existing TRANSLUCENT mode relabelled rather than a new key, so the legacy
+    // CLEAR_GLASS→TRANSLUCENT alias below stays correct and nobody's saved choice changes meaning.
+    //
+    // TUNE_GLASS is the only mode driven by these four values — every other mode ignores them, so
+    // a user can dial in a custom look, switch away to compare, and switch back without losing it.
+    val GLASS_TUNE_BLUR_DP = intPreferencesKey("glass_tune_blur_dp")
+    val GLASS_TUNE_TINT_OPACITY = floatPreferencesKey("glass_tune_tint_opacity")
+    val GLASS_TUNE_BORDER_OPACITY = floatPreferencesKey("glass_tune_border_opacity")
+    val GLASS_TUNE_SHADOW_DP = intPreferencesKey("glass_tune_shadow_dp")
+
+    // Plugin Manager: ids the user switched OFF in Settings > Plugins. Stored as the disabled
+    // set (not the enabled set) so a plugin that appears for the first time -- a fresh install,
+    // a new external .jar -- starts enabled, exactly as before persistence existed. Read once by
+    // PluginManager when it attaches persistence and rewritten on every toggle.
+    val DISABLED_PLUGIN_IDS = androidx.datastore.preferences.core.stringSetPreferencesKey("disabled_plugin_ids")
 }
 
 /**
@@ -255,18 +290,29 @@ object LegacyDataMigration {
 /**
  * v6.0 transplant (DESIGN-RECORD §11) — canonicalizes legacy glass-style key values that
  * main's Settings screen wrote into the single canonical set the glass components read:
- * `FROSTED_GLASS` / `SOLID_M3` / `OLED_BLACK` / `TRANSLUCENT`. Without this, OLED and M3
- * settings silently fell through the component `else → FROSTED_GLASS` branch.
+ * `FROSTED_GLASS` / `SOLID_M3` / `OLED_BLACK` / `TRANSLUCENT` / `LIQUID_GLASS` / `TUNE_GLASS`.
+ * Without this, OLED and M3 settings silently fell through the component
+ * `else → FROSTED_GLASS` branch.
  *
  * Legacy mappings (per §11):
  *  - Header: `FROSTED→FROSTED_GLASS`, `M3_MINIMAL→SOLID_M3`, `CLEAR_GLASS→TRANSLUCENT`, `DEEP_DARK→OLED_BLACK`
  *  - Nav:    `FROSTED→FROSTED_GLASS`, `M3→SOLID_M3`, `OLED→OLED_BLACK`, `TRANSLUCENT→TRANSLUCENT`
  *  - Unknown/blank → `FROSTED_GLASS`
+ *
+ * Phase B adds `LIQUID_GLASS` (real blur + refraction of content passing underneath) and
+ * `TUNE_GLASS` (same renderer, but driven by the user's own blur/tint/border/shadow values).
+ *
+ * `CLEAR_GLASS` deliberately remains an ALIAS of `TRANSLUCENT` and is NOT a distinct mode: the
+ * user-facing label for `TRANSLUCENT` is now "Clear Glass". Making Clear Glass its own key would
+ * have silently repointed every install that had already stored the legacy `CLEAR_GLASS` value at
+ * a different-looking mode. Keep it an alias.
  */
 fun canonicalGlassStyle(raw: String?): String = when (raw?.uppercase()?.trim()) {
     "FROSTED_GLASS", "FROSTED" -> "FROSTED_GLASS"
     "SOLID_M3", "M3_MINIMAL", "M3" -> "SOLID_M3"
     "OLED_BLACK", "DEEP_DARK", "OLED" -> "OLED_BLACK"
     "TRANSLUCENT", "CLEAR_GLASS" -> "TRANSLUCENT"
+    "LIQUID_GLASS", "LIQUID" -> "LIQUID_GLASS"
+    "TUNE_GLASS", "TUNE" -> "TUNE_GLASS"
     else -> "FROSTED_GLASS"
 }

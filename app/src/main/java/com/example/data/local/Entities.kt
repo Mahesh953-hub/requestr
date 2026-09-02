@@ -53,7 +53,109 @@ data class CapturedTrafficEntity(
      * for producers that genuinely have no connection to attach to (e.g. SDK-observed traffic).
      */
     val connectionId: String? = null,
+    /**
+     * True when [com.example.interception.http.HttpBodyDecoder.isProbablyUtf8] flagged this
+     * transaction's request/response body as binary (images, protobufs, undecodable
+     * Content-Encoding, ...). [requestBody]/[responseBody] (the text columns) are null/empty
+     * for such a body -- [requestBodyBytes]/[responseBodyBytes] below are where the real bytes
+     * live instead, when they were small enough to keep (see those fields' doc).
+     *
+     * This is the disambiguator a consumer needs: `isXBinary == false` means "this is (or would
+     * have been, if present) a text body" -- [requestBody]/[responseBody] are authoritative and
+     * [requestBodyBytes]/[responseBodyBytes] are always null. `isXBinary == true` means the real
+     * content lives only in the `*BodyBytes` BLOB column (or was too large to keep -- see
+     * [requestBodyBytesTruncated]/[responseBodyBytesTruncated]).
+     */
+    val isRequestBodyBinary: Boolean = false,
+    val isResponseBodyBinary: Boolean = false,
+    /**
+     * The real, byte-exact request/response body when [isRequestBodyBinary]/
+     * [isResponseBodyBinary] is true -- e.g. actual JPEG/PNG bytes for an image response, where
+     * [responseBody] (text) only ever holds
+     * [com.example.interception.http.HttpBodyDecoder.BINARY_BODY_PLACEHOLDER] (empty). This is
+     * what a consumer (e.g. the image gallery) must decode instead of the text column whenever
+     * the corresponding `isXBodyBinary` flag is set.
+     *
+     * Null in three distinct cases a consumer must NOT conflate:
+     *  1. The body was text, not binary (`isXBodyBinary == false`) -- nothing was ever meant to
+     *     be here; [requestBody]/[responseBody] hold the real content instead.
+     *  2. The body was binary but exceeded
+     *     [com.example.interception.http.HttpBodyDecoder.MAX_STORED_BODY_BYTES] --
+     *     `isXBodyBinary == true` AND `XBodyBytesTruncated == true`: real bytes existed
+     *     on the wire but were deliberately not persisted (too big). The true original size is
+     *     still available from `requestSizeBytes`/`responseSizeBytes` even though the bytes
+     *     themselves are gone, so the UI can still say "N KB, not stored".
+     *  3. There was no body at all -- `isXBodyBinary == false` and `requestBody`/`responseBody`
+     *     is also null/empty and the corresponding size field is 0.
+     *
+     * A non-null value here always means `isXBodyBinary == true` AND
+     * `XBodyBytesTruncated == false`, and its size always equals the matching
+     * `requestSizeBytes`/`responseSizeBytes`.
+     *
+     * EQUALITY NOTE: same caveat as [com.example.interception.http.ParsedHttpMessage.rawBodyBytes]
+     * -- a `ByteArray` property in a `data class` downgrades the generated `equals`/`hashCode`
+     * to array identity for this field. Nothing compares whole [CapturedTrafficEntity] instances
+     * today; if that changes, this field needs deliberate handling.
+     */
+    val requestBodyBytes: ByteArray? = null,
+    val responseBodyBytes: ByteArray? = null,
+    /**
+     * True iff the request/response body was flagged binary
+     * ([isRequestBodyBinary]/[isResponseBodyBinary] true) but exceeded
+     * [com.example.interception.http.HttpBodyDecoder.MAX_STORED_BODY_BYTES], so
+     * [requestBodyBytes]/[responseBodyBytes] is null even though a real binary body existed.
+     * This is the "not stored because it exceeded the cap" row flag distinguishing that case
+     * from "no body at all" (where this stays false) -- see [requestBodyBytes]'s doc for the
+     * full three-state contract. Never true when the corresponding `isXBodyBinary` is false.
+     */
+    val requestBodyBytesTruncated: Boolean = false,
+    val responseBodyBytesTruncated: Boolean = false,
+    /**
+     * Item 1 (dossier Q2 / audit §7.5): which capture tier actually produced THIS row, recorded
+     * by the engine at persist time rather than read off the current global capture setting --
+     * a single database can contain rows captured under different tiers across sessions (e.g. a
+     * VPN_TUN session followed by a MITM_PROXY one), so the row must record how IT was captured,
+     * not what the app's capture mode happens to be right now.
+     *
+     * [CaptureRowMethod.UNKNOWN] is the default for every row persisted before this column
+     * existed (backfilled by `MIGRATION_15_16`) -- the UI must render "unknown" as genuinely
+     * absent, never as "definitely not VPN", since an old row's real capture method is simply
+     * not recorded.
+     */
+    val captureMethod: CaptureRowMethod = CaptureRowMethod.UNKNOWN,
 )
+
+/**
+ * Item 1: honest, per-row record of which capture tier produced a [CapturedTrafficEntity] row --
+ * richer than a bare `routedViaVpnRelay: Boolean` because it also distinguishes MITM/gateway
+ * rows from VPN ones, while the VPN-relay-icon boolean the UI needs is trivially
+ * `captureMethod == VPN_TUN`.
+ *
+ * Deliberately NOT the same type as [com.example.data.interception.CaptureMethod] (a different,
+ * pre-existing enum in an unrelated package) or [CaptureTier] above (that one is the *session's*
+ * declared tier, e.g. for the capture-setup UI; this one is the *row's own* observed tier, set by
+ * the engine that actually persisted it -- the two can legitimately disagree, e.g. a GATEWAY
+ * session proxying another device's traffic never touches this device's VPN/root/Shizuku tier at
+ * all).
+ *
+ * Every value below has a real, confirmed persist site as of this wave:
+ *  - [VPN_TUN]: `CaptureEngine` (driven by `PacketPump`, itself only ever instantiated by
+ *    `RequestrVpnService`) and `PacketPump`'s own HTTP/3 persist path.
+ *  - [MITM_PROXY]: `MitmProxyEngine`, which only ever reaches its persist call sites after
+ *    terminating TLS itself (`wasDecrypted` is always true for these rows).
+ *  - [GATEWAY]: `gateway/GatewayEngine`'s `persistTransaction`.
+ *  - [HTTP_PROXY]: `HttpProxyEngine`'s own `persistTransaction` (added after this enum was
+ *    introduced — a separate audit pass found the plain, non-CONNECT relay path forwarded and
+ *    counted every request but never persisted a `CapturedTrafficEntity` at all, permanently
+ *    starving the traffic list for this tier; the fix mirrors [GATEWAY]'s `persistTransaction`
+ *    exactly, including `HttpBodyDecoder.forStorage`'s binary/text/truncation contract).
+ *
+ * [UNKNOWN] is the default for legacy rows (see [CapturedTrafficEntity.captureMethod]'s doc) and
+ * for the persist sites this enum's introduction did not (yet) reach: `RuntimeTrafficSink`,
+ * `LocalApiServer`'s SDK-observer ingestion, and `HarImporter`'s file import.
+ */
+enum class CaptureRowMethod { UNKNOWN, VPN_TUN, MITM_PROXY, GATEWAY, HTTP_PROXY }
+
 
 /**
  * Capture-tier actually used for a session. Never inferred by the UI — recorded by the engine.
@@ -109,7 +211,13 @@ data class CaptureSessionEntity(
  * action (not a replacement for them) so existing fixed-modification rules keep working
  * unchanged for users who don't need scripting.
  */
-enum class RuleAction { BLOCK, REDIRECT, MODIFY_REQUEST, MODIFY_RESPONSE, LOG_ONLY, FORCE_MITM, MOCK_RESPONSE, SCRIPT_REWRITE, CHAOS }
+enum class RuleAction {
+    BLOCK, REDIRECT, MODIFY_REQUEST, MODIFY_RESPONSE, LOG_ONLY, FORCE_MITM, MOCK_RESPONSE, SCRIPT_REWRITE, CHAOS,
+    /** §2.14(b): AES/GCM-encrypt the matched request/response body in place -- see [RequestCryptoManager]. */
+    BODY_ENCRYPT_AES,
+    /** §2.14(b): AES/GCM-decrypt the matched request/response body in place -- see [RequestCryptoManager]. */
+    BODY_DECRYPT_AES,
+}
 
 /**
  * User-defined intercept rules. The "Block this domain" long-press action must be gated on a
@@ -128,6 +236,19 @@ data class InterceptRuleEntity(
     val enabled: Boolean = true,
     val replacementValue: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
+    /**
+     * §2.14(b): AndroidKeyStore alias whose AES/GCM key material [BODY_ENCRYPT_AES]/
+     * [BODY_DECRYPT_AES] rules use -- see [RequestCryptoManager]. Empty (unset) for every other
+     * [RuleAction]; [RuleEnforcer] treats a blank alias on a crypto rule as a configuration error
+     * (surfaced, never silently skipped -- see [RequestCryptoManager]'s KDoc).
+     */
+    val cryptoKeyAlias: String = "",
+    /** Cipher transformation, e.g. `"AES/GCM/NoPadding"` -- the only one [RequestCryptoManager] implements today. */
+    val cryptoAlgorithm: String = "AES/GCM/NoPadding",
+    /** `"ENCRYPT"` or `"DECRYPT"` -- which [RequestCryptoManager] operation this rule applies. */
+    val cryptoDirection: String = "ENCRYPT",
+    /** `"REQUEST"`, `"RESPONSE"`, or `"BOTH"` -- which side(s) of the transaction this rule applies to. */
+    val cryptoScope: String = "BOTH",
 )
 
 /**
@@ -474,13 +595,37 @@ data class CustomToolEntity(
 /** Backs `ChatRepository`'s persisted chat history (H1). */
 @Entity(
     tableName = "chat_messages",
-    indices = [Index("timestamp")],
+    indices = [Index("timestamp"), Index("conversationId")],
 )
 data class ChatMessageEntity(
     @PrimaryKey val id: String,
     val role: String,                   // "user" or "assistant"
     val content: String,
     val timestamp: Long = System.currentTimeMillis(),
+    // v16 -> v17: which conversation this message belongs to (see [ChatConversationEntity]).
+    // Every pre-v17 row gets backfilled to MIGRATION_16_17's 'default-migrated' conversation id
+    // -- see RequestrDatabase.MIGRATION_16_17's doc for the full backfill story. The Kotlin
+    // default here is a convenience for tests/newly-constructed objects only; real production
+    // callers (ChatRepository) always pass an explicit conversationId.
+    val conversationId: String = "default",
+)
+
+/**
+ * Multi-conversation chat history (Reqy Assistant completeness pass, item 1): one row per
+ * conversation shown in the drawer's "AI History" list. [title] is either a user-set override
+ * ([titleIsOverride] = true, set via the drawer's Rename action) or kept in sync with the
+ * conversation's own derived title (see `deriveChatTitle`) as its messages change.
+ */
+@Entity(
+    tableName = "chat_conversations",
+    indices = [Index("updatedAt")],
+)
+data class ChatConversationEntity(
+    @PrimaryKey val id: String,
+    val title: String,
+    val titleIsOverride: Boolean = false,
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis(),
 )
 
 /**
@@ -495,6 +640,43 @@ data class ChatProviderEntity(
     val model: String,
     val isActive: Boolean,
     val createdAt: Long = System.currentTimeMillis(),
+)
+
+/**
+ * One row per item the user has actually opened, backing Home's "Recently opened" section via
+ * [com.example.data.repository.RecentActivityRepository] (v17 -> v18).
+ *
+ * Before this table existed, Home fabricated its recents list from the first two saved API
+ * requests and the first two notes with hardcoded `"Recent"`/`"Saved"` timestamp strings -- a
+ * list that changed whenever the API list was reordered and never reflected anything the user
+ * had done. This is the real usage history that replaces it.
+ *
+ * The row is a self-contained snapshot ([title]/[preview]/[subtype]) so the UI can render it
+ * without re-querying the source table; the source item may legitimately have changed since.
+ * Snapshots are refreshed by the owning repository when the item is saved/renamed, and the row
+ * is removed when the item is deleted, so a row never points at nothing.
+ *
+ * Composite primary key ([itemType], [itemId]): re-opening an item updates its single row's
+ * [openedAt] rather than appending a duplicate -- this is "recently opened", not "every open
+ * ever". Ships with NO seed rows: an empty table means nothing has been opened yet.
+ */
+@Entity(
+    tableName = "recent_activity",
+    primaryKeys = ["itemType", "itemId"],
+    indices = [Index("openedAt")],
+)
+data class RecentActivityEntity(
+    /** [com.example.data.repository.RecentItemType].name -- API, NOTE, TOOL, CHAT, FLOW. */
+    val itemType: String,
+    /** The source item's own id (saved request id, note id, tool id, conversation id, flow id). */
+    val itemId: String,
+    /** Uppercase-able subtype label for the "{Type} • {SUBTYPE}" line, e.g. "MARKDOWN", "GET". */
+    val subtype: String,
+    val title: String,
+    /** Short single-line metadata/preview shown under the title. */
+    val preview: String,
+    /** Real epoch-millis of the most recent open -- what the relative-timestamp pill formats. */
+    val openedAt: Long,
 )
 
 // ═══════════════════════════════════════════════════════════════

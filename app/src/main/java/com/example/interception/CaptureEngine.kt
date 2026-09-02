@@ -3,6 +3,7 @@ package com.example.interception
 import android.content.Context
 import android.util.Log
 import com.example.data.export.MediaStoreExporter
+import com.example.data.local.CaptureRowMethod
 import com.example.data.local.CapturedTrafficEntity
 import com.example.data.local.InterceptRuleEntity
 import com.example.data.local.RequestrDatabase
@@ -11,6 +12,7 @@ import com.example.data.local.TlsSessionEntity
 import com.example.interception.grpc.GrpcDetector
 import com.example.interception.grpc.ProtobufDecoder
 import com.example.interception.http.Http2Parser
+import com.example.interception.http.HttpBodyDecoder
 import com.example.interception.http.HttpParser
 import com.example.interception.http.ParsedHttpMessage
 import com.example.interception.tcp.TcpReassembler
@@ -35,6 +37,11 @@ import kotlinx.coroutines.runBlocking
  *   CA to the client and connects to the real server)
  * - HTTP/2 frame parsing
  * - WebSocket message capture
+ *
+ * Item 1: this class is driven exclusively by [PacketPump], which is itself only ever
+ * instantiated by [com.example.interception.RequestrVpnService] -- so every
+ * `CapturedTrafficEntity` this class persists is tagged
+ * `captureMethod = CaptureRowMethod.VPN_TUN`, unconditionally.
  */
 class CaptureEngine(
     private val context: Context,
@@ -281,6 +288,10 @@ class CaptureEngine(
                         wasDecrypted = false,
                         isUndecoded = true,
                         connectionId = stream.key,
+                        // Item 1: this class is only ever driven by PacketPump, which is only
+                        // ever instantiated by RequestrVpnService -- every row this class
+                        // persists is genuinely VPN_TUN-tier.
+                        captureMethod = CaptureRowMethod.VPN_TUN,
                     )
                     kotlinx.coroutines.runBlocking {
                         try { db.capturedTrafficDao().insert(entity); transactionCount++; Log.i(TAG, "Undecoded TLS persisted: ${stream.sniHost ?: stream.dstIp}") } catch (_: Exception) {}
@@ -610,6 +621,9 @@ class CaptureEngine(
             timestamp = System.currentTimeMillis(),
             wasDecrypted = stream.decryptedByMitm,
             connectionId = stream.key,
+            // Item 1: gRPC messages captured here always came in over the tun pipeline --
+            // see the class-level VPN_TUN note above.
+            captureMethod = CaptureRowMethod.VPN_TUN,
         )
 
         runCatching {
@@ -709,6 +723,14 @@ class CaptureEngine(
                 // completed on the wire, so there is no live request/response left to inject
                 // a fault into here; persist as observed, same as LOG_ONLY.
             }
+            com.example.data.local.RuleAction.BODY_ENCRYPT_AES, com.example.data.local.RuleAction.BODY_DECRYPT_AES -> {
+                // §2.14(b): wired into RuleEnforcer/MitmProxyEngine, the engines that terminate
+                // the connection and can still transform request/response bytes before they hit
+                // the wire. Same rationale as SCRIPT_REWRITE/CHAOS/MOCK_RESPONSE above -- this
+                // tun-pipeline path only observes the transaction after the real exchange
+                // already completed, so there is nothing left to encrypt/decrypt in place here;
+                // persist as observed, same as LOG_ONLY.
+            }
         }
 
         // LOG_ONLY rules override the capture toggle — always persist tagged traffic
@@ -727,6 +749,10 @@ class CaptureEngine(
             "${(request.method ?: com.example.data.models.HttpMethod.GET).name} ${request.path} ${request.version}".toByteArray(Charsets.UTF_8),
         )
 
+        // Binary-body persistence: see MitmProxyEngine.emitTransaction's identical use of
+        // HttpBodyDecoder.forStorage for the three-state contract this populates.
+        val reqStorage = HttpBodyDecoder.forStorage(request)
+        val respStorage = HttpBodyDecoder.forStorage(response)
         val entity = CapturedTrafficEntity(
             sessionId = sessionId,
             method = (request.method ?: com.example.data.models.HttpMethod.GET).name,
@@ -737,14 +763,25 @@ class CaptureEngine(
             protocol = response.version.ifEmpty { request.version },
             requestHeaders = (if (requestLogging) request.headers else emptyMap()) + enhancedHeaders,
             responseHeaders = if (responseLogging) response.headers else emptyMap(),
-            requestBody = if (requestLogging) request.body.ifEmpty { null } else null,
-            responseBody = if (responseLogging) response.body.ifEmpty { null } else null,
-            requestSizeBytes = request.body.toByteArray(Charsets.UTF_8).size.toLong(),
-            responseSizeBytes = response.body.toByteArray(Charsets.UTF_8).size.toLong(),
+            // storage.text (not message.body): same rule as MitmProxyEngine.emitTransaction, so a
+            // bodyReplaced message (none are produced on this observe-only path today) would
+            // persist what was sent rather than what arrived.
+            requestBody = if (requestLogging) reqStorage.text.ifEmpty { null } else null,
+            responseBody = if (responseLogging) respStorage.text.ifEmpty { null } else null,
+            requestSizeBytes = reqStorage.trueSizeBytes,
+            responseSizeBytes = respStorage.trueSizeBytes,
+            isRequestBodyBinary = requestLogging && reqStorage.isBinary,
+            isResponseBodyBinary = responseLogging && respStorage.isBinary,
+            requestBodyBytes = if (requestLogging) reqStorage.bytes else null,
+            responseBodyBytes = if (responseLogging) respStorage.bytes else null,
+            requestBodyBytesTruncated = requestLogging && reqStorage.truncated,
+            responseBodyBytesTruncated = responseLogging && respStorage.truncated,
             latencyMs = 0L, // without proxy we don't have timing between request/response
             timestamp = System.currentTimeMillis(),
             wasDecrypted = false,
             connectionId = stream.key,
+            // Item 1: see the class-level VPN_TUN note above.
+            captureMethod = CaptureRowMethod.VPN_TUN,
         )
 
         runCatching {
@@ -819,6 +856,8 @@ class CaptureEngine(
             timestamp = System.currentTimeMillis(),
             wasDecrypted = false,
             connectionId = stream.key,
+            // Item 1: see the class-level VPN_TUN note above.
+            captureMethod = CaptureRowMethod.VPN_TUN,
         )
         runCatching {
             kotlinx.coroutines.runBlocking { db.capturedTrafficDao().insert(entity) }

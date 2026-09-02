@@ -7,14 +7,12 @@ import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -34,6 +32,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -91,12 +90,16 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.example.data.models.MusicTrackItem
 import com.example.data.repository.MusicRepository
+import com.example.LocalBottomOverlayHeight
 import com.example.ui.components.ConfirmActionDialog
+import com.example.ui.components.DriveParallaxFrom
 import com.example.ui.components.GlassActionPill
 import com.example.ui.components.GlassCard
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.TrackArtworkView
 import com.example.ui.components.rememberAppHapticFeedback
+import com.example.ui.theme.animateStateColor
+import com.example.ui.theme.scaledSpring
 import kotlinx.coroutines.launch
 
 @Composable
@@ -175,11 +178,15 @@ fun MusicScreen(
 
     var pendingDeleteTrack by remember { mutableStateOf<MusicTrackItem?>(null) }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-    ) {
+    // The playlist is Music's primary scroll container: bind it to the app-wide parallax layer.
+    val listState = rememberLazyListState()
+    DriveParallaxFrom(listState)
+    // `music` scrolls under the nav pill (ROUTES_SCROLLING_UNDER_PILL): the list and the
+    // snackbar reserve the overlay height themselves.
+    val bottomOverlay = LocalBottomOverlayHeight.current
+
+    // Transparent root so the ParallaxBackground hosted in MainActivity shows through.
+    Box(modifier = Modifier.fillMaxSize()) {
         // Main content column: Locked Big Player + Scrollable Playlist underneath
         Column(
             modifier = Modifier
@@ -247,11 +254,12 @@ fun MusicScreen(
 
             // ─── 3. SCROLLABLE SONG LIST (UNDERWAY OF LOCKED PLAYER) ─────────────
             LazyColumn(
+                state = listState,
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
                     .padding(horizontal = 16.dp),
-                contentPadding = PaddingValues(top = 2.dp, bottom = 96.dp),
+                contentPadding = PaddingValues(top = 2.dp, bottom = bottomOverlay + 16.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 itemsIndexed(tracks, key = { _, track -> track.id }) { index, track ->
@@ -324,7 +332,7 @@ fun MusicScreen(
 
         SnackbarHost(
             hostState = snackbarHostState,
-            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp)
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = bottomOverlay + 16.dp)
         )
     }
 
@@ -357,7 +365,10 @@ private fun LockedBigPlayerCard(
     onShuffle: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val animationsEnabled = com.example.ui.theme.LocalAnimationsEnabled.current
+    // Ambient decorative loop: runs only at full motion. REDUCED shortens a loop's period,
+    // which makes it faster and more distracting, so reduced-motion turns it off entirely and
+    // the resting values below take over. See rememberAmbientMotionEnabled().
+    val animationsEnabled = com.example.ui.theme.rememberAmbientMotionEnabled()
     val infiniteTransition = rememberInfiniteTransition(label = "playerWave")
 
     val waveAnim by infiniteTransition.animateFloat(
@@ -746,23 +757,21 @@ private fun TrackListItemRow(
     isPlaying: Boolean,
     onClick: () -> Unit
 ) {
-    val bgAnim by animateColorAsState(
-        targetValue = if (isCurrent) {
-            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
-        } else {
-            MaterialTheme.colorScheme.surface.copy(alpha = 0.85f)
-        },
-        animationSpec = spring(dampingRatio = 0.8f, stiffness = 300f),
+    // "Now playing" state animates on a gated spring; the theme colours resolve instantly.
+    val stateSpec = scaledSpring<Float>(dampingRatio = 0.8f, stiffness = 300f)
+    val bgAnim by animateStateColor(
+        active = isCurrent,
+        activeColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+        inactiveColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
+        animationSpec = stateSpec,
         label = "trackBg"
     )
 
-    val borderAnim by animateColorAsState(
-        targetValue = if (isCurrent) {
-            MaterialTheme.colorScheme.primary.copy(alpha = 0.75f)
-        } else {
-            MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)
-        },
-        animationSpec = spring(dampingRatio = 0.8f, stiffness = 300f),
+    val borderAnim by animateStateColor(
+        active = isCurrent,
+        activeColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.75f),
+        inactiveColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f),
+        animationSpec = stateSpec,
         label = "trackBorder"
     )
 
@@ -881,7 +890,10 @@ fun MiniLiveEqualizer(
     modifier: Modifier = Modifier,
     tint: Color = MaterialTheme.colorScheme.primary
 ) {
-    val animationsEnabled = com.example.ui.theme.LocalAnimationsEnabled.current
+    // Ambient decorative loop: runs only at full motion. REDUCED shortens a loop's period,
+    // which makes it faster and more distracting, so reduced-motion turns it off entirely and
+    // the resting values below take over. See rememberAmbientMotionEnabled().
+    val animationsEnabled = com.example.ui.theme.rememberAmbientMotionEnabled()
     val infiniteTransition = rememberInfiniteTransition(label = "miniEq")
 
     val h1 by infiniteTransition.animateFloat(

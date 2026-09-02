@@ -43,6 +43,15 @@ class RequestrTypeConverters {
     fun nameToRuleAction(value: String?): RuleAction =
         runCatching { RuleAction.valueOf(value ?: "") }.getOrNull() ?: RuleAction.LOG_ONLY
 
+    // -- Item 1: per-row capture method (see CaptureRowMethod's KDoc) -------------------------
+
+    @TypeConverter
+    fun captureRowMethodToName(value: CaptureRowMethod?): String = (value ?: CaptureRowMethod.UNKNOWN).name
+
+    @TypeConverter
+    fun nameToCaptureRowMethod(value: String?): CaptureRowMethod =
+        runCatching { CaptureRowMethod.valueOf(value ?: "") }.getOrNull() ?: CaptureRowMethod.UNKNOWN
+
     // -- Saved API Testr requests (A4) --------------------------------------------------------
 
     @TypeConverter

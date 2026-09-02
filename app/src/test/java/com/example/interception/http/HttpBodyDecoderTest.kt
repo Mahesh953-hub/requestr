@@ -55,12 +55,17 @@ class HttpBodyDecoderTest {
     @Test
     fun `gzip body round-trips to original text`() {
         val original = """{"id":1,"name":"hello world","items":[1,2,3]}"""
-        val result = HttpBodyDecoder.decode(gzip(original), "gzip")
+        val compressed = gzip(original)
+        val result = HttpBodyDecoder.decode(compressed, "gzip")
 
         assertEquals(original, result.text)
         assertFalse(result.isBinary)
         assertEquals(HttpBodyDecoder.Encoding.GZIP, result.encoding)
         assertTrue(result.encodingConsumed)
+        // SHOULD-FIX (gzip'd-image gallery bug): decodedBytes must be the decompressed bytes
+        // -- what text/isBinary were actually computed from -- not the still-gzipped input.
+        assertEquals(original, String(result.decodedBytes, Charsets.UTF_8))
+        assertFalse(result.decodedBytes.contentEquals(compressed))
     }
 
     @Test

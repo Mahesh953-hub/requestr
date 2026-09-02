@@ -136,7 +136,11 @@ fun RelayHealthDetailSheet(
             Spacer(modifier = Modifier.height(14.dp))
             SectionLabel("DROPPED PACKETS BY REASON")
             Spacer(modifier = Modifier.height(6.dp))
-            val reasons = state.stats.dropReasons()
+            // Item 3: the combined breakdown -- TunRelay's own reasons plus the two honest
+            // IcmpRelay-level partitions (checksum failure, ICMPv6-not-relayable) carried on
+            // this RelayHealthState. See RelayHealthState.dropReasons()'s doc for why this is a
+            // different overload than TunRelay.RelayStats.dropReasons().
+            val reasons = state.dropReasons()
             if (reasons.isEmpty()) {
                 Text(
                     text = if (state is RelayHealthState.Down)
@@ -332,6 +336,8 @@ private fun RelayHealthDetailSheetDegradedPreview() {
             ),
             icmpUnrelayableCount = 2,
             icmpLastPathUsed = IcmpRelay.LastPathUsed.PING_SOCKET,
+            icmpChecksumFailureCount = 15,
+            icmpUnrelayableIcmpv6Count = 92,
         ),
         onDismiss = {},
         onStartCapture = {},

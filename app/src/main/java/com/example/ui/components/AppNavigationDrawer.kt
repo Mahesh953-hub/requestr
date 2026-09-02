@@ -21,28 +21,24 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Notes
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material.icons.filled.Notes
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material3.Divider
 import androidx.compose.material3.DrawerState
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.NavigationDrawerItemDefaults
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -67,6 +63,14 @@ import com.example.ui.theme.InterceptorIdleAmber
 import com.example.ui.theme.InterceptorInactiveRed
 import kotlinx.coroutines.launch
 
+/**
+ * App-wide navigation drawer (dossier phase-b-implementation §2.9).
+ *
+ * Opening programmatically: hosts pass the same [DrawerState] they gave this composable and call
+ * `scope.launch { drawerState.open() }` from a hamburger [GlassActionPill] (e.g.
+ * `FloatingCapsuleHeader(onOpenDrawer = ...)`). `gesturesEnabled` deliberately tracks the
+ * gesture-navigation setting (B5) — a disabled edge-swipe never disables the hamburger path.
+ */
 @Composable
 fun AppNavigationDrawer(
     drawerState: DrawerState,
@@ -110,13 +114,14 @@ fun AppNavigationDrawer(
                     ) {
                         RequestrWordmark(fontSize = 24)
 
-                        IconButton(onClick = { coroutineScope.launch { drawerState.close() } }) {
-                            Icon(
-                                imageVector = Icons.Default.Close,
-                                contentDescription = "Close Drawer",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
+                        GlassActionPill(
+                            icon = Icons.Default.Close,
+                            contentDescription = "Close Drawer",
+                            onClick = { coroutineScope.launch { drawerState.close() } },
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            size = 34.dp,
+                            iconSize = 16.dp,
+                        )
                     }
 
                     Text(
@@ -170,7 +175,7 @@ fun AppNavigationDrawer(
                                 Text(
                                     text = if (interceptionState.port > 0)
                                         "Port ${interceptionState.port} · ${interceptionState.tierLabel}"
-                                    else "Port ${settings.proxyPort} · 127.0.0.1",
+                                    else "Configured port ${settings.proxyPort}",
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     fontSize = 10.sp,
                                     fontFamily = FontFamily.Monospace
@@ -209,7 +214,7 @@ fun AppNavigationDrawer(
                         DrawerNavItem("intercept", "Interceptr", Icons.Default.Radar),
                         DrawerNavItem("apis", "API Testr", Icons.Default.Public),
                         DrawerNavItem("tools", "Tools", Icons.Default.Tune),
-                        DrawerNavItem("notes", "Notes", Icons.Default.Notes),
+                        DrawerNavItem("notes", "Notes", Icons.AutoMirrored.Filled.Notes),
                         DrawerNavItem("flow", "Flow", Icons.Default.Code),
                         DrawerNavItem("chat", "Reqy Assistant", Icons.Default.AutoAwesome),
                         DrawerNavItem("music", "Music", Icons.Default.MusicNote)
@@ -235,29 +240,7 @@ fun AppNavigationDrawer(
                                     )
                                     // v6.0 transplant: LIVE capture badge pill on Intercept item (manifest §5.2)
                                     if (isInterceptItem && isCapturing) {
-                                        Box(
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(12.dp))
-                                                .background(InterceptorActiveGreen.copy(alpha = 0.18f))
-                                                .border(0.8.dp, InterceptorActiveGreen.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
-                                                .padding(horizontal = 6.dp, vertical = 2.dp)
-                                        ) {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Box(
-                                                    modifier = Modifier
-                                                        .size(5.dp)
-                                                        .clip(CircleShape)
-                                                        .background(InterceptorActiveGreen)
-                                                )
-                                                Spacer(modifier = Modifier.width(4.dp))
-                                                Text(
-                                                    text = "LIVE",
-                                                    fontSize = 9.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = InterceptorActiveGreen
-                                                )
-                                            }
-                                        }
+                                        BadgePill(text = "LIVE", color = 0xFF10B981)
                                     }
                                 }
                             },

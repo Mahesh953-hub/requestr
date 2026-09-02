@@ -80,6 +80,29 @@ class SettingsDataStore(private val context: Context) {
     val gatewayPort: Flow<Int> = prefs.map { it[AppSettingsKeys.GATEWAY_PORT] ?: DEFAULT_GATEWAY_PORT }
 
     /**
+     * §1.10: opt-in remote-cert mirroring for `FORCE_MITM` hosts -- see
+     * [AppSettingsKeys.REMOTE_CERT_MIRROR_ENABLED]'s KDoc. OFF (`false`) by default.
+     */
+    val remoteCertMirrorEnabled: Flow<Boolean> =
+        prefs.map { it[AppSettingsKeys.REMOTE_CERT_MIRROR_ENABLED] ?: false }
+
+    /**
+     * §3 (C2) -- persisted weak-network simulation config, consumed by
+     * [com.example.interception.NetworkConditionInjector] via
+     * [com.example.interception.HttpProxyShared]. `enabled = false` and all-zero fields by
+     * default (see [com.example.interception.NetworkConditionInjector.NetworkCondition.NONE]) --
+     * this feature must never affect real traffic unless a user explicitly turns it on.
+     */
+    val networkCondition: Flow<com.example.interception.NetworkConditionInjector.NetworkCondition> = prefs.map { p ->
+        com.example.interception.NetworkConditionInjector.NetworkCondition(
+            enabled = p[AppSettingsKeys.NETWORK_CONDITION_ENABLED] ?: false,
+            latencyMs = (p[AppSettingsKeys.NETWORK_CONDITION_LATENCY_MS] ?: 0).coerceAtLeast(0),
+            jitterMs = (p[AppSettingsKeys.NETWORK_CONDITION_JITTER_MS] ?: 0).coerceAtLeast(0),
+            packetLossPercent = (p[AppSettingsKeys.NETWORK_CONDITION_PACKET_LOSS_PCT] ?: 0).coerceIn(0, 100),
+        )
+    }
+
+    /**
      * SDK & CONNECT scope, Task 6: the bearer token `/api/observe` requires. Null until
      * [LocalApiServer][com.example.api.LocalApiServer] generates one on first start.
      */
@@ -155,6 +178,27 @@ class SettingsDataStore(private val context: Context) {
     suspend fun setGatewayPort(port: Int) {
         val safe = port.coerceIn(1024, 65535)
         store.edit { it[AppSettingsKeys.GATEWAY_PORT] = safe }
+    }
+
+    suspend fun setRemoteCertMirrorEnabled(value: Boolean) {
+        store.edit { it[AppSettingsKeys.REMOTE_CERT_MIRROR_ENABLED] = value }
+    }
+
+    /**
+     * §3 (C2) -- writes the full weak-network simulation config in one atomic edit (all four
+     * fields together, never a partial write that could momentarily have `enabled = true` with
+     * stale/default latency values from a prior edit). Values are clamped to
+     * [com.example.interception.NetworkConditionInjector.NetworkCondition]'s own valid ranges
+     * before writing, so a bad UI input (e.g. a slider briefly at -1 mid-drag) can never persist
+     * an invalid config that would throw when [networkCondition] next reconstructs it.
+     */
+    suspend fun setNetworkCondition(value: com.example.interception.NetworkConditionInjector.NetworkCondition) {
+        store.edit {
+            it[AppSettingsKeys.NETWORK_CONDITION_ENABLED] = value.enabled
+            it[AppSettingsKeys.NETWORK_CONDITION_LATENCY_MS] = value.latencyMs.coerceAtLeast(0)
+            it[AppSettingsKeys.NETWORK_CONDITION_JITTER_MS] = value.jitterMs.coerceAtLeast(0)
+            it[AppSettingsKeys.NETWORK_CONDITION_PACKET_LOSS_PCT] = value.packetLossPercent.coerceIn(0, 100)
+        }
     }
 
     suspend fun setPairingToken(value: String) {

@@ -26,12 +26,20 @@ import kotlin.system.exitProcess
  *
  * Options:
  *   --api-base <url>     API server URL (default: http://localhost:9876)
+ *   --token <token>      Pairing token for bearer-protected routes (/api/rules, /api/observe,
+ *                        /api/keylog). Falls back to the REQUESTR_TOKEN environment variable
+ *                        so the token does not have to appear in shell history.
  *   -q, --quiet          Suppress informational output
  *   -v, --version        Print version
  */
 object RequestrCli {
+    /** Environment variable consulted when `--token` is not given. */
+    const val TOKEN_ENV_VAR = "REQUESTR_TOKEN"
+
     private var apiBase = "http://localhost:9876"
     private var quiet = false
+    /** Never logged or echoed -- only ever placed in the Authorization header. */
+    private var token: String? = null
     private val client = okhttp3.OkHttpClient.Builder()
         .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
         .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
@@ -49,6 +57,7 @@ object RequestrCli {
 
         options["api-base"]?.let { apiBase = it }
         quiet = options.containsKey("q") || options.containsKey("quiet")
+        token = resolveToken(options, System.getenv())
 
         if (options.containsKey("v") || options.containsKey("version")) {
             println("requestr CLI v4.0")
@@ -70,7 +79,23 @@ object RequestrCli {
         exitProcess(exitCode)
     }
 
-    private fun parseArgs(args: List<String>): Pair<Map<String, String?>, List<String>> {
+    /**
+     * The pairing token to send, or null for anonymous calls. `--token` wins; otherwise
+     * [TOKEN_ENV_VAR]. Blank values count as absent so `REQUESTR_TOKEN=` does not send
+     * `Bearer ` with nothing behind it.
+     */
+    internal fun resolveToken(options: Map<String, String?>, env: Map<String, String>): String? =
+        options["token"]?.trim()?.takeIf { it.isNotEmpty() }
+            ?: env[TOKEN_ENV_VAR]?.trim()?.takeIf { it.isNotEmpty() }
+
+    /**
+     * Exact `Authorization` header value LocalApiServer.isAuthorized accepts: the literal
+     * `Bearer ` scheme followed by the token (the server compares the remainder, trimmed, for
+     * equality with the pairing token).
+     */
+    internal fun authorizationHeaderValue(token: String): String = "Bearer $token"
+
+    internal fun parseArgs(args: List<String>): Pair<Map<String, String?>, List<String>> {
         val options = mutableMapOf<String, String?>()
         val positional = mutableListOf<String>()
         var i = 0
@@ -78,6 +103,14 @@ object RequestrCli {
             when {
                 args[i] == "--api-base" && i + 1 < args.size -> {
                     options["api-base"] = args[++i]
+                }
+                args[i] == "--token" && i + 1 < args.size -> {
+                    options["token"] = args[++i]
+                }
+                args[i] == "--token" -> {
+                    // Trailing flag with no value: record it empty so resolveToken falls back
+                    // to the environment.
+                    options["token"] = ""
                 }
                 args[i].startsWith("--") -> {
                     val key = args[i].removePrefix("--")
@@ -295,14 +328,39 @@ object RequestrCli {
 
     // ── HTTP helpers ─────────────────────────────────────────────
 
-    private fun get(path: String): String {
-        val url = "$apiBase$path"
-        val request = okhttp3.Request.Builder().url(url).get().build()
-        val response = client.newCall(request).execute()
-        val body = response.body?.string() ?: ""
-        if (!response.isSuccessful && !quiet) {
+    /**
+     * Attaches `Authorization: Bearer <token>` when a token is configured. Sent on every call,
+     * not just the routes known to need it, so a route that gains auth server-side keeps
+     * working; the server ignores the header on open routes.
+     */
+    private fun okhttp3.Request.Builder.withAuth(): okhttp3.Request.Builder {
+        val t = token ?: return this
+        return header("Authorization", authorizationHeaderValue(t))
+    }
+
+    /**
+     * Guidance for an auth failure. Deliberately never includes the token that was sent (a
+     * leaked token in a terminal scrollback or a CI log is as bad as one in logcat).
+     */
+    internal fun unauthorizedHint(tokenWasSent: Boolean): String =
+        if (tokenWasSent) "HTTP 401: the pairing token was rejected. Copy the current one from Settings > Local REST API & CLI (it changes when you tap Regenerate)."
+        else "HTTP 401: this route needs the pairing token. Pass --token <token> or export $TOKEN_ENV_VAR (Settings > Local REST API & CLI)."
+
+    private fun report(response: okhttp3.Response, path: String, body: String) {
+        if (response.isSuccessful || quiet) return
+        if (response.code == 401) {
+            System.err.println(unauthorizedHint(tokenWasSent = token != null))
+        } else {
             System.err.println("HTTP ${response.code} for $path: $body")
         }
+    }
+
+    private fun get(path: String): String {
+        val url = "$apiBase$path"
+        val request = okhttp3.Request.Builder().url(url).get().withAuth().build()
+        val response = client.newCall(request).execute()
+        val body = response.body?.string() ?: ""
+        report(response, path, body)
         return body
     }
 
@@ -311,20 +369,26 @@ object RequestrCli {
         val request = okhttp3.Request.Builder()
             .url(url)
             .post(okhttp3.RequestBody.create("application/json".toMediaType(), body))
+            .withAuth()
             .build()
         val response = client.newCall(request).execute()
-        return response.body?.string() ?: ""
+        val responseBody = response.body?.string() ?: ""
+        report(response, path, responseBody)
+        return responseBody
     }
 
     private fun delete(path: String): String {
         val url = "$apiBase$path"
-        val request = okhttp3.Request.Builder().url(url).delete().build()
+        val request = okhttp3.Request.Builder().url(url).delete().withAuth().build()
         val response = client.newCall(request).execute()
-        return response.body?.string() ?: ""
+        val responseBody = response.body?.string() ?: ""
+        report(response, path, responseBody)
+        return responseBody
     }
 
-    private fun printHelp() {
-        println("""
+    private fun printHelp() = println(helpText())
+
+    internal fun helpText(): String = """
 requestr CLI v4.0 — manage requestr from the command line
 
 USAGE:
@@ -346,6 +410,10 @@ COMMANDS:
 
 OPTIONS:
   --api-base <url>          API server URL (default: http://localhost:9876)
+  --token <token>           Pairing token for bearer-protected routes (rules, observe, keylog).
+                            Sent as "Authorization: Bearer <token>". If omitted, the
+                            REQUESTR_TOKEN environment variable is used, which keeps the
+                            token out of your shell history. Never printed back.
   -q, --quiet               Suppress informational output
   -v, --version             Print version
   --help                    This message
@@ -354,6 +422,7 @@ EXAMPLES:
   requestr --api-base http://10.0.2.2:9876 captures
   requestr tool exec base64-decode SGVsbG8=
   requestr plugin json-prettify '{"json":"{\"a\":1}"}'
-        """.trimIndent())
-    }
+  REQUESTR_TOKEN=<pairing token> requestr rules
+  requestr --token <pairing token> rules
+        """.trimIndent()
 }

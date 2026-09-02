@@ -105,6 +105,53 @@ class HttpParserBodyDecodingTest {
     }
 
     @Test
+    fun `gzip-compressed real PNG response is decompressed for storage, not persisted as gzip bytes`() {
+        // SHOULD-FIX (gzip'd-image gallery bug): a genuine, valid 1x1 transparent PNG -- not a
+        // synthetic non-UTF8 stand-in -- so this actually exercises "bytes classified as an
+        // image and bytes handed to a bitmap decoder are the same bytes", the exact property
+        // the reviewer flagged as broken. Real servers gzip almost everything, images included.
+        val realPng = java.util.Base64.getDecoder().decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABAQMAAAAl21bKAAAAAXNSR0IArs4c6QAAAAlwSFlzAAAAAAAA" +
+                "AAAB8ppjxAAAAApJREFUeJxjYAAAAAIAAeIhvDMAAAAASUVORK5CYII=",
+        )
+        val pngMagic = byteArrayOf(
+            0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+        )
+        assertTrue("fixture must actually be a valid PNG", realPng.copyOf(8).contentEquals(pngMagic))
+
+        val out = ByteArrayOutputStream()
+        GZIPOutputStream(out).use { it.write(realPng) }
+        val compressed = out.toByteArray()
+
+        val head = "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Encoding: gzip\r\n" +
+            "Content-Length: ${compressed.size}\r\n\r\n"
+        val wire = head.toByteArray(Charsets.ISO_8859_1) + compressed
+
+        val parsed = HttpParser.tryParseResponse(wire)
+
+        assertNotNull(parsed)
+        assertTrue(parsed!!.isBodyBinary)
+        // consumedBytes/rawBodyBytes stay wire-exact (still gzip-compressed) -- serialization
+        // fidelity for a non-bodyReplaced message must not regress.
+        assertEquals(wire.size, parsed.consumedBytes)
+        assertTrue(parsed.rawBodyBytes!!.contentEquals(compressed))
+
+        // The actual fix: the bytes HttpBodyDecoder.forStorage would persist as the BLOB column
+        // are the decompressed, genuinely-decodable PNG -- not the gzip container.
+        val storage = HttpBodyDecoder.forStorage(parsed)
+        assertTrue(storage.isBinary)
+        assertFalse(storage.truncated)
+        assertTrue(
+            "stored bytes must be the real PNG, not still-gzipped data",
+            storage.bytes!!.contentEquals(realPng),
+        )
+        assertTrue(storage.bytes!!.copyOf(8).contentEquals(pngMagic))
+        // requestSizeBytes/responseSizeBytes must keep reporting the true *wire* size (the
+        // compressed length), never silently switch to reporting the decompressed length.
+        assertEquals(compressed.size.toLong(), storage.trueSizeBytes)
+    }
+
+    @Test
     fun `gzip chunked response body is decompressed after chunks are reassembled`() {
         val jsonBody = """{"chunked":true,"ok":1}"""
         val compressed = gzip(jsonBody)

@@ -39,6 +39,20 @@ class TunRelay(
     private val pendingActions = ConcurrentLinkedQueue<() -> Unit>()
     private val fragReassembler = IpFragmentReassembler()
 
+    /**
+     * Test seam for [writeUpstream]/[flushPendingUpstream]: defaults to the real
+     * `channel.write(buf)`. A test can replace this with a lambda that throws to exercise the
+     * "peer reset mid-flow" drop-accounting path deterministically -- driving a real loopback
+     * socket through an actual `SO_LINGER 0` reset and then racing the relay's own background
+     * selector thread to notice it (via `Thread.sleep` polling with a wall-clock deadline) is
+     * exactly the kind of scheduling-dependent flake this seam exists to avoid. See
+     * [TunRelayTest]'s regression test: it verifies (elsewhere, empirically) that a genuine
+     * `SO_LINGER 0` reset surfaces as `java.io.IOException: Connection reset by peer` on the
+     * very next `SocketChannel.write()`, then injects exactly that exception here so the
+     * assertion still proves something about the real failure mode, not just "some Exception".
+     */
+    internal var upstreamWriter: (SocketChannel, ByteBuffer) -> Int = { channel, buf -> channel.write(buf) }
+
     @Volatile private var running = true
 
     // ── observable health, following GatewayEngine's MutableStateFlow/asStateFlow pattern
@@ -60,12 +74,22 @@ class TunRelay(
         // aggregate relayErrors / unrelayableCount fields above, so the breakdown is an
         // honest partition of those totals -- never a separate invented stream. The fifth
         // mockup category (tun-MTU over-length) has no drop site in this relay today, so it
-        // is deliberately absent rather than shown as a fabricated zero.
+        // is deliberately absent rather than shown as a fabricated zero. EAGAIN/would-block on
+        // a TCP upstream write is likewise absent: it is handled by re-registering OP_WRITE
+        // interest (see writeUpstream) and retried once the socket is writable again, so the
+        // packet is queued, not dropped -- there is nothing to count.
         val evictionCount: Int = 0,
         val dropProtectFail: Int = 0,
         val dropUpstreamOpen: Int = 0,
         val dropUpstreamWrite: Int = 0,
         val dropUnrelayableProto: Int = 0,
+        // dropTcpUpstreamWriteFail is deliberately distinct from dropUpstreamWrite (the UDP
+        // write-failure counter above): a UDP write failure drops one datagram and the flow
+        // lives on, while a TCP upstream write failure (writeUpstream's/flushPendingUpstream's
+        // catch blocks) tears down the whole TCP connection -- an app-visible reset, not a
+        // single lost packet. A user reading the drop-reason panel would investigate these very
+        // differently, so they are not folded together.
+        val dropTcpUpstreamWriteFail: Int = 0,
     )
 
     private val _stats = MutableStateFlow(RelayStats())
@@ -250,7 +274,7 @@ class TunRelay(
         }
         try {
             val buf = ByteBuffer.wrap(payload)
-            channel.write(buf)
+            upstreamWriter(channel, buf)
             if (buf.hasRemaining()) {
                 flow.pendingUpstreamWrites.add(buf.remaining().let { rem ->
                     ByteArray(rem).also { buf.get(it) }
@@ -262,6 +286,7 @@ class TunRelay(
             }
         } catch (e: Exception) {
             Log.w(TAG, "TCP upstream write failed: ${e.message}")
+            updateStats { it.copy(relayErrors = it.relayErrors + 1, dropTcpUpstreamWriteFail = it.dropTcpUpstreamWriteFail + 1) }
             synchronized(flowLock) { closeTcpFlow(flow.mapKey, flow, sendFinToGuest = false) }
         }
     }
@@ -272,7 +297,7 @@ class TunRelay(
             while (flow.pendingUpstreamWrites.isNotEmpty()) {
                 val head = flow.pendingUpstreamWrites.peekFirst() ?: break
                 val buf = ByteBuffer.wrap(head)
-                channel.write(buf)
+                upstreamWriter(channel, buf)
                 if (buf.hasRemaining()) {
                     flow.pendingUpstreamWrites.removeFirst()
                     val rem = ByteArray(buf.remaining()).also { buf.get(it) }
@@ -285,6 +310,7 @@ class TunRelay(
             if (key != null && key.isValid) key.interestOps(SelectionKey.OP_READ)
         } catch (e: Exception) {
             Log.w(TAG, "TCP upstream flush failed: ${e.message}")
+            updateStats { it.copy(relayErrors = it.relayErrors + 1, dropTcpUpstreamWriteFail = it.dropTcpUpstreamWriteFail + 1) }
         }
     }
 

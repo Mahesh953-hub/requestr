@@ -2,8 +2,10 @@ package com.example.data.repository
 
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.RequestrDatabase
+import com.example.data.models.ChatProviderConfig
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -35,6 +37,22 @@ class ChatRepositoryRoomTest {
         ChatRepository.resetForTest()
         RequestrDatabase.get(context).chatMessageDao().getAll().forEach {
             RequestrDatabase.get(context).chatMessageDao().deleteById(it.id)
+        }
+        // Multi-conversation pass: also clear any leftover chat_conversations rows from a
+        // previous test class in this same Robolectric JVM fork (RequestrDatabase.INSTANCE can
+        // outlive a single test class the same way ChatRepository itself does -- see this
+        // class's own kdoc above), so init()'s ensureActiveConversation() always starts this
+        // test from a genuinely empty conversation table.
+        RequestrDatabase.get(context).chatConversationDao().getAll().forEach {
+            RequestrDatabase.get(context).chatConversationDao().deleteById(it.id)
+        }
+        // Provider-save tests below (added for the "claims success before the write completes"
+        // fix) share this JVM fork with ChatProviderConfigTest, which manages its own
+        // chat_providers cleanup in ITS @Before -- but that only runs before ITS tests, not
+        // before these, so clear it here too for this class's own determinism regardless of
+        // cross-class run order.
+        RequestrDatabase.get(context).chatProviderDao().getAll().forEach {
+            RequestrDatabase.get(context).chatProviderDao().deleteById(it.id)
         }
         ChatRepository.init(context)
     }
@@ -86,5 +104,64 @@ class ChatRepositoryRoomTest {
 
         assertTrue(RequestrDatabase.get(context).chatMessageDao().getAll().isEmpty())
         assertTrue(ChatRepository.messages.value.isEmpty())
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // saveProviderConfig -- "claims success before the write completes" fix. The UI must not
+    // show "Saved and activated." until this suspend call actually returns Success, and a
+    // failure must roll the optimistic in-memory providerConfig back rather than leaving a
+    // phantom active provider.
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+
+    @Test
+    fun `saveProviderConfig returns Success and persists to Room once both writes actually complete`() = runBlocking {
+        // A blank apiKey routes to SecureKeyStore.removeSecret, which never touches
+        // AndroidKeyStore (only the AES key generation path does) -- so this exercises a real,
+        // fully-successful save under Robolectric, not a mocked one.
+        val config = ChatProviderConfig(
+            id = "openai", name = "OpenAI",
+            baseUrl = "https://api.openai.com/v1/chat/completions", model = "gpt-4o-mini",
+            apiKey = "", isActive = true,
+        )
+
+        val result = ChatRepository.saveProviderConfig(config)
+
+        assertTrue("Expected Success once Room + Keystore writes both complete", result is SaveProviderResult.Success)
+        assertEquals("openai", ChatRepository.providerConfig.value.id)
+        val rows = RequestrDatabase.get(context).chatProviderDao().getAll()
+        assertEquals(1, rows.size)
+        assertEquals("openai", rows[0].id)
+        assertTrue("the saved row must actually be marked active in Room, not just in memory", rows[0].isActive)
+    }
+
+    @Test
+    fun `saveProviderConfig rolls back the in-memory config and reports failure when the Keystore write fails`() = runBlocking {
+        // Establish a known-good baseline first (blank apiKey -- guaranteed to succeed, see the
+        // test above) so there's a real "previous" value to roll back to.
+        val baseline = ChatProviderConfig(
+            id = "openai", name = "OpenAI",
+            baseUrl = "https://api.openai.com/v1/chat/completions", model = "gpt-4o-mini",
+            apiKey = "", isActive = true,
+        )
+        val baselineResult = ChatRepository.saveProviderConfig(baseline)
+        assertTrue(baselineResult is SaveProviderResult.Success)
+
+        // A non-blank apiKey routes to SecureKeyStore.putSecret, which calls
+        // getOrCreateSecretKey -- and AndroidKeyStore is NOT available under Robolectric (see
+        // SecureKeyStoreTest's documented boundary), so this is a REAL failure, not simulated.
+        val secretApiKey = "sk-should-never-leak-anywhere-in-this-test"
+        val attempted = baseline.copy(model = "gpt-4o", apiKey = secretApiKey)
+        val result = ChatRepository.saveProviderConfig(attempted)
+
+        assertTrue("Expected Failure when the Keystore write throws", result is SaveProviderResult.Failure)
+        val reason = (result as SaveProviderResult.Failure).reason
+        assertTrue("failure reason must be actionable, not silent", reason.contains("Couldn't save provider settings"))
+        assertFalse("failure reason must never echo the raw API key", reason.contains(secretApiKey))
+
+        // Rolled back: the in-memory providerConfig must be exactly the pre-attempt baseline
+        // (including its model), not the attempted-and-failed config -- no phantom active
+        // provider left showing an unsaved model/key change.
+        assertEquals(baseline.model, ChatRepository.providerConfig.value.model)
+        assertEquals(baseline.apiKey, ChatRepository.providerConfig.value.apiKey)
     }
 }

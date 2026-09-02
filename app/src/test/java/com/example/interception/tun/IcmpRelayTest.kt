@@ -217,6 +217,50 @@ class IcmpRelayTest {
     }
 
     @Test
+    fun `checksum-mismatch input increments checksumFailureCount but not unrelayableIcmpv6Count`() {
+        val (relay, sink) = startRelay()
+        val guestIp = byteArrayOf(10, 111, 222.toByte(), 5)
+        val targetIp = byteArrayOf(127, 0, 0, 1)
+        val request = buildEchoRequestV4(guestIp, targetIp, id = 1, seq = 1, payload = "x".toByteArray())
+        val corrupted = request.copyOf()
+        corrupted[corrupted.size - 1] = (corrupted[corrupted.size - 1] + 1).toByte()
+
+        relay.offer(corrupted, headerFor(corrupted, guestIp, targetIp))
+
+        assertTrue("checksum-mismatch packet must be counted unrelayable", awaitTrue { relay.unrelayableCount == 1 })
+        Thread.sleep(200)
+        assertEquals("checksum failure must be counted in its own honest partition", 1, relay.checksumFailureCount)
+        assertEquals("a v4 packet must never bump the v6-specific partition", 0, relay.unrelayableIcmpv6Count)
+        assertTrue(sink.datagrams.isEmpty())
+    }
+
+    private fun headerForV6(packet: ByteArray, guestIp: ByteArray, targetIp: ByteArray) =
+        TunRelay.Header(family = 6, protocol = 58 /* PROTO_ICMPV6 */, srcIp = guestIp, dstIp = targetIp, transportOffset = 40)
+
+    @Test
+    fun `both relay paths failing for an IPv6 echo request increments unrelayableIcmpv6Count but not checksumFailureCount`() {
+        val (relay, sink) = startRelay()
+        val guestIp = ByteArray(16).also { it[15] = 5 } // fd00::5, an arbitrary guest address
+        // ff02::1 (all-nodes multicast) -- connect attempts to it fail immediately with
+        // "network unreachable" on every port, so both the (JVM-unavailable) ping-socket path
+        // and the TCP fallback across all of IcmpRelay's FALLBACK_PROBE_PORTS genuinely fail,
+        // deterministically and fast -- the IPv6 analogue of the existing v4 multicast test.
+        val targetIp = ByteArray(16).also { it[0] = 0xFF.toByte(); it[1] = 0x02; it[15] = 1 }
+        val restBytes = ByteArray(4)
+        writeU16(restBytes, 0, 77)
+        writeU16(restBytes, 2, 3)
+        val request = IpPacketBuilder.buildIpv6Icmp(guestIp, targetIp, type = 128 /* ICMP_ECHO_REQUEST_V6 */, code = 0, restBytes = restBytes)
+
+        relay.offer(request, headerForV6(request, guestIp, targetIp))
+
+        assertTrue("both paths failing must be counted exactly once", awaitTrue { relay.unrelayableCount == 1 })
+        Thread.sleep(200)
+        assertEquals("a genuinely-attempted-and-failed v6 request must bump the v6-specific partition", 1, relay.unrelayableIcmpv6Count)
+        assertEquals("this is not a checksum failure", 0, relay.checksumFailureCount)
+        assertTrue(sink.datagrams.isEmpty())
+    }
+
+    @Test
     fun `not-an-echo-request ICMP message is counted unrelayable and never relayed`() {
         val (relay, sink) = startRelay()
         val guestIp = byteArrayOf(10, 111, 222.toByte(), 5)
