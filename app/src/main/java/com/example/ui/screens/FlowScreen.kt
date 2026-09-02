@@ -1,7 +1,6 @@
 package com.example.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -25,6 +24,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -91,10 +91,13 @@ import com.example.data.models.FlowNodeType
 import com.example.data.models.FlowPipelineItem
 import com.example.data.repository.FlowRepository
 import com.example.ui.components.GlassCard
+import com.example.ui.components.DriveParallaxFrom
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.rememberAppHapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import com.example.ui.theme.TextMuted
+import com.example.ui.theme.animateStateColor
+import com.example.ui.theme.scaledTween
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import java.util.UUID
@@ -162,11 +165,9 @@ fun FlowScreen(
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-    ) {
+    // Transparent root so the ParallaxBackground hosted in MainActivity shows through; the
+    // canvas card below paints its own opaque surface.
+    Column(modifier = Modifier.fillMaxSize()) {
         SectionHeader(
             title = "Flow & Automation (n8n Engine)",
             onMiniSettings = onMiniSettings,
@@ -413,8 +414,12 @@ fun FlowScreen(
                 onAddNode = { showAddNodeSheet = true }
             )
         } else {
-            // Sequence List Mode
+            // Sequence List Mode — the list is the active scroll container, so it drives the
+            // parallax layer while this mode is showing (canvas mode has no linear scroll).
+            val listState = rememberLazyListState()
+            DriveParallaxFrom(listState)
             LazyColumn(
+                state = listState,
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(horizontal = 16.dp),
@@ -1251,12 +1256,19 @@ fun PipelinePillItem(
     isActive: Boolean,
     onClick: () -> Unit
 ) {
-    val pillBg by animateColorAsState(
-        targetValue = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+    // Selection animates on a gated tween; theme colours resolve instantly.
+    val pillBg by animateStateColor(
+        active = isActive,
+        activeColor = MaterialTheme.colorScheme.primary,
+        inactiveColor = MaterialTheme.colorScheme.surfaceVariant,
+        animationSpec = scaledTween(200),
         label = "pillBg"
     )
-    val pillText by animateColorAsState(
-        targetValue = if (isActive) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+    val pillText by animateStateColor(
+        active = isActive,
+        activeColor = MaterialTheme.colorScheme.onPrimary,
+        inactiveColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        animationSpec = scaledTween(200),
         label = "pillText"
     )
 

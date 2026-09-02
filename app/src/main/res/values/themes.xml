@@ -1,5 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="Theme.MyApplication" parent="android:Theme.DeviceDefault.NoActionBar" />
+    <!--
+        Cold-start canvas. Compose only sets the real window background in
+        MainActivity.SyncWindowWithTheme (a SideEffect after the first composition), so the very
+        first frame is drawn by this style. Without an explicit windowBackground the platform
+        DeviceDefault colour (white on a light OS, grey-black on a dark OS) flashed before the
+        app's own canvas replaced it.
+
+        Light OS: EditorialLightBackground (ui/theme/Color.kt) — the app's default light family.
+        Dark OS:  values-night/colors.xml — MonochromeDarkBackground, the app's default theme.
+
+        Known imperfection: the in-app theme family is a user choice independent of the system
+        dark flag, so a user running a dark in-app theme on a light OS (or the reverse) still gets
+        one first frame in the wrong canvas until SyncWindowWithTheme runs.
+    -->
+    <style name="Theme.MyApplication" parent="android:Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">@color/cold_start_canvas</item>
+    </style>
 </resources>

@@ -36,6 +36,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ChatMessageEntity::class,
         ChatProviderEntity::class,
         ChatConversationEntity::class,
+        RecentActivityEntity::class,
         ConnectAttemptEntity::class,
     ],
     // v3.5: bumped 4 -> 5 for FlowNodeEntity + FlowConnectionEntity (Flow persistence).
@@ -88,7 +89,13 @@ import androidx.sqlite.db.SupportSQLiteDatabase
     // (real multi-conversation chat history, see its doc) and ChatMessageEntity.conversationId.
     // MIGRATION_16_17 preserves every existing chat_messages row -- it does NOT drop them --
     // by folding them into one derived-title "default-migrated" conversation.
-    version = 17,
+    // Home rebrand (home_rebranding.md §6): bumped 17 -> 18 to add RecentActivityEntity, the real
+    // "recently opened" usage history. Home previously fabricated this section from the first two
+    // saved requests and first two notes with literal "Recent"/"Saved" timestamp strings; the new
+    // table records genuine open events (see RecentActivityRepository). Pure CREATE TABLE -- no
+    // existing table is touched, and there is deliberately no backfill: nothing has been "opened"
+    // until the user opens it, so an upgraded install starts with an honest empty section.
+    version = 18,
     exportSchema = true,
 )
 @TypeConverters(RequestrTypeConverters::class)
@@ -112,6 +119,7 @@ abstract class RequestrDatabase : RoomDatabase() {
     abstract fun chatMessageDao(): ChatMessageDao
     abstract fun chatProviderDao(): ChatProviderDao
     abstract fun chatConversationDao(): ChatConversationDao
+    abstract fun recentActivityDao(): RecentActivityDao
     abstract fun connectAttemptDao(): ConnectAttemptDao
 
     companion object {
@@ -138,7 +146,7 @@ abstract class RequestrDatabase : RoomDatabase() {
                     // real, disclosed data loss (see AUDIT_REPORT.md/TODO_v5.md) -- but it is
                     // strictly better than a crash loop, and it does not touch the v8->v9 path,
                     // which stays a real, non-destructive migration.
-                    .addMigrations(MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17)
+                    .addMigrations(MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18)
                     .fallbackToDestructiveMigrationFrom(/* dropAllTables = */ true, 1, 2, 3, 4, 5, 6, 7)
                     .build()
                     .also { INSTANCE = it }
@@ -230,6 +238,29 @@ abstract class RequestrDatabase : RoomDatabase() {
          *    Raw SQL can't strip an attachment-marker prefix the way the Kotlin helper does --
          *    an attachment-prefixed FIRST message is a rare, acceptable edge case here.
          */
+        /**
+         * v17 -> v18 (Home rebrand, home_rebranding.md §6). Adds the `recent_activity` table
+         * backing [RecentActivityEntity] / `RecentActivityRepository`. Additive only: no existing
+         * table or row is touched. Column set, `NOT NULL`ness, the composite
+         * `(itemType, itemId)` primary key and the `openedAt` index mirror the @Entity exactly so
+         * Room's schema validation (and `Migration17To18Test`) accept the migrated table as
+         * identical to a fresh v18 install. No backfill by design -- the previous "recents" were
+         * fabricated from list order, so there is no real open history to carry over, and
+         * inventing one would be exactly the dishonesty this table replaces.
+         */
+        val MIGRATION_17_18: Migration = object : Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS recent_activity (" +
+                        "itemType TEXT NOT NULL, itemId TEXT NOT NULL, " +
+                        "subtype TEXT NOT NULL, title TEXT NOT NULL, preview TEXT NOT NULL, " +
+                        "openedAt INTEGER NOT NULL, " +
+                        "PRIMARY KEY(itemType, itemId))"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_recent_activity_openedAt ON recent_activity(openedAt)")
+            }
+        }
+
         val MIGRATION_16_17: Migration = object : Migration(16, 17) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE chat_messages ADD COLUMN conversationId TEXT NOT NULL DEFAULT 'default-migrated'")

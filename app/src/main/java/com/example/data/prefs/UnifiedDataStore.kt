@@ -161,6 +161,12 @@ object AppSettingsKeys {
     val GLASS_TUNE_TINT_OPACITY = floatPreferencesKey("glass_tune_tint_opacity")
     val GLASS_TUNE_BORDER_OPACITY = floatPreferencesKey("glass_tune_border_opacity")
     val GLASS_TUNE_SHADOW_DP = intPreferencesKey("glass_tune_shadow_dp")
+
+    // Plugin Manager: ids the user switched OFF in Settings > Plugins. Stored as the disabled
+    // set (not the enabled set) so a plugin that appears for the first time -- a fresh install,
+    // a new external .jar -- starts enabled, exactly as before persistence existed. Read once by
+    // PluginManager when it attaches persistence and rewritten on every toggle.
+    val DISABLED_PLUGIN_IDS = androidx.datastore.preferences.core.stringSetPreferencesKey("disabled_plugin_ids")
 }
 
 /**

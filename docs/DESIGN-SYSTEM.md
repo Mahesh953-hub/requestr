@@ -257,38 +257,48 @@ consume these where a main component hardcoded one of these values.
 | Tab spacing | `Arrangement.spacedBy(4.dp)` |
 | Opacity source | `settings.navBarBackgroundOpacity.coerceIn(0.2f, 1f)` |
 
-### 8.2 Background brush by blur mode
+### 8.2 Background brush by glass mode
 
-| Mode key | Brush |
-|---|---|
-| `"SOLID_M3"` | verticalGradient(`surface` → `surfaceVariant`) |
-| `"OLED_BLACK"` | verticalGradient(`Black@opacity` → `0xFF0F172A@opacity`) |
-| `"TRANSLUCENT"` | verticalGradient(`surface@(opacity*0.7)` → `surfaceVariant@(opacity*0.5)`), coerced `0.2f..1f` |
-| else `"FROSTED_GLASS"` | verticalGradient(`surface@opacity` → `surfaceVariant@(opacity*0.95)`), coerced `0.2f..1f` |
+Resolved by `resolveGlassSurface(mode, opacity, GlassRole.NAV, …)` in
+`ui/components/BlurModifier.kt` — the single source of truth for every glass
+shape (see §14.7 for the blur column; `opacity` = `navBarBackgroundOpacity`).
 
-### 8.3 Border color by blur mode
+| Mode key | Tint brush (verticalGradient) | Backdrop blur (API 31+) |
+|---|---|---|
+| `"SOLID_M3"` | `surface` → `surfaceVariant` | none |
+| `"OLED_BLACK"` | `Black@opacity` → `0xFF0F172A@opacity` | none |
+| `"TRANSLUCENT"` ("Clear Glass") | `surface@(opacity*0.7)` → `surfaceVariant@(opacity*0.5)`, coerced `0.2f..1f` | `8.dp` |
+| `"FROSTED_GLASS"` (default) | `surface@opacity` → `surfaceVariant@(opacity*0.95)`, coerced `0.2f..1f` | `24.dp` |
+| `"LIQUID_GLASS"` | `surface@(opacity*0.45)` → `surfaceVariant@(opacity*0.30)` + specular highlight `White@0.22` (fallback tier: `0.80` / `0.70`) | `24.dp` + refraction `1.06×` |
+| `"TUNE_GLASS"` | `surface@tintOpacity` → `surfaceVariant@(tintOpacity*0.95)` — the **only** mode that reads `glassTune*` | `glassTuneBlurDp` (+ refraction when > 0); shadow `glassTuneShadowDp` |
+
+### 8.3 Border color by glass mode
 
 | Mode | Border |
 |---|---|
 | `"SOLID_M3"` | `outlineVariant@0.6` |
 | `"OLED_BLACK"` | `White@0.15` |
-| else | `outline@0.35` |
+| `"LIQUID_GLASS"` | dark theme `White@0.28` / light theme `outline@0.40` |
+| `"TUNE_GLASS"` | `outline@glassTuneBorderOpacity` |
+| else (`FROSTED_GLASS`, `TRANSLUCENT`) | `outline@0.35` |
 
 ### 8.4 Tab (`NavPillTab`)
 
 | Token | Value |
 |---|---|
-| Active bg | `primary@0.16` (else `Transparent`), `animateColorAsState spring(0.75, 350)` |
-| Active fg | `primary` (else `onSurfaceVariant@0.75`), `animateColorAsState spring(0.75, 350)` |
-| Active scale | `1.04` (else `1.0`), `animateFloatAsState spring(0.65, 400)` |
-| Shape | active `RoundedCornerShape(24.dp)` / inactive `10.dp` (instant) |
-| Size animation | `animateContentSize spring(DampingRatioMediumBouncy, StiffnessMediumLow)` |
-| Border | active `0.8.dp primary@0.35`, else `0.dp` |
+| Active bg | `primary@0.20` (else `Transparent`), `animateColorAsState scaledSpring(0.75, 350)` |
+| Active fg | `primary` (else `onSurfaceVariant@0.75`), `animateColorAsState scaledSpring(0.75, 350)` |
+| Active scale | `1.04` (else `1.0`), `animateFloatAsState scaledSpring(0.65, 400)` |
+| Shape | corner radius `animateDpAsState` `24.dp` ↔ `10.dp`, `scaledSpring(0.75, 350)` |
+| Elevation | active `6.dp` / inactive `0.dp`, `animateDpAsState scaledSpring(0.75, 350)` (delta spec said 4dp inactive; a shadow under a transparent tab renders as a smudge, so inactive is 0) |
+| Size animation | `animateContentSize scaledSpring(DampingRatioMediumBouncy, StiffnessMediumLow)` |
+| Border | `1.dp`, active `primary@0.40` (else `Transparent`, colour-animated) |
 | Padding | active `h13 v8` / inactive `h10 v8` |
 | Icon | `19.dp` |
 | Label | `12.sp`, `FontWeight.Bold`, SansSerif |
-| Label enter | `fadeIn(spring(0.75,400)) + expandHorizontally(spring(0.75,400))` |
-| Label exit | `fadeOut(spring(0.75,400)) + shrinkHorizontally(spring(0.75,400))` |
+| Label enter | `fadeIn(scaledSpring(0.75,400)) + expandHorizontally(scaledSpring(0.75,400))` |
+| Label exit | `fadeOut(scaledSpring(0.75,400)) + shrinkHorizontally(scaledSpring(0.75,400))` |
+| Collapse | single `Animatable` progress, `scaledSpring(LowBouncy, StiffnessLow)` collapse / `(MediumBouncy, StiffnessLow)` expand; all tab motion honours §5 gating |
 | Label spacing | `Spacer 6.dp` before label, `4.dp` before dot |
 | Active dot | `4.dp` circle, `primary` |
 | Haptic | `HapticFeedbackType.LongPress` on navigate (only when `!isActive`) |
@@ -305,14 +315,20 @@ Inactive destinations filtered by `settings.navBarHiddenItems` via
 
 ## 9. Glass headers & shared glass components (Lane A — `CommonComponents.kt`)
 
-### 9.1 Frosted-glass emulation (no real blur)
+### 9.1 Tiered glass rendering
 
-Glass is **emulated**: vertical-gradient translucency + hairline border + soft
-shadow. There is deliberately **no `RenderEffect`/`Modifier.blur`** — this is the
-blur fallback (§14.7). All §9 components share the `when (blurStyle)` brush +
-border logic from §8.2/§8.3 (opacity `0.2..1`; `headerBackgroundOpacity` for
-header items). `GlassActionPill`/header use `outline@0.30` for the else-branch
-border (nav pill uses `0.35`).
+Every glass shape is built by `Modifier.glassSurface(rememberGlassSurface(role, backdrop), …)`
+(`ui/components/BlurModifier.kt`): shadow → clip → **backdrop blur** → tint
+gradient → optional accent overlay → specular highlight → hairline border. The
+tint/border come from §8.2/§8.3 with `GlassRole.HEADER` (opacity `0.2..1` from
+`headerBackgroundOpacity`; else-branch border `outline@0.30` — nav uses `0.35`).
+
+Backdrop blur is tiered (§14.7): on API 31+ a `GlassBackdropSource` records the
+content beneath into a `GraphicsLayer`, and each shape re-draws that layer with
+`BlurEffect` (and Liquid Glass's `1.06×` refraction) clipped to its own outline.
+On API 24–30 the same shapes render the gradient + hairline emulation only.
+Consumers must be siblings drawn *after* the source (MainActivity hosts the nav
+pill as an overlay; Home hosts its header the same way) — never descendants.
 
 ### 9.2 `GlassActionPill`
 
@@ -339,7 +355,10 @@ border (nav pill uses `0.35`).
 | Title icon | `16.dp`, tint `primary`, spacer 6dp |
 | Title text | `14.5.sp` Bold, `letterSpacing -0.2.sp`, SansSerif, lowercase, ellipsis max 1 line |
 | Wordmark variant | `RequestrWordmark(fontSize = 17)` when title equals "requestr" (ignoreCase) |
-| Title cross-fade | `AnimatedContent`: `fadeIn(tween(180, delay 60)) togetherWith fadeOut(tween(100))` |
+| Title swap (`HeaderIdentityCapsule`) | five steps: capsule locks width → icon stays → old text `scaledTween(100)` fade-out → new text `scaledTween(180)` fade-in → width released, `animateContentSize scaledSpring` |
+| Accent variant | `accentTint`: overlay `accent@0.12` light / `0.20` dark, border `accent@0.35` / `0.40`, text/icon `accent` |
+| Header capsules (Home) | `HeaderIconCapsule` / `HeaderMenuCapsule` `42.dp`, icon `20.dp`, radius `14.dp`; `ScrollReactiveHeader` keeps them locked while greeting fades over `120px` and `StatsCompressiblePill` compresses (`offset/60`) then slides out (`60..140px`) |
+| `SectionHeader` | delegates here: back capsule + identity capsule + one `GlassActionCluster` (38dp glass capsule; inner `IconButton`s render flat) + optional gear `GlassActionPill` |
 | Status dot | `6.dp` circle, `statusDotColor ?: primary`, spacer 6dp (hidden for wordmark) |
 | Trailing capsules | `Arrangement.spacedBy(8.dp)`, right side |
 | Capsule grouping | leading action + title capsule in `weight(1f, fill=false)` row, `spacedBy(8.dp)` |
@@ -504,8 +523,9 @@ Keep backup `MainSectionCard`/`QuickActionChip`/search row as base.
 | Header Glass Opacity | `0.1f..1.0f` | `HEADER_OPACITY` |
 | Nav Pill Opacity | `0.3f..1.0f` | `NAV_BAR_OPACITY` |
 | FAB bottom spacing | `48f..140f`, `steps = 11` | `FAB_BOTTOM_SPACING` |
-| Header blur style | `FROSTED_GLASS` / `SOLID_M3` / `OLED_BLACK` / `TRANSLUCENT` | `HEADER_BLUR_STYLE` |
-| Nav blur style | `FROSTED_GLASS` / `SOLID_M3` / `OLED_BLACK` / `TRANSLUCENT` | `NAV_BAR_BLUR_EFFECT` |
+| Header glass mode | `FROSTED_GLASS` / `SOLID_M3` / `OLED_BLACK` / `TRANSLUCENT` ("Clear Glass") / `LIQUID_GLASS` / `TUNE_GLASS` | `HEADER_BLUR_STYLE` |
+| Nav glass mode | same six keys | `NAV_BAR_BLUR_EFFECT` |
+| Tune Glass sliders | blur `0..48dp`, tint `0.15..1`, border `0..1`, shadow `0..24dp` — read only when a role is in `TUNE_GLASS` | `glassTune*` |
 
 `LiveRoundnessSettingCard`: live corner-radius preview slider.
 
@@ -513,16 +533,20 @@ Keep backup `MainSectionCard`/`QuickActionChip`/search row as base.
 
 ## 13. Canonical glass-style keys
 
-Single set of **canonical component keys** used by all glass components:
-`FROSTED_GLASS` (default), `SOLID_M3`, `OLED_BLACK`, `TRANSLUCENT`.
+Single set of **canonical component keys** used by all glass components
+(`GlassMode` enum in `BlurModifier.kt`): `FROSTED_GLASS` (default), `SOLID_M3`,
+`OLED_BLACK`, `TRANSLUCENT`, `LIQUID_GLASS`, `TUNE_GLASS`.
 
-Settings writes canonical keys; display labels stay user-friendly
+Settings writes canonical keys; display labels come from `glassModeDisplayName`
 (`FROSTED_GLASS` → "Frosted Glass", `SOLID_M3` → "Material 3",
-`OLED_BLACK` → "OLED Black", `TRANSLUCENT` → "Translucent").
+`OLED_BLACK` → "OLED Black", `TRANSLUCENT` → "Clear Glass",
+`LIQUID_GLASS` → "Liquid Glass", `TUNE_GLASS` → "Tune Glass"). `CLEAR_GLASS`
+stays an alias of `TRANSLUCENT` — not a seventh key.
 
 `canonicalGlassStyle(raw)` in `UnifiedDataStore.kt` migrates legacy stored values:
 - Header: `FROSTED→FROSTED_GLASS`, `M3_MINIMAL→SOLID_M3`, `CLEAR_GLASS→TRANSLUCENT`, `DEEP_DARK→OLED_BLACK`
 - Nav: `FROSTED→FROSTED_GLASS`, `M3→SOLID_M3`, `OLED→OLED_BLACK`, `TRANSLUCENT→TRANSLUCENT`
+- Phase B: `LIQUID→LIQUID_GLASS`, `TUNE→TUNE_GLASS`
 - Unknown/blank → `FROSTED_GLASS`
 
 Covered by `GlassStyleKeysTest` (every stored value maps to a supported brush
@@ -543,7 +567,7 @@ each in lane tests (task 11–14) and the judge re-checks (task 9).
 | **14.4 Font scaling** | No fixed-height containers around labels. Pill/tab/card text uses `sp` and wraps/ellipsizes (`maxLines`, `TextOverflow.Ellipsis`). `BadgePill`/badges must not clip at large font scales. | Lane tests at 1.3/2.0 font scale |
 | **14.5 TalkBack** | Icon-only pills (`GlassActionPill`, nav tabs, quick actions) carry `contentDescription`. Switches carry label + `stateDescription`. Haptics are never the only feedback. `BadgePill` is read as part of its parent row's semantics, not separately announced when decorative. | Lane accessibility tests |
 | **14.6 Reduced motion** | Infinite animations (pulse/vinyl/waveform/equalizer) gated behind `LocalAnimationsEnabled`; springs/tweens via `scaledSpring`/`scaledTween`. NONE = instant; REDUCED = 0.4× faster springs. | Lane animation-gating tests |
-| **14.7 Blur fallback** | Glass is emulated (gradient translucency + hairline border + shadow); **no `RenderEffect`/`Modifier.blur`**. Components degrade gracefully on all API levels. Do not claim real blur in docs. | Lane screenshot states; documented in §9.1 |
+| **14.7 Tiered blur** | `glassRenderTier(sdkInt)`: **REAL_BLUR on API 31+** — backdrop captured by `GlassBackdropSource` into a `GraphicsLayer`, re-drawn per shape with `BlurEffect(radius, Clamp)` (+ `1.06×` refraction for Liquid Glass / Tune Glass) behind the tint. **GRADIENT_FALLBACK on API 24–30** — identical layout/colours, blur radius and refraction resolve to `0`, `Modifier.glassBackdrop` is a no-op. `Modifier.blur` is never used (it would blur the pill, not what is beneath it). Blur radii: Frosted `24dp`, Clear `8dp`, Liquid `24dp`, Tune `glassTuneBlurDp`, M3/OLED `0`. Verified by `GlassSurfaceResolverTest`. | `GlassSurfaceResolverTest`; documented in §9.1 |
 
 ---
 
@@ -566,8 +590,12 @@ permission surfaces (consistent tokens, lane-owned content):
 
 - **Nav-pill hit target ≈ 35dp** (below 48dp recommendation) — documented;
   finalize at judgment (task 9).
-- **Glass is emulated** — gradient translucency + hairline border + shadow; no
-  real blur. Do not claim `RenderEffect` blur.
+- **Real backdrop blur is API 31+ only** (`RenderEffect`). Below that, glass is
+  the gradient + hairline + shadow emulation with identical tokens (§14.7).
+  Blur requires the glass shape to be an overlay *sibling* of its
+  `GlassBackdropSource`; a shape nested inside its own source gets no blur.
+- **Refraction is a lens, not an AGSL shader** — a `1.06×` scale of the blurred
+  backdrop about the shape's centre. A RuntimeShader-based distortion is deferred.
 - **Infinite animations are gated** — hold static frames when
   `LocalAnimationsEnabled == false`; reduced motion scales via
   `scaledSpring`/`scaledTween`; NONE is instant.

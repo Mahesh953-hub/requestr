@@ -14,7 +14,11 @@ enum class AppThemeMode(val displayName: String, val isLight: Boolean, val sampl
     KYOTO_MATCHA("Kyoto Matcha", true, KyotoMatchaPrimary, KyotoMatchaBackground),
     CYBER_TERMINAL("Cyber Terminal", false, CyberTerminalPrimary, CyberTerminalBackground),
     DUSK_TERRACOTTA("Dusk Terracotta", false, DuskTerracottaPrimary, DuskTerracottaBackground),
-    SOLAR_AMBER("Solar Amber", false, SolarAmberPrimary, SolarAmberBackground);
+    SOLAR_AMBER("Solar Amber", false, SolarAmberPrimary, SolarAmberBackground),
+    // Phase B delta spec (e) — two new families. Pastel Light is a warm paper canvas with
+    // taupe ink; Deep Olive Dark is a near-black olive canvas with a moss primary.
+    PASTEL_LIGHT("Pastel Light", true, PastelLightAccent, PastelLightBackground),
+    DEEP_OLIVE_DARK("Deep Olive Dark", false, DeepOliveDarkAccent, DeepOliveDarkBackground);
 
     // v6.0 — compatibility bridge to the new orthogonal accent axis (AppAccent below). Lets
     // a future caller derive a sensible AppAccent from a legacy AppThemeMode identity with
@@ -22,6 +26,40 @@ enum class AppThemeMode(val displayName: String, val isLight: Boolean, val sampl
     // (values(), .name, .isLight, .samplePrimary, .sampleBg, MyApplicationTheme(themeMode))
     // keeps compiling and rendering exactly as before.
     val accent: AppAccent get() = AppAccent.fromKey(name)
+
+    companion object {
+        /**
+         * Single source of truth for resolving a persisted theme key (`themeMode`,
+         * `selectedLightTheme`, `selectedDarkTheme`) to an [AppThemeMode]. Accepts the enum
+         * name (any case) plus the short legacy aliases that older builds persisted
+         * ("LIGHT", "OBSIDIAN", "MIDNIGHT", "MATCHA", "TERMINAL", "DUSK", "AMBER"). Returns
+         * null for unknown keys so callers pick their own fallback instead of silently
+         * rendering the wrong family (a stored light key must never resolve to a dark theme).
+         */
+        fun fromKey(key: String?): AppThemeMode? {
+            if (key.isNullOrBlank()) return null
+            val k = key.trim().uppercase()
+            values().firstOrNull { it.name == k }?.let { return it }
+            return when (k) {
+                "LIGHT", "EDITORIAL" -> EDITORIAL_LIGHT
+                "OBSIDIAN", "OBSIDIAN_DARK", "MONOCHROME" -> MONOCHROME_DARK
+                "MIDNIGHT", "SAPPHIRE" -> MIDNIGHT_SAPPHIRE
+                "MATCHA", "KYOTO" -> KYOTO_MATCHA
+                "TERMINAL", "CYBER" -> CYBER_TERMINAL
+                "DUSK", "TERRACOTTA" -> DUSK_TERRACOTTA
+                "AMBER", "SOLAR" -> SOLAR_AMBER
+                "PASTEL", "PASTEL_LIGHT_THEME" -> PASTEL_LIGHT
+                "OLIVE", "DEEP_OLIVE", "OLIVE_DARK" -> DEEP_OLIVE_DARK
+                else -> null
+            }
+        }
+
+        /** Light families, in picker order. */
+        fun lightThemes(): List<AppThemeMode> = values().filter { it.isLight }
+
+        /** Dark families, in picker order. */
+        fun darkThemes(): List<AppThemeMode> = values().filter { !it.isLight }
+    }
 }
 
 /**
@@ -65,6 +103,8 @@ enum class AppAccent(
                     "DYNAMIC_LIME" -> LIME
                     "DUSK_TERRACOTTA" -> ORANGE
                     "SOLAR_AMBER" -> AMBER
+                    "PASTEL_LIGHT" -> OBSIDIAN
+                    "DEEP_OLIVE_DARK" -> LIME
                     else -> INDIGO
                 }
         }
@@ -219,23 +259,120 @@ private val SolarAmberColorScheme = darkColorScheme(
     outlineVariant = Color(0xFF4D3F2E)
 )
 
+// Phase B delta spec (e) §8 — Pastel Light. Every role is set deliberately; the canvas is
+// warm paper (#FAFBF7) and ink is warm charcoal (#3A3530, 11.6:1 on the canvas). The taupe
+// primary (#9B8B7E) is a mid-tone, so onPrimary is deep warm ink (#231F1C, ~5:1) rather than
+// white (which would only reach ~3.3:1).
+private val PastelLightColorScheme = lightColorScheme(
+    primary = PastelLightPrimary,
+    onPrimary = PastelLightInkDeep,
+    primaryContainer = PastelLightPrimaryContainer,
+    onPrimaryContainer = PastelLightOnPrimaryContainer,
+    inversePrimary = PastelLightPrimaryBright,
+    secondary = PastelLightSecondary,
+    onSecondary = PastelLightInkDeep,
+    secondaryContainer = PastelLightSecondaryContainer,
+    onSecondaryContainer = PastelLightOnSecondaryContainer,
+    tertiary = PastelLightTertiary,
+    onTertiary = PastelLightInkDeep,
+    tertiaryContainer = PastelLightTertiaryContainer,
+    onTertiaryContainer = PastelLightOnTertiaryContainer,
+    background = PastelLightBackground,
+    onBackground = PastelLightInk,
+    surface = PastelLightSurface,
+    onSurface = PastelLightInk,
+    surfaceVariant = PastelLightSurfaceVariant,
+    onSurfaceVariant = PastelLightInkMuted,
+    surfaceTint = PastelLightPrimary,
+    inverseSurface = Color(0xFF2E2A26),
+    inverseOnSurface = PastelLightSurfaceVariant,
+    error = PastelLightError,
+    onError = Color.White,
+    errorContainer = PastelLightErrorContainer,
+    onErrorContainer = PastelLightOnErrorContainer,
+    outline = PastelLightBorder,
+    outlineVariant = PastelLightBorderStrong,
+    scrim = Color.Black,
+    surfaceBright = PastelLightSurface,
+    surfaceDim = Color(0xFFE3E0DA),
+    surfaceContainer = Color(0xFFF2EFEA),
+    surfaceContainerHigh = Color(0xFFECE8E2),
+    surfaceContainerHighest = Color(0xFFE6E1DA),
+    surfaceContainerLow = Color(0xFFF7F5F1),
+    surfaceContainerLowest = Color.White
+)
+
+// Phase B delta spec (e) §9 — Deep Olive Dark. Canvas is near-black olive (#0D0F09), text is
+// warm off-white (#F0EDE9). The moss primary (#8FA880) is a mid-tone too, so onPrimary is the
+// canvas ink (#0D0F09, ~7.4:1) — white would only reach ~2.6:1 and fail body-text contrast.
+private val DeepOliveDarkColorScheme = darkColorScheme(
+    primary = DeepOliveDarkPrimary,
+    onPrimary = DeepOliveDarkBackground,
+    primaryContainer = DeepOliveDarkPrimaryContainer,
+    onPrimaryContainer = DeepOliveDarkPrimaryBright,
+    inversePrimary = Color(0xFF5B7350),
+    secondary = DeepOliveDarkSecondary,
+    onSecondary = DeepOliveDarkBackground,
+    secondaryContainer = DeepOliveDarkSecondaryContainer,
+    onSecondaryContainer = DeepOliveDarkOnSecondaryContainer,
+    tertiary = DeepOliveDarkTertiary,
+    onTertiary = DeepOliveDarkBackground,
+    tertiaryContainer = DeepOliveDarkTertiaryContainer,
+    onTertiaryContainer = DeepOliveDarkOnTertiaryContainer,
+    background = DeepOliveDarkBackground,
+    onBackground = DeepOliveDarkText,
+    surface = DeepOliveDarkSurface,
+    onSurface = DeepOliveDarkText,
+    surfaceVariant = DeepOliveDarkSurfaceVariant,
+    onSurfaceVariant = DeepOliveDarkTextMuted,
+    surfaceTint = DeepOliveDarkPrimaryBright,
+    inverseSurface = DeepOliveDarkText,
+    inverseOnSurface = DeepOliveDarkSurfaceVariant,
+    error = DeepOliveDarkError,
+    onError = DeepOliveDarkOnError,
+    errorContainer = DeepOliveDarkErrorContainer,
+    onErrorContainer = DeepOliveDarkOnErrorContainer,
+    outline = DeepOliveDarkBorder,
+    outlineVariant = DeepOliveDarkBorderStrong,
+    scrim = Color.Black,
+    surfaceBright = Color(0xFF2C302B),
+    surfaceDim = DeepOliveDarkBackground,
+    surfaceContainer = DeepOliveDarkSurface,
+    surfaceContainerHigh = DeepOliveDarkSurfaceVariant,
+    surfaceContainerHighest = Color(0xFF262B27),
+    surfaceContainerLow = Color(0xFF121410),
+    surfaceContainerLowest = Color(0xFF080A06)
+)
+
+/**
+ * The fixed canvas [ColorScheme] for a theme family — what the family looks like with its
+ * own native primary, before any user accent is applied. Public so Settings can render
+ * honest theme swatches and so tests can assert every role's contrast.
+ */
+fun themeColorScheme(themeMode: AppThemeMode): ColorScheme = when (themeMode) {
+    AppThemeMode.EDITORIAL_LIGHT -> EditorialLightColorScheme
+    AppThemeMode.MONOCHROME_DARK -> MonochromeDarkColorScheme
+    AppThemeMode.MIDNIGHT_SAPPHIRE -> MidnightSapphireColorScheme
+    AppThemeMode.KYOTO_MATCHA -> KyotoMatchaColorScheme
+    AppThemeMode.CYBER_TERMINAL -> CyberTerminalColorScheme
+    AppThemeMode.DUSK_TERRACOTTA -> DuskTerracottaColorScheme
+    AppThemeMode.SOLAR_AMBER -> SolarAmberColorScheme
+    AppThemeMode.PASTEL_LIGHT -> PastelLightColorScheme
+    AppThemeMode.DEEP_OLIVE_DARK -> DeepOliveDarkColorScheme
+}
+
+/**
+ * Theme switching is intentionally instantaneous: this is a plain `MaterialTheme(...)` call
+ * with no Crossfade / animateColorAsState around the scheme, so a new [themeMode] recomposes
+ * every colorScheme reader in a single frame with no intermediate blended colors.
+ */
 @Composable
 fun MyApplicationTheme(
     themeMode: AppThemeMode = AppThemeMode.EDITORIAL_LIGHT,
     content: @Composable () -> Unit,
 ) {
-    val colorScheme = when (themeMode) {
-        AppThemeMode.EDITORIAL_LIGHT -> EditorialLightColorScheme
-        AppThemeMode.MONOCHROME_DARK -> MonochromeDarkColorScheme
-        AppThemeMode.MIDNIGHT_SAPPHIRE -> MidnightSapphireColorScheme
-        AppThemeMode.KYOTO_MATCHA -> KyotoMatchaColorScheme
-        AppThemeMode.CYBER_TERMINAL -> CyberTerminalColorScheme
-        AppThemeMode.DUSK_TERRACOTTA -> DuskTerracottaColorScheme
-        AppThemeMode.SOLAR_AMBER -> SolarAmberColorScheme
-    }
-
     MaterialTheme(
-        colorScheme = colorScheme,
+        colorScheme = themeColorScheme(themeMode),
         typography = Typography,
         content = content
     )
@@ -305,9 +442,9 @@ fun buildDarkColorScheme(accent: AppAccent): ColorScheme {
 }
 
 /**
- * v6.0 — orthogonal accent-axis overload. Not yet wired to any call site (MainActivity still
- * resolves [AppThemeMode] via the overload above); this is the engine that MainActivity's
- * `selectedAccent`-driven resolution will call in a follow-up change.
+ * v6.0 — orthogonal accent-axis overload on the Universal canvas. Only the light/dark bit of
+ * the chosen theme family survives here; the family's own canvas colors are ignored. Prefer
+ * the `(themeMode, accent)` overload below, which keeps the family canvas AND the accent.
  */
 @Composable
 fun MyApplicationTheme(
@@ -322,4 +459,180 @@ fun MyApplicationTheme(
         typography = Typography,
         content = content
     )
+}
+
+// ==========================================
+// Phase B — composed engine: theme-family canvas × user accent
+// ==========================================
+
+/** WCAG relative luminance (sRGB) of an opaque color, 0f (black) .. 1f (white). */
+fun relativeLuminance(color: Color): Float {
+    fun channel(c: Float): Float =
+        if (c <= 0.03928f) c / 12.92f else Math.pow(((c + 0.055f) / 1.055f).toDouble(), 2.4).toFloat()
+    return 0.2126f * channel(color.red) + 0.7152f * channel(color.green) + 0.0722f * channel(color.blue)
+}
+
+/** WCAG contrast ratio between two opaque colors, always >= 1f. */
+fun contrastRatio(a: Color, b: Color): Float {
+    val la = relativeLuminance(a)
+    val lb = relativeLuminance(b)
+    val lighter = maxOf(la, lb)
+    val darker = minOf(la, lb)
+    return (lighter + 0.05f) / (darker + 0.05f)
+}
+
+/**
+ * Picks whichever of [darkInk] / [lightInk] reads better on [background]. Used for the
+ * on-primary / on-secondary / on-tertiary roles when a user accent (which may be as bright as
+ * Dynamic Lime or as dark as Deep Sapphire) is laid over a theme family's canvas, so no
+ * combination ever produces white-on-lime or ink-on-navy.
+ */
+fun readableInkOn(background: Color, darkInk: Color, lightInk: Color = Color.White): Color =
+    if (contrastRatio(background, darkInk) >= contrastRatio(background, lightInk)) darkInk else lightInk
+
+/**
+ * Builds the [ColorScheme] the app should actually render for a (theme family, accent) pair:
+ * the family's canvas roles (background / surface / surfaceVariant / outline / text / error /
+ * inverse / surfaceContainer*) come from [themeColorScheme]; the accent replaces the
+ * primary / secondary / tertiary roles, their containers, surfaceTint and inversePrimary.
+ *
+ * Light families take the accent's `primary`; dark families take its `bright` variant, with
+ * the canvas background used as ink on it so the pairing stays coherent with the family.
+ * Pure and allocation-cheap, so it is safe to call inside a `remember(themeMode, accent)`.
+ */
+fun buildColorScheme(themeMode: AppThemeMode, accent: AppAccent): ColorScheme {
+    val base = themeColorScheme(themeMode)
+    return if (themeMode.isLight) {
+        val primary = accent.primary
+        val ink = readableInkOn(primary, darkInk = base.onBackground)
+        base.copy(
+            primary = primary,
+            onPrimary = ink,
+            primaryContainer = accent.containerLight,
+            onPrimaryContainer = accent.primary,
+            inversePrimary = accent.bright,
+            secondary = accent.bright,
+            onSecondary = readableInkOn(accent.bright, darkInk = base.onBackground),
+            secondaryContainer = accent.containerLight,
+            onSecondaryContainer = accent.primary,
+            tertiary = accent.primary,
+            onTertiary = ink,
+            tertiaryContainer = accent.containerLight,
+            onTertiaryContainer = accent.primary,
+            surfaceTint = primary
+        )
+    } else {
+        val primary = accent.bright
+        val ink = readableInkOn(primary, darkInk = base.background)
+        base.copy(
+            primary = primary,
+            onPrimary = ink,
+            primaryContainer = accent.containerDark,
+            onPrimaryContainer = accent.bright,
+            inversePrimary = accent.primary,
+            secondary = accent.primary,
+            onSecondary = readableInkOn(accent.primary, darkInk = base.background),
+            secondaryContainer = accent.containerDark,
+            onSecondaryContainer = accent.bright,
+            tertiary = accent.bright,
+            onTertiary = ink,
+            tertiaryContainer = accent.containerDark,
+            onTertiaryContainer = accent.bright,
+            surfaceTint = primary
+        )
+    }
+}
+
+/**
+ * Composed overload — theme family canvas × user accent. This is the overload MainActivity
+ * should call (`MyApplicationTheme(themeMode = themeMode, accent = selectedAccent)`) so that
+ * all nine families actually render instead of collapsing to the Universal light/dark canvas.
+ * Still a bare `MaterialTheme(...)`: switching is instantaneous by construction.
+ */
+@Composable
+fun MyApplicationTheme(
+    themeMode: AppThemeMode,
+    accent: AppAccent,
+    content: @Composable () -> Unit,
+) {
+    MaterialTheme(
+        colorScheme = buildColorScheme(themeMode, accent),
+        typography = Typography,
+        content = content
+    )
+}
+
+// ==========================================
+// Phase B — glass style catalogue (single source of truth for labels)
+// ==========================================
+
+/**
+ * One selectable glass style. [key] is the canonical persisted value (the same set
+ * `canonicalGlassStyle()` in UnifiedDataStore.kt normalises legacy keys to); [label] is the
+ * only user-facing name for it — both the header picker and the nav-pill picker in Settings
+ * read this list, so the two can never drift apart again ("Clear Tint" vs "Translucent").
+ * [needsBlurApi] marks styles whose defining effect (real backdrop blur) only exists on
+ * Android 12+ (API 31); below that they fall back to a static gradient.
+ */
+data class GlassStyleOption(
+    val key: String,
+    val label: String,
+    val description: String,
+    val needsBlurApi: Boolean,
+)
+
+object GlassStyles {
+    const val FROSTED_GLASS = "FROSTED_GLASS"
+    const val SOLID_M3 = "SOLID_M3"
+    const val TRANSLUCENT = "TRANSLUCENT"
+    const val OLED_BLACK = "OLED_BLACK"
+    const val LIQUID_GLASS = "LIQUID_GLASS"
+    const val TUNE_GLASS = "TUNE_GLASS"
+
+    /** Minimum Android API level with a real `Modifier.blur` (RenderEffect). */
+    const val REAL_BLUR_MIN_API = 31
+
+    val options: List<GlassStyleOption> = listOf(
+        GlassStyleOption(FROSTED_GLASS, "Frosted Glass", "Soft frosted surface over the content, the default look.", needsBlurApi = false),
+        GlassStyleOption(SOLID_M3, "Material 3", "Opaque Material surface, no transparency.", needsBlurApi = false),
+        GlassStyleOption(TRANSLUCENT, "Clear Glass", "Thin clear tint, content shows through with no frost.", needsBlurApi = false),
+        GlassStyleOption(OLED_BLACK, "OLED Black", "Pure black surface for OLED panels.", needsBlurApi = false),
+        GlassStyleOption(LIQUID_GLASS, "Liquid Glass", "Live backdrop blur with a specular highlight (Android 12+).", needsBlurApi = true),
+        GlassStyleOption(TUNE_GLASS, "Tune Glass", "Your own blur, tint, border and shadow — adjust with the sliders below.", needsBlurApi = true),
+    )
+
+    /** Resolves a persisted key (canonical or legacy alias) to its option; unknown -> Frosted Glass. */
+    fun option(key: String?): GlassStyleOption = options.first { it.key == canonicalKey(key) }
+
+    /** User-facing label for a persisted key. */
+    fun label(key: String?): String = option(key).label
+
+    /**
+     * Mirrors `canonicalGlassStyle()` in UnifiedDataStore.kt so Settings can compare a stored
+     * legacy value ("CLEAR_GLASS", "M3", "OLED", ...) against a canonical chip key.
+     */
+    fun canonicalKey(key: String?): String = when (key?.trim()?.uppercase()) {
+        "FROSTED_GLASS", "FROSTED" -> FROSTED_GLASS
+        "SOLID_M3", "M3_MINIMAL", "M3" -> SOLID_M3
+        "OLED_BLACK", "DEEP_DARK", "OLED" -> OLED_BLACK
+        "TRANSLUCENT", "CLEAR_GLASS" -> TRANSLUCENT
+        "LIQUID_GLASS", "LIQUID" -> LIQUID_GLASS
+        "TUNE_GLASS", "TUNE" -> TUNE_GLASS
+        else -> FROSTED_GLASS
+    }
+
+    /** True when this device can render the real blur the given style is defined by. */
+    fun hasRealBlur(sdkInt: Int): Boolean = sdkInt >= REAL_BLUR_MIN_API
+}
+
+/**
+ * Slider ranges for Tune Glass. These are the exact clamp ranges the repository setters
+ * (`SettingsRepository.updateGlassTune*`) enforce, surfaced so the sliders never offer a
+ * value that would be silently clamped away.
+ */
+object GlassTuneRanges {
+    val blurDp: IntRange = 0..48
+    val tintOpacity: ClosedFloatingPointRange<Float> = 0.15f..1f
+    val borderOpacity: ClosedFloatingPointRange<Float> = 0f..1f
+    val shadowDp: IntRange = 0..24
 }

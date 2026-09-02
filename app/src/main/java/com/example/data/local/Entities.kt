@@ -642,6 +642,43 @@ data class ChatProviderEntity(
     val createdAt: Long = System.currentTimeMillis(),
 )
 
+/**
+ * One row per item the user has actually opened, backing Home's "Recently opened" section via
+ * [com.example.data.repository.RecentActivityRepository] (v17 -> v18).
+ *
+ * Before this table existed, Home fabricated its recents list from the first two saved API
+ * requests and the first two notes with hardcoded `"Recent"`/`"Saved"` timestamp strings -- a
+ * list that changed whenever the API list was reordered and never reflected anything the user
+ * had done. This is the real usage history that replaces it.
+ *
+ * The row is a self-contained snapshot ([title]/[preview]/[subtype]) so the UI can render it
+ * without re-querying the source table; the source item may legitimately have changed since.
+ * Snapshots are refreshed by the owning repository when the item is saved/renamed, and the row
+ * is removed when the item is deleted, so a row never points at nothing.
+ *
+ * Composite primary key ([itemType], [itemId]): re-opening an item updates its single row's
+ * [openedAt] rather than appending a duplicate -- this is "recently opened", not "every open
+ * ever". Ships with NO seed rows: an empty table means nothing has been opened yet.
+ */
+@Entity(
+    tableName = "recent_activity",
+    primaryKeys = ["itemType", "itemId"],
+    indices = [Index("openedAt")],
+)
+data class RecentActivityEntity(
+    /** [com.example.data.repository.RecentItemType].name -- API, NOTE, TOOL, CHAT, FLOW. */
+    val itemType: String,
+    /** The source item's own id (saved request id, note id, tool id, conversation id, flow id). */
+    val itemId: String,
+    /** Uppercase-able subtype label for the "{Type} • {SUBTYPE}" line, e.g. "MARKDOWN", "GET". */
+    val subtype: String,
+    val title: String,
+    /** Short single-line metadata/preview shown under the title. */
+    val preview: String,
+    /** Real epoch-millis of the most recent open -- what the relative-timestamp pill formats. */
+    val openedAt: Long,
+)
+
 // ═══════════════════════════════════════════════════════════════
 // CONNECT Control subsystem
 // ═══════════════════════════════════════════════════════════════════

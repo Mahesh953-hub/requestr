@@ -4,6 +4,7 @@ import android.util.Log
 import com.example.data.local.InterceptRuleEntity
 import com.example.data.local.RequestrDatabase
 import com.example.data.local.RuleAction
+import com.example.data.prefs.SecureKeyStore
 import com.example.interception.http.HttpBodyDecoder
 import com.example.interception.http.ParsedHttpMessage
 import com.example.scripting.JsScriptEngine
@@ -152,10 +153,22 @@ object RuleEnforcer {
      * UI, never a second source of truth that could disagree with the action that actually
      * matched).
      *
+     * Encoding contract: the cipher runs over the *decoded* body ([ParsedHttpMessage.decodedBodyBytes]
+     * -- gzip/deflate already inflated), never the still-compressed wire bytes, and the output is
+     * sent identity-encoded (the serializer drops Content-Encoding for any replaced body). A body
+     * whose declared Content-Encoding could not be undone on this device (`br`, `zstd`, unknown,
+     * or a gzip/deflate body that failed to inflate -- see [HttpBodyDecoder.residualContentEncoding])
+     * is refused with [CryptoApplyResult.Failed] and a reason naming the encoding, because the
+     * transformed body could not honestly declare its inner encoding. Compression is not
+     * re-applied after decrypt: a gzip'd JSON body encrypted then decrypted comes back as the
+     * identity JSON content, which is what every other body-replacing rule already produces.
+     *
      * On success, sets [ParsedHttpMessage.replacedBodyBytes] (byte-exact -- ciphertext and
      * decrypted binary payloads both survive intact, unlike routing through [ParsedHttpMessage.body]
      * which is UTF-8 text) and [ParsedHttpMessage.bodyReplaced]`= true` so the existing
-     * serializers ([MitmProxyEngine.bodyBytesFor]) pick it up.
+     * serializers ([MitmProxyEngine.bodyBytesFor]) pick it up, and re-derives
+     * [ParsedHttpMessage.isBodyBinary] / [ParsedHttpMessage.body] from the result so the
+     * persisted row ([HttpBodyDecoder.forStorage]) describes the transformed body that was sent.
      *
      * Security audit fix (fail-open AES crypto): a bad key, an invalid/blank alias, or a decrypt
      * of data never encrypted under that key used to leave [message] "completely untouched" on
@@ -167,7 +180,22 @@ object RuleEnforcer {
      * [result]'s `reason` string comes only from [RequestCryptoManager] (never the key or the
      * plaintext/ciphertext bytes themselves), so logging it here is safe.
      */
-    fun applyBodyCrypto(message: ParsedHttpMessage, rule: InterceptRuleEntity, encrypt: Boolean): CryptoApplyResult {
+    fun applyBodyCrypto(message: ParsedHttpMessage, rule: InterceptRuleEntity, encrypt: Boolean): CryptoApplyResult =
+        applyBodyCryptoWith(message, rule, encrypt, SecureKeyStore::getOrCreateAesGcmKey)
+
+    /**
+     * Test seam for [applyBodyCrypto]: same logic, injectable [keyProvider] (mirrors
+     * [RequestCryptoManager.encryptWith]/[RequestCryptoManager.decryptWith]) because
+     * `AndroidKeyStore` is unavailable under Robolectric, and the success path's persisted-row
+     * semantics (what [HttpBodyDecoder.forStorage] stores for the transformed body) must be
+     * asserted, not assumed.
+     */
+    internal fun applyBodyCryptoWith(
+        message: ParsedHttpMessage,
+        rule: InterceptRuleEntity,
+        encrypt: Boolean,
+        keyProvider: (String) -> javax.crypto.SecretKey,
+    ): CryptoApplyResult {
         val appliesToThisMessage = when (rule.cryptoScope.uppercase()) {
             "REQUEST" -> message.isRequest
             "RESPONSE" -> !message.isRequest
@@ -175,20 +203,48 @@ object RuleEnforcer {
         }
         if (!appliesToThisMessage) return CryptoApplyResult.NotApplicable
 
-        val inputBytes = message.rawBodyBytes ?: message.body.toByteArray(Charsets.UTF_8)
+        val op = if (encrypt) "BODY_ENCRYPT_AES" else "BODY_DECRYPT_AES"
+        // Ordering: decode -> transform -> send identity. The cipher runs over the DECODED body
+        // (gzip/deflate already inflated by HttpParser), because the serializer drops
+        // Content-Encoding for every replaced body: encrypting the still-compressed wire bytes
+        // would emit ciphertext whose plaintext is gzip data that nothing declares as gzip, and
+        // decrypting would recover bytes whose true encoding had been erased. Encrypting the
+        // inflated content instead means decrypt yields identity content, which is exactly what
+        // the (now header-less) message claims to carry -- so ENCRYPT then DECRYPT round-trips a
+        // compressed body back to its content bytes.
+        val residualEncoding = HttpBodyDecoder.residualContentEncoding(message)
+        if (residualEncoding != null) {
+            // The declared encoding could not be undone on this device (br/zstd/unknown, or a
+            // gzip/deflate body that failed to inflate). There is no honest way to represent
+            // "ciphertext of <br> bytes" with the headers available -- Content-Encoding must
+            // describe the bytes on the wire, and the ciphertext is not br-encoded -- so refuse
+            // through the existing fail-closed path rather than emit an ambiguous body.
+            val reason = "$op refused: body is Content-Encoding: $residualEncoding, which this device cannot decode; " +
+                "the transformed body would carry no honest record of that encoding"
+            Log.w(TAG, "$op rule '${rule.name}' $reason")
+            return CryptoApplyResult.Failed(reason)
+        }
+        val inputBytes = message.decodedBodyBytes ?: message.rawBodyBytes ?: message.body.toByteArray(Charsets.UTF_8)
         val result = if (encrypt) {
-            RequestCryptoManager.encrypt(rule.cryptoKeyAlias, inputBytes, rule.cryptoAlgorithm)
+            RequestCryptoManager.encryptWith(rule.cryptoKeyAlias, inputBytes, rule.cryptoAlgorithm, keyProvider)
         } else {
-            RequestCryptoManager.decrypt(rule.cryptoKeyAlias, inputBytes, rule.cryptoAlgorithm)
+            RequestCryptoManager.decryptWith(rule.cryptoKeyAlias, inputBytes, rule.cryptoAlgorithm, keyProvider)
         }
         return when (result) {
             is RequestCryptoManager.CryptoResult.Success -> {
                 message.replacedBodyBytes = result.bytes
                 message.bodyReplaced = true
+                // Keep the text rendering + binary flag describing the bytes that will actually
+                // be sent (ciphertext is binary; a decrypted JSON payload is text), so the
+                // persisted row, the detail sheet and any later pm.* script all see the
+                // transformed body -- not the pre-transformation one that used to leak into
+                // CapturedTrafficEntity.responseBody as if the rule had never run.
+                val isBinary = !HttpBodyDecoder.isProbablyUtf8(result.bytes)
+                message.isBodyBinary = isBinary
+                message.body = if (isBinary) HttpBodyDecoder.BINARY_BODY_PLACEHOLDER else String(result.bytes, Charsets.UTF_8)
                 CryptoApplyResult.Applied
             }
             is RequestCryptoManager.CryptoResult.Failure -> {
-                val op = if (encrypt) "BODY_ENCRYPT_AES" else "BODY_DECRYPT_AES"
                 Log.w(TAG, "$op rule '${rule.name}' failed, blocking rather than forwarding untransformed: ${result.reason}")
                 CryptoApplyResult.Failed(result.reason)
             }
@@ -201,7 +257,7 @@ object RuleEnforcer {
         data object NotApplicable : CryptoApplyResult
         /** Transformed successfully; [ParsedHttpMessage.replacedBodyBytes] is set. */
         data object Applied : CryptoApplyResult
-        /** Key unavailable, alias blank, or the ciphertext did not authenticate. Never forward [message] as-is on this. */
+        /** Key unavailable, alias blank, the ciphertext did not authenticate, or the body carries a Content-Encoding this device cannot undo. Never forward [message] as-is on this. */
         data class Failed(val reason: String) : CryptoApplyResult
     }
 
@@ -252,13 +308,19 @@ object RuleEnforcer {
      * (the message passes through unmodified) rather than a thrown exception, matching
      * [applyRequestModification]/[applyResponseModification]'s fail-open behavior for a broken
      * rule config.
+     *
+     * @return null when the script ran cleanly (or there was nothing to run); otherwise the
+     *   JavaScript error text (or the config-parse failure) so the caller can surface it. The
+     *   message is left exactly as the script had mutated it up to the throw. The live engine
+     *   ([com.example.interception.MitmProxyEngine]) stamps this into [SCRIPT_ERROR_HEADER] via
+     *   [scriptErrorHeaderValue] so the failure is visible on the captured row, not just in logcat.
      */
-    fun applyScriptRewrite(message: ParsedHttpMessage, config: String?) {
-        if (config.isNullOrBlank()) return
-        runCatching {
+    fun applyScriptRewrite(message: ParsedHttpMessage, config: String?): String? {
+        if (config.isNullOrBlank()) return null
+        return runCatching {
             val json = org.json.JSONObject(config)
             val script = json.optString("script", "")
-            if (script.isBlank()) return@runCatching
+            if (script.isBlank()) return@runCatching null
             val variables = LinkedHashMap<String, String>()
             if (json.has("variables")) {
                 val varsJson = json.getJSONObject("variables")
@@ -318,8 +380,30 @@ object RuleEnforcer {
             val result = JsScriptEngine.eval(script, PmPrelude.SOURCE, bridge)
             if (!result.ok) {
                 Log.w(TAG, "SCRIPT_REWRITE script error: ${result.error}")
+                result.error ?: "script failed without an error message"
+            } else {
+                null
             }
-        }.onFailure { Log.w(TAG, "Failed to apply script rewrite: ${it.message}") }
+        }.getOrElse {
+            Log.w(TAG, "Failed to apply script rewrite: ${it.message}")
+            "invalid SCRIPT_REWRITE config: ${it.message}"
+        }
+    }
+
+    /**
+     * Header the live engine stamps onto a captured exchange whose [RuleAction.SCRIPT_REWRITE]
+     * script threw ([applyScriptRewrite] returned non-null). Sibling of [CHAOS_ATTRIBUTION_HEADER]:
+     * requestr's own metadata, persisted even when header logging is off, read by the traffic
+     * list / detail sheet. On the response leg it also goes on the wire to the client; on the
+     * request leg the engine adds it to the persisted request headers only, AFTER the request
+     * bytes were serialized, so it is never sent to the origin server.
+     */
+    const val SCRIPT_ERROR_HEADER = "x-requestr-script-error"
+
+    /** Builds the [SCRIPT_ERROR_HEADER] value: `<error, CR/LF folded>; rule="<name>"`. */
+    fun scriptErrorHeaderValue(error: String, ruleName: String): String {
+        val folded = error.replace(Regex("[\\r\\n]+"), " ").trim()
+        return "$folded; rule=\"$ruleName\""
     }
 
     /**
@@ -464,57 +548,128 @@ object RuleEnforcer {
     }
 
     /**
-     * Result of [applyChaos] -- what the calling live engine (currently
-     * [com.example.interception.MitmProxyEngine]) should actually do to answer the client.
+     * Response header every chaos-injected outcome is stamped with, both on the wire (so a
+     * client under test can tell a requestr-injected 503 / corrupted body / delay from a real
+     * upstream one) and in the persisted [com.example.data.local.CapturedTrafficEntity.responseHeaders]
+     * (so the traffic list and detail sheet can badge the row as CHAOS without a schema change).
+     * Value grammar, one of:
+     *  - `fail; rule="<rule name>"`
+     *  - `corrupt-body; rule="<rule name>"` (suffixed `; body-empty=true` when there was nothing to corrupt)
+     *  - `delay=<millis>ms; rule="<rule name>"`
+     * Lowercase like every other header key in [ParsedHttpMessage.headers]. [MitmProxyEngine]
+     * persists `x-requestr-*` headers even when response-header logging is off -- they are
+     * requestr's own metadata about what IT did to the exchange, not server content.
+     */
+    const val CHAOS_ATTRIBUTION_HEADER = "x-requestr-chaos"
+
+    /**
+     * Result of [applyChaosToRequest] / [applyChaosToResponse] -- what the calling live engine
+     * ([com.example.interception.MitmProxyEngine], the only TLS-MITM path) should actually do.
      * Kept separate from [ChaosInjector.ChaosOutcome] because [Fail] needs a ready-to-serialize
      * [ParsedHttpMessage] the caller can forward instead of the real response, which
      * [ChaosInjector] (a pure, engine-agnostic decision helper) deliberately has no knowledge of.
      */
     sealed interface ChaosApplyResult {
-        /** No chaos triggered (including a null/blank/malformed config) -- forward the real response as-is. */
+        /** No chaos triggered (including a null/blank/malformed config) -- forward the real message as-is. */
         data object PassThrough : ChaosApplyResult
-        /** [message] was mutated in place (body byte-corrupted); forward it re-serialized. */
+        /** The response was mutated in place (body byte-corrupted, attribution header added); forward it re-serialized. */
         data object Applied : ChaosApplyResult
-        /** Caller should sleep [millis] before forwarding the real (unmutated) response. */
+        /** Caller should sleep [millis] before forwarding the real response (attribution header already added). */
         data class Delay(val millis: Long) : ChaosApplyResult
-        /** Caller should forward [failureResponse] INSTEAD of the real response. */
+        /** Caller should answer the client with [failureResponse] and never contact upstream. */
         data class Fail(val failureResponse: ParsedHttpMessage) : ChaosApplyResult
     }
 
     /**
-     * Master plan §3 LOW-ADD — [RuleAction.CHAOS]: rolls the dice once per matched response via
-     * [ChaosInjector.decide] and reports what the caller should do. `message` is mutated in
-     * place only for [ChaosApplyResult.Applied] (body corruption) -- [ChaosApplyResult.Delay]
-     * and [ChaosApplyResult.Fail] are reported, not acted on here, because sleeping the calling
-     * thread and choosing whether to answer with a synthetic error vs. drop the connection
-     * outright are both live-engine decisions, not [RuleEnforcer]'s to make (same "caller does
-     * the real side effect" split [ChaosInjector]'s own KDoc documents).
+     * Master plan §3 LOW-ADD — [RuleAction.CHAOS], request leg. Called by
+     * [com.example.interception.MitmProxyEngine.handleParsedRequest] BEFORE the upstream
+     * connection is dialed; rolls ONLY the `failRate` die. A [ChaosApplyResult.Fail] means
+     * "the server is unreachable": the caller answers the client with [ChaosApplyResult.Fail.failureResponse]
+     * (503 by default, tunable via `failStatusCode`/`failStatusMessage`/`failBody`) and never
+     * sends the request upstream -- same short-circuit shape as [RuleAction.BLOCK] and
+     * [RuleAction.MOCK_RESPONSE], so a chaos failure cannot cause a real backend side effect.
      *
-     * `config` schema: `{"failRate":0.1,"failStatusCode":503,"failStatusMessage":"...",
-     * "failBody":"...","delayMs":[100,3000],"corruptBodyRate":0.05}` -- see [parseChaosConfig].
-     * [random] is injectable so tests are deterministic; a null/blank/malformed config, or any
-     * exception while parsing/deciding, fails open to [ChaosApplyResult.PassThrough], matching
-     * every other rule action's fail-open behavior for a broken config.
+     * The single [ChaosInjector.decide] roll is split across the two legs (fail here,
+     * corrupt/delay in [applyChaosToResponse]) with identical joint probabilities:
+     * P(fail)=f, P(corrupt)=(1-f)*c, P(delay)=(1-f)*(1-c), because the response leg only runs
+     * when this leg passed through. A null/blank/malformed config, or any exception while
+     * parsing/deciding, fails open to [ChaosApplyResult.PassThrough].
      */
-    fun applyChaos(
-        message: ParsedHttpMessage,
-        config: String?,
+    fun applyChaosToRequest(
+        rule: InterceptRuleEntity,
         random: kotlin.random.Random = kotlin.random.Random.Default,
     ): ChaosApplyResult {
+        val config = rule.replacementValue
         if (config.isNullOrBlank()) return ChaosApplyResult.PassThrough
         return runCatching {
-            when (val outcome = ChaosInjector.decide(parseChaosConfig(config), random)) {
-                is ChaosInjector.ChaosOutcome.Fail -> ChaosApplyResult.Fail(buildChaosFailureResponse(config))
-                is ChaosInjector.ChaosOutcome.Delay -> ChaosApplyResult.Delay(outcome.millis)
-                is ChaosInjector.ChaosOutcome.CorruptBody -> {
-                    message.body = ChaosInjector.corrupt(message.body, random)
-                    message.bodyReplaced = true
-                    ChaosApplyResult.Applied
-                }
-                ChaosInjector.ChaosOutcome.PassThrough -> ChaosApplyResult.PassThrough
+            val failOnly = parseChaosConfig(config).copy(delayMsRange = 0L..0L, corruptBodyRate = 0.0)
+            when (ChaosInjector.decide(failOnly, random)) {
+                is ChaosInjector.ChaosOutcome.Fail -> ChaosApplyResult.Fail(buildChaosFailureResponse(config, rule.name))
+                else -> ChaosApplyResult.PassThrough
             }
         }.getOrElse {
-            Log.w(TAG, "Failed to apply chaos: ${it.message}")
+            Log.w(TAG, "Failed to apply chaos (request leg): ${it.message}")
+            ChaosApplyResult.PassThrough
+        }
+    }
+
+    /**
+     * Master plan §3 LOW-ADD — [RuleAction.CHAOS], response leg. Called by
+     * [com.example.interception.MitmProxyEngine.handleParsedResponse] on the real upstream
+     * response, only for exchanges whose request leg ([applyChaosToRequest]) passed through.
+     * Rolls `corruptBodyRate` then `delayMs` (never `failRate`, already rolled).
+     *
+     *  - [ChaosApplyResult.Applied]: [message]'s body was corrupted in place -- the decoded text
+     *    body via [ChaosInjector.corrupt], or the raw wire bytes via [ChaosInjector.corruptBytes]
+     *    when the body is binary (so an image/protobuf really is corrupted rather than replaced by
+     *    the empty text placeholder) -- and [ParsedHttpMessage.bodyReplaced] is set so the
+     *    serializer recomputes Content-Length.
+     *  - [ChaosApplyResult.Delay]: caller must sleep [ChaosApplyResult.Delay.millis] before
+     *    forwarding (outside any shared write lock -- only this connection may stall).
+     *
+     * Both stamp [CHAOS_ATTRIBUTION_HEADER] onto [message] so the client and the persisted row
+     * can see exactly what was injected and by which rule. Fails open to
+     * [ChaosApplyResult.PassThrough] on a blank/malformed config or any exception.
+     */
+    fun applyChaosToResponse(
+        message: ParsedHttpMessage,
+        rule: InterceptRuleEntity,
+        random: kotlin.random.Random = kotlin.random.Random.Default,
+    ): ChaosApplyResult {
+        val config = rule.replacementValue
+        if (config.isNullOrBlank()) return ChaosApplyResult.PassThrough
+        return runCatching {
+            val noFail = parseChaosConfig(config).copy(failRate = 0.0)
+            when (val outcome = ChaosInjector.decide(noFail, random)) {
+                is ChaosInjector.ChaosOutcome.Delay -> {
+                    message.headers = message.headers + (CHAOS_ATTRIBUTION_HEADER to
+                        "delay=${outcome.millis}ms; rule=\"${rule.name}\"")
+                    ChaosApplyResult.Delay(outcome.millis)
+                }
+                is ChaosInjector.ChaosOutcome.CorruptBody -> {
+                    // Binary: corrupt the decompressed content bytes (what the client actually
+                    // decodes), not the still-encoded wire bytes; the serializer drops
+                    // Content-Encoding for a replaced body, so the client receives exactly these.
+                    val binaryBytes = if (message.isBodyBinary) message.decodedBodyBytes ?: message.rawBodyBytes else null
+                    val bodyEmpty: Boolean
+                    if (binaryBytes != null && binaryBytes.isNotEmpty()) {
+                        message.replacedBodyBytes = ChaosInjector.corruptBytes(binaryBytes, random)
+                        bodyEmpty = false
+                    } else {
+                        bodyEmpty = message.body.isEmpty()
+                        message.body = ChaosInjector.corrupt(message.body, random)
+                    }
+                    message.bodyReplaced = true
+                    val suffix = if (bodyEmpty) "; body-empty=true" else ""
+                    message.headers = message.headers + (CHAOS_ATTRIBUTION_HEADER to
+                        "corrupt-body; rule=\"${rule.name}\"$suffix")
+                    ChaosApplyResult.Applied
+                }
+                // Fail is impossible with failRate forced to 0.0; treat defensively as no-op.
+                is ChaosInjector.ChaosOutcome.Fail, ChaosInjector.ChaosOutcome.PassThrough -> ChaosApplyResult.PassThrough
+            }
+        }.getOrElse {
+            Log.w(TAG, "Failed to apply chaos (response leg): ${it.message}")
             ChaosApplyResult.PassThrough
         }
     }
@@ -554,7 +709,7 @@ object RuleEnforcer {
      * `failStatusMessage`/`failBody`), so one rule config can tune both the failure probability
      * and what the synthesized failure actually looks like.
      */
-    private fun buildChaosFailureResponse(config: String?): ParsedHttpMessage {
+    private fun buildChaosFailureResponse(config: String?, ruleName: String): ParsedHttpMessage {
         var statusCode = 503
         var statusMessage = "Service Unavailable"
         var body = "{\"error\":\"chaos-injected failure\"}"
@@ -569,6 +724,8 @@ object RuleEnforcer {
         val headers = linkedMapOf(
             "content-type" to "application/json; charset=utf-8",
             "content-length" to body.toByteArray(Charsets.UTF_8).size.toString(),
+            // Machine-checkable marker distinguishing this from a real 503 upstream ever sent.
+            CHAOS_ATTRIBUTION_HEADER to "fail; rule=\"$ruleName\"",
         )
         return ParsedHttpMessage(
             isRequest = false,

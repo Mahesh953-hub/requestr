@@ -188,7 +188,13 @@ class NetworkConditionInjectorTest {
             // expected -- and it must be an IOException so existing catch-alls (runCatching in
             // HttpProxyShared.forwardRequest, dial-time exception propagation in
             // LazyUpstreamConnection.connect()) already handle it with zero new code.
-            assertTrue(e is java.io.IOException)
+            // Asserted against the class hierarchy rather than `e is IOException`: the compiler
+            // already knows `e`'s static type, so an `is` check there is vacuous and would keep
+            // passing even if SimulatedPacketLossException stopped extending IOException.
+            assertTrue(
+                "SimulatedPacketLossException must extend IOException so the existing catch-alls keep handling it",
+                java.io.IOException::class.java.isAssignableFrom(e.javaClass)
+            )
         }
         // packetLossPercent=100 with no latency configured means the computed delay is zero, so
         // apply() never invokes sleep at all (it only sleeps when delay > 0).

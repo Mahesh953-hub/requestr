@@ -1,11 +1,9 @@
 package com.example.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -36,6 +34,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.CompareArrows
+import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
@@ -46,7 +46,6 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
@@ -147,6 +146,8 @@ import com.example.data.repository.ToolsRepository
 import com.example.data.repository.WebSocketSession
 import com.example.data.repository.WsConnectionStatus
 import com.example.data.repository.WsMessage
+import com.example.ui.components.DiffView
+import com.example.ui.components.EmptyState
 import com.example.ui.components.GlassCard
 import com.example.ui.components.MethodBadge
 import com.example.ui.components.ProtocolBadge
@@ -165,6 +166,8 @@ import com.example.ui.theme.MethodWs
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.animateStateColor
+import com.example.ui.theme.scaledTween
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
@@ -184,6 +187,15 @@ fun ApiTestrScreen(
     var reqState by remember(currentRequest) { mutableStateOf(currentRequest) }
     var responseData by remember { mutableStateOf<ApiResponseData?>(null) }
     var isLoading by remember { mutableStateOf(false) }
+
+    // "Compare runs" (DiffView call site, see ApiTestrResponseDiffHelpers.kt): the last completed
+    // send per request id in this session, plus the run currently on screen and the run it
+    // replaced. `responseData` above is the *display* copy (Beautify rewrites its body);
+    // these hold bodies exactly as received so both sides of the diff are like-for-like.
+    var lastRunByRequest by remember { mutableStateOf<Map<String, ApiRunSnapshot>>(emptyMap()) }
+    var currentRun by remember { mutableStateOf<ApiRunSnapshot?>(null) }
+    var previousRun by remember { mutableStateOf<ApiRunSnapshot?>(null) }
+    var showCompareRunsSheet by remember { mutableStateOf(false) }
 
     // v6.0 transplant (manifest §5.5): WebSocket session state — backup had a bare
     // `wsConnected` boolean that was never set to true; the WS method showed "Connect"
@@ -272,6 +284,7 @@ fun ApiTestrScreen(
             return
         }
         isLoading = true
+        val sentRequest = reqState
         coroutineScope.launch {
             // Master plan §1.10/§1.11: {{var}} substitution, pre-/post-request pm.* scripts,
             // and 202-polling are now all sequenced centrally in
@@ -285,6 +298,13 @@ fun ApiTestrScreen(
             redirectFollowState = redirectFollowState.afterSend()
             val resp = outcome.response
             responseData = resp
+            // Record this run against its request id so "Compare runs" can diff it with the
+            // previous send of the same request (other requests' runs are untouched).
+            val run = ApiRunSnapshot(sentRequest.id, sentRequest.method.name, sentRequest.url, resp)
+            val (baseline, updatedRuns) = recordRun(lastRunByRequest, run)
+            previousRun = baseline
+            currentRun = run
+            lastRunByRequest = updatedRuns
             // v3.4 Part C — C3: clear any previous run's pass/fail results —
             // they belong to a different response, not this one.
             testResults = null
@@ -329,11 +349,8 @@ fun ApiTestrScreen(
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-    ) {
+    // Transparent root so the ParallaxBackground hosted in MainActivity shows through.
+    Column(modifier = Modifier.fillMaxSize()) {
         // Section Header
         SectionHeader(
             title = "API Testr",
@@ -437,7 +454,9 @@ fun ApiTestrScreen(
 
             TabRow(
                 selectedTabIndex = requestTab,
-                containerColor = MaterialTheme.colorScheme.background,
+                // Transparent: an opaque `background` strip here would cut a band out of the
+                // parallax layer between the header and the request editor.
+                containerColor = Color.Transparent,
                 contentColor = MaterialTheme.colorScheme.primary,
                 indicator = { tabPositions ->
                     SecondaryIndicator(
@@ -836,6 +855,20 @@ fun ApiTestrScreen(
                                         modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.End
                                     ) {
+                                        // Opens the "Compare runs" sheet: this response's body vs
+                                        // the previous send of the same request (DiffView). Shown
+                                        // whenever a response exists so the "only one run so far"
+                                        // state is reachable and explained, not hidden.
+                                        if (currentRun != null) {
+                                            Button(
+                                                onClick = { showCompareRunsSheet = true },
+                                                shape = RoundedCornerShape(8.dp),
+                                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                                            ) {
+                                                Text("⇄ Compare runs", color = TextPrimary, fontSize = 11.sp)
+                                            }
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                        }
                                         Button(
                                             onClick = {
                                                 responseData = resp.copy(body = ToolsRepository.formatJson(resp.body))
@@ -980,6 +1013,18 @@ fun ApiTestrScreen(
                 }
             }
         }
+    }
+
+    // Sheet: Compare runs -- DiffView over the previous vs current body of the same request.
+    // Bounded (DiffView.maxHeight) and scrollable, so on 720x1600 the sheet never grows past
+    // the viewport and the control that opened it stays where it was.
+    val compareCurrent = currentRun
+    if (showCompareRunsSheet && compareCurrent != null) {
+        CompareRunsSheet(
+            current = compareCurrent,
+            previous = previousRun,
+            onDismiss = { showCompareRunsSheet = false },
+        )
     }
 
     // Modal: Code Snippets (Python, JS, Kotlin, Swift, cURL, Go)
@@ -1836,9 +1881,12 @@ private fun TitleAndUrlCard(
         label = "rocketScale"
     )
 
-    val rocketBg by animateColorAsState(
-        targetValue = if (followRedirects) primaryColor.copy(alpha = if (isDark) 0.22f else 0.15f) else Color.Transparent,
-        animationSpec = tween(200),
+    // Toggle state animates on a gated tween; the theme colour resolves instantly.
+    val rocketBg by animateStateColor(
+        active = followRedirects,
+        activeColor = primaryColor.copy(alpha = if (isDark) 0.22f else 0.15f),
+        inactiveColor = Color.Transparent,
+        animationSpec = scaledTween(200),
         label = "rocketBg"
     )
 
@@ -2147,11 +2195,13 @@ private fun SendFloatingBar(
         modifier = modifier
             .fillMaxWidth()
             .background(
+                // Scrim, not a wall: the last stop stays slightly translucent so the parallax
+                // layer remains faintly visible behind the send bar instead of being cut off.
                 Brush.verticalGradient(
                     colors = listOf(
                         gradientColor.copy(alpha = 0f),
                         gradientColor.copy(alpha = 0.85f),
-                        gradientColor
+                        gradientColor.copy(alpha = 0.92f)
                     )
                 )
             )
@@ -2259,8 +2309,12 @@ private fun KeyValueTableRow(
         label = "checkboxScale"
     )
 
-    val checkboxBg by animateColorAsState(
-        targetValue = if (item.isEnabled) primaryColor else Color.Transparent,
+    // Enabled state animates on a gated tween; the theme colour resolves instantly.
+    val checkboxBg by animateStateColor(
+        active = item.isEnabled,
+        activeColor = primaryColor,
+        inactiveColor = Color.Transparent,
+        animationSpec = scaledTween(200),
         label = "checkboxBg"
     )
 
@@ -2542,7 +2596,7 @@ private fun HttpRequestBodyTab(
                                 }
                             )
                             CodeToolbarAction(
-                                icon = Icons.Default.FormatListBulleted,
+                                icon = Icons.AutoMirrored.Filled.FormatListBulleted,
                                 description = "Copy as key=value",
                                 onClick = {
                                     clipboardManager.setText(AnnotatedString(flattenJsonBodyToKeyValueLines(bodyContent)))
@@ -3318,6 +3372,106 @@ private fun CodeToolbarAction(
 // ====================================================================
 
 /** Formats a byte count as a human-readable string (e.g. "1.0 KB", "842 B"). */
+/**
+ * "Compare runs" sheet: the DiffView call site for API Testr. Header names the request, one meta
+ * line per side (status · latency · size · time), then either the "only one run so far" state or
+ * the line diff of the two bodies exactly as received. Which diff state appears (identical /
+ * additions / deletions / mixed / binary / too large / both empty) is decided by
+ * `buildDiffModel` inside DiffView from the real bodies -- nothing here special-cases it.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CompareRunsSheet(
+    current: ApiRunSnapshot,
+    previous: ApiRunSnapshot?,
+    onDismiss: () -> Unit,
+) {
+    val availability = remember(previous) { responseCompareAvailability(previous) }
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(start = 20.dp, end = 20.dp, bottom = 32.dp)
+        ) {
+            Text("Compare runs", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = TextPrimary)
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "${current.method} ${current.url}",
+                color = TextMuted,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+
+            if (previous != null) {
+                CompareRunMetaRow(label = "Previous", run = previous)
+                Spacer(modifier = Modifier.height(6.dp))
+            }
+            CompareRunMetaRow(label = "Current", run = current)
+
+            if (previous != null && runTargetsDiffer(previous, current)) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Previous run was ${previous.method} ${previous.url}",
+                    color = Color(0xFFF59E0B),
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Spacer(modifier = Modifier.height(14.dp))
+
+            when (availability) {
+                ResponseCompareAvailability.NO_PREVIOUS_RUN -> EmptyState(
+                    icon = Icons.AutoMirrored.Filled.CompareArrows,
+                    message = responseCompareMessage(availability)!!,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp),
+                )
+                ResponseCompareAvailability.READY -> DiffView(
+                    oldText = previous!!.response.body,
+                    newText = current.response.body,
+                    title = "Body: previous → current",
+                    maxHeight = 320.dp,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CompareRunMetaRow(label: String, run: ApiRunSnapshot) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = label,
+            color = TextSecondary,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.width(60.dp)
+        )
+        Text(
+            text = runSideLabel(run),
+            color = if (run.response.isSuccess) TextPrimary else Color(0xFFEF4444),
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+    }
+}
+
 private fun formatBytes(bytes: Long): String {
     if (bytes < 1024) return "$bytes B"
     val kb = bytes / 1024.0

@@ -5,7 +5,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -38,6 +37,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Apps
@@ -64,7 +64,6 @@ import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SettingsInputAntenna
@@ -164,7 +163,6 @@ import com.example.data.repository.FridaScript
 import com.example.data.repository.TrafficInterceptorRepository
 import com.example.ui.components.ContextActionItem
 import com.example.ui.components.ContextualActionMenuDialog
-import com.example.ui.components.ConfirmActionDialog
 import com.example.ui.components.BadgePill
 import com.example.ui.components.GlassCard
 import com.example.ui.components.Http3DetailSheet
@@ -185,11 +183,11 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import com.example.ui.theme.InterceptorActiveGreen
 import com.example.ui.theme.InterceptorIdleAmber
 import com.example.ui.theme.InterceptorInactiveRed
-import com.example.ui.theme.LocalAnimationsEnabled
+import com.example.ui.theme.rememberAmbientMotionEnabled
 import com.example.ui.theme.LocalAppSpacing
-import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.animateIndexedStateColor
 import com.example.ui.theme.scaledTween
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -290,7 +288,6 @@ fun InterceptScreen(
     val isCapturing = interceptionState.isActive
     val isArmed = interceptionState.isArmed
     val vpnPort = if (interceptionState.port > 0) interceptionState.port else configuredPort
-    val vpnPacketsCount = interceptionState.packetCount
     val vpnBytesTransferred = interceptionState.bytesTransferred
 
     // Pre-flight outcome to surface (CA missing, no apps chosen, real failure reason).
@@ -357,21 +354,28 @@ fun InterceptScreen(
     // FAB colour is driven by the real engine status, and the three states are genuinely
     // distinct (APP_v2.md Bug 3.5): green = actively capturing, yellow/amber = armed but not
     // yet streaming, muted = idle/off.
-    val fabColor by animateColorAsState(
-        targetValue = when {
-            isCapturing -> InterceptorActiveGreen
-            isArmed -> InterceptorIdleAmber
-            else -> MaterialTheme.colorScheme.surfaceVariant
+    // The idle colour is a theme token, so this animates the *state position* (idle -> armed ->
+    // capturing) and lerps between colours re-read from the theme each composition. A plain
+    // animateColorAsState here made a theme swap cross-fade the FAB from the old palette over
+    // 300ms, which breaks the "theme switching is instantaneous" contract.
+    val fabColor by animateIndexedStateColor(
+        index = when {
+            isCapturing -> 2
+            isArmed -> 1
+            else -> 0
         },
+        colors = listOf(
+            MaterialTheme.colorScheme.surfaceVariant,
+            InterceptorIdleAmber,
+            InterceptorActiveGreen,
+        ),
         animationSpec = scaledTween(300),
         label = "fabColor"
     )
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-    ) {
+    // Deliberately transparent: the activity hosts `ParallaxBackground` behind every screen and
+    // it is the base layer the floating glass refracts. An opaque root here painted over it.
+    Box(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
             // Decluttered header (APP_v2.md Bug 3.7): title plus a single setup entry point.
             // The four capability chips and the app/rule/clear actions moved into the
@@ -404,88 +408,41 @@ fun InterceptScreen(
                 }
             )
 
-            // Live status readout. Every value here is real: status, tier, port and the packet
-            // counter written by the capture engine.
-            GlassCard(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 2.dp),
-                backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
-            ) {
-                Column(modifier = Modifier.padding(10.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                modifier = Modifier
-                                    .size(8.dp)
-                                    .clip(CircleShape)
-                                    .background(
-                                        when (interceptionState.status) {
-                                            InterceptionStatus.ACTIVE -> InterceptorActiveGreen
-                                            InterceptionStatus.ARMED -> InterceptorIdleAmber
-                                            InterceptionStatus.ERROR -> InterceptorInactiveRed
-                                            else -> TextMuted
-                                        }
-                                    )
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = when (interceptionState.status) {
-                                    InterceptionStatus.ACTIVE ->
-                                        "CAPTURING :$vpnPort - ${interceptionState.methodLabel}"
-                                    InterceptionStatus.ARMED -> "ARMED :$vpnPort - waiting for traffic"
-                                    InterceptionStatus.ERROR -> "ERROR"
-                                    InterceptionStatus.CONFIGURED_IDLE -> "IDLE - not capturing"
-                                    InterceptionStatus.NEVER_CONFIGURED -> "NOT CONFIGURED"
-                                },
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                        }
+            // Live status readout: CaptureStateBanner (CaptureController.kt) renders the single
+            // source of truth -- status pill, method/port/counters and, in ERROR, the real
+            // errorText verbatim plus a live Retry. A VPN establish() failure (e.g. Redroid's
+            // "Cannot create interface") lands here via RequestrVpnService.fail() -> markError(),
+            // NOT via startPrompt, so this inline strip is the only place that error is visible
+            // without opening a sheet.
+            CaptureStateBanner(
+                state = interceptionState,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+                onRetry = { captureController.requestStart() },
+            )
 
-                        Text(
-                            text = "$vpnPacketsCount pkts / ${formatByteCount(vpnBytesTransferred)}",
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 10.sp,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-
-                        // Honest decryption status
-                        val decryptText = when {
-                            interceptionState.decryptedTransactionCount > 0 ->
-                                "HTTPS DECRYPTED ✓ · ${interceptionState.decryptedTransactionCount} transactions"
-                            interceptionState.captureMethod == CaptureMethod.VPN_TUN ->
-                                "PLAINTEXT ONLY · HTTPS bodies not captured"
-                            interceptionState.tier == ActiveTier.PROXY ->
-                                "PROXY · decrypting..."
-                            else -> ""
-                        }
-                        if (decryptText.isNotEmpty()) {
-                            Text(
-                                text = decryptText,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 9.sp,
-                                color = if (interceptionState.decryptedTransactionCount > 0) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-
-                    // A real error is shown verbatim instead of being swallowed.
-                    interceptionState.errorText?.let { error ->
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = error,
-                            fontSize = 10.sp,
-                            color = InterceptorInactiveRed
-                        )
-                    }
-                }
+            // Honest decryption disclosure + wire bytes: real fields the banner has no slot for
+            // (its detail line already carries pkts / decrypted counts, so those are not repeated).
+            // "PLAINTEXT ONLY" on the VPN_TUN tier is a deliberate capability statement, not noise.
+            val decryptText = when {
+                interceptionState.decryptedTransactionCount > 0 ->
+                    "HTTPS DECRYPTED ✓ · ${interceptionState.decryptedTransactionCount} transactions"
+                interceptionState.captureMethod == CaptureMethod.VPN_TUN ->
+                    "PLAINTEXT ONLY · HTTPS bodies not captured"
+                interceptionState.tier == ActiveTier.PROXY ->
+                    "PROXY · decrypting..."
+                else -> ""
+            }
+            if (isCapturing || isArmed || decryptText.isNotEmpty()) {
+                Text(
+                    text = listOf(
+                        if (isCapturing || isArmed) "${formatByteCount(vpnBytesTransferred)} on the wire" else "",
+                        decryptText,
+                    ).filter { it.isNotEmpty() }.joinToString(" · "),
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 9.sp,
+                    color = if (interceptionState.decryptedTransactionCount > 0) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
 
             Spacer(modifier = Modifier.height(4.dp))
@@ -686,7 +643,10 @@ fun InterceptScreen(
         // A slow scale-pulse runs only while genuinely capturing.
         // v3.1 B8: infinite pulse can't be duration-scaled to 0 without flickering
         // forever, so skip it entirely and hold a static scale when animations are off.
-        val animationsEnabled = LocalAnimationsEnabled.current
+        // Ambient decorative loop: runs only at full motion. REDUCED shortens a loop's period,
+    // which makes it faster and more distracting, so reduced-motion turns it off entirely and
+    // the resting values below take over. See rememberAmbientMotionEnabled().
+    val animationsEnabled = rememberAmbientMotionEnabled()
         val pulseTransition = rememberInfiniteTransition(label = "fabPulse")
         val animatedPulseScale by pulseTransition.animateFloat(
             initialValue = 1f,
@@ -773,48 +733,16 @@ fun InterceptScreen(
     }
 
     // Pre-flight outcomes. Each one is a real blocking condition, surfaced with the exact
-    // remedy rather than a silent no-op.
-    when (val prompt = startPrompt) {
-        is CaptureStartPrompt.CaInstallRequired -> {
-            ConfirmActionDialog(
-                title = "Install the requestr CA certificate",
-                message = "HTTPS traffic cannot be decrypted until the requestr root certificate " +
-                    "is trusted by this device. Android will ask you to name the certificate and " +
-                    "confirm your screen lock.",
-                confirmLabel = "Install now",
-                onConfirm = {
-                    startPrompt = null
-                    caInstallLauncher.launch(prompt.installIntent)
-                },
-                onDismiss = { startPrompt = null }
-            )
-        }
-
-        CaptureStartPrompt.AppSelectionRequired -> {
-            ConfirmActionDialog(
-                title = "Choose what to capture",
-                message = "Capture is limited to selected apps, but no app is selected yet. " +
-                    "Pick at least one app, or switch to \"All apps\".",
-                confirmLabel = "Choose apps",
-                onConfirm = {
-                    startPrompt = null
-                    showAppFilterSheet = true
-                },
-                onDismiss = { startPrompt = null }
-            )
-        }
-
-        is CaptureStartPrompt.Failed -> {
-            ConfirmActionDialog(
-                title = "Capture could not start",
-                message = prompt.reason,
-                confirmLabel = "OK",
-                onConfirm = { startPrompt = null },
-                onDismiss = { startPrompt = null }
-            )
-        }
-
-        null -> Unit
+    // remedy rather than a silent no-op. CaptureStartPromptDialog (CaptureController.kt) owns
+    // the copy/severity per case; this screen only owns the side effects.
+    startPrompt?.let { prompt ->
+        CaptureStartPromptDialog(
+            prompt = prompt,
+            onDismiss = { startPrompt = null },
+            onInstallCa = { caInstallLauncher.launch(it) },
+            onChooseApps = { showAppFilterSheet = true },
+            onRetry = { captureController.requestStart() },
+        )
     }
 
     // Capture setup sheet: the chips and controls that used to crowd the top bar.
@@ -1004,7 +932,7 @@ fun InterceptScreen(
                 ),
                 ContextActionItem(
                     label = "Send to API Testr",
-                    icon = Icons.Default.Send,
+                    icon = Icons.AutoMirrored.Filled.Send,
                     iconTint = MaterialTheme.colorScheme.primary,
                     onClick = {
                         val apiItem = ApiRequestItem(
@@ -1866,6 +1794,20 @@ fun TrafficItemCard(
                     // the GATEWAY badge above, distinct cyan color to match the SDK's identity.
                     if (item.trafficSource == com.example.data.models.TrafficSource.SDK) {
                         BadgePill(text = "SDK", color = 0xFF06B6D4)
+                        Spacer(modifier = Modifier.width(6.dp))
+                    }
+                    // M4 follow-up: rows a CHAOS rule actually touched carry RuleEnforcer's
+                    // x-requestr-chaos attribution header (persisted even with response-header
+                    // logging off). Badge them so an injected 503 / corrupted body / delay is
+                    // never mistaken for a real upstream failure. Absent header == no chaos ran.
+                    if (chaosAttributionSummary(item.responseHeaders) != null) {
+                        BadgePill(text = "CHAOS", color = 0xFFEF4444)
+                        Spacer(modifier = Modifier.width(6.dp))
+                    }
+                    // Same mechanism for a SCRIPT_REWRITE rule whose JavaScript threw
+                    // (x-requestr-script-error) -- previously logcat-only.
+                    if (scriptErrorSummary(item.requestHeaders, item.responseHeaders) != null) {
+                        BadgePill(text = "SCRIPT ERROR", color = 0xFFEF4444)
                         Spacer(modifier = Modifier.width(6.dp))
                     }
                     ProtocolBadge(protocol = item.protocol)
@@ -3742,16 +3684,23 @@ fun RulesConfigBottomSheet(
                             textStyle = LocalTextStyle.current.copy(fontSize = 13.sp)
                         )
 
-                        // URL Pattern (regex/glob)
+                        // URL Pattern (regex). M4: RuleEnforcer.getMatchingRule evaluates this
+                        // inside runCatching { }.getOrDefault(false), so a pattern that doesn't
+                        // compile silently never matches -- surface that here, not never.
+                        val patternError = rulePatternError(rulePattern)
                         OutlinedTextField(
                             value = rulePattern,
                             onValueChange = { rulePattern = it },
                             label = { Text("URL Pattern (regex)", fontSize = 11.sp) },
                             placeholder = { Text("e.g., .*(ads|tracker|analytics).*", fontSize = 11.sp) },
+                            isError = rulePattern.isNotBlank() && patternError != null,
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true,
                             textStyle = LocalTextStyle.current.copy(fontSize = 12.sp, fontFamily = FontFamily.Monospace)
                         )
+                        if (rulePattern.isNotBlank() && patternError != null) {
+                            Text(patternError, fontSize = 10.sp, color = MaterialTheme.colorScheme.error)
+                        }
 
                         // Domain (for quick block checks)
                         OutlinedTextField(
@@ -3804,9 +3753,23 @@ fun RulesConfigBottomSheet(
                         // means the action has no replacement value at all and the field is
                         // hidden. supportsFileFixtureBody, below, is the narrower question of
                         // whether that value is a *body* (and so can be a file:// fixture).
+                        // M4: one draft, one validity verdict. `ruleConfigError` is the single
+                        // predicate that decides whether the config the form would persist makes
+                        // the engine do anything observable for the selected action -- see
+                        // ReplacementValueUiHelpers.kt's file KDoc for the per-action engine
+                        // evidence. It is recomputed on every recomposition, so switching the
+                        // action chip re-evaluates immediately against the new action's rules.
+                        val ruleDraft = RuleConfigDraft(
+                            action = ruleAction,
+                            replacementValueText = ruleReplacementValueField.text,
+                            scriptText = ruleScriptField.text,
+                            variables = variableRowsToMap(ruleVariableRows),
+                            cryptoKeyAlias = ruleCryptoKeyAlias,
+                        )
+                        val configError = ruleConfigError(ruleDraft)
                         val replacementSpec = replacementValueSpecFor(ruleAction)
                         if (replacementSpec != null) {
-                            val replacementError = replacementValueError(ruleAction, effectiveReplacementValueForSave(ruleAction, ruleReplacementValueField.text, variableRowsToMap(ruleVariableRows)))
+                            val replacementError = configError
                             OutlinedTextField(
                                 value = ruleReplacementValueField,
                                 onValueChange = { ruleReplacementValueField = it },
@@ -3856,9 +3819,13 @@ fun RulesConfigBottomSheet(
                                 onValueChange = { ruleScriptField = it },
                                 label = { Text("Script (JS)", fontSize = 11.sp) },
                                 placeholder = { Text("pm.request.headers.set('X-Trace', '{{traceId}}');", fontSize = 10.sp) },
+                                isError = configError != null,
                                 modifier = Modifier.fillMaxWidth().heightIn(min = 96.dp),
                                 textStyle = LocalTextStyle.current.copy(fontSize = 12.sp, fontFamily = FontFamily.Monospace)
                             )
+                            if (configError != null) {
+                                Text(configError, fontSize = 10.sp, color = MaterialTheme.colorScheme.error)
+                            }
                             Text(
                                 "Runs against this matched request/response with the same pm.* JS engine " +
                                     "ApiTestr's pre/post-request scripts use (pm.request/pm.response, pm.test, " +
@@ -4067,13 +4034,15 @@ fun RulesConfigBottomSheet(
                             Switch(checked = ruleEnabled, onCheckedChange = { ruleEnabled = it })
                         }
 
-                        // Save button
+                        // Save button. M4: `addRuleSaveBlocker` is the ONE predicate behind both
+                        // `enabled` and the reason text below it -- the button is never silently
+                        // dead, and it is impossible to save a rule whose config the engine would
+                        // ignore (blank MODIFY_*/CHAOS/SCRIPT_REWRITE, a non-compiling pattern,
+                        // ...). Blank MOCK_RESPONSE stays saveable: it is the documented 200 OK.
+                        val saveBlocker = addRuleSaveBlocker(ruleName, rulePattern, ruleDraft)
                         Button(
                             onClick = {
-                                if (ruleName.isNotBlank() && rulePattern.isNotBlank() &&
-                                    cryptoKeyAliasError(ruleAction, ruleCryptoKeyAlias) == null &&
-                                    replacementValueError(ruleAction, effectiveReplacementValueForSave(ruleAction, ruleReplacementValueField.text, variableRowsToMap(ruleVariableRows))) == null
-                                ) {
+                                if (addRuleSaveBlocker(ruleName, rulePattern, ruleDraft) == null) {
                                     // Capture the current field values into locals BEFORE resetting
                                     // the form. scope.launch(Dispatchers.IO) only schedules the
                                     // coroutine -- it does not run synchronously -- so if the
@@ -4086,27 +4055,9 @@ fun RulesConfigBottomSheet(
                                     val domainToSave = ruleDomain.trim()
                                     val actionToSave = ruleAction
                                     val enabledToSave = ruleEnabled
-                                    // §3 (C10): merge this rule's `variables` map into whatever
-                                    // config JSON the form otherwise produces, without touching
-                                    // any other config key -- see mergeVariablesIntoConfigJson's
-                                    // KDoc. SCRIPT_REWRITE builds its config from ruleScriptField
-                                    // instead of ruleReplacementValueField (its own field, added
-                                    // above -- no other field writes SCRIPT_REWRITE's config).
-                                    val variablesToSave = variableRowsToMap(ruleVariableRows)
-                                    val rawReplacementText = ruleReplacementValueField.text.trim()
-                                    val replacementValueToSave: String? = when {
-                                        actionToSave == com.example.data.local.RuleAction.SCRIPT_REWRITE -> {
-                                            val scriptText = ruleScriptField.text.trim()
-                                            if (scriptText.isBlank() && variablesToSave.isEmpty()) {
-                                                null
-                                            } else {
-                                                mergeVariablesIntoConfigJson(mergeScriptIntoConfigJson(null, scriptText), variablesToSave)
-                                            }
-                                        }
-                                        ruleActionUsesTemplating(actionToSave) && variablesToSave.isNotEmpty() ->
-                                            effectiveReplacementValueForSave(actionToSave, rawReplacementText, variablesToSave).ifBlank { null }
-                                        else -> rawReplacementText.ifBlank { null }
-                                    }
+                                    // Exactly the value `ruleConfigError` just validated -- same
+                                    // builder, same draft (see replacementValueToSave's KDoc).
+                                    val replacementValueToSave: String? = replacementValueToSave(ruleDraft)
                                     val cryptoKeyAliasToSave = ruleCryptoKeyAlias.trim()
                                     val cryptoScopeToSave = ruleCryptoScope
                                     scope.launch(kotlinx.coroutines.Dispatchers.IO) {
@@ -4140,15 +4091,20 @@ fun RulesConfigBottomSheet(
                                     showAddForm = false
                                 }
                             },
-                            enabled = ruleName.isNotBlank() && rulePattern.isNotBlank() &&
-                                cryptoKeyAliasError(ruleAction, ruleCryptoKeyAlias) == null &&
-                                replacementValueError(ruleAction, effectiveReplacementValueForSave(ruleAction, ruleReplacementValueField.text, variableRowsToMap(ruleVariableRows))) == null,
+                            enabled = saveBlocker == null,
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(8.dp)
                         ) {
                             Icon(imageVector = Icons.Default.Add, contentDescription = "Add", modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(6.dp))
                             Text("Add Rule")
+                        }
+                        if (saveBlocker != null) {
+                            Text(
+                                "Can't add yet: $saveBlocker",
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.error,
+                            )
                         }
                     }
                 }
@@ -4171,6 +4127,11 @@ fun RulesConfigBottomSheet(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     items(rules, key = { it.id }) { rule ->
+                        // M4: a rule saved before the form refused no-op configs (or whose
+                        // pattern never compiles) is kept and shown -- never hidden or silently
+                        // rewritten -- but flagged with the exact reason it does nothing, so it
+                        // can't sit in the list looking like it works. Toggle/Delete stay live.
+                        val savedNoOpReason = remember(rule) { savedRuleConfigError(rule) }
                         GlassCard(
                             modifier = Modifier.fillMaxWidth(),
                             backgroundColor = if (rule.enabled) MaterialTheme.colorScheme.surfaceVariant
@@ -4189,6 +4150,10 @@ fun RulesConfigBottomSheet(
                                         if (!rule.enabled) {
                                             Spacer(modifier = Modifier.width(6.dp))
                                             Text("DISABLED", fontSize = 9.sp, color = MaterialTheme.colorScheme.error)
+                                        }
+                                        if (savedNoOpReason != null) {
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("NO EFFECT", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.error)
                                         }
                                     }
                                     Text(rule.pattern, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary, fontFamily = FontFamily.Monospace, maxLines = 1)
@@ -4212,6 +4177,13 @@ fun RulesConfigBottomSheet(
                                             "Body from file fixture",
                                             fontSize = 9.sp,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    if (savedNoOpReason != null) {
+                                        Text(
+                                            "Does nothing when matched: $savedNoOpReason Delete it and add a corrected rule.",
+                                            fontSize = 9.sp,
+                                            color = MaterialTheme.colorScheme.error,
                                         )
                                     }
                                 }
@@ -4720,7 +4692,7 @@ fun CapturedDetailBottomSheet(
                         Icon(imageVector = Icons.Default.Repeat, contentDescription = "Repeat replay", tint = MaterialTheme.colorScheme.primary)
                     }
                     IconButton(onClick = onSendToTestr) {
-                        Icon(imageVector = Icons.Default.Send, contentDescription = "Send to Testr", tint = MaterialTheme.colorScheme.primary)
+                        Icon(imageVector = Icons.AutoMirrored.Filled.Send, contentDescription = "Send to Testr", tint = MaterialTheme.colorScheme.primary)
                     }
                     IconButton(onClick = onDismiss) {
                         Icon(imageVector = Icons.Default.Close, contentDescription = "Close", tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -4734,12 +4706,28 @@ fun CapturedDetailBottomSheet(
             Spacer(modifier = Modifier.height(4.dp))
 
             // Source + Protocol badges
+            val chaosSummary = chaosAttributionSummary(item.responseHeaders)
+            val scriptError = scriptErrorSummary(item.requestHeaders, item.responseHeaders)
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 BadgePill(text = item.trafficSource.label, color = 0xFF64748B)
                 BadgePill(text = item.protocolHint.shortLabel.uppercase(), color = 0xFF0EA5E9)
                 if (item.tlsVersion.isNotBlank()) {
                     BadgePill(text = item.tlsVersion, color = 0xFF10B981)
                 }
+                if (chaosSummary != null) {
+                    BadgePill(text = "CHAOS", color = 0xFFEF4444)
+                }
+                if (scriptError != null) {
+                    BadgePill(text = "SCRIPT ERROR", color = 0xFFEF4444)
+                }
+            }
+            for (injectedNote in listOfNotNull(chaosSummary, scriptError)) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = injectedNote,
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.error,
+                )
             }
 
             Spacer(modifier = Modifier.height(10.dp))

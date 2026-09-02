@@ -65,6 +65,16 @@ object NotesRepository {
     private val _notes = MutableStateFlow<List<NoteItem>>(emptyList())
     val notes: StateFlow<List<NoteItem>> = _notes.asStateFlow()
 
+    /**
+     * The note currently open in the editor, or null when no note is open -- the notes
+     * equivalent of [ApiCollectionsRepository.currentActiveRequest]. Opening a note goes through
+     * [openNote] (from the Notes list, from Home's recents/search, or a deeplink) so every path
+     * records the same "recently opened" event and lands in the same editor; [closeNote] clears
+     * it when the editor is dismissed or the note is saved.
+     */
+    private val _activeNote = MutableStateFlow<NoteItem?>(null)
+    val activeNote: StateFlow<NoteItem?> = _activeNote.asStateFlow()
+
     private var appContext: Context? = null
     private val repoScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -78,6 +88,7 @@ object NotesRepository {
         if (appContext != null) return
         val ctx = context.applicationContext
         appContext = ctx
+        RecentActivityRepository.init(ctx)
         val db = RequestrDatabase.get(ctx)
 
         repoScope.launch {
@@ -96,6 +107,27 @@ object NotesRepository {
         }
     }
 
+    /**
+     * The single mediating "open this note" call. Sets [activeNote] and records the open in
+     * [RecentActivityRepository] -- Home's "Recently opened" is fed from here, not from list
+     * order.
+     */
+    fun openNote(note: NoteItem) {
+        _activeNote.value = note
+        RecentActivityRepository.recordOpened(
+            type = RecentItemType.NOTE,
+            itemId = note.id,
+            subtype = note.format.name,
+            title = note.title,
+            preview = note.content,
+        )
+    }
+
+    /** Dismisses the editor: [activeNote] becomes null. */
+    fun closeNote() {
+        _activeNote.value = null
+    }
+
     fun saveNote(note: NoteItem) {
         val updated = note.copy(updatedAt = System.currentTimeMillis())
         val current = _notes.value
@@ -105,6 +137,15 @@ object NotesRepository {
         } else {
             listOf(updated) + current
         }
+        // Saving is not opening: refresh the recents snapshot (title/format/preview) only if
+        // this note is already in the history, leaving its openedAt alone.
+        RecentActivityRepository.updateSnapshot(
+            type = RecentItemType.NOTE,
+            itemId = updated.id,
+            subtype = updated.format.name,
+            title = updated.title,
+            preview = updated.content,
+        )
         val ctx = appContext ?: return
         repoScope.launch {
             RequestrDatabase.get(ctx).noteDao().upsert(updated.toEntity())
@@ -113,6 +154,9 @@ object NotesRepository {
 
     fun deleteNote(id: String) {
         _notes.value = _notes.value.filter { it.id != id }
+        if (_activeNote.value?.id == id) _activeNote.value = null
+        // A deleted note must not linger in Home's recents as a row that opens nothing.
+        RecentActivityRepository.forget(RecentItemType.NOTE, id)
         val ctx = appContext ?: return
         repoScope.launch {
             RequestrDatabase.get(ctx).noteDao().deleteById(id)
@@ -228,6 +272,7 @@ object FlowRepository {
     fun init(context: Context) {
         if (appContext != null) return
         appContext = context.applicationContext
+        RecentActivityRepository.init(context.applicationContext)
         val db = com.example.data.local.RequestrDatabase.get(context.applicationContext)
 
         // Observe pipelines from Room (transplant slice 11)
@@ -295,7 +340,27 @@ object FlowRepository {
         }
     }
 
+    /**
+     * The user-initiated "open this flow" call (FlowScreen's pipeline picker, [createNewFlow]).
+     * Records the open in [RecentActivityRepository]; the automatic fallback in [deleteFlow]
+     * uses [activateFlow] directly so deleting a flow never fabricates an "opened" event for
+     * whichever flow happens to become active next.
+     */
     fun setActiveFlow(flowId: String) {
+        activateFlow(flowId)
+        // Only record a flow we can actually describe -- a pipeline not (yet) in _allFlows has
+        // no honest title to show on a recents row.
+        val pipeline = _allFlows.value.firstOrNull { it.id == flowId } ?: return
+        RecentActivityRepository.recordOpened(
+            type = RecentItemType.FLOW,
+            itemId = pipeline.id,
+            subtype = pipeline.triggerType,
+            title = pipeline.name,
+            preview = pipeline.description,
+        )
+    }
+
+    private fun activateFlow(flowId: String) {
         val ctx = appContext ?: return
         val db = com.example.data.local.RequestrDatabase.get(ctx)
         _activeFlowId.value = flowId
@@ -350,6 +415,7 @@ object FlowRepository {
     fun deleteFlow(flowId: String) {
         if (_allFlows.value.size <= 1) return
         _allFlows.value = _allFlows.value.filter { it.id != flowId }
+        RecentActivityRepository.forget(RecentItemType.FLOW, flowId)
         val ctx = appContext ?: return
         repoScope.launch {
             val db = com.example.data.local.RequestrDatabase.get(ctx)
@@ -359,7 +425,7 @@ object FlowRepository {
         }
         if (_activeFlowId.value == flowId) {
             val next = _allFlows.value.firstOrNull() ?: return
-            setActiveFlow(next.id)
+            activateFlow(next.id)
         }
     }
 
@@ -826,6 +892,7 @@ object ApiCollectionsRepository {
         if (appContext != null) return
         val ctx = context.applicationContext
         appContext = ctx
+        RecentActivityRepository.init(ctx)
         repoScope.launch {
             RequestrDatabase.get(ctx).savedApiRequestDao().observeAll().collect { rows ->
                 _requests.value = rows.map { it.toApiRequestItem() }
@@ -833,8 +900,22 @@ object ApiCollectionsRepository {
         }
     }
 
+    /**
+     * The single mediating "open this request in the editor" call (Home recents/search, Saved
+     * APIs list, `api/run` deeplink). Records the open in [RecentActivityRepository] when [req]
+     * is a saved request -- the unsaved editor placeholder is not something that can be
+     * "re-opened", so it is never written to the history.
+     */
     fun setActiveRequest(req: ApiRequestItem) {
         _currentActiveRequest.value = req
+        if (_requests.value.none { it.id == req.id }) return
+        RecentActivityRepository.recordOpened(
+            type = RecentItemType.API,
+            itemId = req.id,
+            subtype = req.method.name,
+            title = req.name,
+            preview = req.url.removePrefix("https://").removePrefix("http://"),
+        )
     }
 
     fun saveRequest(req: ApiRequestItem) {
@@ -852,6 +933,15 @@ object ApiCollectionsRepository {
         } else {
             listOf(updated) + current
         }
+        // Saving is not opening (a collection import saves dozens at once): only refresh the
+        // recents snapshot of a request that is already in the history.
+        RecentActivityRepository.updateSnapshot(
+            type = RecentItemType.API,
+            itemId = updated.id,
+            subtype = updated.method.name,
+            title = updated.name,
+            preview = updated.url.removePrefix("https://").removePrefix("http://"),
+        )
 
         val ctx = appContext
         if (ctx != null) {
@@ -872,6 +962,7 @@ object ApiCollectionsRepository {
 
     fun deleteRequest(id: String) {
         _requests.value = _requests.value.filter { it.id != id }
+        RecentActivityRepository.forget(RecentItemType.API, id)
         val ctx = appContext
         if (ctx != null) {
             repoScope.launch {
@@ -1156,7 +1247,7 @@ object SettingsRepository {
 
     // v3.1 B1 — the single, unified theme-selection write path. Every UI entry point
     // that lets the user pick a root theme (Setup Wizard's AppearanceStep, Settings'
-    // AppearanceSelector + AccentColorGrid, CommonComponents' ThemeToggleButton, and
+    // AppearanceSelector + AccentColorGrid, CommonComponents' HeaderThemeCapsule, and
     // AppNavigationDrawer's quick-switcher) must route through THIS function instead
     // of calling updateTheme()/updateSelectedDarkTheme() directly and separately —
     // that dual-write divergence (mutating themeMode identity without regard to which

@@ -1,18 +1,28 @@
 package com.example
 
+// TrafficInterceptorRepository import removed — all state flows now come from InterceptionStateRepository
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.AnimatedContentTransitionScope
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.text.font.FontFamily
-import com.example.ui.theme.InterceptorActiveGreen
-import com.example.ui.theme.InterceptorInactiveRed
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.LocalOverscrollConfiguration
+import androidx.compose.foundation.OverscrollConfiguration
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,12 +38,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Notes
 import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material.icons.filled.Notes
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Save
@@ -51,28 +63,46 @@ import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.ProvidableCompositionLocal
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.navigation.NamedNavArgument
+import androidx.navigation.NavBackStackEntry
+import androidx.navigation.NavGraphBuilder
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.example.data.interception.FridaState
+import com.example.data.interception.InterceptionStateRepository
+import com.example.data.interception.InterceptionStatus
+import com.example.data.interception.RootState
 import com.example.data.models.ApiRequestItem
 import com.example.data.models.CapturedTrafficItem
 import com.example.data.models.NoteItem
@@ -80,35 +110,44 @@ import com.example.data.repository.ApiCollectionsRepository
 import com.example.data.repository.FlowRepository
 import com.example.data.repository.MusicRepository
 import com.example.data.repository.NotesRepository
+import com.example.data.repository.RecentActivityRepository
 import com.example.data.repository.SettingsRepository
-import com.example.data.interception.FridaState
-import com.example.data.interception.InterceptionStateRepository
-import com.example.data.interception.InterceptionStatus
-import com.example.data.interception.RootState
-// TrafficInterceptorRepository import removed — all state flows now come from InterceptionStateRepository
 import com.example.ui.components.AppNavigationDrawer
-import com.example.ui.components.GlassCard
 import com.example.ui.components.CollapsibleNavPill
+import com.example.ui.components.GlassBackdropSource
+import com.example.ui.components.GlassBackdropState
+import com.example.ui.components.GlassCard
 import com.example.ui.components.InPageMiniSettingsSheet
+import com.example.ui.components.LocalGlassBackdropState
+import com.example.ui.components.LocalParallaxState
 import com.example.ui.components.MusicMiniPlayer
+import com.example.ui.components.ParallaxBackground
+import com.example.ui.components.ParallaxState
+import com.example.ui.components.rememberGlassBackdropState
 import com.example.ui.screens.ApiTestrScreen
+import com.example.ui.screens.ChatScreen
 import com.example.ui.screens.FlowScreen
 import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.InterceptScreen
 import com.example.ui.screens.MusicScreen
 import com.example.ui.screens.NotesScreen
-import com.example.ui.screens.ChatScreen
 import com.example.ui.screens.OnboardingScreen
 import com.example.ui.screens.SavedApisScreen
+import com.example.ui.screens.RecentlyOpenedScreen
+import com.example.ui.screens.RecentActivityNavigator
+import com.example.data.repository.ChatRepository
 import com.example.ui.screens.SettingsScreen
-import com.example.ui.screens.ToolsScreen
 import com.example.ui.screens.ToolWorkspaceScreen
+import com.example.ui.screens.ToolsScreen
 import com.example.ui.theme.AppAccent
 import com.example.ui.theme.AppThemeMode
+import com.example.ui.theme.InterceptorActiveGreen
+import com.example.ui.theme.InterceptorInactiveRed
 import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.rememberEffectiveDurationScale
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -176,6 +215,7 @@ class MainActivity : ComponentActivity() {
         // transport shipped in schema v9 -- previously all three lived only in a plain
         // MutableStateFlow/ConcurrentHashMap and were wiped on process death.
         NotesRepository.init(applicationContext)
+        RecentActivityRepository.init(applicationContext)
         com.example.data.repository.ToolsRepository.init(applicationContext)
         com.example.data.repository.ChatRepository.init(applicationContext)
         // R3 fix: gives ApiTestrRepository a Context so its OkHttpClient can attach
@@ -293,11 +333,12 @@ sealed class Screen(val route: String, val title: String, val icon: ImageVector)
     object Intercept : Screen("intercept", "Intercept", Icons.Default.Radar)
     object Apis : Screen("apis", "APIs", Icons.Default.Public)
     object Tools : Screen("tools", "Tools", Icons.Default.Tune)
-    object Notes : Screen("notes", "Notes", Icons.Default.Notes)
+    object Notes : Screen("notes", "Notes", Icons.AutoMirrored.Filled.Notes)
     object Flow : Screen("flow", "Flow", Icons.Default.Code)
     object Music : Screen("music", "Music", Icons.Default.MusicNote)
     object Settings : Screen("settings", "Settings", Icons.Default.Tune)
     object SavedApis : Screen("saved_apis", "Saved APIs", Icons.Default.Save)
+    object RecentlyOpened : Screen("recently_opened", "Recently opened", Icons.Default.History)
     object Onboarding : Screen("onboarding", "Onboarding", Icons.Default.Home)
     data class ToolWorkspace(val toolId: String) : Screen(
         "tool_workspace/{toolId}", "Tool", Icons.Default.Tune
@@ -308,6 +349,282 @@ sealed class Screen(val route: String, val title: String, val icon: ImageVector)
     }
 }
 
+// =============================================================================================
+// Design system — screen_transitions
+// =============================================================================================
+
+/**
+ * Left-to-right order of the bottom-nav tabs. Mirrors `CollapsibleNavPill.DEFAULT_NAV`; hidden
+ * tabs (settings.navBarHiddenItems) do not change the relative order of the remaining ones, so
+ * the canonical list is the right basis for direction even when some tabs are hidden.
+ */
+val BOTTOM_TAB_ORDER: List<String> = listOf(
+    Screen.Home.route,
+    Screen.Intercept.route,
+    Screen.Apis.route,
+    Screen.Tools.route,
+    Screen.Flow.route,
+    Screen.Music.route,
+)
+
+/** Base duration of a screen transition before the user's animation scale is applied. */
+const val SCREEN_TRANSITION_MS = 320
+
+/**
+ * The spatial relationship between the screen being left and the screen being entered.
+ *
+ * - [LATERAL_FORWARD] / [LATERAL_BACKWARD]: both routes are bottom tabs. Content slides
+ *   sideways and fades in the direction the user moved along the tab bar — the spatial cue
+ *   the brief asks for. Forward = the target tab sits to the right.
+ * - [DEPTH_FORWARD] / [DEPTH_BACKWARD]: one side is not a tab (Settings, Saved APIs, Tool
+ *   Workspace, Notes, Chat). Those routes have no position on the tab bar, so a lateral
+ *   direction would be arbitrary; they read as a *push* into a detail (content arrives from the
+ *   right while the tab recedes) and a *pop* back out of it. Notes and Chat are deliberately in
+ *   this group: they are reached from Home cards / the drawer, never from the pill.
+ * - [FADE]: no spatial relationship (Onboarding in or out, or the same route re-selected).
+ */
+enum class ScreenTransition { LATERAL_FORWARD, LATERAL_BACKWARD, DEPTH_FORWARD, DEPTH_BACKWARD, FADE }
+
+/**
+ * Pure resolver — unit-tested in `ScreenTransitionResolverTest`.
+ *
+ * @param fromRoute route pattern of the destination being left (`null` on first composition).
+ * @param toRoute route pattern of the destination being entered.
+ * @param isPop whether this navigation is a back-stack pop (NavHost's popEnter/popExit).
+ * @param tabOrder left-to-right tab routes; defaults to [BOTTOM_TAB_ORDER].
+ */
+fun resolveScreenTransition(
+    fromRoute: String?,
+    toRoute: String?,
+    isPop: Boolean,
+    tabOrder: List<String> = BOTTOM_TAB_ORDER,
+): ScreenTransition {
+    if (fromRoute == null || toRoute == null) return ScreenTransition.FADE
+    if (fromRoute == Screen.Onboarding.route || toRoute == Screen.Onboarding.route) return ScreenTransition.FADE
+    val fromIdx = tabOrder.indexOf(fromRoute)
+    val toIdx = tabOrder.indexOf(toRoute)
+    return when {
+        fromIdx >= 0 && toIdx >= 0 -> when {
+            toIdx > fromIdx -> ScreenTransition.LATERAL_FORWARD
+            toIdx < fromIdx -> ScreenTransition.LATERAL_BACKWARD
+            else -> ScreenTransition.FADE
+        }
+        // Target is a tab, source is a detail: we are coming back out of the detail regardless
+        // of whether the user pressed back or tapped a tab in the drawer.
+        toIdx >= 0 -> ScreenTransition.DEPTH_BACKWARD
+        // Target is a detail: push forward unless this is a back-stack pop between two details.
+        isPop -> ScreenTransition.DEPTH_BACKWARD
+        else -> ScreenTransition.DEPTH_FORWARD
+    }
+}
+
+/**
+ * Fraction of the container width the lateral slide travels. Combined with the fade this reads
+ * as a Material "shared axis" move rather than a full page push, which is what keeps six tabs
+ * from feeling like a carousel.
+ */
+private const val LATERAL_SLIDE_FRACTION = 0.22f
+
+/** Fraction of the container width a depth push/pop travels. */
+private const val DEPTH_SLIDE_FRACTION = 0.10f
+
+/** Scale the receding screen settles at during a depth push (and starts from on pop). */
+private const val DEPTH_RECEDE_SCALE = 0.96f
+
+/**
+ * Enter transition for [transition] at [durationMs]. A zero duration (animations disabled or
+ * Transition Behavior = NONE) returns [EnterTransition.None] so the swap is instant.
+ */
+fun AnimatedContentTransitionScope<NavBackStackEntry>.screenEnterTransition(
+    transition: ScreenTransition,
+    durationMs: Int,
+): EnterTransition {
+    if (durationMs <= 0) return EnterTransition.None
+    val fade = fadeIn(tween(durationMs, delayMillis = durationMs / 6, easing = LinearOutSlowInEasing))
+    return when (transition) {
+        ScreenTransition.LATERAL_FORWARD -> slideIntoContainer(
+            towards = AnimatedContentTransitionScope.SlideDirection.Left,
+            animationSpec = tween(durationMs, easing = FastOutSlowInEasing),
+        ) { (it * LATERAL_SLIDE_FRACTION).toInt() } + fade
+        ScreenTransition.LATERAL_BACKWARD -> slideIntoContainer(
+            towards = AnimatedContentTransitionScope.SlideDirection.Right,
+            animationSpec = tween(durationMs, easing = FastOutSlowInEasing),
+        ) { (it * LATERAL_SLIDE_FRACTION).toInt() } + fade
+        ScreenTransition.DEPTH_FORWARD -> slideIntoContainer(
+            towards = AnimatedContentTransitionScope.SlideDirection.Left,
+            animationSpec = tween(durationMs, easing = FastOutSlowInEasing),
+        ) { (it * DEPTH_SLIDE_FRACTION).toInt() } + fade
+        ScreenTransition.DEPTH_BACKWARD -> scaleIn(
+            animationSpec = tween(durationMs, easing = FastOutSlowInEasing),
+            initialScale = DEPTH_RECEDE_SCALE,
+        ) + fade
+        ScreenTransition.FADE -> fadeIn(tween(durationMs, easing = LinearOutSlowInEasing))
+    }
+}
+
+/**
+ * Exit transition for [transition] at [durationMs]. Mirrors [screenEnterTransition]; the
+ * outgoing screen fades over the first half so the two never sit fully blended mid-flight.
+ */
+fun AnimatedContentTransitionScope<NavBackStackEntry>.screenExitTransition(
+    transition: ScreenTransition,
+    durationMs: Int,
+): ExitTransition {
+    if (durationMs <= 0) return ExitTransition.None
+    val fade = fadeOut(tween((durationMs / 2).coerceAtLeast(1), easing = FastOutSlowInEasing))
+    return when (transition) {
+        ScreenTransition.LATERAL_FORWARD -> slideOutOfContainer(
+            towards = AnimatedContentTransitionScope.SlideDirection.Left,
+            animationSpec = tween(durationMs, easing = FastOutSlowInEasing),
+        ) { (it * LATERAL_SLIDE_FRACTION).toInt() } + fade
+        ScreenTransition.LATERAL_BACKWARD -> slideOutOfContainer(
+            towards = AnimatedContentTransitionScope.SlideDirection.Right,
+            animationSpec = tween(durationMs, easing = FastOutSlowInEasing),
+        ) { (it * LATERAL_SLIDE_FRACTION).toInt() } + fade
+        ScreenTransition.DEPTH_FORWARD -> scaleOut(
+            animationSpec = tween(durationMs, easing = FastOutSlowInEasing),
+            targetScale = DEPTH_RECEDE_SCALE,
+        ) + fade
+        ScreenTransition.DEPTH_BACKWARD -> slideOutOfContainer(
+            towards = AnimatedContentTransitionScope.SlideDirection.Right,
+            animationSpec = tween(durationMs, easing = FastOutSlowInEasing),
+        ) { (it * DEPTH_SLIDE_FRACTION).toInt() } + fade
+        ScreenTransition.FADE -> fadeOut(tween(durationMs, easing = FastOutSlowInEasing))
+    }
+}
+
+// =============================================================================================
+// Design system — glass nav pill hosting (bottom overlay + refraction backdrop)
+// =============================================================================================
+
+/**
+ * Height (excluding the navigation-bar inset) of the floating bottom overlay — mini player plus
+ * nav pill — currently drawn over the content. 0.dp when the pill is hidden. Provided by
+ * `RequestrApp` around the NavHost so a screen that scrolls under the pill can size its own
+ * bottom content padding from the real overlay instead of a fixed guess.
+ */
+val LocalBottomOverlayHeight: ProvidableCompositionLocal<Dp> = compositionLocalOf { 0.dp }
+
+/**
+ * Routes whose content is laid out *under* the floating nav pill so the pill's glass actually
+ * has moving content to blur and refract. Every other route keeps the pre-glass behaviour —
+ * its content box is inset by the overlay height, exactly what `Scaffold(bottomBar)` used to do —
+ * because those screens do not reserve any bottom space of their own (the only screens that pad
+ * for the pill via `fabBottomSpacingDp` are Home, RecentlyOpened and part of ApiTestr).
+ *
+ * To let another screen scroll under the pill: give its scroll container a bottom
+ * `contentPadding` of at least `LocalBottomOverlayHeight.current` (+ breathing room) and add its
+ * route here. Doing this without the padding hides the last row behind the pill.
+ *
+ * Rule applied per route: added when the default view is a scrolling container AND every other
+ * mode of that screen reserves the overlay height explicitly.
+ *  - home   — LazyColumn pads `LocalBottomOverlayHeight + 16.dp`.
+ *  - tools  — LazyVerticalGrid pads the overlay; search/chips are top-anchored.
+ *  - music  — playlist LazyColumn and the snackbar pad the overlay; permission/empty states are
+ *             top-anchored; the mini player is hidden on this route.
+ *  - notes  — list LazyColumn pads the overlay; the editor mode pads its root column and
+ *             snackbar by the overlay height instead.
+ * Deliberately NOT added: flow (canvas mini-map and snackbar are bottom-anchored; the canvas is
+ * an opaque surface card anyway), apis (fixed SendFloatingBar at the bottom), intercept (owned
+ * by a different lane).
+ */
+val ROUTES_SCROLLING_UNDER_PILL: Set<String> = setOf(
+    Screen.Home.route,
+    Screen.Tools.route,
+    Screen.Music.route,
+    Screen.Notes.route,
+)
+
+/** Bottom inset a destination's content box gets; pure so it is unit-testable. */
+fun bottomOverlayInsetFor(route: String, overlayHeight: Dp): Dp =
+    if (route in ROUTES_SCROLLING_UNDER_PILL) 0.dp else overlayHeight
+
+/**
+ * `composable(...)` plus the per-destination bottom inset. Applying the inset per destination
+ * (rather than on the NavHost) means a lateral/depth transition between an under-pill route and
+ * an inset route never resizes mid-flight: each screen is laid out at its own final size.
+ */
+private fun NavGraphBuilder.screen(
+    route: String,
+    arguments: List<NamedNavArgument> = emptyList(),
+    content: @Composable (NavBackStackEntry) -> Unit,
+) {
+    composable(route = route, arguments = arguments) { entry ->
+        val inset = bottomOverlayInsetFor(route, LocalBottomOverlayHeight.current)
+        Box(modifier = Modifier.fillMaxSize().padding(bottom = inset)) {
+            content(entry)
+        }
+    }
+}
+
+// =============================================================================================
+// Design system — theme_switching (activity side)
+// =============================================================================================
+
+/**
+ * Resolve a persisted theme key to the family to render. Delegates to
+ * [AppThemeMode.fromKey] (enum name or legacy alias) and falls back to Midnight Sapphire for
+ * an unrecognised key, exactly as the previous inline `when` did.
+ */
+fun resolveAppThemeMode(effectiveThemeKey: String): AppThemeMode =
+    AppThemeMode.fromKey(effectiveThemeKey) ?: AppThemeMode.MIDNIGHT_SAPPHIRE
+
+/**
+ * Keeps the Activity window in lock-step with the composed theme so a Light <-> Dark switch is a
+ * single-frame colour inversion with nothing at the window level lagging behind:
+ *
+ *  - System-bar icon appearance follows the *in-app* theme, not the OS setting. The default
+ *    `enableEdgeToEdge()` in `onCreate` decides light/dark icons from the OS configuration, so
+ *    a user on a light OS who picks a dark in-app theme got dark icons on a dark background
+ *    until now. Re-applying `enableEdgeToEdge` with an explicit `detectDarkMode` flips the
+ *    WindowInsetsController flags immediately; there is no animation on that path.
+ *  - The window background is set to the theme background. Compose paints every pixel once
+ *    the tree is up, but the window background is what shows through during an IME-driven
+ *    relayout or a surface resize; leaving it at the XML default (device-default light or dark)
+ *    is how a white flash sneaks into an otherwise instant switch.
+ *
+ * Runs as a [SideEffect] so it is applied in the same frame as the recomposition that changed
+ * the colours, and only when a value actually changed.
+ */
+@Composable
+private fun SyncWindowWithTheme(isDarkTheme: Boolean) {
+    val view = LocalView.current
+    if (view.isInEditMode) return
+    val backgroundArgb = MaterialTheme.colorScheme.background.toArgb()
+    val applied = remember { WindowThemeApplied() }
+    SideEffect {
+        if (applied.isDark == isDarkTheme && applied.backgroundArgb == backgroundArgb) return@SideEffect
+        val activity = view.context as? ComponentActivity ?: return@SideEffect
+        activity.enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.auto(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT,
+            ) { isDarkTheme },
+            navigationBarStyle = SystemBarStyle.auto(
+                EDGE_TO_EDGE_LIGHT_SCRIM,
+                EDGE_TO_EDGE_DARK_SCRIM,
+            ) { isDarkTheme },
+        )
+        activity.window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(backgroundArgb))
+        applied.isDark = isDarkTheme
+        applied.backgroundArgb = backgroundArgb
+    }
+}
+
+private class WindowThemeApplied {
+    var isDark: Boolean? = null
+    var backgroundArgb: Int? = null
+}
+
+// The scrims androidx.activity applies on API < 29 three-button navigation bars; the library
+// keeps its own copies private, so they are mirrored here to keep the default look.
+private val EDGE_TO_EDGE_LIGHT_SCRIM = android.graphics.Color.argb(0xe6, 0xFF, 0xFF, 0xFF)
+private val EDGE_TO_EDGE_DARK_SCRIM = android.graphics.Color.argb(0x80, 0x1b, 0x1b, 0x1b)
+
+// OverscrollConfiguration / LocalOverscrollConfiguration are @ExperimentalFoundationApi in
+// Compose Foundation 1.7.2 (the pinned version). They are the only public overscroll surface in
+// this version; see the scrolling_physics comment inside for why the BOM must not be bumped.
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun RequestrApp() {
     val settings by SettingsRepository.settings.collectAsState()
@@ -326,21 +643,18 @@ fun RequestrApp() {
             else -> settings.themeMode
         }
     }
-    val themeMode = remember(effectiveThemeKey) {
-        when (effectiveThemeKey.uppercase()) {
-            "EDITORIAL_LIGHT", "LIGHT" -> AppThemeMode.EDITORIAL_LIGHT
-            "MONOCHROME_DARK", "OBSIDIAN" -> AppThemeMode.MONOCHROME_DARK
-            "MIDNIGHT_SAPPHIRE", "MIDNIGHT" -> AppThemeMode.MIDNIGHT_SAPPHIRE
-            "KYOTO_MATCHA", "MATCHA" -> AppThemeMode.KYOTO_MATCHA
-            "CYBER_TERMINAL", "TERMINAL" -> AppThemeMode.CYBER_TERMINAL
-            "DUSK_TERRACOTTA", "DUSK" -> AppThemeMode.DUSK_TERRACOTTA
-            "SOLAR_AMBER", "AMBER" -> AppThemeMode.SOLAR_AMBER
-            else -> AppThemeMode.MIDNIGHT_SAPPHIRE
-        }
-    }
+    // Design system — theme_switching. Resolution goes through AppThemeMode.fromKey so the two
+    // Phase B families (PASTEL_LIGHT / DEEP_OLIVE_DARK) resolve to their own canvas instead of
+    // falling through to the dark default, and the composed (family × accent) engine renders
+    // them. The switch itself is a plain recomposition: no Crossfade, no animateColorAsState,
+    // nothing between the setting flipping and every colorScheme reader repainting in one frame.
+    val themeMode = remember(effectiveThemeKey) { resolveAppThemeMode(effectiveThemeKey) }
 
     val selectedAccent = remember(settings.selectedAccent) { AppAccent.fromKey(settings.selectedAccent) }
-    MyApplicationTheme(isDarkTheme = !themeMode.isLight, accent = selectedAccent) {
+    MyApplicationTheme(themeMode = themeMode, accent = selectedAccent) {
+      // Window-level pieces (system-bar icon appearance, window background) follow the same
+      // frame, so the inversion is complete — see SyncWindowWithTheme.
+      SyncWindowWithTheme(isDarkTheme = !themeMode.isLight)
       // v3.1 B8: "Display Scale" (SMALL/NORMAL/LARGE) — override LocalDensity's fontScale
       // so every sp-sized text and dp-based layout below actually renders larger/smaller,
       // instead of the setting being stored and never read.
@@ -369,9 +683,41 @@ fun RequestrApp() {
       // list/card composables read the user's actual Compact/Comfortable preference
       // instead of hardcoding their own spacing regardless of the setting.
       com.example.ui.theme.ProvideDensityConfig(densityMode = settings.densityMode) {
+      // Design system — scrolling_physics. One app-wide overscroll configuration: every
+      // LazyColumn / LazyRow / verticalScroll below resolves its overscroll effect from this
+      // CompositionLocal (ScrollableDefaults.overscrollEffect()), so no screen needs touching.
+      // On API 31+ the effect is the platform stretch — the kinetic, velocity-absorbing elastic
+      // bounce at both ends of a list; on API 24–30 the platform has no stretch and this
+      // resolves to the edge glow, tinted with the accent instead of the stock grey.
+      // Compose Foundation here is 1.7.2: OverscrollConfiguration / LocalOverscrollConfiguration
+      // are the supported surface (marked @ExperimentalFoundationApi; deprecated only from 1.8),
+      // and rememberOverscrollEffect / OverscrollFactory do not exist yet. Do not bump the BOM
+      // to chase the newer API.
+      val overscrollGlow = MaterialTheme.colorScheme.primary
+      val overscrollConfiguration = remember(overscrollGlow) { OverscrollConfiguration(glowColor = overscrollGlow) }
+      // Design system — glassmorphism base layer. One ParallaxState for the whole app; screens
+      // bind their scroll container with DriveParallaxFrom(...) and glass components read the
+      // current shift from LocalParallaxState.
+      val parallaxState = remember { ParallaxState() }
+      CompositionLocalProvider(
+          LocalOverscrollConfiguration provides overscrollConfiguration,
+          LocalParallaxState provides parallaxState,
+      ) {
         val navController = rememberNavController()
         val navBackStackEntry by navController.currentBackStackEntryAsState()
         val currentRoute = navBackStackEntry?.destination?.route ?: Screen.Home.route
+
+        // Lateral parallax drift follows the active tab; detail routes leave it where the
+        // underlying tab put it so returning from Settings does not move the background.
+        val activeTabIndex = BOTTOM_TAB_ORDER.indexOf(currentRoute)
+        if (activeTabIndex >= 0) {
+            parallaxState.setLateralTabPosition(activeTabIndex, BOTTOM_TAB_ORDER.size)
+        }
+
+        // Design system — screen_transitions. Duration runs through the same animation scale as
+        // scaledTween; 0 means every NavHost transition resolves to EnterTransition.None /
+        // ExitTransition.None and the swap is instant.
+        val transitionDurationMs = (SCREEN_TRANSITION_MS * rememberEffectiveDurationScale()).toInt()
 
         // Drain requestr:// deep links: the initial launch intent (if any) plus every uri
         // MainActivity.onNewIntent() emits afterwards. Keyed on navController (not Unit) so
@@ -396,6 +742,9 @@ fun RequestrApp() {
 
         var showMiniSettingsForSection by remember { mutableStateOf<String?>(null) }
 
+        // Routes that show the floating nav pill. Chat (Reqy) is intentionally absent: the
+        // navigation_showcase mockup disables the pill there and gives it a dedicated back
+        // capsule (ChatScreen.onBack), the same treatment Settings gets.
         val rootRoutes = listOf(
             Screen.Home.route,
             Screen.Intercept.route,
@@ -404,7 +753,6 @@ fun RequestrApp() {
             Screen.Notes.route,
             Screen.Flow.route,
             Screen.Music.route,
-            "chat"
         )
 
         var isMiniPlayerDismissed by remember { mutableStateOf(false) }
@@ -443,60 +791,70 @@ fun RequestrApp() {
                 navController.navigate(Screen.Settings.route)
             }
         ) {
-            Scaffold(
-                modifier = Modifier.fillMaxSize().nestedScroll(scrollConnection),
-                containerColor = MaterialTheme.colorScheme.background,
-                bottomBar = {
-                    if (showPillNav) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .windowInsetsPadding(WindowInsets.navigationBars)
-                        ) {
-                            // Music mini-player — independent floating element per spec §1-B
-                            if (currentRoute != Screen.Music.route && !isMiniPlayerDismissed) {
-                                MusicMiniPlayer(
-                                    track = currentTrack,
-                                    isPlaying = isMusicPlaying,
-                                    onTogglePlay = { MusicRepository.togglePlayPause() },
-                                    onNext = { MusicRepository.nextTrack() },
-                                    onClose = {
-                                        MusicRepository.stopMusic()
-                                        isMiniPlayerDismissed = true
-                                    },
-                                    onExpand = { navController.navigate(Screen.Music.route) }
-                                )
-                            }
-
-                            // Collapsible glassmorphic navigation pill per requestr_nav_pill_spec.md
-                            CollapsibleNavPill(
-                                currentRoute = currentRoute,
-                                onNavigate = { route ->
-                                    if (currentRoute != route) {
-                                        navController.navigate(route) {
-                                            popUpTo(Screen.Home.route) { saveState = true }
-                                            launchSingleTop = true
-                                            restoreState = true
-                                        }
-                                    }
-                                },
-                                scrollCollapseSignal = scrollDown,
-                                scrollExpandSignal = scrollUp
-                            )
-                        }
-                    }
-                }
-            ) { innerPadding ->
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(innerPadding)
-                ) {
+          // Design system — glass. The refraction under the nav pill needs the pill to be drawn
+          // AFTER, and NOT inside, the content it samples (GlassBackdropSource records its
+          // subtree into a GraphicsLayer; a consumer inside that subtree would be drawing the very
+          // layer it is being recorded into). Scaffold(bottomBar) made the pill a descendant of
+          // the content, so it is now a later sibling in this Box instead.
+          val backdrop = rememberGlassBackdropState()
+          var bottomOverlayHeightPx by remember { mutableIntStateOf(0) }
+          val bottomOverlayHeight = with(LocalDensity.current) {
+              if (showPillNav) bottomOverlayHeightPx.toDp() else 0.dp
+          }
+          Box(modifier = Modifier.fillMaxSize()) {
+            GlassBackdropSource(
+                state = backdrop,
+                modifier = Modifier.fillMaxSize()
+            ) {
+              Box(modifier = Modifier.fillMaxSize()) {
+                // Base layer: the parallax background is the page background and is INSIDE the
+                // backdrop source, so the glass refracts the moving base layer as well as the
+                // content (the "base layer for glassmorphism refraction" in the brief). It paints
+                // colorScheme.background itself; nothing above it fills the page.
+                ParallaxBackground(modifier = Modifier.fillMaxSize(), state = parallaxState)
+                // Scaffold is kept only as the inset provider it always was: innerPadding is the
+                // status bar (top) and navigation bar (bottom) — IME handling was never Scaffold's
+                // here (manifest windowSoftInputMode) and is unchanged. The bottom-bar height it
+                // used to add is re-applied per destination by NavGraphBuilder.screen(...).
+                Scaffold(
+                    modifier = Modifier.fillMaxSize().nestedScroll(scrollConnection),
+                    containerColor = Color.Transparent
+                ) { innerPadding ->
+                  Box(
+                      modifier = Modifier
+                          .fillMaxSize()
+                          .padding(innerPadding)
+                  ) {
+                    CompositionLocalProvider(LocalBottomOverlayHeight provides bottomOverlayHeight) {
                     NavHost(
                         navController = navController,
-                        startDestination = if (settings.onboardingCompleted) Screen.Home.route else Screen.Onboarding.route
+                        startDestination = if (settings.onboardingCompleted) Screen.Home.route else Screen.Onboarding.route,
+                        enterTransition = {
+                            screenEnterTransition(
+                                resolveScreenTransition(initialState.destination.route, targetState.destination.route, isPop = false),
+                                transitionDurationMs,
+                            )
+                        },
+                        exitTransition = {
+                            screenExitTransition(
+                                resolveScreenTransition(initialState.destination.route, targetState.destination.route, isPop = false),
+                                transitionDurationMs,
+                            )
+                        },
+                        popEnterTransition = {
+                            screenEnterTransition(
+                                resolveScreenTransition(initialState.destination.route, targetState.destination.route, isPop = true),
+                                transitionDurationMs,
+                            )
+                        },
+                        popExitTransition = {
+                            screenExitTransition(
+                                resolveScreenTransition(initialState.destination.route, targetState.destination.route, isPop = true),
+                                transitionDurationMs,
+                            )
+                        },
                     ) {
-                        composable(Screen.Onboarding.route) {
+                        screen(Screen.Onboarding.route) {
                             OnboardingScreen(
                                 onFinishOnboarding = { name, theme ->
                                     SettingsRepository.updateUserName(name)
@@ -509,7 +867,7 @@ fun RequestrApp() {
                             )
                         }
 
-                        composable(Screen.Home.route) {
+                        screen(Screen.Home.route) {
                             HomeScreen(
                                 onNavigateToSection = { section ->
                                     val route = when (section) {
@@ -541,14 +899,24 @@ fun RequestrApp() {
                                         restoreState = true
                                     }
                                 },
-                                onOpenTrafficDetail = {
-                                    navController.navigate(Screen.Intercept.route) {
+                                onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
+                                onOpenToolWorkspace = { toolId ->
+                                    navController.navigate(Screen.ToolWorkspace.createRoute(toolId))
+                                },
+                                onOpenChatConversation = { conversationId ->
+                                    // switchToConversation records the open in RecentActivityRepository.
+                                    ChatRepository.switchToConversation(conversationId)
+                                    navController.navigate("chat") {
                                         popUpTo(Screen.Home.route) { saveState = true }
                                         launchSingleTop = true
                                         restoreState = true
                                     }
                                 },
-                                onOpenNote = {
+                                onOpenAllRecents = { navController.navigate(Screen.RecentlyOpened.route) },
+                                onOpenNote = { note ->
+                                    // Registers the note as "recently opened" (RecentActivityRepository)
+                                    // and makes it the active note before Notes comes up.
+                                    NotesRepository.openNote(note)
                                     navController.navigate(Screen.Notes.route) {
                                         popUpTo(Screen.Home.route) { saveState = true }
                                         launchSingleTop = true
@@ -565,7 +933,7 @@ fun RequestrApp() {
                             )
                         }
 
-                        composable(Screen.Intercept.route) {
+                        screen(Screen.Intercept.route) {
                             InterceptScreen(
                                 onSendToTestr = { reqItem ->
                                     ApiCollectionsRepository.saveRequest(reqItem)
@@ -577,7 +945,7 @@ fun RequestrApp() {
                             )
                         }
 
-                        composable(Screen.Apis.route) {
+                        screen(Screen.Apis.route) {
                             ApiTestrScreen(
                                 onMiniSettings = { showMiniSettingsForSection = "APIs" },
                                 onNavigateToSaved = {
@@ -593,7 +961,45 @@ fun RequestrApp() {
                             )
                         }
 
-                        composable(Screen.SavedApis.route) {
+                        screen(Screen.RecentlyOpened.route) {
+                            // "See all" behind Home's Recently opened section. The navigator mirrors
+                            // the one HomeScreen builds for its own rows so both surfaces open items
+                            // identically; the by-id lookups fall back to the section when the source
+                            // item has already been deleted.
+                            val savedApis by ApiCollectionsRepository.requests.collectAsState()
+                            val notes by NotesRepository.notes.collectAsState()
+                            fun toTab(route: String) = navController.navigate(route) {
+                                popUpTo(Screen.Home.route) { saveState = true }
+                                launchSingleTop = true
+                                restoreState = true
+                            }
+                            RecentlyOpenedScreen(
+                                onBack = { navController.popBackStack() },
+                                navigator = RecentActivityNavigator(
+                                    openApi = { id ->
+                                        savedApis.firstOrNull { it.id == id }?.let { ApiCollectionsRepository.setActiveRequest(it) }
+                                        toTab(Screen.Apis.route)
+                                    },
+                                    openNote = { id ->
+                                        notes.firstOrNull { it.id == id }?.let { NotesRepository.openNote(it) }
+                                        toTab(Screen.Notes.route)
+                                    },
+                                    openTool = { toolId ->
+                                        navController.navigate(Screen.ToolWorkspace.createRoute(toolId))
+                                    },
+                                    openChat = { conversationId ->
+                                        ChatRepository.switchToConversation(conversationId)
+                                        toTab("chat")
+                                    },
+                                    openFlow = { flowId ->
+                                        FlowRepository.setActiveFlow(flowId)
+                                        toTab(Screen.Flow.route)
+                                    },
+                                ),
+                            )
+                        }
+
+                        screen(Screen.SavedApis.route) {
                             SavedApisScreen(
                                 onBack = { navController.popBackStack() },
                                 onOpenRequest = { req ->
@@ -605,7 +1011,7 @@ fun RequestrApp() {
                             )
                         }
 
-                        composable(Screen.Tools.route) {
+                        screen(Screen.Tools.route) {
                             ToolsScreen(
                                 onMiniSettings = { showMiniSettingsForSection = "Tools" },
                                 onNavigateToTool = { toolId ->
@@ -614,7 +1020,7 @@ fun RequestrApp() {
                             )
                         }
 
-                        composable(
+                        screen(
                             route = "tool_workspace/{toolId}",
                             arguments = listOf(
                                 androidx.navigation.navArgument("toolId") {
@@ -629,26 +1035,26 @@ fun RequestrApp() {
                             )
                         }
 
-                        composable(Screen.Notes.route) {
+                        screen(Screen.Notes.route) {
                             NotesScreen(
                                 onMiniSettings = { showMiniSettingsForSection = "Notes" }
                             )
                         }
 
-                        composable(Screen.Flow.route) {
+                        screen(Screen.Flow.route) {
                             FlowScreen(
                                 onMiniSettings = { showMiniSettingsForSection = "Flow Automation" }
                             )
                         }
 
-                        composable(Screen.Music.route) {
+                        screen(Screen.Music.route) {
                             MusicScreen(
                                 onBack = { navController.popBackStack() },
                                 onMiniSettings = { showMiniSettingsForSection = "Music Lounge" }
                             )
                         }
 
-                        composable("chat") {
+                        screen("chat") {
                             ChatScreen(
                                 onMiniSettings = { showMiniSettingsForSection = "Chats" },
                                 onNavigateHome = {
@@ -676,10 +1082,22 @@ fun RequestrApp() {
                                         restoreState = true
                                     }
                                 },
+                                // Chat is always entered with popUpTo(Home){saveState}, so the
+                                // stack is [Home, chat] and a pop lands on Home; the fallback
+                                // covers a cold entry where nothing is beneath it.
+                                onBack = {
+                                    if (!navController.popBackStack()) {
+                                        navController.navigate(Screen.Home.route) {
+                                            popUpTo(Screen.Home.route) { saveState = true }
+                                            launchSingleTop = true
+                                            restoreState = true
+                                        }
+                                    }
+                                },
                             )
                         }
 
-                        composable(Screen.Settings.route) {
+                        screen(Screen.Settings.route) {
                             SettingsScreen(
                                 onBack = { navController.popBackStack() },
                                 onReRunWizard = {
@@ -711,9 +1129,64 @@ fun RequestrApp() {
                             )
                         }
                     }
+                    }
+                  }
                 }
+              }
             }
+
+            // Floating bottom overlay — mini player + nav pill — a LATER sibling of the source so
+            // its glass can sample (blur + refract) whatever is scrolling underneath. Position and
+            // dismiss behaviour are unchanged: bottom-centre above the navigation bar, mini player
+            // hidden on the Music route or once closed (isMiniPlayerDismissed).
+            if (showPillNav) {
+              CompositionLocalProvider(LocalGlassBackdropState provides backdrop) {
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .windowInsetsPadding(WindowInsets.navigationBars)
+                        // Measured inside the inset padding: overlay content height only. The
+                        // navigation-bar inset itself is already in Scaffold's innerPadding.
+                        .onSizeChanged { bottomOverlayHeightPx = it.height }
+                ) {
+                    // Music mini-player — independent floating element per spec §1-B
+                    if (currentRoute != Screen.Music.route && !isMiniPlayerDismissed) {
+                        MusicMiniPlayer(
+                            track = currentTrack,
+                            isPlaying = isMusicPlaying,
+                            onTogglePlay = { MusicRepository.togglePlayPause() },
+                            onNext = { MusicRepository.nextTrack() },
+                            onClose = {
+                                MusicRepository.stopMusic()
+                                isMiniPlayerDismissed = true
+                            },
+                            onExpand = { navController.navigate(Screen.Music.route) }
+                        )
+                    }
+
+                    // Collapsible glassmorphic navigation pill per requestr_nav_pill_spec.md
+                    CollapsibleNavPill(
+                        currentRoute = currentRoute,
+                        onNavigate = { route ->
+                            if (currentRoute != route) {
+                                navController.navigate(route) {
+                                    popUpTo(Screen.Home.route) { saveState = true }
+                                    launchSingleTop = true
+                                    restoreState = true
+                                }
+                            }
+                        },
+                        scrollCollapseSignal = scrollDown,
+                        scrollExpandSignal = scrollUp,
+                        backdrop = backdrop
+                    )
+                }
+              }
+            }
+          }
         }
+      }
       }
       }
       }

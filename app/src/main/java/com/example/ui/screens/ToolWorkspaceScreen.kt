@@ -28,10 +28,12 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SearchOff
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -48,6 +50,8 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -63,63 +67,86 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.repository.ToolsRepository
+import com.example.ui.components.BadgePill
+import com.example.ui.components.DriveParallaxFrom
+import com.example.ui.components.EmptyState
+import com.example.ui.components.FloatingCapsuleHeader
+import com.example.ui.components.GlassActionPill
+import com.example.ui.components.GlassCard
 
-/** Look up a tool by id and render its domain-specific workspace. */
+/**
+ * Look up a tool by id and render its domain-specific workspace.
+ *
+ * Phase B (PHASE-B-REBRAND-NO-MOCKUP-COVERAGE §Tool workspace): the header is the shipped
+ * [FloatingCapsuleHeader] — the single `FloatingCapsuleHeader(...)` call in this file — so a
+ * future header primitive can swap in at exactly that spot. The tool is resolved from the live
+ * [ToolsRepository.catalog] flow (not a one-shot snapshot) so a custom tool that finishes loading
+ * from Room after this screen is entered still resolves instead of dead-ending in "not found".
+ */
 @Composable
 fun ToolWorkspaceScreen(
     toolId: String,
     onBack: () -> Unit
 ) {
-    val tool = remember(toolId) {
-        ToolsRepository.getToolsCatalog().find { it.id == toolId }
+    val catalog by ToolsRepository.catalog.collectAsState()
+    val tool = remember(toolId, catalog) { catalog.find { it.id == toolId } }
+    // Record the open through ToolsRepository.openTool -- the single mediating call that feeds
+    // Home's Room-backed "Recently opened" -- once the id resolves. Keyed on `tool?.id` (not the
+    // catalog) so it fires exactly once per screen entry, and only after a late-loading custom
+    // tool has actually appeared; rendering still follows the live catalog above, so the
+    // "Tool not found" state below stays reachable for an id that never resolves.
+    LaunchedEffect(toolId, tool?.id) {
+        if (tool != null) ToolsRepository.openTool(toolId)
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-    ) {
-        // Header
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = onBack) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = "Back",
-                    tint = MaterialTheme.colorScheme.onSurface
-                )
-            }
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = tool?.title ?: "Unknown Tool",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 18.sp,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
+    // Transparent root so the ParallaxBackground hosted in MainActivity shows through.
+    Column(modifier = Modifier.fillMaxSize()) {
+        // Header primitive — single call site for this screen.
+        FloatingCapsuleHeader(
+            title = tool?.title ?: "Tool not found",
+            icon = tool?.icon ?: Icons.Default.Build,
+            onBack = onBack,
+            showWordmarkDot = false,
+            trailingContent = {
                 if (tool != null) {
-                    Text(
-                        text = "${tool.category.displayName} · ${tool.description}",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1
+                    BadgePill(
+                        text = "${tool.category.icon} ${tool.category.displayName}".uppercase(),
+                        color = 0xFF6366F1
                     )
                 }
             }
-        }
+        )
 
-        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+        if (tool != null) {
+            Text(
+                text = tool.description,
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp)
+            )
+        }
 
         // Workspace body
         if (tool == null) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("Tool not found", color = MaterialTheme.colorScheme.error)
+                EmptyState(
+                    icon = Icons.Default.SearchOff,
+                    message = "No tool with id \"$toolId\" exists in the catalog. It may have been removed or the link is stale.",
+                    cta = {
+                        GlassActionPill(
+                            icon = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back to tools",
+                            onClick = onBack,
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                )
             }
         } else {
             val scrollState = rememberScrollState()
+            // The workspace body is the screen's scroll container: it drives the parallax layer.
+            DriveParallaxFrom(scrollState)
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -243,19 +270,36 @@ private fun ReversibleWorkspace(
                 // Swap: mockup's exact semantic is "swaps output into input field AND switches
                 // the active tab to the opposite mode" — not a generic two-field swap. We also
                 // re-run processing immediately so the round-trip result is visible right away.
-                IconButton(onClick = {
-                    input = output
-                    mode = !mode
-                    process()
-                }, modifier = Modifier.size(28.dp)) {
-                    Icon(Icons.Default.SwapHoriz, "Swap output into input", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
-                }
-                IconButton(onClick = { copyToClipboard(ctx, output) }, modifier = Modifier.size(28.dp)) {
-                    Icon(Icons.Default.ContentCopy, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
-                }
-                IconButton(onClick = { input = ""; output = "" }, modifier = Modifier.size(28.dp)) {
-                    Icon(Icons.Default.Clear, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
-                }
+                GlassActionPill(
+                    icon = Icons.Default.SwapHoriz,
+                    contentDescription = "Swap output into input",
+                    onClick = {
+                        input = output
+                        mode = !mode
+                        process()
+                    },
+                    tint = MaterialTheme.colorScheme.primary,
+                    size = 28.dp,
+                    iconSize = 14.dp,
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                GlassActionPill(
+                    icon = Icons.Default.ContentCopy,
+                    contentDescription = "Copy output",
+                    onClick = { copyToClipboard(ctx, output) },
+                    tint = MaterialTheme.colorScheme.primary,
+                    size = 28.dp,
+                    iconSize = 14.dp,
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                GlassActionPill(
+                    icon = Icons.Default.Clear,
+                    contentDescription = "Clear",
+                    onClick = { input = ""; output = "" },
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    size = 28.dp,
+                    iconSize = 14.dp,
+                )
             }
         }
     }
@@ -454,13 +498,6 @@ private fun HashWorkspace(algorithm: String) {
     var input by remember { mutableStateOf("") }
     val ctx = LocalContext.current
 
-    val hashFn: (String) -> String = remember(algorithm) {
-        { ToolsRepository.formatJson(ToolsRepository::class.java.getMethod(
-            "hash${algorithm.replace("-", "")}", String::class.java
-        ).invoke(ToolsRepository, it) as String) }
-    }
-
-    // Simpler approach: use a when
     val result = remember(input) {
         when (algorithm) {
             "SHA-256" -> ToolsRepository.hashSha256(input)
@@ -609,9 +646,14 @@ private fun AesCipherWorkspace() {
                 onSelectRight = { encrypt = false }
             )
             Spacer(modifier = Modifier.weight(1f))
-            IconButton(onClick = { key = randomHex(32); process() }, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Default.AutoAwesome, "Random key", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
-            }
+            GlassActionPill(
+                icon = Icons.Default.AutoAwesome,
+                contentDescription = "Random key",
+                onClick = { key = randomHex(32); process() },
+                tint = MaterialTheme.colorScheme.primary,
+                size = 32.dp,
+                iconSize = 16.dp,
+            )
         }
 
         Spacer(modifier = Modifier.height(8.dp))
@@ -999,31 +1041,40 @@ private fun outputBlock(label: String, value: String, ctx: Context, onSwap: (() 
         if (value.isNotBlank()) {
             Row {
                 if (onSwap != null) {
-                    IconButton(onClick = onSwap, modifier = Modifier.size(28.dp)) {
-                        Icon(Icons.Default.SwapHoriz, "Swap output into input", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
-                    }
+                    GlassActionPill(
+                        icon = Icons.Default.SwapHoriz,
+                        contentDescription = "Swap output into input",
+                        onClick = onSwap,
+                        tint = MaterialTheme.colorScheme.primary,
+                        size = 28.dp,
+                        iconSize = 14.dp,
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
                 }
-                IconButton(onClick = { copyToClipboard(ctx, value) }, modifier = Modifier.size(28.dp)) {
-                    Icon(Icons.Default.ContentCopy, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
-                }
+                GlassActionPill(
+                    icon = Icons.Default.ContentCopy,
+                    contentDescription = "Copy output",
+                    onClick = { copyToClipboard(ctx, value) },
+                    tint = MaterialTheme.colorScheme.primary,
+                    size = 28.dp,
+                    iconSize = 14.dp,
+                )
             }
         }
     }
     Spacer(modifier = Modifier.height(4.dp))
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surface)
-            .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
-            .padding(12.dp)
+    GlassCard(
+        modifier = Modifier.fillMaxWidth(),
+        cornerRadius = 12.dp,
+        borderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
     ) {
         Text(
             text = value.ifBlank { "Output will appear here…" },
             fontFamily = FontFamily.Monospace,
             fontSize = 13.sp,
             color = if (value.isNotBlank()) MaterialTheme.colorScheme.onSurface
-            else MaterialTheme.colorScheme.onSurfaceVariant
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(12.dp)
         )
     }
 }

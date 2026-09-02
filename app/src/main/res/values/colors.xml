@@ -7,4 +7,7 @@
     <color name="teal_700">#FF018786</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+    <!-- Cold-start window canvas (light OS). EditorialLightBackground in ui/theme/Color.kt;
+         values-night/colors.xml overrides with MonochromeDarkBackground. Keep in sync. -->
+    <color name="cold_start_canvas">#FFF4F2EC</color>
 </resources>

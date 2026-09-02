@@ -144,22 +144,85 @@ object HttpBodyDecoder {
      *   [bytes]'s length, so `requestSizeBytes`/`responseSizeBytes` keep reporting what actually
      *   crossed the wire even though [bytes] itself is now decompressed content; for a text body
      *   this matches the pre-existing `body.toByteArray(UTF_8).size` computation exactly, so
-     *   switching a caller over to this for text bodies is a no-op.
+     *   switching a caller over to this for text bodies is a no-op. For a
+     *   [ParsedHttpMessage.bodyReplaced] message it is the replacement's own length -- that IS
+     *   what crossed the wire (see below).
+     * @property text the value for the `requestBody`/`responseBody` text column: the body as
+     *   transmitted when [isBinary] is false, [BINARY_BODY_PLACEHOLDER] (empty) when true.
+     *   Persist this, not [ParsedHttpMessage.body] directly -- for a replaced body the two can
+     *   differ (see the `bodyReplaced` contract below).
+     *
+     * `bodyReplaced` contract (chaos/AES persisted-body fix): when a rule overwrote the body
+     * ([ParsedHttpMessage.bodyReplaced]), the row must hold the body that was ACTUALLY SENT, not
+     * the one that arrived. The serializers (MitmProxyEngine.bodyBytesFor) write
+     * `replacedBodyBytes ?: body.toByteArray(UTF_8)` and drop Content-Encoding, so for a replaced
+     * message the wire bytes are already the decoded, identity-encoded representation -- the
+     * "decode, then replace, then store what was sent" ordering collapses to "store the
+     * replacement". [isBinary] is never inherited from the pre-replacement body: a text
+     * replacement (`replacedBodyBytes == null`, the body String is what was serialized) is always
+     * a text row -- a JPEG whose body a MODIFY_RESPONSE rule replaced with JSON is a text row; a
+     * byte replacement honours an explicit `isBodyBinary = true` (byte-exact mock fixture,
+     * chaos `corruptBytes`) and otherwise re-derives it with the same [isProbablyUtf8] heuristic
+     * every other path uses -- a JSON body a BODY_ENCRYPT_AES rule turned into ciphertext is a
+     * binary row, and ciphertext decrypted back to JSON is a text row. Before this, the
+     * stored row for either case was the untouched ORIGINAL (decodedBodyBytes / body) while the
+     * headers and the wire said otherwise -- a debugging tool asserting a change it then showed
+     * no evidence of.
      */
     data class BinaryBodyStorage(
         val isBinary: Boolean,
         val bytes: ByteArray?,
         val truncated: Boolean,
         val trueSizeBytes: Long,
+        val text: String,
     )
 
     fun forStorage(message: ParsedHttpMessage): BinaryBodyStorage {
+        if (message.bodyReplaced) {
+            val replacedBytes = message.replacedBodyBytes
+            if (replacedBytes == null) {
+                // Text replacement (bodyReplace / pm.response.body / ChaosInjector.corrupt on a
+                // text body): the serializer wrote body.toByteArray(UTF_8), so the text column IS
+                // the wire body. Stored as text unconditionally -- no re-sniff, because a chaos
+                // corruption can legitimately produce control characters and must still be shown
+                // as the (mangled) text the client received, not vanish into a BLOB.
+                val sent = message.body.toByteArray(Charsets.UTF_8)
+                return BinaryBodyStorage(
+                    isBinary = false,
+                    bytes = null,
+                    truncated = false,
+                    trueSizeBytes = sent.size.toLong(),
+                    text = message.body,
+                )
+            }
+            // Byte replacement (AES ciphertext/plaintext, chaos corruptBytes, byte-exact mock
+            // fixture): honour an explicit isBodyBinary = true, otherwise sniff the bytes.
+            val sent = replacedBytes
+            if (!message.isBodyBinary && isProbablyUtf8(sent)) {
+                return BinaryBodyStorage(
+                    isBinary = false,
+                    bytes = null,
+                    truncated = false,
+                    trueSizeBytes = sent.size.toLong(),
+                    text = String(sent, Charsets.UTF_8),
+                )
+            }
+            val clamped = clampForStorage(sent)
+            return BinaryBodyStorage(
+                isBinary = true,
+                bytes = clamped.bytes,
+                truncated = clamped.truncated,
+                trueSizeBytes = sent.size.toLong(),
+                text = BINARY_BODY_PLACEHOLDER,
+            )
+        }
         if (!message.isBodyBinary) {
             return BinaryBodyStorage(
                 isBinary = false,
                 bytes = null,
                 truncated = false,
                 trueSizeBytes = message.body.toByteArray(Charsets.UTF_8).size.toLong(),
+                text = message.body,
             )
         }
         val raw = message.rawBodyBytes ?: ByteArray(0)
@@ -175,6 +238,7 @@ object HttpBodyDecoder {
             bytes = clamped.bytes,
             truncated = clamped.truncated,
             trueSizeBytes = raw.size.toLong(),
+            text = BINARY_BODY_PLACEHOLDER,
         )
     }
 
@@ -198,6 +262,7 @@ object HttpBodyDecoder {
                 bytes = null,
                 truncated = false,
                 trueSizeBytes = bytes.size.toLong(),
+                text = String(bytes, Charsets.UTF_8),
             )
         }
         val clamped = clampForStorage(bytes)
@@ -206,11 +271,36 @@ object HttpBodyDecoder {
             bytes = clamped.bytes,
             truncated = clamped.truncated,
             trueSizeBytes = bytes.size.toLong(),
+            text = BINARY_BODY_PLACEHOLDER,
         )
     }
 
     /** Content-Encoding values this JDK/Android has no decoder for. */
     private val UNDECODABLE_ENCODINGS = setOf("br", "zstd", "compress")
+
+    /**
+     * The `Content-Encoding` still *applied to* [ParsedHttpMessage.decodedBodyBytes], or null when
+     * those bytes are identity-encoded content.
+     *
+     * Body-rewriting rules (BODY_ENCRYPT_AES / BODY_DECRYPT_AES) operate on the decoded content
+     * and the serializer drops `Content-Encoding` for any replaced body, so they need to know
+     * whether "decoded" really means identity. It does when the header is absent/`identity`, or
+     * when [decode] actually inflated a gzip/deflate body. It does NOT when the header names an
+     * encoding this device has no decoder for (`br`, `zstd`, `compress`, anything unknown) or
+     * when a declared gzip/deflate body failed to inflate -- in both cases [decode] fell back to
+     * the still-encoded raw bytes, and this returns that declared token so the caller can refuse
+     * rather than emit content whose inner encoding has been erased from the headers.
+     */
+    fun residualContentEncoding(message: ParsedHttpMessage): String? {
+        val declared = message.headers.entries
+            .firstOrNull { it.key.equals("content-encoding", ignoreCase = true) }
+            ?.value?.trim()?.lowercase().orEmpty()
+        if (classify(declared) == Encoding.IDENTITY) return null
+        val raw = message.rawBodyBytes ?: return declared
+        val decoded = message.decodedBodyBytes ?: return declared
+        val consumed = decoded !== raw && !decoded.contentEquals(raw)
+        return if (consumed) null else declared
+    }
 
     /** The Content-Encoding a body declared, independent of whether we could act on it. */
     enum class Encoding {

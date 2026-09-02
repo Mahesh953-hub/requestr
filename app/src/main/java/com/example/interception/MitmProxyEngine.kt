@@ -115,6 +115,19 @@ class MitmProxyEngine(
      * tests can inject a fake/deterministic probe instead of touching the real KeyStore.
      */
     private val caTrustGate: CaTrustGate = CaTrustGate(),
+    /**
+     * RNG every [RuleAction.CHAOS] roll ([RuleEnforcer.applyChaosToRequest] /
+     * [RuleEnforcer.applyChaosToResponse]) draws from. Test seam only -- production uses the
+     * default so a `failRate` of 0.1 really is a 10% chance per matched exchange.
+     */
+    private val chaosRandom: kotlin.random.Random = kotlin.random.Random.Default,
+    /**
+     * How a [RuleEnforcer.ChaosApplyResult.Delay] is served. Production sleeps the calling
+     * server→client relay thread (only that one connection stalls; the sleep happens OUTSIDE the
+     * per-connection `clientWriteLock`); tests inject a recorder so a `[5000, 5000]` delay rule
+     * can be asserted without actually waiting five seconds.
+     */
+    private val chaosSleep: (Long) -> Unit = { millis -> Thread.sleep(millis) },
 ) {
     private var serverSocket: ServerSocket? = null
     private var acceptJob: Job? = null
@@ -934,6 +947,26 @@ class MitmProxyEngine(
                 // forward tail, since this path never forwards anything upstream.
                 return
             }
+            RuleAction.CHAOS -> {
+                // Master plan §3 LOW-ADD: the `failRate` die is rolled HERE, before upstream is
+                // ever dialed, so an injected failure really behaves like an unreachable server
+                // -- the request never reaches the backend (no real side effect), the client gets
+                // the synthetic 503 (or the rule's failStatusCode), and the exchange is still
+                // persisted (0ms, stamped x-requestr-chaos) so it is not invisible in the list.
+                // Same short-circuit shape as BLOCK / MOCK_RESPONSE above. The corrupt/delay dice
+                // are rolled on the real response in handleParsedResponse.
+                val chaos = rule?.let { RuleEnforcer.applyChaosToRequest(it, chaosRandom) }
+                if (chaos is RuleEnforcer.ChaosApplyResult.Fail) {
+                    synchronized(clientWriteLock) {
+                        clientOut.write(serializeResponse(chaos.failureResponse))
+                        clientOut.flush()
+                    }
+                    Log.i(TAG, "CHAOS fail (decrypted): ${request.method?.name} ${request.url.take(80)} -> ${chaos.failureResponse.statusCode}")
+                    emitTransaction(request, chaos.failureResponse, 0L, "$host:$port", logRequests, logResponses)
+                    return
+                }
+                raw
+            }
             RuleAction.REDIRECT -> {
                 if (rule?.replacementValue?.isNotBlank() == true) {
                     request.url = rule.replacementValue!!
@@ -949,8 +982,16 @@ class MitmProxyEngine(
                 serializeRequest(request)
             }
             RuleAction.SCRIPT_REWRITE -> {
-                RuleEnforcer.applyScriptRewrite(request, rule?.replacementValue)
-                serializeRequest(request)
+                val scriptError = RuleEnforcer.applyScriptRewrite(request, rule?.replacementValue)
+                val bytes = serializeRequest(request)
+                if (scriptError != null && rule != null) {
+                    // Added AFTER serialization on purpose: this diagnostic must reach the
+                    // persisted row (emitTransaction keeps x-requestr-* request headers even with
+                    // request logging off) but must never be sent to the origin server.
+                    request.headers = request.headers +
+                        (RuleEnforcer.SCRIPT_ERROR_HEADER to RuleEnforcer.scriptErrorHeaderValue(scriptError, rule.name))
+                }
+                bytes
             }
             RuleAction.BODY_ENCRYPT_AES, RuleAction.BODY_DECRYPT_AES -> {
                 val cryptoResult = rule?.let {
@@ -1030,13 +1071,37 @@ class MitmProxyEngine(
         // client and the captured-traffic list both see a visibly-failed transaction rather than
         // the untransformed body forwarded as if it had succeeded.
         var responseToEmit = response
+        // Master plan §3 LOW-ADD (CHAOS delay): served AFTER the rule block and BEFORE taking
+        // clientWriteLock, so only this connection's server→client relay thread stalls and the
+        // client-observed latency persisted below honestly includes the injected delay.
+        var chaosDelayMs = 0L
         if (request != null) {
             val rule = RuleEnforcer.getMatchingRule(db, request.url, request.host)
-            if (rule?.action == RuleAction.MODIFY_RESPONSE) {
+            if (rule?.action == RuleAction.CHAOS) {
+                when (val chaos = RuleEnforcer.applyChaosToResponse(response, rule, chaosRandom)) {
+                    is RuleEnforcer.ChaosApplyResult.Applied -> {
+                        Log.i(TAG, "CHAOS corrupt-body (decrypted): ${request.method?.name} ${request.url.take(80)}")
+                        out = serializeResponse(response)
+                    }
+                    is RuleEnforcer.ChaosApplyResult.Delay -> {
+                        Log.i(TAG, "CHAOS delay ${chaos.millis}ms (decrypted): ${request.method?.name} ${request.url.take(80)}")
+                        chaosDelayMs = chaos.millis
+                        out = serializeResponse(response) // carries the x-requestr-chaos header
+                    }
+                    // Fail is only ever produced on the request leg; PassThrough forwards raw.
+                    is RuleEnforcer.ChaosApplyResult.Fail, RuleEnforcer.ChaosApplyResult.PassThrough -> Unit
+                }
+            } else if (rule?.action == RuleAction.MODIFY_RESPONSE) {
                 rule.replacementValue?.let { RuleEnforcer.applyResponseModification(response, it) }
                 out = serializeResponse(response)
             } else if (rule?.action == RuleAction.SCRIPT_REWRITE) {
-                RuleEnforcer.applyScriptRewrite(response, rule.replacementValue)
+                val scriptError = RuleEnforcer.applyScriptRewrite(response, rule.replacementValue)
+                if (scriptError != null) {
+                    // On the wire AND persisted: the client under test can see the rewrite did
+                    // not happen, and the traffic list badges the row instead of logcat-only.
+                    response.headers = response.headers +
+                        (RuleEnforcer.SCRIPT_ERROR_HEADER to RuleEnforcer.scriptErrorHeaderValue(scriptError, rule.name))
+                }
                 out = serializeResponse(response)
             } else if (rule?.action == RuleAction.BODY_ENCRYPT_AES || rule?.action == RuleAction.BODY_DECRYPT_AES) {
                 val cryptoResult = RuleEnforcer.applyBodyCrypto(response, rule, encrypt = rule.action == RuleAction.BODY_ENCRYPT_AES)
@@ -1057,6 +1122,7 @@ class MitmProxyEngine(
                 }
             }
         }
+        if (chaosDelayMs > 0L) chaosSleep(chaosDelayMs)
         synchronized(clientWriteLock) {
             clientOut.write(out)
             clientOut.flush()
@@ -1110,10 +1176,17 @@ class MitmProxyEngine(
             path = request.path,
             statusCode = if (response.statusCode == 0) null else response.statusCode,
             protocol = response.version.ifEmpty { request.version },
-            requestHeaders = if (logRequests) request.headers else emptyMap(),
-            responseHeaders = if (logResponses) response.headers else emptyMap(),
-            requestBody = if (logRequests) request.body.ifEmpty { null } else null,
-            responseBody = if (logResponses) response.body.ifEmpty { null } else null,
+            // `x-requestr-*` headers are requestr's own metadata about what IT did to this
+            // exchange (RuleEnforcer.CHAOS_ATTRIBUTION_HEADER, RuleEnforcer.SCRIPT_ERROR_HEADER,
+            // x-requestr-crypto-failed), not client/server content -- keep them even when header
+            // logging is off, so the CHAOS / SCRIPT ERROR / crypto-failed badges never silently
+            // disappear with that toggle.
+            requestHeaders = if (logRequests) request.headers else request.headers.filterKeys { it.startsWith("x-requestr-") },
+            responseHeaders = if (logResponses) response.headers else response.headers.filterKeys { it.startsWith("x-requestr-") },
+            // storage.text (not message.body): for a bodyReplaced message the text column must
+            // hold what was actually sent -- see HttpBodyDecoder.BinaryBodyStorage's contract.
+            requestBody = if (logRequests) reqStorage.text.ifEmpty { null } else null,
+            responseBody = if (logResponses) respStorage.text.ifEmpty { null } else null,
             requestSizeBytes = reqStorage.trueSizeBytes,
             responseSizeBytes = respStorage.trueSizeBytes,
             isRequestBodyBinary = logRequests && reqStorage.isBinary,

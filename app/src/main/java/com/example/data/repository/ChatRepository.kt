@@ -8,8 +8,10 @@ import com.example.data.local.RequestrDatabase
 import com.example.data.models.ChatMessage
 import com.example.data.models.ChatProviderConfig
 import com.example.data.models.ChatProviderKind
+import com.example.data.models.decodeAttachment
 import com.example.data.models.deriveChatTitle
 import com.example.data.models.validateProviderFields
+import com.example.data.search.ChatSearchEntry
 import com.example.data.prefs.ChatSettingsStore
 import com.example.data.prefs.SecureKeyStore
 import kotlinx.coroutines.CoroutineScope
@@ -20,6 +22,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -94,6 +97,19 @@ object ChatRepository {
     private val _activeConversationId = MutableStateFlow("")
     val activeConversationId: StateFlow<String> = _activeConversationId.asStateFlow()
 
+    /**
+     * Every conversation with its title and every message body as the bubble renders it
+     * (attachment markers stripped), kept current from Room by [init]. This is what Home passes
+     * to `GlobalSearch.search(chats = ...)` so chat search is real -- title AND content -- while
+     * search itself stays a pure in-memory function with no I/O inside composition. Ordered
+     * most-recently-updated first, matching [conversations].
+     */
+    private val _searchableConversations = MutableStateFlow<List<ChatSearchEntry>>(emptyList())
+    val searchableConversations: StateFlow<List<ChatSearchEntry>> = _searchableConversations.asStateFlow()
+
+    /** Subtype label for a chat's "{Type} • {SUBTYPE}" recents line. */
+    private const val RECENT_SUBTYPE = "Conversation"
+
     // When the CURRENT chat session started (reset by startNewChat()/switchToConversation()) --
     // feeds the placeholder title shown before the first message exists, e.g.
     // "New chat -- 6:02 PM".
@@ -112,6 +128,7 @@ object ChatRepository {
     // it (see resetForTest's kdoc for the full failure mode this closes).
     private var observeMessagesJob: Job? = null
     private var observeConversationsJob: Job? = null
+    private var observeSearchIndexJob: Job? = null
     private var loadProviderConfigJob: Job? = null
 
     /**
@@ -125,10 +142,27 @@ object ChatRepository {
         if (appContext != null) return
         val ctx = context.applicationContext
         appContext = ctx
+        RecentActivityRepository.init(ctx)
         observeConversationsJob = repoScope.launch {
             RequestrDatabase.get(ctx).chatConversationDao().observeAll().collect { rows ->
                 _conversations.value = rows
             }
+        }
+        observeSearchIndexJob = repoScope.launch {
+            val db = RequestrDatabase.get(ctx)
+            combine(
+                db.chatConversationDao().observeAll(),
+                db.chatMessageDao().observeAll(),
+            ) { convs, msgs ->
+                val byConversation = msgs.groupBy { it.conversationId }
+                convs.map { conv ->
+                    ChatSearchEntry(
+                        conversationId = conv.id,
+                        title = conv.title,
+                        messages = byConversation[conv.id].orEmpty().map { displayText(it.content) },
+                    )
+                }
+            }.collect { _searchableConversations.value = it }
         }
         loadProviderConfigJob = repoScope.launch {
             loadProviderConfig()
@@ -156,17 +190,38 @@ object ChatRepository {
             dao.upsert(fresh)
             fresh
         }
-        switchToConversation(target.id)
+        // Startup/fallback activation is not the user opening a chat -- no recents entry.
+        activateConversation(target.id)
     }
 
     /**
-     * Switches [messages]/[titleOverride]/[currentSessionStartedAt] to reflect [conversationId] --
-     * used both by [ensureActiveConversation] on startup and by the drawer's conversation list
-     * (tap an entry to switch to it). Cancels and relaunches [observeMessagesJob] against the new
-     * conversation's own `chat_messages` rows, following the same cancel-and-relaunch idiom
-     * `init()` already used for a single conversation before this pass.
+     * The user-initiated "open this conversation" call -- the drawer's conversation list (tap an
+     * entry to switch to it) and Home's chat search hits / recents rows. Switches
+     * [messages]/[titleOverride]/[currentSessionStartedAt] to reflect [conversationId] via
+     * [activateConversation] (which cancels and relaunches [observeMessagesJob] against the new
+     * conversation's own `chat_messages` rows, the same cancel-and-relaunch idiom `init()` used
+     * for a single conversation before the multi-conversation pass) and records the open in
+     * [RecentActivityRepository]. Startup's [ensureActiveConversation] calls [activateConversation]
+     * directly so merely launching the app never fabricates an "opened" event.
      */
     fun switchToConversation(conversationId: String) {
+        val ctx = appContext ?: return
+        activateConversation(conversationId)
+        // The user chose this conversation (drawer tap, Home search/recents): record the open
+        // with the title/preview Room currently holds for it.
+        repoScope.launch {
+            val conv = RequestrDatabase.get(ctx).chatConversationDao().getById(conversationId) ?: return@launch
+            RecentActivityRepository.recordOpened(
+                type = RecentItemType.CHAT,
+                itemId = conv.id,
+                subtype = RECENT_SUBTYPE,
+                title = conv.title,
+                preview = latestMessagePreview(ctx, conversationId),
+            )
+        }
+    }
+
+    private fun activateConversation(conversationId: String) {
         val ctx = appContext ?: return
         _activeConversationId.value = conversationId
         observeMessagesJob?.cancel()
@@ -205,9 +260,11 @@ object ChatRepository {
     internal fun resetForTest() {
         observeMessagesJob?.cancel()
         observeConversationsJob?.cancel()
+        observeSearchIndexJob?.cancel()
         loadProviderConfigJob?.cancel()
         observeMessagesJob = null
         observeConversationsJob = null
+        observeSearchIndexJob = null
         loadProviderConfigJob = null
         appContext = null
         _messages.value = emptyList()
@@ -215,6 +272,7 @@ object ChatRepository {
         _providerConfig.value = ChatProviderConfig(id = DEFAULT_PROVIDER_ID)
         _titleOverride.value = null
         _conversations.value = emptyList()
+        _searchableConversations.value = emptyList()
         _activeConversationId.value = ""
         sessionStartedAt = System.currentTimeMillis()
     }
@@ -376,6 +434,7 @@ object ChatRepository {
                 dao.upsert(existing.copy(titleIsOverride = false, updatedAt = System.currentTimeMillis()))
                 recomputeTitleIfNotOverridden(ctx, conversationId)
             }
+            syncRecentSnapshot(ctx, conversationId)
         }
     }
 
@@ -402,6 +461,15 @@ object ChatRepository {
             RequestrDatabase.get(ctx).chatConversationDao().upsert(
                 ChatConversationEntity(id = newId, title = "New chat", titleIsOverride = false, createdAt = now, updatedAt = now),
             )
+            // The user explicitly opened a new conversation; its title/preview follow via
+            // syncRecentSnapshot as messages arrive.
+            RecentActivityRepository.recordOpened(
+                type = RecentItemType.CHAT,
+                itemId = newId,
+                subtype = RECENT_SUBTYPE,
+                title = "New chat",
+                preview = "",
+            )
             observeMessagesJob = repoScope.launch {
                 RequestrDatabase.get(ctx).chatMessageDao().observeByConversation(newId).collect { entities ->
                     _messages.value = entities.map { it.toChatMessage() }
@@ -417,6 +485,7 @@ object ChatRepository {
      */
     fun deleteConversation(conversationId: String) {
         val ctx = appContext ?: return
+        RecentActivityRepository.forget(RecentItemType.CHAT, conversationId)
         repoScope.launch {
             val convDao = RequestrDatabase.get(ctx).chatConversationDao()
             RequestrDatabase.get(ctx).chatMessageDao().deleteByConversation(conversationId)
@@ -524,6 +593,7 @@ object ChatRepository {
         repoScope.launch {
             deleteAllPersistedMessages(ctx, conversationId)
             recomputeTitleIfNotOverridden(ctx, conversationId)
+            syncRecentSnapshot(ctx, conversationId)
         }
     }
 
@@ -534,6 +604,7 @@ object ChatRepository {
      */
     fun clearAllConversations() {
         _messages.value = emptyList()
+        RecentActivityRepository.forgetAll(RecentItemType.CHAT)
         val ctx = appContext ?: return
         repoScope.launch {
             val convDao = RequestrDatabase.get(ctx).chatConversationDao()
@@ -577,6 +648,42 @@ object ChatRepository {
         repoScope.launch {
             RequestrDatabase.get(ctx).chatMessageDao().upsert(message.toEntity(conversationId))
             recomputeTitleIfNotOverridden(ctx, conversationId)
+            syncRecentSnapshot(ctx, conversationId)
+        }
+    }
+
+    /**
+     * Keeps this conversation's Home recents row (if it has one) showing the title/latest-message
+     * preview Room currently holds -- called after anything that changes either. Never bumps the
+     * row's openedAt: receiving a reply or renaming is not re-opening.
+     */
+    private suspend fun syncRecentSnapshot(ctx: Context, conversationId: String) {
+        val conv = RequestrDatabase.get(ctx).chatConversationDao().getById(conversationId) ?: return
+        RecentActivityRepository.updateSnapshot(
+            type = RecentItemType.CHAT,
+            itemId = conv.id,
+            subtype = RECENT_SUBTYPE,
+            title = conv.title,
+            preview = latestMessagePreview(ctx, conversationId),
+        )
+    }
+
+    /** The newest message's display text, or empty for a conversation with no messages yet. */
+    private suspend fun latestMessagePreview(ctx: Context, conversationId: String): String {
+        val last = RequestrDatabase.get(ctx).chatMessageDao().getByConversation(conversationId).lastOrNull() ?: return ""
+        return displayText(last.content)
+    }
+
+    /**
+     * A message body exactly as the bubble shows it: the attachment marker/header is stripped and
+     * an attachment-only message reads as its attachment's name in brackets.
+     */
+    private fun displayText(content: String): String {
+        val (attachment, body) = decodeAttachment(content)
+        return when {
+            body.isNotBlank() -> body
+            attachment != null -> "[${attachment.name}]"
+            else -> content
         }
     }
 

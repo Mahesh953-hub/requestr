@@ -813,6 +813,59 @@ interface ChatProviderDao {
     suspend fun deleteById(id: String)
 }
 
+/**
+ * Backs [com.example.data.repository.RecentActivityRepository] (v18). Every write is scoped by
+ * the composite (itemType, itemId) key, so a repeated open of the same item is a single-row
+ * update; [pruneOlderThanNewest] is what keeps the table bounded.
+ */
+@Dao
+interface RecentActivityDao {
+
+    @Query("SELECT * FROM recent_activity ORDER BY openedAt DESC LIMIT :limit")
+    fun observeRecent(limit: Int): Flow<List<RecentActivityEntity>>
+
+    @Query("SELECT * FROM recent_activity ORDER BY openedAt DESC")
+    suspend fun getAll(): List<RecentActivityEntity>
+
+    @Query("SELECT COUNT(*) FROM recent_activity")
+    suspend fun count(): Int
+
+    /** REPLACE on the composite key = "re-opening updates the existing row", never a duplicate. */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(entry: RecentActivityEntity)
+
+    /**
+     * Refreshes the rendered snapshot of an item that is already in the history (e.g. a note was
+     * re-saved under a new title) WITHOUT touching [RecentActivityEntity.openedAt] -- editing an
+     * item is not the same as opening it. No-op when the item was never opened.
+     */
+    @Query(
+        "UPDATE recent_activity SET subtype = :subtype, title = :title, preview = :preview " +
+            "WHERE itemType = :itemType AND itemId = :itemId"
+    )
+    suspend fun updateSnapshot(itemType: String, itemId: String, subtype: String, title: String, preview: String)
+
+    /**
+     * Deletes every row except the [keep] most recently opened. Keyed on SQLite's implicit
+     * `rowid` (this is an ordinary rowid table, not WITHOUT ROWID) so the delete is exact even
+     * when two rows share the same [RecentActivityEntity.openedAt] millisecond.
+     */
+    @Query(
+        "DELETE FROM recent_activity WHERE rowid NOT IN " +
+            "(SELECT rowid FROM recent_activity ORDER BY openedAt DESC LIMIT :keep)"
+    )
+    suspend fun pruneOlderThanNewest(keep: Int)
+
+    @Query("DELETE FROM recent_activity WHERE itemType = :itemType AND itemId = :itemId")
+    suspend fun delete(itemType: String, itemId: String)
+
+    @Query("DELETE FROM recent_activity WHERE itemType = :itemType")
+    suspend fun deleteAllOfType(itemType: String)
+
+    @Query("DELETE FROM recent_activity")
+    suspend fun clear()
+}
+
 // ═══════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════
 // CONNECT Control subsystem

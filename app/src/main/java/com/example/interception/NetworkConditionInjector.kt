@@ -8,9 +8,11 @@ import kotlin.random.Random
  * see that object's KDoc for why VPN/root/Frida tiers can't be exercised here).
  *
  * Same "pure decision function, caller applies the effect" shape as [ChaosInjector] (its sibling
- * in this file), deliberately not doing any [Thread.sleep]/socket I/O itself so it stays a fully
- * deterministic, injectable-clock/RNG unit under test. Unlike [ChaosInjector] (still unwired,
- * `RuleEnforcer` in that file's KDoc is "out of scope"), this one IS wired live into
+ * in this package), deliberately not doing any [Thread.sleep]/socket I/O itself so it stays a fully
+ * deterministic, injectable-clock/RNG unit under test. The two differ in scope, not in wiring:
+ * [ChaosInjector] is per-rule ([com.example.data.local.RuleAction.CHAOS], dispatched by
+ * [MitmProxyEngine] via [RuleEnforcer.applyChaosToRequest]/[RuleEnforcer.applyChaosToResponse]),
+ * whereas this one is a global setting wired into
  * [HttpProxyShared.forwardRequest]/[HttpProxyShared.handleConnectAttempt] via
  * [com.example.data.prefs.SettingsDataStore.networkCondition].
  *

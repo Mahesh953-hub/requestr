@@ -93,3 +93,19 @@ fun ProvideAnimationConfig(
         content()
     }
 }
+
+/**
+ * Whether purely **ambient** motion — decorative infinite loops such as a pulsing status dot, a
+ * rotating artwork disc or an equaliser bar — should run at all.
+ *
+ * These are the animations a reduced-motion user most wants gone, and they are also the ones
+ * duration scaling handles worst: shortening the period of an infinite loop makes it *faster* and
+ * therefore more distracting, which is the opposite of what "reduced" asks for. So ambient loops
+ * are simply off unless the user is at full motion, and the caller falls back to its resting
+ * value — which every ambient site in this codebase already defines.
+ *
+ * Finite, meaningful transitions keep using [scaledTween] / [scaledSpring] and are merely
+ * shortened when reduced.
+ */
+@Composable
+fun rememberAmbientMotionEnabled(): Boolean = rememberEffectiveDurationScale() >= 1f

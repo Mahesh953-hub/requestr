@@ -2,7 +2,6 @@ package com.example.ui.screens
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -20,11 +19,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -77,8 +77,11 @@ import com.example.data.models.CollectionTestReport
 import com.example.data.models.HttpMethod
 import com.example.data.models.RequestTestResult
 import com.example.data.repository.ApiCollectionsRepository
+import com.example.ui.components.DriveParallaxFrom
 import com.example.ui.components.MethodBadge
-import com.example.ui.components.SectionHeader
+import com.example.ui.theme.animateStateColor
+import com.example.ui.components.FloatingCapsuleHeader
+import com.example.ui.components.GlassActionCluster
 import kotlinx.coroutines.launch
 
 /**
@@ -157,93 +160,87 @@ fun SavedApisScreen(
     // request was always visible.
     var collapsedCollectionIds by remember { mutableStateOf(setOf<String>()) }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-    ) {
-        // Header
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = onBack) {
-                Icon(
-                    Icons.AutoMirrored.Filled.ArrowBack, "Back",
-                    tint = MaterialTheme.colorScheme.onSurface
-                )
-            }
-            Text(
-                "Saved APIs",
-                fontWeight = FontWeight.Bold,
-                fontSize = 18.sp,
-                color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.weight(1f)
-            )
+    // The collection list is the screen's scroll container: bind it to the parallax layer.
+    val listState = rememberLazyListState()
+    DriveParallaxFrom(listState)
 
-            // Master plan §1.6 — Postman Collection v2.1 export/import. Export always available
-            // (an empty collection is still a valid, if pointless, export); import is always
-            // available too since it starts from zero saved requests.
-            IconButton(
-                onClick = {
-                    coroutineScope.launch {
-                        runCatching {
-                            val json = PostmanCollectionCodec.export(
-                                collectionName = "requestr export",
-                                requests = allRequests,
-                                folders = allFolders,
-                            )
-                            val target = com.example.data.export.MediaStoreExporter.writeText(
-                                context,
-                                "requestr-collection-${System.currentTimeMillis()}.postman_collection.json",
-                                "application/json",
-                                json,
-                            ) ?: error("Failed to write Postman collection JSON")
-                            com.example.data.export.FileExporter.shareFile(
-                                context, target, "application/json", "requestr Postman Collection"
-                            )
-                        }.onFailure { e ->
-                            android.widget.Toast.makeText(context, "Export failed: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+    // Transparent root so the ParallaxBackground hosted in MainActivity shows through.
+    Column(modifier = Modifier.fillMaxSize()) {
+        // Header — floating glass capsules (DESIGN-SYSTEM §9.3 / §14.7, shared-context §6).
+        // docs/designs/saved_apis/ draws one `.header-capsule` bar around the controls; the
+        // global rule that header shapes are independent floating capsules over a transparent
+        // page wins, so the back capsule, identity capsule and the export/import/run cluster
+        // float separately here. Title/actions are the screen's real ones (no "New Folder"
+        // action exists in this screen, so the mockup's accent button is not fabricated).
+        FloatingCapsuleHeader(
+            title = "Saved APIs",
+            icon = Icons.Default.Bookmark,
+            onBack = onBack,
+            trailingContent = {
+                GlassActionCluster {
+                    // Master plan §1.6 — Postman Collection v2.1 export/import. Export always available
+                    // (an empty collection is still a valid, if pointless, export); import is always
+                    // available too since it starts from zero saved requests.
+                    IconButton(
+                        onClick = {
+                            coroutineScope.launch {
+                                runCatching {
+                                    val json = PostmanCollectionCodec.export(
+                                        collectionName = "requestr export",
+                                        requests = allRequests,
+                                        folders = allFolders,
+                                    )
+                                    val target = com.example.data.export.MediaStoreExporter.writeText(
+                                        context,
+                                        "requestr-collection-${System.currentTimeMillis()}.postman_collection.json",
+                                        "application/json",
+                                        json,
+                                    ) ?: error("Failed to write Postman collection JSON")
+                                    com.example.data.export.FileExporter.shareFile(
+                                        context, target, "application/json", "requestr Postman Collection"
+                                    )
+                                }.onFailure { e ->
+                                    android.widget.Toast.makeText(context, "Export failed: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        }
+                    ) {
+                        Icon(Icons.Default.Upload, "Export as Postman Collection", tint = MaterialTheme.colorScheme.onSurface)
+                    }
+                    IconButton(onClick = { postmanImportLauncher.launch(arrayOf("application/json")) }) {
+                        Icon(Icons.Default.Download, "Import Postman Collection", tint = MaterialTheme.colorScheme.onSurface)
+                    }
+
+                    // v3.4 Part C — C3: only shown when at least one saved request actually has an
+                    // enabled assertion — otherwise there is nothing to run and the button would just
+                    // be a dead end.
+                    if (testableCount > 0) {
+                        IconButton(
+                            onClick = {
+                                isRunningTests = true
+                                coroutineScope.launch {
+                                    testReport = ApiCollectionsRepository.runCollectionTests(
+                                        folderId = null,
+                                        haltOnFailure = haltOnFailure,
+                                    )
+                                    isRunningTests = false
+                                }
+                            },
+                            enabled = !isRunningTests
+                        ) {
+                            if (isRunningTests) {
+                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(
+                                    Icons.Default.PlayArrow, "Run All Tests ($testableCount)",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
                         }
                     }
                 }
-            ) {
-                Icon(Icons.Default.Upload, "Export as Postman Collection", tint = MaterialTheme.colorScheme.onSurface)
             }
-            IconButton(onClick = { postmanImportLauncher.launch(arrayOf("application/json")) }) {
-                Icon(Icons.Default.Download, "Import Postman Collection", tint = MaterialTheme.colorScheme.onSurface)
-            }
-
-            // v3.4 Part C — C3: only shown when at least one saved request actually has an
-            // enabled assertion — otherwise there is nothing to run and the button would just
-            // be a dead end.
-            if (testableCount > 0) {
-                IconButton(
-                    onClick = {
-                        isRunningTests = true
-                        coroutineScope.launch {
-                            testReport = ApiCollectionsRepository.runCollectionTests(
-                                folderId = null,
-                                haltOnFailure = haltOnFailure,
-                            )
-                            isRunningTests = false
-                        }
-                    },
-                    enabled = !isRunningTests
-                ) {
-                    if (isRunningTests) {
-                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                    } else {
-                        Icon(
-                            Icons.Default.PlayArrow, "Run All Tests ($testableCount)",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                }
-            }
-        }
+        )
 
         // Master plan §2.12 — halt-on-failure toggle for the test runner. Kept outside the
         // header row (which is already tight) but still above the request list so it is always
@@ -313,6 +310,7 @@ fun SavedApisScreen(
             }
         } else {
             LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(
                     horizontal = 16.dp, vertical = 8.dp
@@ -521,15 +519,20 @@ private fun TabChip(
     selected: Boolean,
     onClick: () -> Unit
 ) {
-    val bgColor by animateColorAsState(
-        if (selected) MaterialTheme.colorScheme.primary
-        else MaterialTheme.colorScheme.surfaceVariant,
-        animationSpec = com.example.ui.theme.scaledTween(250), label = "tabBg"
+    // Selection animates on a gated tween; theme colours resolve instantly.
+    val bgColor by animateStateColor(
+        active = selected,
+        activeColor = MaterialTheme.colorScheme.primary,
+        inactiveColor = MaterialTheme.colorScheme.surfaceVariant,
+        animationSpec = com.example.ui.theme.scaledTween(250),
+        label = "tabBg"
     )
-    val textColor by animateColorAsState(
-        if (selected) MaterialTheme.colorScheme.onPrimary
-        else MaterialTheme.colorScheme.onSurfaceVariant,
-        animationSpec = com.example.ui.theme.scaledTween(250), label = "tabText"
+    val textColor by animateStateColor(
+        active = selected,
+        activeColor = MaterialTheme.colorScheme.onPrimary,
+        inactiveColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        animationSpec = com.example.ui.theme.scaledTween(250),
+        label = "tabText"
     )
     Row(
         modifier = Modifier

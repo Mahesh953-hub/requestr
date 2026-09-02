@@ -71,7 +71,10 @@ object CronetInstrumentation {
     }
 
     private fun buildProxyOptions(port: Int): ProxyOptions {
-        val proxy = Proxy(Proxy.HTTP, "127.0.0.1", port, object : Proxy.Callback() {
+        // Cronet 143 deprecates the 4-arg Proxy constructor in favour of the one that takes the
+        // Executor the Callback runs on; reuse the finished-listener thread so proxy-tunnel
+        // callbacks are serialised with the rest of this object's Cronet event handling.
+        val proxy = Proxy(Proxy.HTTP, "127.0.0.1", port, listenerExecutor, object : Proxy.Callback() {
             override fun onTunnelHeadersReceived(
                 headers: MutableList<MutableMap.MutableEntry<String, String>>,
                 statusCode: Int,

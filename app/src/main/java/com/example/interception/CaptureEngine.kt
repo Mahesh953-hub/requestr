@@ -763,8 +763,11 @@ class CaptureEngine(
             protocol = response.version.ifEmpty { request.version },
             requestHeaders = (if (requestLogging) request.headers else emptyMap()) + enhancedHeaders,
             responseHeaders = if (responseLogging) response.headers else emptyMap(),
-            requestBody = if (requestLogging) request.body.ifEmpty { null } else null,
-            responseBody = if (responseLogging) response.body.ifEmpty { null } else null,
+            // storage.text (not message.body): same rule as MitmProxyEngine.emitTransaction, so a
+            // bodyReplaced message (none are produced on this observe-only path today) would
+            // persist what was sent rather than what arrived.
+            requestBody = if (requestLogging) reqStorage.text.ifEmpty { null } else null,
+            responseBody = if (responseLogging) respStorage.text.ifEmpty { null } else null,
             requestSizeBytes = reqStorage.trueSizeBytes,
             responseSizeBytes = respStorage.trueSizeBytes,
             isRequestBodyBinary = requestLogging && reqStorage.isBinary,

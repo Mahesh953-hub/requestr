@@ -39,6 +39,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
@@ -56,7 +57,6 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Reply
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Storage
@@ -116,6 +116,7 @@ import com.example.data.models.validateProviderFields
 import com.example.data.prefs.ChatSettingsStore
 import com.example.data.repository.ChatRepository
 import com.example.data.repository.SaveProviderResult
+import com.example.ui.components.DriveParallaxFrom
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.formatByteCount
 import com.example.ui.components.rememberAppHapticFeedback
@@ -146,6 +147,7 @@ fun ChatScreen(
     onNavigateHome: () -> Unit,
     onNavigateToCollections: () -> Unit,
     onNavigateToFlows: () -> Unit,
+    onBack: () -> Unit,
 ) {
     val messages by ChatRepository.messages.collectAsState()
     val isLoading by ChatRepository.isLoading.collectAsState()
@@ -192,12 +194,12 @@ fun ChatScreen(
         }
     }
 
+    // The message list is Chat's primary scroll container: bind it to the parallax layer.
+    DriveParallaxFrom(listState)
+
     Box(modifier = Modifier.fillMaxSize()) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(MaterialTheme.colorScheme.background)
-        ) {
+        // Transparent root so the ParallaxBackground hosted in MainActivity shows through.
+        Column(modifier = Modifier.fillMaxSize()) {
             SectionHeader(
                 title = chatTitle,
                 // The gear reopens Reqy's OWN full-page Settings screen (mockup Screen 2) rather
@@ -205,7 +207,10 @@ fun ChatScreen(
                 // `onMiniSettings` callback param is kept for caller-signature compatibility
                 // (MainActivity.kt is off-limits this wave) but intentionally never invoked here.
                 onMiniSettings = { showSettings = true },
-                onBack = null,
+                // Reqy is a dedicated destination, not a bottom tab (navigation_showcase mockup:
+                // "Reqy Assistant (Chat) and Settings have the bottom navigation pill disabled
+                // ... with dedicated back capsules"), so it gets a real back capsule.
+                onBack = onBack,
                 actions = {
                     IconButton(
                         onClick = { showDrawer = true },
@@ -760,7 +765,7 @@ private fun UserMessageLockPanel(
         )
         DropdownMenuItem(
             text = { Text("Reply") },
-            leadingIcon = { Icon(Icons.Default.Reply, contentDescription = null) },
+            leadingIcon = { Icon(Icons.AutoMirrored.Filled.Reply, contentDescription = null) },
             onClick = onReply,
         )
         androidx.compose.material3.HorizontalDivider()
@@ -899,7 +904,10 @@ private fun ReqyErrorBubble(
 
 @Composable
 private fun ThinkingIndicator() {
-    val animationsEnabled = com.example.ui.theme.LocalAnimationsEnabled.current
+    // Ambient decorative loop: runs only at full motion. REDUCED shortens a loop's period,
+    // which makes it faster and more distracting, so reduced-motion turns it off entirely and
+    // the resting values below take over. See rememberAmbientMotionEnabled().
+    val animationsEnabled = com.example.ui.theme.rememberAmbientMotionEnabled()
     val infiniteTransition = rememberInfiniteTransition(label = "reqyThinking")
 
     // Three dots pulse out of phase; gated behind LocalAnimationsEnabled.
@@ -1214,23 +1222,50 @@ private fun pickedFileInfo(context: android.content.Context, uri: android.net.Ur
 private suspend fun captureScreenshotAttachment(context: android.content.Context, view: android.view.View): ChatAttachment? {
     val activity = view.context as? android.app.Activity ?: context as? android.app.Activity ?: return null
     if (view.width <= 0 || view.height <= 0) return null
-    return try {
+    // Bitmap ownership is handed to whoever "wins" the PixelCopy race:
+    //  - normal path: the listener resumes the coroutine with the bitmap, which is then
+    //    compressed and recycled in `finally` below;
+    //  - listener reports failure: it recycles the bitmap itself and resumes with null;
+    //  - cancelled while suspended: suspendCancellableCoroutine's prompt-cancellation guarantee
+    //    means the coroutine sees CancellationException and never touches the bitmap. PixelCopy
+    //    is still writing into it on its own thread, so it must NOT be recycled here; the
+    //    listener will still fire once, its resume() is ignored on the cancelled continuation
+    //    and the `onCancellation` handler recycles the bitmap instead. That is exactly what the
+    //    three-argument `resume(value, onCancellation)` (kotlinx.coroutines ≥ 1.9) exists for;
+    //    the old two-argument overload with an empty lambda leaked the bitmap in this case.
+    // PixelCopy invokes the listener exactly once, so there is no double-resume path.
+    val captured: android.graphics.Bitmap = try {
         val bitmap = android.graphics.Bitmap.createBitmap(view.width, view.height, android.graphics.Bitmap.Config.ARGB_8888)
-        val success = kotlinx.coroutines.suspendCancellableCoroutine<Boolean> { cont ->
+        kotlinx.coroutines.suspendCancellableCoroutine<android.graphics.Bitmap?> { cont ->
             android.view.PixelCopy.request(
                 activity.window,
                 bitmap,
-                { result -> if (cont.isActive) cont.resume(result == android.view.PixelCopy.SUCCESS) {} },
+                { result ->
+                    if (result == android.view.PixelCopy.SUCCESS) {
+                        cont.resume(bitmap) { _, value, _ -> value?.recycle() }
+                    } else {
+                        bitmap.recycle()
+                        cont.resume(null) { _, _, _ -> }
+                    }
+                },
                 android.os.Handler(android.os.Looper.getMainLooper()),
             )
         }
-        if (!success) return null
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        null
+    } ?: return null
+
+    return try {
         val file = java.io.File(context.cacheDir, "reqy_screenshot_${System.currentTimeMillis()}.png")
-        java.io.FileOutputStream(file).use { out -> bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 90, out) }
+        java.io.FileOutputStream(file).use { out -> captured.compress(android.graphics.Bitmap.CompressFormat.PNG, 90, out) }
         val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
         ChatAttachment(ChatAttachmentKind.SCREENSHOT, file.name, file.length(), uri.toString())
     } catch (e: Exception) {
         null
+    } finally {
+        captured.recycle()
     }
 }
 
@@ -1614,11 +1649,8 @@ private fun ReqySettingsScreen(onClose: () -> Unit) {
         }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-    ) {
+    // Transparent root so the ParallaxBackground hosted in MainActivity shows through.
+    Column(modifier = Modifier.fillMaxSize()) {
         SectionHeader(title = "Settings", onBack = onClose, onMiniSettings = null)
         Column(
             modifier = Modifier
