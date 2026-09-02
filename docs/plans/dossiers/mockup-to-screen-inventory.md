@@ -94,7 +94,7 @@ Evidence column uses `File.kt:line`. "Wired" = where the screen hosts the compon
 | `home/home_rebranding.md` (+ 2 PNGs) | `HomeScreen.kt` | APPLIED | pinned capsules `:483-511`; identity swap `:532`; status dot `:540`; dynamic color `:217`; 4 quick actions `:420-439`; search placeholder `:352`; status card `:819`; power grid `:1058` | Full rebrand landed (Phase B). See §2 for the one residual nuance. |
 | `home/home-section_prototype.png` | (raster) | — reference | — | **No companion HTML.** Served by `home_rebranding.md` + this PNG. |
 | `home/home-section_prototype_detailed.png` | (raster) | — reference | — | **No companion HTML.** Served by `home_rebranding.md` + this PNG. |
-| `interceptr/interceptr-combined_light.html` (3 screens) | `InterceptScreen.kt` + `ResponseInspectorView.kt` | APPLIED | header `:384`; capture status `:428-438`; **VPN relay row icon `:1826-1830`**; set-cookie per-header reveal `:4800-4820`; `ResponseInspectorView.kt:416-466` | Q2 blocker resolved: `item.routedViaVpnRelay` drives the per-row VPN icon. Response tab set is a **superset** of mockup (adds Set-Cookies/Metrics/Tests). |
+| `interceptr/interceptr-combined_light.html` (3 screens) | `InterceptScreen.kt` (`CapturedDetailBottomSheet`) | APPLIED | header `:384`; capture status `:428-438`; **VPN relay row icon `:1826-1830`**; capture response tabs/detail sheet `:4637+` | Q2 blocker resolved: `item.routedViaVpnRelay` drives the per-row VPN icon. ApiTestr's separate inline response viewer is a **superset** with Hex/search/Set-Cookies/Metrics/Tests. |
 | `interceptr/interceptr-request-and-response-opened_prototype.png` | (raster, dark) | — reference | — | Companion HTML authoritative (Screen 2 detail). |
 | `interceptr/requestr-traffic-rows_light.png` | (raster) | — reference | — | Companion HTML authoritative (Screen 1 rows). |
 | `music/music_section_light.html` | `MusicScreen.kt` | APPLIED | `LockedBigPlayerCard.kt`-equiv `MusicScreen.kt:357`; `TrackArtworkView.kt`; `MiniLiveEqualizer.kt` `:808,889`; delete track `:291,342` | "Import MP3 removed" honored — grep for `Import`/`mp3` = zero. Overflow/transport/scrubber present. |
@@ -144,7 +144,7 @@ Theme light/dark pairs are one mockup for this purpose.
 | Screen / slot | Single governing mockup | Target file | Why |
 |---|---|---|---|
 | **Home** | `home/home_rebranding.md` (spec) **+** `home/home-section_prototype.png` / `home-section_prototype_detailed.png` (pixel reference) | `HomeScreen.kt` | The written spec *is* the rebrand; the 2 PNGs are its pixel source-of-truth. No HTML exists. |
-| **Interceptr / traffic** | `interceptr/interceptr-combined_light.html` (its 3 screens) | `InterceptScreen.kt` + `ResponseInspectorView.kt` | Single combined mockup covers rows, opened-row detail, and response viewer. |
+| **Interceptr / traffic** | `interceptr/interceptr-combined_light.html` (its 3 screens) | `InterceptScreen.kt` (`CapturedDetailBottomSheet`) | Single combined mockup covers rows, opened-row detail, and the capture response viewer. |
 | **API Testr** | `api-testr/api_testr_light.html` (`api_testr_dark.html` is the dark version) | `ApiTestrScreen.kt` | One screen, two themes. |
 | **Saved APIs** | `saved_apis/saved_apis_editorial_light.html` (`…_obsidian_dark` = dark) | `SavedApisScreen.kt` | One screen, two themes. |
 | **Tools** | `tools/tools-section-with-independate-tools-light.html` | `ToolsScreen.kt` (library) + `ToolWorkspaceScreen.kt` (detail patterns) + `JwtDecoder.kt` | 3 screens in one mockup. |

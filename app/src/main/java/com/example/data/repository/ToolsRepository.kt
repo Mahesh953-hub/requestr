@@ -62,7 +62,7 @@ object ToolsRepository {
 
     private val builtInTools = listOf(
         ToolItem("jwt-decoder",     "JWT Token Decoder",        "Decode Header, Payload claims and inspect signatures", ToolCategory.DECODERS,   Ic.Key),
-        ToolItem("base64",          "Base64 Encoder / Decoder", "RFC 4648 Base64 text & binary converter",              ToolCategory.DECODERS,   Ic.DataObject),
+        ToolItem("base64",          "Base64 Encoder / Decoder", "RFC 4648 Base64 text converter",              ToolCategory.DECODERS,   Ic.DataObject),
         ToolItem("url-encoder",     "URL / URI Percent Encoder","Encode & decode query strings & path parameters",       ToolCategory.DECODERS,   Ic.Link),
         ToolItem("hex-converter",   "Hex ↔ String Converter",   "Convert ASCII/UTF-8 strings to Hex bytes",              ToolCategory.DECODERS,   Ic.Tag),
         ToolItem("html-entity",     "HTML Entity Escape",       "Escape and unescape HTML special entities",             ToolCategory.DECODERS,   Ic.Code),

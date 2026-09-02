@@ -116,7 +116,7 @@ object HttpStackDetector {
         val unresolvedReasons = mutableListOf<String>()
         val representative = linkedMapOf<HttpStack, StackFingerprinter.StackVerdict>()
         for (row in rows) {
-            val connectionSignals = row.connectionIdOrNull()?.let { StackSignalStore.get(it) }
+            val connectionSignals = row.connectionId?.let { StackSignalStore.get(it) }
             val verdict = StackFingerprinter.classify(
                 requestHeaders = row.requestHeaders,
                 connectionSignals = connectionSignals,
@@ -146,26 +146,6 @@ object HttpStackDetector {
         )
     }
 
-}
-
-/**
- * Reads [CapturedTrafficEntity.connectionId] via reflection instead of a direct property
- * reference. Transport-scope owns [CapturedTrafficEntity] and its `connectionId` column
- * (Room schema v9, landed on `origin/vorflux/scope-transport` at commit `c6b7069`, task 12) --
- * this worktree has not merged that branch in yet, so the field may not exist here at compile
- * time. Reflection lets this classifier degrade to "no connection signals" honestly (same as
- * a HAR-imported row with a genuinely null `connectionId`) instead of hard-failing the whole
- * runtime module's compilation while the merge is pending. Once transport's branch is merged
- * into `vorflux/scope-runtime`, this can be simplified back to `row.connectionId`.
- */
-private fun CapturedTrafficEntity.connectionIdOrNull(): String? = try {
-    val field = this::class.java.getDeclaredField("connectionId")
-    field.isAccessible = true
-    field.get(this) as? String
-} catch (_: NoSuchFieldException) {
-    null
-} catch (_: Exception) {
-    null
 }
 
 /** Real, computed-from-Room stack breakdown for one capture session. */

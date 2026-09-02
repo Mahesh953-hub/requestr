@@ -26,11 +26,6 @@ import kotlinx.coroutines.withContext
  * password — the exact same on-disk shape [CertificateAuthority] itself produces — so the next
  * [CertificateAuthority.getOrCreate] call picks it up transparently, with no cooperation needed
  * from `CertificateAuthority.kt`.
- *
- * Surfacing note: complete and unit-tested ([CaP12ExchangeTest]), but currently unreachable from
- * the UI — the CA settings surface exposes the export half ([CertificateAuthority.exportP12]) and
- * a `.p12` import needs a file picker + PKCS#12 password prompt, a self-contained UI slice that
- * is intentionally left out of this engine-fix PR (see the PR description's out-of-scope notes).
  */
 object CaP12Exchange {
     private const val TAG = "CaP12Exchange"

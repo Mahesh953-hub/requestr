@@ -64,7 +64,8 @@ it** — an earlier dossier in this project invented three filenames that do not
 - **Interception state has exactly one source of truth**: `InterceptionStateRepository.state`.
   Home's status card and the Power Modules "Intercept" card must both read it. Never add a
   second "is intercept configured" flag.
-- **Onboarding stays Identity / Theme / Diagnostics.** Settled earlier.
+- **Onboarding stays Identity / Permissions / Appearance.** Settled earlier. VPN/CA setup
+  remains outside onboarding (in InterceptScreen/Settings).
 
 ## 3. Build rules — important, we share one Gradle project
 

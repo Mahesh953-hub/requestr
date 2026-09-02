@@ -37,11 +37,11 @@ landed).
 | B5 | "Honestly disabled Environments drawer row" — **location discrepancy** | Row is in **Reqy drawer** `ChatScreen.kt:1476` (KDoc 1364–1376), *not* `AppNavigationDrawer.kt` | **KEEP** row + **REWORD** doc pointer | The row exists and is honestly disabled; every doc/handoff claiming "main AppNavigationDrawer" names the wrong file. |
 | B6 | Onboarding steps | Code = Identity / Permissions / Appearance (`OnboardingScreen.kt:196, 201, 221`); docs say "Identity/Theme/Diagnostics"; mockup still says VPN Service / Install Root CA (`onboarding_editorial_light.html:185,192`) | **REWORD** docs | Core decision holds (no VPN/CA steps — KEEP); the specific step list in docs is stale. |
 | B7 | cURL importer refuses instead of guessing | `CurlParser.kt:62,80,230–231` (`VALUE_FLAGS`, `-F/--form/-T`, `unsupportedFlag`) | **KEEP** | Correct refusal; `-F/-T` consumed-and-discarded is intentional. |
-| C1 | Dead `RichResponseInspector` block (~1312-line file) | `ResponseInspectorView.kt:402` (+`ParsedCookie` 92, `parseCookiesFromHeaders` 103, `HexRow` 163, `generateHexRows` 169, `UniversalSyntaxHighlighter`, `CookieFlagBadge`); zero production callers; superseded by `CapturedDetailBottomSheet` (`InterceptScreen.kt:4637`) | **REMOVE** | Dead. Flagged to user already (`62e5a42a-3f2f-478c-adce-eb505ca64826`, pending user call). |
-| C2 | Dead `DynamicIconPress` composable | `DynamicIconPress.kt:30` (73-line file), zero callers | **REMOVE** | Newly found dead code, not in any doc. |
-| C3 | Dead private `KeyValueTableRow` | `ApiTestrScreen.kt:2282`, zero callers even in-file | **REMOVE** | Newly found dead code ("v6.0 transplant"). |
-| D1 | Stale `CaP12Exchange` "unreachable from UI" KDoc | `CaP12Exchange.kt:30–33`; actually wired at `SettingsScreen.kt:1959, 1324, 2032, 2043–2044` | **REMOVE** comment | Comment claims a feature is unwired that is now fully wired. |
-| D2 | Stale reflection shim `connectionIdOrNull()` | `HttpStackDetector.kt:151–169` claims "this worktree has not merged that branch"; `connectionId` is a real field (`Entities.kt:55`, `Index` 15), caller 119 | **REMOVE** | Obsolete reflection; replace with `row.connectionId`. |
+| C1 | Dead `RichResponseInspector` block (~1312-line file) | `ResponseInspectorView.kt:402` (+`ParsedCookie` 92, `parseCookiesFromHeaders` 103, `HexRow` 163, `generateHexRows` 169, `UniversalSyntaxHighlighter`, `CookieFlagBadge`); zero production callers | **HARVEST-then-REMOVE — DONE** | Ported Hex view, in-body search/highlighting, parsed Set-Cookies, per-header/copy-all, and export/share into `ApiTestrScreen`; moved the tested pure helpers to `ResponseInspectorHelpers.kt`; deleted the dead inspector while preserving `ResponseInspectorHelpersTest.kt`. |
+| C2 | Dead `DynamicIconPress` composable | `DynamicIconPress.kt:30` (73-line file), zero callers | **REMOVE — DONE** | Deleted after confirming zero callers. |
+| C3 | Dead private `KeyValueTableRow` | Formerly in `ApiTestrScreen.kt`, zero callers even in-file | **REMOVE — DONE** | Deleted from the live screen after confirming zero callers. |
+| D1 | Stale `CaP12Exchange` "unreachable from UI" KDoc | Formerly `CaP12Exchange.kt:30–33`; actually wired in `SettingsScreen.kt` | **REMOVE — DONE** | Deleted the stale paragraph while preserving the useful implementation KDoc. |
+| D2 | Stale reflection shim `connectionIdOrNull()` | Formerly `HttpStackDetector.kt:151–169`; `connectionId` is a real field (`Entities.kt:55`, `Index` 15) | **REMOVE — DONE** | Replaced the shim with direct nullable `row.connectionId` access. |
 | E1 | TunRelay per-reason drop counters ("deferred" in ledger) | Now implemented: `TunRelay.kt:72–92` (`evictionCount`, `dropProtectFail`, `dropUpstreamOpen/WRITE`, `dropUnrelayableProto`, `dropTcpUpstreamWriteFail`) | **KEEP** code + **REWORD** ledger | Status doc "Remaining known issues #3" is stale — the breakdown is an honest partition of `relayErrors`/`unrelayableCount`. |
 | E2 | ChaosInjector "describes itself as unwired" (ledger #4) | KDoc now correctly documents live wiring (`ChaosInjector.kt:5–27`) | **RESOLVED** | Doc was already corrected; ledger entry is stale. |
 | E3 | §2.17 NSC cleartext stays strict | `app/src/main/res/xml/network_security_config.xml`; status doc 260–264 | **KEEP** | Deliberate: app-as-client must not use cleartext; proxy relays it via raw sockets, not NSC. |
@@ -140,25 +140,24 @@ import this flag". `-F/-T` are consumed-and-discarded deliberately. Correct. KEE
 
 ### C — Dead code
 
-**C1 — `RichResponseInspector` (REMOVE; pending user call).** `ResponseInspectorView.kt` is a
-1312-line file whose composition root `RichResponseInspector` (402) has **zero** production
-callers. Its helpers `ParsedCookie` (92), `parseCookiesFromHeaders` (103), `HexRow` (163),
-`generateHexRows` (169), `UniversalSyntaxHighlighter`, and `CookieFlagBadge` are used only by
-that dead composable and by `ResponseInspectorHelpersTest.kt`. The live capture-inspection UI is
-now `CapturedDetailBottomSheet` (`InterceptScreen.kt:4637`), which uses the new helpers in
-`CapturedTrafficHelpers.kt` (whose header comment at 15–17 explicitly says the old inspector was
-kept *out* of scope). This block is dead and should be REMOVED — but it was already surfaced to
-the user with finding `62e5a42a-3f2f-478c-adce-eb505ca64826` (idempotency-key
-`requestr-dead-response-inspector`, status PENDING per handoff §9). **Do not delete without the
-user's call.**
+**C1 — `RichResponseInspector` (HARVEST-then-REMOVE — DONE).** `ResponseInspectorView.kt`
+was a 1312-line dead file whose composition root had zero production callers. The useful behavior
+was specific to API testing, not captured-traffic inspection, so it was ported into the inline
+`ApiTestrScreen` response viewer: Text/Hex body modes, syntax-aware in-body search, a parsed
+Set-Cookies tab, per-header/copy-all actions, and response export/share. The pure
+`ParsedCookie`/`parseCookiesFromHeaders`, `HexRow`/`generateHexRows`, and
+`UniversalSyntaxHighlighter` code now lives in `ResponseInspectorHelpers.kt`; its plain-JUnit
+`ResponseInspectorHelpersTest.kt` coverage was preserved. The dead inspector file was removed.
+Platform traceability: original finding `62e5a42a-3f2f-478c-adce-eb505ca64826`
+(idempotency key `requestr-dead-response-inspector`) is resolved by this remediation. A follow-up
+status-sync finding `b4777c7c-264e-4428-9933-7581b4338860` records that the original platform
+entry may still display Pending because no existing-finding status mutation command is available.
 
-**C2 — `DynamicIconPress` (REMOVE).** `DynamicIconPress.kt:30` declares a public composable with
-no callers anywhere in the tree (verified by a word-boundary grep over all of `ui/`; no false
-positives). It is not referenced by any doc — newly-found dead code. REMOVE.
+**C2 — `DynamicIconPress` (REMOVE — DONE).** The public composable had no callers anywhere in
+the tree. Its standalone file was deleted and the canonical design-system matrix was updated.
 
-**C3 — `KeyValueTableRow` (REMOVE).** `ApiTestrScreen.kt:2282` declares a private composable
-whose own in-file comment says it's a "v6.0 transplant (manifest §5.5)", and it has zero call
-sites even inside `ApiTestrScreen.kt`. REMOVE.
+**C3 — `KeyValueTableRow` (REMOVE — DONE).** The private composable had no caller even inside
+`ApiTestrScreen.kt`; it was deleted with its now-unused import.
 
 *(Exempt from C: the `@Preview`-annotated composables in `Http3DetailSheet.kt`,
 `RelayHealthCard.kt`, `RelayHealthDetailSheet.kt`, `TlsFailureDetailSheet.kt`,
@@ -166,18 +165,13 @@ sites even inside `ApiTestrScreen.kt`. REMOVE.
 
 ### D — Stale comments / reflection shims
 
-**D1 — `CaP12Exchange` stale KDoc (REMOVE comment).** The KDoc at `CaP12Exchange.kt:30–33` says
-the `.p12` import path is "currently unreachable from the UI … intentionally left out of this
-engine-fix PR". That is now false: the feature is fully wired through `P12ImportPasswordDialog`
-(`SettingsScreen.kt:1959`), the "Import .p12 (with password)" affordance (1324), the
-`importP12` call (2032), and `P12ImportErrorClassifier` (2043–2044). The stale comment will
-mislead; REMOVE it (and any "left out of this PR" phrasing).
+**D1 — `CaP12Exchange` stale KDoc (REMOVE — DONE).** The paragraph claiming the `.p12` path
+was unreachable was false because Settings already wires the password and `importP12` flow. Only
+that stale paragraph was removed; the live class and useful implementation KDoc remain.
 
-**D2 — `connectionIdOrNull()` reflection shim (REMOVE).** `HttpStackDetector.kt:151–169` still
-uses `getDeclaredField("connectionId")` reflection and a comment claiming "this worktree has not
-merged that branch in yet" (Room v9 / `c6b7069`). That is obsolete: `CapturedTrafficEntity.
-connectionId: String?` is a real, direct field (`Entities.kt:55`, with an `Index` at 15), and the
-caller at line 119 could read it directly. REMOVE the shim and simplify to `row.connectionId`.
+**D2 — `connectionIdOrNull()` reflection shim (REMOVE — DONE).** `connectionId` is a real
+nullable `CapturedTrafficEntity` field, so the obsolete reflection bridge was deleted and the call
+site now uses direct `row.connectionId` access with the same null behavior.
 
 ### E — "Remaining known issues" ledger reconciliation
 
@@ -244,19 +238,16 @@ dropping flow nodes, matching the spec). No change.
 Ranked by (a) whether the item actively misleads a future reader, (b) the size/risk of the dead
 weight, and (c) whether it can be fixed without a user decision.
 
-1. **D1 — Remove the stale `CaP12Exchange` "unreachable from UI" KDoc.** Action: delete the
-   `CaP12Exchange.kt:30–33` paragraph claiming `.p12` is unimplemented. *Why first:* it asserts a
-   shipped feature doesn't exist and will derail anyone trusting the KDoc.
-2. **D2 — Remove the `connectionIdOrNull()` reflection shim.** Action: in `HttpStackDetector.kt`,
-   replace lines 151–169 with a direct `row.connectionId` read. *Why:* obsolete reflection on a
-   now-real column; a subtle future-proofing hazard.
-3. **C1 — Delete the dead `RichResponseInspector` block.** Action: remove
-   `ResponseInspectorView.kt` (1312 lines) plus the now-orphaned `ResponseInspectorHelpersTest.kt`
-   and the `CapturedTrafficHelpers.kt:15–17` reference — **only after the user's call** on finding
-   `62e5a42a…`. *Why:* largest dead-code weight and the single biggest maintenance tax.
-4. **C2 / C3 — Delete `DynamicIconPress` and `KeyValueTableRow`.** Action: remove
-   `DynamicIconPress.kt` and `ApiTestrScreen.kt:2282`. *Why:* small, unambiguous, no user decision
-   needed — quickest wins.
+1. **D1 — Remove the stale `CaP12Exchange` "unreachable from UI" KDoc — DONE.** The
+   misleading paragraph was deleted while useful P12 implementation notes remain.
+2. **D2 — Remove the `connectionIdOrNull()` reflection shim — DONE.** `HttpStackDetector`
+   now reads the real nullable `row.connectionId` field directly.
+3. **C1 — Harvest then delete the dead `RichResponseInspector` block — DONE.** Hex view,
+   in-body search, parsed Set-Cookies, per-header/copy-all, and export/share now live in the inline
+   `ApiTestrScreen` response viewer. Tested pure helpers moved to `ResponseInspectorHelpers.kt`,
+   `ResponseInspectorHelpersTest.kt` remains, and the 1312-line dead file was deleted.
+4. **C2 / C3 — Delete `DynamicIconPress` and `KeyValueTableRow` — DONE.** Both zero-caller
+   components were removed.
 5. **B5 — Correct the "Environments drawer row" location in every doc.** Action: in
    CONTINUITY-HANDOFF §8.4/§11 (and any dossier repeating it), change "AppNavigationDrawer" to
    "Reqy Assistant drawer (`ChatScreen.kt:1476`)". *Why:* wrong-file pointer makes the audit's
@@ -283,12 +274,14 @@ weight, and (c) whether it can be fixed without a user decision.
 
 ## Bottom-line classification
 
-- **REMOVE (code):** C1 (`RichResponseInspector`, pending user call), C2 (`DynamicIconPress`), C3
-  (`KeyValueTableRow`), D1 (stale KDoc), D2 (reflection shim).
-- **REWORD (docs/comments/strings, no code behavior change):** B3 (Base64 description), B5
-  (Environments-row location), B6 (onboarding steps), E1 (TunRelay ledger entry).
+- **HARVEST-then-REMOVE (code):** C1 (`RichResponseInspector`) — **DONE**.
+- **REMOVE (code):** C2 (`DynamicIconPress`), C3 (`KeyValueTableRow`), D1 (stale KDoc),
+  D2 (reflection shim) — **DONE**.
+- **REWORD (docs/comments/strings, no code behavior change):** B3 (Base64 description — **DONE**),
+  B5 (Environments-row location — **DONE**), B6 (onboarding steps — **DONE**),
+  E1 (TunRelay ledger entry — **DONE**).
 - **KEEP (correct as-is):** A1–A3, B1, B2, B4, B7, E3, E5, G1–G2.
-- **RESOLVED (already fixed, mark done):** E2, E4, F1, F2, H1.
+- **RESOLVED (already fixed, mark done):** E2 (**DONE** — ledger updated), E4, F1, F2, H1.
 
 **Key doc-vs-code contradictions to trust code over docs:** Continuity-handoff is stale in at
 least four places (Environments-row file, onboarding step list, TunRelay counters, M4/deprecation

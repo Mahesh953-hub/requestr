@@ -431,9 +431,14 @@ object ApiTestrRepository {
      */
     private suspend fun buildMockResponse(requestItem: ApiRequestItem): ApiResponseData {
         if (requestItem.mockDelayMs > 0) delay(requestItem.mockDelayMs)
-        val headerMap = requestItem.mockHeaders
+        val headerLines = requestItem.mockHeaders
             .filter { it.isEnabled && it.key.isNotBlank() }
-            .associate { it.key to it.value }
+            .map { it.key to it.value }
+        val headerMap = linkedMapOf<String, String>()
+        headerLines.forEach { (name, value) ->
+            val existingKey = headerMap.keys.firstOrNull { it.equals(name, ignoreCase = true) }
+            if (existingKey == null) headerMap[name] = value else headerMap[existingKey] = value
+        }
         val bodySize = requestItem.mockBody.toByteArray().size.toLong()
         return ApiResponseData(
             statusCode = requestItem.mockStatusCode,
@@ -442,6 +447,7 @@ object ApiTestrRepository {
             latencyMs = requestItem.mockDelayMs,
             sizeBytes = bodySize,
             headers = headerMap,
+            headerLines = headerLines,
             body = requestItem.mockBody,
             timestamp = System.currentTimeMillis(),
             isSuccess = requestItem.mockStatusCode in 200..399,
@@ -544,9 +550,13 @@ object ApiTestrRepository {
             val responseBody = response.body?.string() ?: ""
             val size = responseBody.toByteArray().size.toLong()
 
-            val headerMap = mutableMapOf<String, String>()
-            for (i in 0 until response.headers.size) {
-                headerMap[response.headers.name(i)] = response.headers.value(i)
+            val headerLines = response.headers.map { it.first to it.second }
+            // Keep an ordered duplicate-capable wire view plus a case-insensitive last-value map
+            // for legacy script/assertion consumers.
+            val headerMap = linkedMapOf<String, String>()
+            headerLines.forEach { (name, value) ->
+                val existingKey = headerMap.keys.firstOrNull { it.equals(name, ignoreCase = true) }
+                if (existingKey == null) headerMap[name] = value else headerMap[existingKey] = value
             }
 
             ApiResponseData(
@@ -556,6 +566,7 @@ object ApiTestrRepository {
                 latencyMs = latency,
                 sizeBytes = size,
                 headers = headerMap,
+                headerLines = headerLines,
                 body = responseBody,
                 timestamp = System.currentTimeMillis(),
                 isSuccess = response.isSuccessful,

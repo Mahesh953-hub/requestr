@@ -6,9 +6,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * v6.0 transplant (plan task 6, manifest §5.9) — tests for the pure helpers ported from
- * main's [ResponseInspectorView.kt]: cookie header parsing, hex dump generation, and the
- * universal syntax highlighter. No Android framework calls, so these run as plain JUnit.
+ * Tests for the pure response-inspection helpers shared by ApiTestrScreen: cookie parsing,
+ * hex-dump generation, and syntax/search highlighting. No Android framework calls.
  */
 class ResponseInspectorHelpersTest {
 
@@ -77,6 +76,24 @@ class ResponseInspectorHelpersTest {
         assertEquals("b", cookies[1].name)
         assertEquals("2", cookies[1].value)
         assertEquals("/api", cookies[1].path)
+    }
+
+
+    @Test
+    fun `parseCookiesFromHeaderValues preserves separate lines and Expires comma`() {
+        val cookies = parseCookiesFromHeaderValues(
+            listOf(
+                "session=abc; Path=/; HttpOnly",
+                "prefs=dark; Expires=Wed, 21 Oct 2030 07:28:00 GMT; Secure",
+            )
+        )
+
+        assertEquals(2, cookies.size)
+        assertEquals("session", cookies[0].name)
+        assertTrue(cookies[0].httpOnly)
+        assertEquals("prefs", cookies[1].name)
+        assertEquals("Wed, 21 Oct 2030 07:28:00 GMT", cookies[1].expires)
+        assertTrue(cookies[1].secure)
     }
 
     // ─── generateHexRows ─────────────────────────────────────────────────
