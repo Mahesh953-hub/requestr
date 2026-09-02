@@ -233,11 +233,13 @@ fun rulePatternError(pattern: String): String? {
  * The single reason the Add-Rule button is disabled, or `null` when the rule can be saved. The
  * button's `enabled` and the inline text under it both derive from this, so the user always
  * sees exactly why Save is blocked -- never a silently dead button. Order matches the form's
- * top-to-bottom layout: name, pattern, then the per-action config ([ruleConfigError]).
+ * top-to-bottom layout: name, pattern (only decisive when [domain] is blank, mirroring
+ * `RuleEnforcer.getMatchingRule`'s domain-substring OR compiled-pattern match), then the
+ * per-action config ([ruleConfigError]).
  */
-fun addRuleSaveBlocker(name: String, pattern: String, draft: RuleConfigDraft): String? {
+fun addRuleSaveBlocker(name: String, pattern: String, domain: String, draft: RuleConfigDraft): String? {
     if (name.isBlank()) return "Rule Name is required."
-    rulePatternError(pattern)?.let { return it }
+    if (domain.isBlank()) rulePatternError(pattern)?.let { return it }
     return ruleConfigError(draft)
 }
 

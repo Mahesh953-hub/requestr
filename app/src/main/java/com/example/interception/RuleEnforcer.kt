@@ -560,6 +560,26 @@ object RuleEnforcer {
      * persists `x-requestr-*` headers even when response-header logging is off -- they are
      * requestr's own metadata about what IT did to the exchange, not server content.
      */
+    /**
+     * Upper bound for a CHAOS `delayMs` value, in milliseconds (30s). See
+     * [parseChaosConfig] for why an unbounded delay is indistinguishable from a hang.
+     */
+    const val MAX_CHAOS_DELAY_MS: Long = 30_000L
+
+    /**
+     * The exact set of metadata headers requestr stamps onto an exchange to record what IT did.
+     * Kept as a closed allow-list rather than an `x-requestr-` prefix match, because a prefix
+     * match would also retain a header the *client app under test* happened to send with that
+     * prefix — which is client content, and is exactly what turning header logging off is meant
+     * to suppress. Consumed by `MitmProxyEngine.emitTransaction`.
+     */
+    val METADATA_HEADER_KEYS: Set<String> = setOf(
+        CHAOS_ATTRIBUTION_HEADER,
+        SCRIPT_ERROR_HEADER,
+        "x-requestr-crypto-failed",
+        "x-requestr-json-prettified",
+    )
+
     const val CHAOS_ATTRIBUTION_HEADER = "x-requestr-chaos"
 
     /**
@@ -647,9 +667,13 @@ object RuleEnforcer {
                     ChaosApplyResult.Delay(outcome.millis)
                 }
                 is ChaosInjector.ChaosOutcome.CorruptBody -> {
-                    // Binary: corrupt the decompressed content bytes (what the client actually
-                    // decodes), not the still-encoded wire bytes; the serializer drops
-                    // Content-Encoding for a replaced body, so the client receives exactly these.
+                    // Binary: corrupt the decoded content bytes, which is what the client actually
+                    // decodes; the serializer drops Content-Encoding for a replaced body, so the
+                    // client receives exactly these. One honest caveat: HttpBodyDecoder.decode
+                    // leaves decodedBodyBytes == rawBodyBytes when a declared gzip/deflate fails
+                    // to inflate, so for that (broken-encoding) corner the bytes corrupted here
+                    // are the still-compressed stream. The body is damaged and attributed either
+                    // way, which is all CHAOS promises, but it is not the content bytes.
                     val binaryBytes = if (message.isBodyBinary) message.decodedBodyBytes ?: message.rawBodyBytes else null
                     val bodyEmpty: Boolean
                     if (binaryBytes != null && binaryBytes.isNotEmpty()) {
@@ -680,6 +704,13 @@ object RuleEnforcer {
      * array is treated as no delay. Every field is optional and clamped/defaulted so a partial
      * or malformed config degrades to an all-zero (always-[ChaosInjector.ChaosOutcome.PassThrough])
      * config rather than throwing -- fail-open, same discipline as every schema this file parses.
+     *
+     * `delayMs` is additionally clamped to [MAX_CHAOS_DELAY_MS]. A chaos delay parks the server
+     * -> client thread for that one connection, and a value beyond this is indistinguishable to
+     * the user from a hung app: every real client has timed out long before, so the only visible
+     * effect is a relay thread pinned for minutes with nothing to show for it. The clamp is
+     * applied here rather than only in the rule form so a config written by an earlier build, an
+     * import, or the local API is bounded too.
      */
     internal fun parseChaosConfig(config: String?): ChaosInjector.ChaosConfig {
         if (config.isNullOrBlank()) return ChaosInjector.ChaosConfig()
@@ -689,8 +720,9 @@ object RuleEnforcer {
             val corruptBodyRate = json.optDouble("corruptBodyRate", 0.0).coerceIn(0.0, 1.0)
             val delayRange = if (json.has("delayMs")) {
                 val arr = json.getJSONArray("delayMs")
-                val lo = arr.optLong(0, 0L).coerceAtLeast(0L)
-                val hi = (if (arr.length() > 1) arr.optLong(1, lo) else lo).coerceAtLeast(lo)
+                val lo = arr.optLong(0, 0L).coerceIn(0L, MAX_CHAOS_DELAY_MS)
+                val hi = (if (arr.length() > 1) arr.optLong(1, lo) else lo)
+                    .coerceIn(lo, MAX_CHAOS_DELAY_MS)
                 lo..hi
             } else {
                 0L..0L

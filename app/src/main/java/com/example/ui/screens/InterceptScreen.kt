@@ -3687,7 +3687,10 @@ fun RulesConfigBottomSheet(
                         // URL Pattern (regex). M4: RuleEnforcer.getMatchingRule evaluates this
                         // inside runCatching { }.getOrDefault(false), so a pattern that doesn't
                         // compile silently never matches -- surface that here, not never.
-                        val patternError = rulePatternError(rulePattern)
+                        // The pattern is only decisive when the domain is blank: a non-blank
+                        // domain matches by substring on its own, so a blank or non-compiling
+                        // pattern there does not render the rule inert (see savedRuleConfigError).
+                        val patternError = if (ruleDomain.isBlank()) rulePatternError(rulePattern) else null
                         OutlinedTextField(
                             value = rulePattern,
                             onValueChange = { rulePattern = it },
@@ -4039,10 +4042,10 @@ fun RulesConfigBottomSheet(
                         // dead, and it is impossible to save a rule whose config the engine would
                         // ignore (blank MODIFY_*/CHAOS/SCRIPT_REWRITE, a non-compiling pattern,
                         // ...). Blank MOCK_RESPONSE stays saveable: it is the documented 200 OK.
-                        val saveBlocker = addRuleSaveBlocker(ruleName, rulePattern, ruleDraft)
+                        val saveBlocker = addRuleSaveBlocker(ruleName, rulePattern, ruleDomain, ruleDraft)
                         Button(
                             onClick = {
-                                if (addRuleSaveBlocker(ruleName, rulePattern, ruleDraft) == null) {
+                                if (addRuleSaveBlocker(ruleName, rulePattern, ruleDomain, ruleDraft) == null) {
                                     // Capture the current field values into locals BEFORE resetting
                                     // the form. scope.launch(Dispatchers.IO) only schedules the
                                     // coroutine -- it does not run synchronously -- so if the

@@ -72,17 +72,6 @@ class GlassSurfaceResolverTest {
         assertEquals(6, GlassMode.entries.size)
     }
 
-    @Test
-    fun `display names relabel TRANSLUCENT as Clear Glass`() {
-        assertEquals("Frosted Glass", glassModeDisplayName("FROSTED_GLASS"))
-        assertEquals("Material 3", glassModeDisplayName("SOLID_M3"))
-        assertEquals("OLED Black", glassModeDisplayName("OLED_BLACK"))
-        assertEquals("Clear Glass", glassModeDisplayName("TRANSLUCENT"))
-        assertEquals("Clear Glass", glassModeDisplayName("CLEAR_GLASS"))
-        assertEquals("Liquid Glass", glassModeDisplayName("LIQUID_GLASS"))
-        assertEquals("Tune Glass", glassModeDisplayName("TUNE_GLASS"))
-    }
-
     // ─── Frozen legacy tokens ──────────────────────────────────────────────────────────────
 
     @Test

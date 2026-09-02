@@ -257,7 +257,7 @@ class ReplacementValueUiHelpersTest {
     @Test
     fun `an out-of-range statusCode blocks the Add-Rule save even with other effective keys present`() {
         val draft = RuleConfigDraft(RuleAction.MODIFY_RESPONSE, replacementValueText = """{"statusCode":999,"bodyReplace":"x"}""")
-        val blocker = addRuleSaveBlocker("r", ".*", draft) ?: throw AssertionError("must block")
+        val blocker = addRuleSaveBlocker("r", ".*", "", draft) ?: throw AssertionError("must block")
         assertTrue(blocker, blocker.contains("statusCode 999"))
     }
 
@@ -513,22 +513,33 @@ class ReplacementValueUiHelpersTest {
     @Test
     fun `addRuleSaveBlocker reports name then pattern then config in form order`() {
         val draft = RuleConfigDraft(RuleAction.MODIFY_REQUEST)
-        assertEquals("Rule Name is required.", addRuleSaveBlocker("", ".*", draft))
-        assertTrue(addRuleSaveBlocker("Ads", "", draft)!!.contains("URL Pattern"))
-        assertTrue(addRuleSaveBlocker("Ads", ".*", draft)!!.contains("Request modification (JSON)"))
+        assertEquals("Rule Name is required.", addRuleSaveBlocker("", ".*", "", draft))
+        assertTrue(addRuleSaveBlocker("Ads", "", "", draft)!!.contains("URL Pattern"))
+        assertTrue(addRuleSaveBlocker("Ads", ".*", "", draft)!!.contains("Request modification (JSON)"))
     }
 
     @Test
     fun `addRuleSaveBlocker is null for a complete valid rule and for a blank MOCK_RESPONSE`() {
-        assertNull(addRuleSaveBlocker("Ads", ".*ads.*", RuleConfigDraft(RuleAction.BLOCK)))
-        assertNull(addRuleSaveBlocker("Mock", ".*api.*", RuleConfigDraft(RuleAction.MOCK_RESPONSE)))
+        assertNull(addRuleSaveBlocker("Ads", ".*ads.*", "", RuleConfigDraft(RuleAction.BLOCK)))
+        assertNull(addRuleSaveBlocker("Mock", ".*api.*", "", RuleConfigDraft(RuleAction.MOCK_RESPONSE)))
         assertNull(
             addRuleSaveBlocker(
                 "Trace",
                 ".*",
+                "",
                 RuleConfigDraft(RuleAction.MODIFY_REQUEST, replacementValueText = """{"addHeaders":{"X-Trace":"1"}}"""),
             ),
         )
+    }
+
+    @Test
+    fun `addRuleSaveBlocker lets a domain-only rule skip the blank pattern requirement`() {
+        val mo = RuleConfigDraft(RuleAction.MODIFY_REQUEST, replacementValueText = """{"addHeaders":{"X-Trace":"1"}}""")
+        // Mirrors getMatchingRule: a non-blank domain matches by substring on its own, so a
+        // blank/non-compiling pattern is not decisive and must not block saving.
+        assertNull(addRuleSaveBlocker("Ads", "", "ads.example.com", mo))
+        assertNull(addRuleSaveBlocker("Ads", "(", "ads.example.com", RuleConfigDraft(RuleAction.BLOCK)))
+        assertTrue(addRuleSaveBlocker("Ads", "", "", RuleConfigDraft(RuleAction.BLOCK))!!.contains("URL Pattern"))
     }
 
     // ── savedRuleConfigError -- pre-existing rules ──────────────────────────────────────

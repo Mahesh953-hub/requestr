@@ -1,7 +1,6 @@
 package com.example.ui.theme
 
 import com.example.data.prefs.canonicalGlassStyle
-import com.example.ui.components.glassModeDisplayName
 import com.example.data.repository.SettingsRepository
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -48,13 +47,26 @@ class GlassStylesTest {
     }
 
     @Test
-    fun `labels agree with the renderer-side glassModeDisplayName for every key and alias`() {
-        GlassStyles.options.forEach { option ->
-            assertEquals(option.key, glassModeDisplayName(option.key), option.label)
-        }
-        listOf("FROSTED", "M3", "M3_MINIMAL", "OLED", "DEEP_DARK", "CLEAR_GLASS", "LIQUID", "TUNE", "bogus", null).forEach { alias ->
-            assertEquals("alias $alias", glassModeDisplayName(alias), GlassStyles.label(alias))
-        }
+    fun `every canonical key and legacy alias resolves to its exact user-facing label`() {
+        // GlassStyles is the only label source in the app -- Settings' pickers and the glass
+        // renderers both read it -- so this is the one place the mapping is pinned.
+        assertEquals("Frosted Glass", GlassStyles.label("FROSTED_GLASS"))
+        assertEquals("Material 3", GlassStyles.label("SOLID_M3"))
+        assertEquals("OLED Black", GlassStyles.label("OLED_BLACK"))
+        assertEquals("Clear Glass", GlassStyles.label("TRANSLUCENT"))
+        assertEquals("Liquid Glass", GlassStyles.label("LIQUID_GLASS"))
+        assertEquals("Tune Glass", GlassStyles.label("TUNE_GLASS"))
+
+        // Legacy aliases must land on the same label as the key they canonicalise to, or an
+        // install holding an old string would silently show a different mode's name.
+        listOf("FROSTED", "M3", "M3_MINIMAL", "OLED", "DEEP_DARK", "CLEAR_GLASS", "LIQUID", "TUNE")
+            .forEach { alias ->
+                assertEquals("alias $alias", GlassStyles.label(GlassStyles.canonicalKey(alias)), GlassStyles.label(alias))
+            }
+
+        // Unknown and absent keys fall back to the default mode's label rather than blank.
+        assertEquals("Frosted Glass", GlassStyles.label("bogus"))
+        assertEquals("Frosted Glass", GlassStyles.label(null))
     }
 
     @Test

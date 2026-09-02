@@ -129,6 +129,11 @@ object RecentActivityRepository {
 
     /** Attaches to the real `recent_activity` table. Idempotent. */
     fun init(context: Context) {
+        // Deliberately an unsynchronized check-then-act. Every caller is on the main thread
+        // (MainActivity.onCreate, plus the producer repositories' own init, which run from the
+        // same place), so the race cannot happen; guarding it would only add a lock on the
+        // startup path. If a background caller is ever added, this needs synchronizing --
+        // two concurrent inits would leak one collector job on the old dao.
         if (dao != null) return
         attach(RequestrDatabase.get(context.applicationContext).recentActivityDao())
     }

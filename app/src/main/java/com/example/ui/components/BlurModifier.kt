@@ -407,13 +407,6 @@ enum class GlassMode(val key: String) {
     }
 }
 
-/**
- * User-facing label per mode. Delegates to the theme catalogue ([GlassStyles.label]) — the single
- * source of truth Settings renders from — so the renderer and the pickers can never disagree
- * (TRANSLUCENT is "Clear Glass"; the legacy `CLEAR_GLASS` key stays an alias of it).
- */
-fun glassModeDisplayName(raw: String?): String = GlassStyles.label(GlassMode.fromKey(raw).key)
-
 /** Which floating shape is being rendered — the two roles keep slightly different frozen tokens. */
 enum class GlassRole { NAV, HEADER }
 

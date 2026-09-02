@@ -76,6 +76,7 @@ import com.example.data.models.ApiRequestItem
 import com.example.data.models.CollectionTestReport
 import com.example.data.models.HttpMethod
 import com.example.data.models.RequestTestResult
+import com.example.data.repository.RelativeTimeFormatter
 import com.example.data.repository.ApiCollectionsRepository
 import com.example.ui.components.DriveParallaxFrom
 import com.example.ui.components.MethodBadge
@@ -711,7 +712,7 @@ private fun SavedApiCard(
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    formatTimestamp(request.updatedAt),
+                    RelativeTimeFormatter.format(request.updatedAt),
                     fontSize = 10.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                 )
@@ -825,13 +826,3 @@ private fun chainSources(request: ApiRequestItem, all: List<ApiRequestItem>): Li
         .map { it.name }
 }
 
-private fun formatTimestamp(millis: Long): String {
-    val now = System.currentTimeMillis()
-    val diff = now - millis
-    return when {
-        diff < 60_000 -> "Just now"
-        diff < 3600_000 -> "${diff / 60_000}m ago"
-        diff < 86_400_000 -> "${diff / 3600_000}h ago"
-        else -> "${diff / 86_400_000}d ago"
-    }
-}

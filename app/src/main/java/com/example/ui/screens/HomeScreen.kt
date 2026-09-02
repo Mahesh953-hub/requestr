@@ -105,8 +105,6 @@ import com.example.ui.components.StatsPillEntry
 import com.example.ui.components.rememberGlassBackdropState
 import com.example.ui.theme.rememberAmbientMotionEnabled
 import com.example.ui.theme.TextMuted
-import com.example.ui.theme.TextPrimary
-import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.dynamicHeaderAccent
 import com.example.LocalBottomOverlayHeight
 import java.text.SimpleDateFormat
@@ -329,7 +327,16 @@ fun HomeScreen(
                         StatsCompressiblePill(
                             entries = statsEntries,
                             scrollOffsetPx = scrollOffsetPx,
-                            backdrop = backdrop,
+                            // Deliberately NOT `backdrop = backdrop`: this pill is scrolling page
+                            // content and lives INSIDE `GlassBackdropSource(state = backdrop)`'s
+                            // own content, so it is a descendant of the very source it would be
+                            // sampling. Recording that source's layer while it is already being
+                            // recorded (i.e. blurring a layer from inside itself) crashes
+                            // RenderThread with a native stack overflow (see BlurModifier.kt's
+                            // "must NOT be descendants" contract on GlassBackdropState). Let this
+                            // resolve `LocalGlassBackdropState.current`, which `GlassBackdropSource`
+                            // already resets to null for its own descendants — the pill correctly
+                            // falls back to the flat (non-blurred) glass look instead of crashing.
                             accentTint = headerAccent,
                             onClick = onOpenAllRecents,
                         )
@@ -785,7 +792,7 @@ private fun SearchResultRow(hit: GlobalSearchHit, onClick: () -> Unit) {
                 Text(
                     text = hit.title,
                     fontWeight = FontWeight.SemiBold,
-                    color = TextPrimary,
+                    color = MaterialTheme.colorScheme.onSurface,
                     fontSize = 14.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -793,7 +800,7 @@ private fun SearchResultRow(hit: GlobalSearchHit, onClick: () -> Unit) {
                 if (hit.subtitle.isNotBlank()) {
                     Text(
                         text = hit.subtitle,
-                        color = TextSecondary,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 12.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,

@@ -131,6 +131,10 @@ object PluginManager {
      * the rest of this process.
      */
     fun setPluginEnabled(pluginId: String, enabled: Boolean) {
+        // Assumes the persisted set has already been loaded (attachPersistence runs during
+        // MainActivity.onCreate, before any UI exists that could call this). A toggle made before
+        // that would be silently overwritten when attach applies the stored set -- which is the
+        // right precedence, but would look to the user like their tap was ignored.
         val current = _plugins.value[pluginId] ?: return
         _plugins.value = _plugins.value + (pluginId to current.copy(enabled = enabled))
         val next = if (enabled) disabledIds - pluginId else disabledIds + pluginId

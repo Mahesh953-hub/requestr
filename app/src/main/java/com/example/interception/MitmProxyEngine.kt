@@ -1176,13 +1176,16 @@ class MitmProxyEngine(
             path = request.path,
             statusCode = if (response.statusCode == 0) null else response.statusCode,
             protocol = response.version.ifEmpty { request.version },
-            // `x-requestr-*` headers are requestr's own metadata about what IT did to this
-            // exchange (RuleEnforcer.CHAOS_ATTRIBUTION_HEADER, RuleEnforcer.SCRIPT_ERROR_HEADER,
-            // x-requestr-crypto-failed), not client/server content -- keep them even when header
+            // requestr's own metadata about what IT did to this exchange is kept even when header
             // logging is off, so the CHAOS / SCRIPT ERROR / crypto-failed badges never silently
-            // disappear with that toggle.
-            requestHeaders = if (logRequests) request.headers else request.headers.filterKeys { it.startsWith("x-requestr-") },
-            responseHeaders = if (logResponses) response.headers else response.headers.filterKeys { it.startsWith("x-requestr-") },
+            // disappear with that toggle. Matched against the closed
+            // RuleEnforcer.METADATA_HEADER_KEYS allow-list rather than an `x-requestr-` prefix: a
+            // prefix match would also retain a header the client app under test happened to send
+            // with that prefix, and client content is precisely what the toggle suppresses.
+            requestHeaders = if (logRequests) request.headers
+            else request.headers.filterKeys { it in RuleEnforcer.METADATA_HEADER_KEYS },
+            responseHeaders = if (logResponses) response.headers
+            else response.headers.filterKeys { it in RuleEnforcer.METADATA_HEADER_KEYS },
             // storage.text (not message.body): for a bodyReplaced message the text column must
             // hold what was actually sent -- see HttpBodyDecoder.BinaryBodyStorage's contract.
             requestBody = if (logRequests) reqStorage.text.ifEmpty { null } else null,

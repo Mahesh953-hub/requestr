@@ -343,7 +343,7 @@ pill as an overlay; Home hosts its header the same way) — never descendants.
 | Badge dot | `8.dp` circle TopEnd, `padding 3.dp`, `primary` (shown when `badgeCount > 0`) |
 | Haptic | `HapticFeedbackType.LongPress` on tap |
 
-### 9.3 `FloatingCapsuleHeader` / `DynamicGlassHeader` alias
+### 9.3 `FloatingCapsuleHeader`
 
 | Token | Value |
 |---|---|
