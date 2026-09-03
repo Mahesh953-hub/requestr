@@ -3,6 +3,7 @@ package com.example.interception
 import com.example.data.local.CaptureRowMethod
 import com.example.data.local.CapturedTrafficEntity
 import com.example.interception.http.HttpBodyDecoder
+import com.example.interception.net.SocketProtector
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
@@ -121,6 +122,8 @@ internal object HttpProxyShared {
         networkCondition: NetworkConditionInjector.NetworkCondition = NetworkConditionInjector.NetworkCondition.NONE,
         random: Random = Random.Default,
         sleep: (Long) -> Unit = Thread::sleep,
+        socketFactory: () -> Socket = { Socket() },
+        socketConnector: (Socket, InetSocketAddress) -> Unit = { socket, address -> socket.connect(address) },
         onBytesTransferred: (clientToUpstream: Long, upstreamToClient: Long) -> Unit = { _, _ -> },
     ) {
         when (disposition) {
@@ -133,14 +136,14 @@ internal object HttpProxyShared {
                 NetworkConditionInjector.apply(networkCondition, random, sleep)
                 output.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray())
                 output.flush()
-                relay(client, host, port, onBytesTransferred)
+                relay(client, host, port, onBytesTransferred, socketFactory, socketConnector)
             }
             is ConnectControl.Disposition.Redirect -> {
                 val (host, port) = parseHostPort(disposition.target, 443)
                 NetworkConditionInjector.apply(networkCondition, random, sleep)
                 output.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray())
                 output.flush()
-                relay(client, host, port, onBytesTransferred)
+                relay(client, host, port, onBytesTransferred, socketFactory, socketConnector)
             }
             is ConnectControl.Disposition.ForceMitm -> {
                 // A plain Socket relay can never terminate TLS -- only MitmProxyEngine can
@@ -158,8 +161,21 @@ internal object HttpProxyShared {
         host: String,
         port: Int,
         onBytesTransferred: (clientToUpstream: Long, upstreamToClient: Long) -> Unit,
+        socketFactory: () -> Socket,
+        socketConnector: (Socket, InetSocketAddress) -> Unit,
     ) {
-        Socket(host, port).use { upstream ->
+        val upstream = socketFactory()
+        try {
+            val protectResult = SocketProtector.protectSocket(upstream)
+            if (protectResult == SocketProtector.ProtectResult.Failed) {
+                throw IOException("SocketProtector.protectSocket failed for relay upstream $host:$port")
+            }
+            socketConnector(upstream, InetSocketAddress(host, port))
+        } catch (t: Throwable) {
+            runCatching { upstream.close() }
+            throw t
+        }
+        upstream.use {
             val sent = AtomicLong(0)
             val received = AtomicLong(0)
             val t1 = Thread {
@@ -229,6 +245,12 @@ internal object HttpProxyShared {
         networkCondition: NetworkConditionInjector.NetworkCondition = NetworkConditionInjector.NetworkCondition.NONE,
         random: Random = Random.Default,
         sleep: (Long) -> Unit = Thread::sleep,
+        socketFactory: (secure: Boolean) -> Socket = { secure ->
+            if (secure) SSLSocketFactory.getDefault().createSocket() else Socket()
+        },
+        socketConnector: (Socket, InetSocketAddress, Int) -> Unit = { socket, address, timeout ->
+            socket.connect(address, timeout)
+        },
     ): Triple<Int, Map<String, String>, ByteArray> {
         return runCatching {
             NetworkConditionInjector.apply(networkCondition, random, sleep)
@@ -242,9 +264,18 @@ internal object HttpProxyShared {
             // servers, and it's simply redundant.
             val hostHeaderValue = if ((secure && port == 443) || (!secure && port == 80)) host else "$host:$port"
 
-            val socket: Socket = if (secure) SSLSocketFactory.getDefault().createSocket() else Socket()
+            val socket = socketFactory(secure)
+            try {
+                val protectResult = SocketProtector.protectSocket(socket)
+                if (protectResult == SocketProtector.ProtectResult.Failed) {
+                    throw IOException("SocketProtector.protectSocket failed for forwardRequest $host:$port")
+                }
+                socketConnector(socket, InetSocketAddress(host, port), connectTimeoutMs)
+            } catch (t: Throwable) {
+                runCatching { socket.close() }
+                throw t
+            }
             socket.use { sock ->
-                sock.connect(InetSocketAddress(host, port), connectTimeoutMs)
                 sock.soTimeout = readTimeoutMs
                 if (sock is SSLSocket) sock.startHandshake()
 

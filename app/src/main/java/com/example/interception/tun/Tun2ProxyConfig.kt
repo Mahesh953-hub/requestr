@@ -1,16 +1,14 @@
 package com.example.interception.tun
 
 /**
- * Kotlin mirror of `native/tun2proxy-bridge/src/config.rs`'s `BridgeConfig` JSON wire schema
- * (Gap #1 Approach A). [toJson] is the single place that JSON is produced for
- * [NativeTun2Proxy.start]/[Tun2ProxyBridge.start] -- keep it byte-for-byte in sync with the
- * `#[derive(Deserialize)]` structs in `config.rs` (field names, defaults, snake_case wire
- * values) or the native side will reject the config.
+ * Kotlin mirror of `native/tun2proxy-bridge/src/config.rs`'s `BridgeConfig` JSON wire schema.
+ * [toJson] is the single place that JSON is produced for [NativeTun2Proxy.start] /
+ * [Tun2ProxyBridge.start] -- keep it byte-for-byte in sync with the `#[derive(Deserialize)]`
+ * structs in `config.rs`.
  *
  * Deliberately does not use `org.json.JSONObject`: that class is an unmocked stub under this
- * project's plain JVM unit tests (see e.g. `RuleEnforcerBodyReplacedFlagTest`'s doc comment,
- * which explains the same constraint), so building JSON by hand here keeps config marshalling
- * itself unit-testable without Robolectric.
+ * project's plain JVM unit tests, so building JSON by hand keeps config marshalling unit-testable
+ * without Robolectric.
  */
 data class Tun2ProxyConfig(
     val proxy: ProxyTarget,
@@ -26,6 +24,20 @@ data class Tun2ProxyConfig(
     /** One of "off"/"error"/"warn"/"info"/"debug"/"trace" -- mirrors `ArgVerbosity`. */
     val verbosity: String = "info",
     val maxSessions: Int = 200,
+
+    // --- Vendored fork extensions (S0 task 2) ---
+
+    /** UDP policy mode for capture-scoped QUIC handling (Decision D6). */
+    val udpPolicy: UdpPolicyMode = UdpPolicyMode.PASS_ALL,
+
+    /** Enable the packet tee device for PCAPng capture and passive QUIC decode. */
+    val teeEnabled: Boolean = false,
+
+    /** Whether VpnService.protect() is available for native socket protection. */
+    val protectAvailable: Boolean = false,
+
+    /** SOCKS5 `+info` metadata for session attribution through the local proxy. */
+    val socks5Info: Socks5InfoMetadata? = null,
 ) {
     /** Mirrors `tun2proxy::ProxyType` via `config::WireProxyType`. */
     enum class ProxyType(val wireName: String) {
@@ -37,13 +49,19 @@ data class Tun2ProxyConfig(
     /**
      * Mirrors `tun2proxy::ArgDns` via `config::WireDnsMode`. `VIRTUAL` is what makes tun2proxy
      * preserve the original hostname per-flow, which is also what makes it automatically speak
-     * SOCKS4a/5h (remote DNS resolution) instead of plain SOCKS4/5 -- there is no separate wire
-     * toggle for 4/4a or 5/5h, see `config.rs`'s doc comment on `WireProxyAuth`.
+     * SOCKS4a/5h (remote DNS resolution) instead of plain SOCKS4/5.
      */
     enum class DnsMode(val wireName: String) {
         VIRTUAL("virtual"),
         OVER_TCP("over_tcp"),
         DIRECT("direct"),
+    }
+
+    /** UDP policy mode (mirrors `UdpPolicyMode` in Rust `config.rs`). */
+    enum class UdpPolicyMode(val wireName: String) {
+        PASS_ALL("pass_all"),
+        BLOCK_QUIC("block_quic"),
+        OBSERVE_QUIC("observe_quic"),
     }
 
     data class ProxyAuth(val username: String, val password: String)
@@ -55,12 +73,18 @@ data class Tun2ProxyConfig(
         val auth: ProxyAuth? = null,
     )
 
-    /** UDP-over-TCP gateway, needed because [ProxyType.HTTP]/CONNECT proxies (in particular
-     * `MitmProxyEngine`'s own listener, the Approach-A target) cannot carry raw UDP. */
+    /** UDP-over-TCP gateway. */
     data class UdpGw(
         val server: String,
         val maxConnections: Int? = null,
         val keepaliveSecs: Long? = null,
+    )
+
+    /** SOCKS5 `+info` metadata for session attribution. */
+    data class Socks5InfoMetadata(
+        val appPackage: String? = null,
+        val uid: Int? = null,
+        val sessionTag: String? = null,
     )
 
     /** Serializes to exactly the JSON shape `config::parse_config` (Rust) expects. */
@@ -82,6 +106,12 @@ data class Tun2ProxyConfig(
         append(",\"ipv6_enabled\":").append(ipv6Enabled)
         append(",\"verbosity\":").append(jsonString(verbosity))
         append(",\"max_sessions\":").append(maxSessions)
+        append(",\"udp_policy\":").append(jsonString(udpPolicy.wireName))
+        append(",\"tee_enabled\":").append(teeEnabled)
+        append(",\"protect_available\":").append(protectAvailable)
+        if (socks5Info != null) {
+            append(",\"socks5_info\":").append(socks5Info.toWireJson())
+        }
         append('}')
     }
 
@@ -106,23 +136,47 @@ data class Tun2ProxyConfig(
         append('}')
     }
 
+    private fun Socks5InfoMetadata.toWireJson(): String = buildString {
+        append('{')
+        var first = true
+        if (appPackage != null) {
+            append("\"app_package\":").append(jsonString(appPackage))
+            first = false
+        }
+        if (uid != null) {
+            if (!first) append(',')
+            append("\"uid\":").append(uid)
+            first = false
+        }
+        if (sessionTag != null) {
+            if (!first) append(',')
+            append("\"session_tag\":").append(jsonString(sessionTag))
+        }
+        append('}')
+    }
+
     companion object {
         /**
-         * Builds the config for the one shape Approach A actually uses in production: an HTTP
-         * CONNECT target pointed at [RequestrVpnService]'s own locally-started `MitmProxyEngine`
-         * instance on `127.0.0.1:mitmPort`. SOCKS4/4a/5/5h + auth + udpgw remain configurable on
-         * [Tun2ProxyConfig] directly for completeness (chaining through an external proxy), but
-         * are not exercised by this factory.
+         * Builds the config for the standard Approach-A wiring: HTTP CONNECT target pointed
+         * at the locally-started MitmProxyEngine on `127.0.0.1:mitmPort`.
+         *
+         * Uses VIRTUAL DNS so tun2proxy preserves hostnames. Protection is required by default
+         * when used from VPN service (caller should set protectAvailable=true when
+         * SocketProtector is installed). SOCKS5 +info attribution activates in S1 when
+         * LocalGateway replaces MitmProxyEngine as the local proxy.
          */
-        fun forMitmProxyEngine(mitmPort: Int, mtu: Int = 1500): Tun2ProxyConfig = Tun2ProxyConfig(
+        fun forMitmProxyEngine(
+            mitmPort: Int,
+            mtu: Int = 1500,
+            protectAvailable: Boolean = true,
+        ): Tun2ProxyConfig = Tun2ProxyConfig(
             proxy = ProxyTarget(proxyType = ProxyType.HTTP, address = "127.0.0.1:$mitmPort"),
+            dnsMode = DnsMode.VIRTUAL,
             mtu = mtu,
+            protectAvailable = protectAvailable,
         )
 
-        /** Minimal-but-correct JSON string escaping. Every field this config ever serializes is
-         * either a fixed enum literal or something Kotlin code constructs (host:port,
-         * credentials) -- never raw untrusted external input -- but this escapes properly
-         * regardless rather than assuming that stays true forever. */
+        /** Minimal JSON string escaping. */
         internal fun jsonString(value: String): String = buildString {
             append('"')
             for (c in value) {

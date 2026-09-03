@@ -2,7 +2,9 @@ package com.example.interception
 
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketAddress
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import java.util.concurrent.CountDownLatch
@@ -10,6 +12,8 @@ import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.X509TrustManager
+
+import com.example.interception.net.SocketProtector
 
 /**
  * §1.5 MUST-FIX: lazily dials + TLS-handshakes the real upstream server for a single MITM'd
@@ -38,7 +42,10 @@ import javax.net.ssl.X509TrustManager
 internal class LazyUpstreamConnection(
     private val host: String,
     private val port: Int,
-    private val connectionFactory: (String, Int) -> Socket = { h, p -> Socket(h, p) },
+    /** Creates an unconnected socket. [connect] always owns protect-before-connect ordering. */
+    private val socketFactory: () -> Socket = { Socket() },
+    /** Package-private connector seam for deterministic tests; production uses [Socket.connect]. */
+    private val socketConnector: (Socket, SocketAddress) -> Unit = { socket, address -> socket.connect(address) },
     /**
      * ALPN protocols to offer the upstream server, in preference order. Mirrors whatever the
      * client-facing leg actually negotiated (see [MitmProxyEngine.handleClient]) rather than
@@ -75,12 +82,12 @@ internal class LazyUpstreamConnection(
      * right after a successful handshake and before this (or any concurrent) call returns.
      *
      * Throws [javax.net.ssl.SSLException] if the handshake itself fails, and whatever
-     * [java.io.IOException] [connectionFactory] throws (e.g. unknown host, connection refused)
+     * [java.io.IOException] the socket connector throws (e.g. unknown host, connection refused)
      * -- callers are responsible for translating an [javax.net.ssl.SSLException] into a
      * persisted failure record, matching the previous eager call site's behaviour of only
      * treating the handshake step (not the raw connect) as a first-class "upstream handshake"
      * failure. §3 (C2): also throws [NetworkConditionInjector.SimulatedPacketLossException] (an
-     * [java.io.IOException]) before ever calling [connectionFactory], if [networkCondition] rolls
+     * [java.io.IOException]) before ever creating the socket, if [networkCondition] rolls
      * a simulated loss on this dial attempt -- handled identically to any other raw-connect
      * failure by every existing caller, since it's just another [java.io.IOException] subtype.
      */
@@ -90,7 +97,19 @@ internal class LazyUpstreamConnection(
             connected?.let { return it }
             try {
                 NetworkConditionInjector.apply(networkCondition, random, sleep)
-                val socket = connectionFactory(host, port)
+                val socket = socketFactory()
+                try {
+                    val protectResult = SocketProtector.protectSocket(socket)
+                    if (protectResult == SocketProtector.ProtectResult.Failed) {
+                        throw java.io.IOException(
+                            "SocketProtector.protectSocket failed for upstream $host:$port; refusing to connect"
+                        )
+                    }
+                    socketConnector(socket, InetSocketAddress(host, port))
+                } catch (t: Throwable) {
+                    runCatching { socket.close() }
+                    throw t
+                }
                 val sslSocket = SSLContext.getInstance("TLS").apply {
                     init(null, arrayOf(AcceptAllTrustManager), SecureRandom())
                 }.socketFactory.createSocket(socket, host, port, true) as SSLSocket

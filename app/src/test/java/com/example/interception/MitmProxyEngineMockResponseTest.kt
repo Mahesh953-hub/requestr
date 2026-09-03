@@ -70,7 +70,7 @@ class MitmProxyEngineMockResponseTest {
 
     /**
      * §1.5 MUST-FIX: [MitmProxyEngine.handleParsedRequest]'s 4th parameter is now a
-     * [LazyUpstreamConnection] rather than a raw [OutputStream]. A `connectionFactory` that
+     * [LazyUpstreamConnection] rather than a raw [OutputStream]. A `socketConnector` that
      * throws if ever invoked doubles as a hard assertion that MOCK_RESPONSE never dials
      * upstream -- stronger than the old "check the buffer stayed empty" assertion, which could
      * never fail even if the production code regressed to dialing (nothing was ever written to
@@ -79,7 +79,7 @@ class MitmProxyEngineMockResponseTest {
     private fun neverConnectUpstream(host: String = "mock.example", port: Int = 443) =
         LazyUpstreamConnection(
             host, port,
-            connectionFactory = { _, _ -> throw AssertionError("MOCK_RESPONSE must never dial upstream") },
+            socketConnector = { _, _ -> throw AssertionError("MOCK_RESPONSE must never dial upstream") },
         )
 
     @Test

@@ -220,6 +220,9 @@ dependencies {
   implementation(libs.androidx.navigation.compose)
   implementation(libs.androidx.room.ktx)
   implementation(libs.androidx.room.runtime)
+  // S0 task 3: bundled SQLite runtime so FTS5 is guaranteed regardless of device (D4).
+  // Provides BundledSQLiteDriver for Room 2.7.0's setDriver() API.
+  implementation(libs.androidx.sqlite.bundled)
   implementation(libs.converter.moshi)
   implementation(libs.firebase.ai)
   // Uncomment to use Firestore:

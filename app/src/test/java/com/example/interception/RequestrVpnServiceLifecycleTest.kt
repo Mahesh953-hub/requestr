@@ -5,6 +5,9 @@ import com.example.data.interception.ActiveTier
 import com.example.data.interception.CaptureLifecycleOwner
 import com.example.data.interception.InterceptionStateRepository
 import com.example.data.interception.InterceptionStatus
+import com.example.interception.net.SocketProtector
+import java.net.DatagramSocket
+import java.net.Socket
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -57,9 +60,21 @@ import org.robolectric.RobolectricTestRunner
 @RunWith(RobolectricTestRunner::class)
 class RequestrVpnServiceLifecycleTest {
 
+    private var protectorRegistration: SocketProtector.Registration? = null
+
     @After
     fun tearDown() {
+        protectorRegistration?.let(SocketProtector::clear)
         InterceptionStateRepository.resetAll()
+    }
+
+    private fun installProtector(service: RequestrVpnService) {
+        protectorRegistration = SocketProtector.install(object : SocketProtector.Backing {
+            override fun protectSocket(socket: Socket) = true
+            override fun protectDatagramSocket(socket: DatagramSocket) = true
+            override fun protectFd(fd: Int) = true
+        })
+        service.socketProtectorRegistration = protectorRegistration
     }
 
     @Test
@@ -85,6 +100,35 @@ class RequestrVpnServiceLifecycleTest {
         }
 
         assertNull("tunInterface must be torn down once capture has stopped", service.tunInterface)
+    }
+
+    @Test
+    fun `onDestroy clears the active socket protector`() {
+        val controller = Robolectric.buildService(RequestrVpnService::class.java).create()
+        val service = controller.get()
+        installProtector(service)
+        assertEquals(true, SocketProtector.isInstalled)
+
+        controller.destroy()
+
+        assertEquals(false, SocketProtector.isInstalled)
+        protectorRegistration = null
+    }
+
+    @Test
+    fun `onRevoke clears the active socket protector through stop cleanup`() {
+        val service = Robolectric.buildService(RequestrVpnService::class.java).create().get()
+        installProtector(service)
+
+        service.onRevoke()
+        runBlocking {
+            withTimeout(5_000) {
+                while (SocketProtector.isInstalled) kotlinx.coroutines.delay(10)
+            }
+        }
+
+        assertEquals(false, SocketProtector.isInstalled)
+        protectorRegistration = null
     }
 
     @Test

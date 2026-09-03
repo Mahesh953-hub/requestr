@@ -1,0 +1,18 @@
+8:#   kotlin  – unit tests, lint, debug + release assembly, Room schema drift
+9:#   rust    – cargo fmt, cargo check, cargo test for native/tun2proxy-bridge
+36:    name: Kotlin (test · lint · assemble)
+71:          ./gradlew :app:testDebugUnitTest
+79:          ./gradlew :app:lintDebug
+82:      - name: Upload lint report
+86:          name: lint-report
+87:          path: app/build/reports/lint-results-debug.html
+93:      # rust job. assembleRelease auto-runs verifyReleaseSigning; the
+98:          ./gradlew :app:assembleDebug
+100:          -x lintDebug
+105:          ./gradlew :app:assembleRelease
+107:          -x lintRelease
+116:        run: bash tools/ci/check-schema-drift.sh
+163:      - name: Check formatting (cargo fmt)
+164:        run: cargo fmt --all -- --check
+168:        run: cargo check --lib --tests
+172:        run: cargo test --lib

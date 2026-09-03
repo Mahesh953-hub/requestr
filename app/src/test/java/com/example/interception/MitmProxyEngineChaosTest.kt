@@ -86,14 +86,14 @@ class MitmProxyEngineChaosTest {
 
     private fun neverConnectUpstream() = LazyUpstreamConnection(
         "chaos.example", 443,
-        connectionFactory = { _, _ -> throw AssertionError("a chaos FAIL must never dial upstream") },
+        socketConnector = { _, _ -> throw AssertionError("a chaos FAIL must never dial upstream") },
     )
 
     /** Upstream stand-in that records the dial attempt and aborts -- proves the request WOULD have gone out. */
     private class Dialed : IOException("dialed upstream")
     private fun recordingUpstream() = LazyUpstreamConnection(
         "chaos.example", 443,
-        connectionFactory = { _, _ -> throw Dialed() },
+        socketConnector = { _, _ -> throw Dialed() },
     )
 
     /**

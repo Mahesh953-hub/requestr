@@ -190,7 +190,10 @@ pub fn record_traffic(tx: u64, rx: u64) {
 }
 
 pub fn traffic_snapshot() -> (u64, u64) {
-    (TX_BYTES.load(Ordering::Relaxed), RX_BYTES.load(Ordering::Relaxed))
+    (
+        TX_BYTES.load(Ordering::Relaxed),
+        RX_BYTES.load(Ordering::Relaxed),
+    )
 }
 
 pub fn reset_traffic() {
@@ -209,7 +212,13 @@ mod tests {
     #[test]
     fn state_round_trips_through_i32() {
         let _guard = super::lock_test_state();
-        for s in [BridgeState::Idle, BridgeState::Starting, BridgeState::Running, BridgeState::Stopping, BridgeState::Failed] {
+        for s in [
+            BridgeState::Idle,
+            BridgeState::Starting,
+            BridgeState::Running,
+            BridgeState::Stopping,
+            BridgeState::Failed,
+        ] {
             set_state(s);
             assert_eq!(get_state(), s);
         }
@@ -300,7 +309,10 @@ mod tests {
         // the caller must treat as a real failure, never as success.
         assert_eq!(observed, BridgeState::Starting);
         assert!(elapsed >= Duration::from_millis(50), "elapsed={elapsed:?}");
-        assert!(elapsed < Duration::from_millis(1000), "elapsed={elapsed:?} (not bounded)");
+        assert!(
+            elapsed < Duration::from_millis(1000),
+            "elapsed={elapsed:?} (not bounded)"
+        );
         set_state(BridgeState::Idle);
     }
 
@@ -338,7 +350,10 @@ mod tests {
         let elapsed = start.elapsed();
         assert!(!confirmed);
         assert!(elapsed >= Duration::from_millis(50), "elapsed={elapsed:?}");
-        assert!(elapsed < Duration::from_millis(1000), "elapsed={elapsed:?} (not bounded)");
+        assert!(
+            elapsed < Duration::from_millis(1000),
+            "elapsed={elapsed:?} (not bounded)"
+        );
         // Leave it confirmable for any later test in this module that shares the process.
         mark_thread_done();
     }

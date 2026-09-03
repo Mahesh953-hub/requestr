@@ -25,6 +25,7 @@ import com.example.data.local.CaptureTier
 import com.example.data.local.RequestrDatabase
 import com.example.data.prefs.AppFilterMode
 import com.example.data.prefs.SettingsDataStore
+import com.example.interception.net.SocketProtector
 import com.example.interception.tls.TlsKeyLogRegistry
 import com.example.interception.tun.NativeTun2Proxy
 import com.example.interception.tun.ProtectHook
@@ -63,6 +64,7 @@ class RequestrVpnService : VpnService() {
     // widening the real public API surface (still module-internal).
     internal var tunInterface: ParcelFileDescriptor? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var startJob: Job? = null
     private var pumpJob: Job? = null
     private var filterObserverJob: Job? = null
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO)
@@ -75,6 +77,7 @@ class RequestrVpnService : VpnService() {
     // until the entire outer launched block finishes, regardless of statement order inside it.
     internal var stopCaptureStepRecorder: (String) -> Unit = {}
     private var sessionId: Long? = null
+    internal var socketProtectorRegistration: SocketProtector.Registration? = null
 
     /**
      * Gap #1 Approach A: true once the native tun2proxy bridge has genuinely taken over the
@@ -122,7 +125,7 @@ class RequestrVpnService : VpnService() {
      * outside the tun instead of looping back into it. Must run before connect/send on every
      * relay socket; [com.example.interception.tun.TunRelay] guarantees that ordering.
      */
-    private val protectHook = object : ProtectHook {
+    private val protectHook = object : ProtectHook, SocketProtector.Backing {
         override fun protectSocket(socket: java.net.Socket): Boolean =
             runCatching { protect(socket) }.getOrDefault(false)
 
@@ -150,7 +153,7 @@ class RequestrVpnService : VpnService() {
             return
         }
 
-        scope.launch {
+        startJob = scope.launch {
             try {
                 val prefs = SettingsDataStore.get(applicationContext)
                 val port = prefs.proxyPort.first()
@@ -208,6 +211,12 @@ class RequestrVpnService : VpnService() {
                     return@launch
                 }
                 tunInterface = tun
+
+                // S0 Task 4: install the process-wide socket protector so every egress
+                // path (LazyUpstreamConnection, RemoteCertificateMirror, HttpProxyShared,
+                // ConnectReplay, and the native-bridge callback) protects before connect.
+                socketProtectorRegistration = SocketProtector.install(protectHook)
+                SocketProtector.resetMetrics()
 
                 // Persist a real session row; counters are updated from actual traffic.
                 val db = RequestrDatabase.get(applicationContext)
@@ -380,6 +389,8 @@ class RequestrVpnService : VpnService() {
             } catch (t: Throwable) {
                 if (t is kotlinx.coroutines.CancellationException) throw t
                 fail("Capture failed to start: ${t.message ?: t::class.java.simpleName}")
+            } finally {
+                startJob = null
             }
         }
     }
@@ -481,6 +492,8 @@ class RequestrVpnService : VpnService() {
     }
 
     private fun cleanup() {
+        startJob?.cancel()
+        startJob = null
         filterObserverJob?.cancel()
         filterObserverJob = null
         pumpJob?.cancel()
@@ -512,6 +525,10 @@ class RequestrVpnService : VpnService() {
         activeMitmEngine = null
         runCatching { tunInterface?.close() }
         tunInterface = null
+        // All relays have stopped, but clear before slow persistence/backup teardown below so a
+        // completed onRevoke/failed start cannot leave process-wide VPN state installed.
+        socketProtectorRegistration?.let(SocketProtector::clear)
+        socketProtectorRegistration = null
         // T1: stop PCAP export with the rest of this session's lifecycle -- flushes and closes
         // the .pcap file. No-op (guarded by its own `active` flag) if it was never started.
         runCatching { com.example.interception.packet.PacketCaptureEngine.stop() }

@@ -13,6 +13,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use tun2proxy::{ArgDns, ArgProxy, Args, ProxyType, UserKey};
 
+use crate::udp_policy::UdpPolicyMode;
+
 /// Mirrors `tun2proxy::ProxyType`, spelled out so the wire format is stable even if the
 /// upstream crate ever reorders its enum discriminants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -91,6 +93,22 @@ pub struct WireUdpGw {
     pub keepalive_secs: Option<u64>,
 }
 
+/// Metadata encoded in the SOCKS5 username for `+info` session attribution.
+/// When present, the bridge encodes this into the SOCKS5 auth username so the
+/// local proxy (`LocalGateway` in S1) can attribute the session to a specific app.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
+pub struct Socks5InfoMetadata {
+    /// Android package name of the originating app.
+    #[serde(default)]
+    pub app_package: Option<String>,
+    /// UID of the originating app.
+    #[serde(default)]
+    pub uid: Option<u32>,
+    /// Opaque session tag for correlation with Kotlin-side capture state.
+    #[serde(default)]
+    pub session_tag: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct BridgeConfig {
     pub proxy: WireProxyTarget,
@@ -120,6 +138,31 @@ pub struct BridgeConfig {
     pub verbosity: String,
     #[serde(default = "default_max_sessions")]
     pub max_sessions: usize,
+
+    // --- S0 task 2: new fields for the extended bridge protocol ---
+    /// UDP policy mode for capture-scoped QUIC handling (Decision D6).
+    /// Default `pass_all` preserves legacy behavior; S1 refines to per-UID scoping.
+    #[serde(default)]
+    pub udp_policy: UdpPolicyMode,
+
+    /// Enable the packet tee device. When true, every IP-layer packet flowing through
+    /// the tun is copied to the registered PacketSink (feeds PCAPng and passive QUIC
+    /// decode). Default false.
+    #[serde(default)]
+    pub tee_enabled: bool,
+
+    /// Whether a socket-protect callback is available. When true, the bridge calls back
+    /// into Kotlin's `VpnService.protect()` before every egress connect to prevent
+    /// routing loops. Set by `BridgeSupervisor` based on VPN lifecycle state.
+    #[serde(default)]
+    pub protect_available: bool,
+
+    /// SOCKS5 authentication metadata carrying the `+info` session tuple.
+    /// Present when `proxy.proxy_type == socks5` and the proxy supports `+info`
+    /// metadata encoding in the username field. Structure:
+    /// `{"app_package":"com.example.app","uid":10123,"session_tag":"capture-42"}`.
+    #[serde(default)]
+    pub socks5_info: Option<Socks5InfoMetadata>,
 }
 
 impl Default for WireDnsMode {
@@ -169,7 +212,8 @@ impl From<String> for ConfigError {
 /// Parses `json` into a [`BridgeConfig`]. The only entry point Kotlin's config JSON goes
 /// through -- never hand-assembled `tun2proxy::Args` fields anywhere else in this crate.
 pub fn parse_config(json: &str) -> Result<BridgeConfig, ConfigError> {
-    serde_json::from_str(json).map_err(|e| ConfigError(format!("invalid tun2proxy bridge config JSON: {e}")))
+    serde_json::from_str(json)
+        .map_err(|e| ConfigError(format!("invalid tun2proxy bridge config JSON: {e}")))
 }
 
 /// Builds a real `tun2proxy::Args` from a parsed [`BridgeConfig`] plus the tun fd handed
@@ -178,13 +222,35 @@ pub fn parse_config(json: &str) -> Result<BridgeConfig, ConfigError> {
 /// from `RequestrVpnService.cleanup()`), so tun2proxy must never close it itself -- doing so
 /// would race the two independent "owners" of one fd number.
 pub fn build_args(config: &BridgeConfig, tun_fd: i32) -> Result<Args, ConfigError> {
-    let proxy_addr: SocketAddr = config
-        .proxy
-        .address
-        .parse()
-        .map_err(|e| ConfigError(format!("invalid proxy address '{}': {e}", config.proxy.address)))?;
+    let proxy_addr: SocketAddr = config.proxy.address.parse().map_err(|e| {
+        ConfigError(format!(
+            "invalid proxy address '{}': {e}",
+            config.proxy.address
+        ))
+    })?;
 
-    let credentials = config.proxy.auth.as_ref().filter(|a| !a.username.is_empty() || !a.password.is_empty()).map(|a| UserKey::new(a.username.clone(), a.password.clone()));
+    let credentials = config
+        .proxy
+        .auth
+        .as_ref()
+        .filter(|a| !a.username.is_empty() || !a.password.is_empty())
+        .map(|a| UserKey::new(a.username.clone(), a.password.clone()));
+
+    // requestr: when socks5_info is set for a SOCKS5 proxy, encode the +info
+    // metadata as a JSON string in the SOCKS5 username field. This carries the
+    // source tuple (app_package, uid, session_tag) through the authenticated
+    // SOCKS5 handshake to the local proxy (LocalGateway in S1) for session
+    // attribution. If explicit auth is also set, socks5_info takes precedence.
+    let credentials = if config.proxy.proxy_type == WireProxyType::Socks5 {
+        if let Some(ref info) = config.socks5_info {
+            let info_json = serde_json::to_string(info).unwrap_or_default();
+            Some(UserKey::new(format!("+info:{info_json}"), String::new()))
+        } else {
+            credentials
+        }
+    } else {
+        credentials
+    };
 
     let arg_proxy = ArgProxy {
         proxy_type: config.proxy.proxy_type.into_proxy_type(),
@@ -349,7 +415,8 @@ mod tests {
 
     #[test]
     fn invalid_verbosity_is_rejected() {
-        let json = r#"{"proxy": {"proxy_type":"http","address":"127.0.0.1:1"},"verbosity":"screaming"}"#;
+        let json =
+            r#"{"proxy": {"proxy_type":"http","address":"127.0.0.1:1"},"verbosity":"screaming"}"#;
         let cfg = parse_config(json).unwrap();
         let err = build_args(&cfg, 1).unwrap_err();
         assert!(err.0.contains("invalid verbosity"));
@@ -362,5 +429,130 @@ mod tests {
         let cfg = parse_config(&minimal_json("http", 1)).unwrap();
         let args = build_args(&cfg, 5).unwrap();
         assert_eq!(args.close_fd_on_drop, Some(false));
+    }
+
+    // --- S0 task 2: new config field tests ---
+
+    #[test]
+    fn new_fields_default_correctly_when_absent() {
+        let cfg = parse_config(&minimal_json("http", 8080)).unwrap();
+        assert_eq!(cfg.udp_policy, UdpPolicyMode::PassAll);
+        assert!(!cfg.tee_enabled);
+        assert!(!cfg.protect_available);
+        assert!(cfg.socks5_info.is_none());
+    }
+
+    #[test]
+    fn udp_policy_parses_from_config_json() {
+        let json = r#"{
+            "proxy": {"proxy_type":"http","address":"127.0.0.1:8080"},
+            "udp_policy": "block_quic"
+        }"#;
+        let cfg = parse_config(json).unwrap();
+        assert_eq!(cfg.udp_policy, UdpPolicyMode::BlockQuic);
+    }
+
+    #[test]
+    fn tee_and_protect_flags_parse() {
+        let json = r#"{
+            "proxy": {"proxy_type":"socks5","address":"127.0.0.1:1080"},
+            "tee_enabled": true,
+            "protect_available": true
+        }"#;
+        let cfg = parse_config(json).unwrap();
+        assert!(cfg.tee_enabled);
+        assert!(cfg.protect_available);
+    }
+
+    #[test]
+    fn socks5_info_metadata_round_trips() {
+        let json = r#"{
+            "proxy": {"proxy_type":"socks5","address":"127.0.0.1:1080"},
+            "socks5_info": {
+                "app_package": "com.example.browser",
+                "uid": 10042,
+                "session_tag": "capture-7"
+            }
+        }"#;
+        let cfg = parse_config(json).unwrap();
+        let info = cfg.socks5_info.expect("socks5_info must be present");
+        assert_eq!(info.app_package.as_deref(), Some("com.example.browser"));
+        assert_eq!(info.uid, Some(10042));
+        assert_eq!(info.session_tag.as_deref(), Some("capture-7"));
+    }
+
+    #[test]
+    fn socks5_info_with_partial_fields() {
+        let json = r#"{
+            "proxy": {"proxy_type":"socks5","address":"127.0.0.1:1080"},
+            "socks5_info": {"uid": 10001}
+        }"#;
+        let cfg = parse_config(json).unwrap();
+        let info = cfg.socks5_info.unwrap();
+        assert!(info.app_package.is_none());
+        assert_eq!(info.uid, Some(10001));
+        assert!(info.session_tag.is_none());
+    }
+
+    #[test]
+    fn full_config_with_all_new_fields() {
+        let json = r#"{
+            "proxy": {"proxy_type":"socks5","address":"127.0.0.1:1080","auth":{"username":"u","password":"p"}},
+            "dns_mode": "virtual",
+            "ipv6_enabled": true,
+            "max_sessions": 64,
+            "udp_policy": "observe_quic",
+            "tee_enabled": true,
+            "protect_available": true,
+            "socks5_info": {"app_package":"com.test","uid":99,"session_tag":"s1"}
+        }"#;
+        let cfg = parse_config(json).unwrap();
+        assert_eq!(cfg.udp_policy, UdpPolicyMode::ObserveQuic);
+        assert!(cfg.tee_enabled);
+        assert!(cfg.protect_available);
+        assert!(cfg.ipv6_enabled);
+        assert_eq!(cfg.max_sessions, 64);
+        assert_eq!(cfg.socks5_info.as_ref().unwrap().uid, Some(99));
+        // Verify the existing fields still work with args builder
+        let args = build_args(&cfg, 10).unwrap();
+        assert_eq!(args.proxy.proxy_type, ProxyType::Socks5);
+        assert!(args.proxy.credentials.is_some());
+        // Verify +info is encoded in the SOCKS5 username
+        let creds = args.proxy.credentials.as_ref().unwrap();
+        assert!(
+            creds.username.starts_with("+info:"),
+            "SOCKS5 +info not encoded: got '{}'",
+            creds.username
+        );
+        assert!(creds.username.contains("com.test"));
+        assert!(creds.username.contains("99"));
+    }
+
+    #[test]
+    fn socks5_info_overrides_explicit_auth() {
+        let json = r#"{
+            "proxy": {"proxy_type":"socks5","address":"127.0.0.1:1080","auth":{"username":"manual","password":"pw"}},
+            "socks5_info": {"uid": 42}
+        }"#;
+        let cfg = parse_config(json).unwrap();
+        let args = build_args(&cfg, 1).unwrap();
+        let creds = args.proxy.credentials.unwrap();
+        assert!(
+            creds.username.starts_with("+info:"),
+            "socks5_info should override explicit auth, got '{}'",
+            creds.username
+        );
+    }
+
+    #[test]
+    fn http_proxy_ignores_socks5_info() {
+        let json = r#"{
+            "proxy": {"proxy_type":"http","address":"127.0.0.1:8080"},
+            "socks5_info": {"uid": 42}
+        }"#;
+        let cfg = parse_config(json).unwrap();
+        let args = build_args(&cfg, 1).unwrap();
+        // HTTP proxy should not have +info credentials
+        assert!(args.proxy.credentials.is_none());
     }
 }

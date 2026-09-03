@@ -1,0 +1,1339 @@
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/build.rs:97:
+
+ fn get_git_hash() -> std::io::Result<String> {
+     use std::process::Command;
+-    let git_hash = Command::new("git").args(["rev-parse", "--short", "HEAD"]).output()?.stdout;
+-    let git_hash = String::from_utf8(git_hash).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
++    let git_hash = Command::new("git")
++        .args(["rev-parse", "--short", "HEAD"])
++        .output()?
++        .stdout;
++    let git_hash = String::from_utf8(git_hash)
++        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+     Ok(git_hash)
+ }
+
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/android.rs:26:
+ ) -> jint {
+     env.with_env(|env: &mut Env| -> Result<jint> {
+         let cli_args = get_java_string(env, &cli_args)?;
+-        let tokens = shlex::split(&cli_args).ok_or_else(|| Error::from("Failed to split CLI args"))?;
++        let tokens =
++            shlex::split(&cli_args).ok_or_else(|| Error::from("Failed to split CLI args"))?;
+         let tokens_clone = tokens.clone();
+-        let args = <Args as ::clap::Parser>::try_parse_from(tokens).map_err(|err| Error::from(format!("Parse CLI args: {err}")))?;
++        let args = <Args as ::clap::Parser>::try_parse_from(tokens)
++            .map_err(|err| Error::from(format!("Parse CLI args: {err}")))?;
+
+         let filter_str = format!("off,tun2proxy={}", args.verbosity);
+-        let filter = android_logger::FilterBuilder::new().parse(&filter_str).build();
++        let filter = android_logger::FilterBuilder::new()
++            .parse(&filter_str)
++            .build();
+         android_logger::init_once(
+             android_logger::Config::default()
+                 .with_tag("tun2proxy")
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/android.rs:39:
+                 .with_filter(filter),
+         );
+
+-        if !tokens_clone
+-            .iter()
+-            .any(|token| token == "--dns" || token.starts_with("--dns=") || token == "-d" || token.starts_with("-d"))
+-        {
++        if !tokens_clone.iter().any(|token| {
++            token == "--dns"
++                || token.starts_with("--dns=")
++                || token == "-d"
++                || token.starts_with("-d")
++        }) {
+             log::error!("--dns is required for Android");
+             return Err(Error::from("--dns is required for Android"));
+         }
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/android.rs:62:
+ ///
+ /// Shutdown tun2proxy
+ #[unsafe(no_mangle)]
+-pub unsafe extern "C" fn Java_com_github_shadowsocks_bg_Tun2proxy_stop(_env: EnvUnowned<'_>, _: JClass<'_>) -> jint {
++pub unsafe extern "C" fn Java_com_github_shadowsocks_bg_Tun2proxy_stop(
++    _env: EnvUnowned<'_>,
++    _: JClass<'_>,
++) -> jint {
+     crate::general_api::tun2proxy_stop_internal()
+ }
+
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/args.rs:11:
+ #[macro_export]
+ macro_rules! version_info {
+     () => {
+-        concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), " ", env!("BUILD_TIME"), ")")
++        concat!(
++            env!("CARGO_PKG_VERSION"),
++            " (",
++            env!("GIT_HASH"),
++            " ",
++            env!("BUILD_TIME"),
++            ")"
++        )
+     };
+ }
+
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/args.rs:45:
+     /// Set whether to close the received raw file descriptor on drop or not.
+     /// This setting is dependent on [tun_fd].
+     #[cfg(unix)]
+-    #[arg(long, value_name = "true or false", conflicts_with = "tun", requires = "tun_fd")]
++    #[arg(
++        long,
++        value_name = "true or false",
++        conflicts_with = "tun",
++        requires = "tun_fd"
++    )]
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub close_fd_on_drop: Option<bool>,
+
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/args.rs:87:
+     pub setup: bool,
+
+     /// DNS handling strategy
+-    #[arg(short, long, value_name = "strategy", value_enum, default_value = "direct")]
++    #[arg(
++        short,
++        long,
++        value_name = "strategy",
++        value_enum,
++        default_value = "direct"
++    )]
+     pub dns: ArgDns,
+
+     /// DNS resolver address
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/args.rs:222:
+         let args = <Self as ::clap::Parser>::parse();
+         #[cfg(target_os = "linux")]
+         if !args.setup && args.tun.is_none() {
+-            eprintln!("Missing required argument, '--tun' must present when '--setup' is not used.");
++            eprintln!(
++                "Missing required argument, '--tun' must present when '--setup' is not used."
++            );
+             std::process::exit(-1);
+         }
+         args
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/args.rs:294:
+ }
+
+ #[repr(C)]
+-#[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
++#[derive(
++    Default,
++    Debug,
++    Copy,
++    Clone,
++    PartialEq,
++    Eq,
++    PartialOrd,
++    Ord,
++    clap::ValueEnum,
++    serde::Serialize,
++    serde::Deserialize,
++)]
+ pub enum ArgVerbosity {
+     Off = 0,
+     Error,
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/args.rs:364:
+ /// - OverTcp: Use TCP to send DNS queries to the DNS server
+ /// - Direct: Do not handle DNS by relying on DNS server bypassing
+ #[repr(C)]
+-#[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
++#[derive(
++    Default,
++    Debug,
++    Copy,
++    Clone,
++    PartialEq,
++    Eq,
++    PartialOrd,
++    Ord,
++    clap::ValueEnum,
++    serde::Serialize,
++    serde::Deserialize,
++)]
+ pub enum ArgDns {
+     Virtual = 0,
+     OverTcp,
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/args.rs:437:
+         let port = url.port_or_known_default().ok_or(Error::from(&e))?;
+
+         let e2 = format!("`{host}` does not resolve to a usable IP address");
+-        let addr = (host, port).to_socket_addrs()?.next().ok_or(Error::from(&e2))?;
++        let addr = (host, port)
++            .to_socket_addrs()?
++            .next()
++            .ok_or(Error::from(&e2))?;
+
+         let credentials = if url.username() == "" && url.password().is_none() {
+             None
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/args.rs:459:
+ }
+
+ #[repr(C)]
+-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default, serde::Serialize, serde::Deserialize)]
++#[derive(
++    Copy,
++    Clone,
++    PartialEq,
++    Eq,
++    PartialOrd,
++    Ord,
++    Debug,
++    Default,
++    serde::Serialize,
++    serde::Deserialize,
++)]
+ pub enum ProxyType {
+     Http = 0,
+     Socks4,
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/dns.rs:7:
+ };
+ use std::{net::IpAddr, str::FromStr};
+
+-pub fn build_dns_response(mut request: Message, domain: &str, ip: IpAddr, ttl: u32) -> Result<Message, String> {
++pub fn build_dns_response(
++    mut request: Message,
++    domain: &str,
++    ip: IpAddr,
++    ttl: u32,
++) -> Result<Message, String> {
+     let name = Name::from_str(domain).map_err(|e| e.to_string())?;
+     let record = match ip {
+         IpAddr::V4(ip) => Record::from_rdata(name.clone(), ttl, RData::A(A(ip))),
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/dns.rs:23:
+ }
+
+ pub fn remove_ipv6_entries(message: &mut Message) {
+-    message.answers.retain(|answer| !matches!(&answer.data, RData::AAAA(_)));
++    message
++        .answers
++        .retain(|answer| !matches!(&answer.data, RData::AAAA(_)));
+ }
+
+ pub fn extract_ipaddr_from_dns_message(message: &Message) -> Result<IpAddr, String> {
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/dump_logger.rs:18:
+ }
+
+ #[derive(Clone)]
+-pub struct DumpCallback(Option<unsafe extern "C" fn(ArgVerbosity, *const c_char, *mut c_void)>, *mut c_void);
++pub struct DumpCallback(
++    Option<unsafe extern "C" fn(ArgVerbosity, *const c_char, *mut c_void)>,
++    *mut c_void,
++);
+
+ impl DumpCallback {
+     unsafe fn call(self, dump_level: ArgVerbosity, info: *const c_char) {
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/dump_logger.rs:42:
+     fn log(&self, record: &log::Record) {
+         if self.enabled(record.metadata()) {
+             let current_crate_name = env!("CARGO_CRATE_NAME");
+-            if record.module_path().unwrap_or("").starts_with(current_crate_name) {
++            if record
++                .module_path()
++                .unwrap_or("")
++                .starts_with(current_crate_name)
++            {
+                 self.do_dump_log(record);
+             }
+         }
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/general_api.rs:9:
+ /// - tun_mtu: The MTU of the TUN device, e.g. 1500
+ /// - packet_information: Whether exists packet information in packet from TUN device
+ #[unsafe(no_mangle)]
+-pub unsafe extern "C" fn tun2proxy_run_with_cli_args(cli_args: *const c_char, tun_mtu: c_ushort, packet_information: bool) -> c_int {
++pub unsafe extern "C" fn tun2proxy_run_with_cli_args(
++    cli_args: *const c_char,
++    tun_mtu: c_ushort,
++    packet_information: bool,
++) -> c_int {
+     let Ok(cli_args) = unsafe { std::ffi::CStr::from_ptr(cli_args) }.to_str() else {
+         log::error!("Failed to convert CLI arguments to string");
+         return -5;
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/general_api.rs:22:
+     general_run_for_api(args, tun_mtu, packet_information)
+ }
+
+-static TUN_QUIT: std::sync::Mutex<Option<tokio_util::sync::CancellationToken>> = std::sync::Mutex::new(None);
++static TUN_QUIT: std::sync::Mutex<Option<tokio_util::sync::CancellationToken>> =
++    std::sync::Mutex::new(None);
+
+ pub(crate) fn tun2proxy_stop_internal() -> c_int {
+     if let Ok(mut lock) = TUN_QUIT.lock() {
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/general_api.rs:52:
+         return -2;
+     }
+
+-    let Ok(rt) = tokio::runtime::Builder::new_multi_thread().enable_all().build() else {
++    let Ok(rt) = tokio::runtime::Builder::new_multi_thread()
++        .enable_all()
++        .build()
++    else {
+         log::error!("failed to create tokio runtime with");
+         return -3;
+     };
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/general_api.rs:101:
+     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+     {
+         use tproxy_config::{TUN_GATEWAY, TUN_IPV4, TUN_NETMASK};
+-        tun_config.address(TUN_IPV4).netmask(TUN_NETMASK).mtu(tun_mtu).up();
++        tun_config
++            .address(TUN_IPV4)
++            .netmask(TUN_NETMASK)
++            .mtu(tun_mtu)
++            .up();
+         tun_config.destination(TUN_GATEWAY);
+     }
+
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/general_api.rs:186:
+         }
+     }
+
+-    let join_handle = tokio::spawn(crate::run(device, tun_mtu, args.clone(), shutdown_token.clone()));
++    let join_handle = tokio::spawn(crate::run(
++        device,
++        tun_mtu,
++        args.clone(),
++        shutdown_token.clone(),
++    ));
+
+     match join_handle.await? {
+         Ok(sessions) => {
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/general_api.rs:195:
+
+             let max_sessions = args.max_sessions;
+             if args.exit_on_fatal_error && sessions >= max_sessions {
+-                let info = format!("Forced exit due to max sessions reached ({sessions}/{max_sessions})");
++                let info =
++                    format!("Forced exit due to max sessions reached ({sessions}/{max_sessions})");
+                 return Err(std::io::Error::other(info));
+             }
+             Ok(sessions)
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/http.rs:77:
+ /// (for example `Basic` without a `realm=`, or `NTLM`) return `false` instead
+ /// of panicking on an out-of-bounds index.
+ fn is_digest_scheme(auth_data: &[u8]) -> bool {
+-    auth_data.get(..6).is_some_and(|p| p.eq_ignore_ascii_case(b"digest"))
++    auth_data
++        .get(..6)
++        .is_some_and(|p| p.eq_ignore_ascii_case(b"digest"))
+ }
+
+ impl HttpConnection {
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/http.rs:161:
+                     .respond(&context)
+                     .map_err(|e| format!("Digest auth response failed: {e}"))?;
+
+-                self.server_outbuf
+-                    .extend(format!("{}: {}\r\n", PROXY_AUTHORIZATION, response.to_header_string()).as_bytes());
++                self.server_outbuf.extend(
++                    format!(
++                        "{}: {}\r\n",
++                        PROXY_AUTHORIZATION,
++                        response.to_header_string()
++                    )
++                    .as_bytes(),
++                );
+             }
+             AuthenticationScheme::Basic => {
+-                self.server_outbuf
+-                    .extend(format!("{PROXY_AUTHORIZATION}: {}\r\n", basic_auth_header_value(credentials)).as_bytes());
++                self.server_outbuf.extend(
++                    format!(
++                        "{PROXY_AUTHORIZATION}: {}\r\n",
++                        basic_auth_header_value(credentials)
++                    )
++                    .as_bytes(),
++                );
+             }
+             AuthenticationScheme::None => {}
+         }
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/http.rs:215:
+                     httparse::Status::Complete(len) => len,
+                     httparse::Status::Partial => return Ok(()),
+                 };
+-                let status_code = res.code.ok_or("Malformed HTTP proxy response: missing status code")?;
+-                let version = res.version.ok_or("Malformed HTTP proxy response: missing HTTP version")?;
++                let status_code = res
++                    .code
++                    .ok_or("Malformed HTTP proxy response: missing status code")?;
++                let version = res
++                    .version
++                    .ok_or("Malformed HTTP proxy response: missing HTTP version")?;
+
+                 if status_code == 200 {
+                     // Connection successful
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/http.rs:231:
+                     let e = format!(
+                         "Expected success status code. Server replied with {} [Reason: {}].",
+                         status_code,
+-                        res.reason.ok_or("Malformed HTTP proxy response: missing reason phrase")?
++                        res.reason
++                            .ok_or("Malformed HTTP proxy response: missing reason phrase")?
+                     );
+                     return Err(e.into());
+                 }
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/http.rs:246:
+                 // We accept anything that does not match the `Digest` scheme as
+                 // "auth method is not supported" and surface a clean error.
+                 if !is_digest_scheme(auth_data) {
+-                    return Err("Proxy authentication method is not supported; only Digest is supported".into());
++                    return Err(
++                        "Proxy authentication method is not supported; only Digest is supported"
++                            .into(),
++                    );
+                 }
+
+                 // Analize challenge params
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/http.rs:447:
+             return Err(Error::from("Protocol not supported by HTTP proxy").into());
+         }
+         Ok(Arc::new(Mutex::new(
+-            HttpConnection::new(self.server, info, domain_name, self.credentials.clone(), self.digest_state.clone()).await?,
++            HttpConnection::new(
++                self.server,
++                info,
++                domain_name,
++                self.credentials.clone(),
++                self.digest_state.clone(),
++            )
++            .await?,
+         )))
+     }
+ }
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/http.rs:486:
+         let header = basic_auth_header_value(&creds);
+
+         let prefix = "Basic ";
+-        assert!(header.starts_with(prefix), "{header:?} missing `Basic ` prefix");
++        assert!(
++            header.starts_with(prefix),
++            "{header:?} missing `Basic ` prefix"
++        );
+         let b64 = &header[prefix.len()..];
+         let decoded = base64easy::decode(b64, base64easy::EngineKind::Standard).unwrap();
+         assert_eq!(decoded, b"alice-foo:p_word");
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/http.rs:493:
+
+         // And it must NOT match what `UserKey::Display` would have produced.
+         let regressed = base64easy::encode(creds.to_string(), base64easy::EngineKind::Standard);
+-        assert_ne!(b64, regressed, "basic-auth still using percent-encoded credentials");
++        assert_ne!(
++            b64, regressed,
++            "basic-auth still using percent-encoded credentials"
++        );
+     }
+
+     /// Regression test for the `auth_data[..6]` panic. Drives the same
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/http.rs:506:
+     #[test]
+     fn is_digest_scheme_short_values_do_not_panic() {
+         for value in [b"Basic".as_slice(), b"NTLM", b"x", b""] {
+-            assert!(!is_digest_scheme(value), "value {value:?} mis-classified as digest");
++            assert!(
++                !is_digest_scheme(value),
++                "value {value:?} mis-classified as digest"
++            );
+         }
+         // Sanity: an actual digest header is still recognized.
+         assert!(is_digest_scheme(b"Digest realm=\"x\", nonce=\"y\""));
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/lib.rs:130:
+     }
+ }
+
+-async fn create_tcp_stream(socket_queue: &Option<Arc<SocketQueue>>, peer: SocketAddr) -> std::io::Result<TcpStream> {
++async fn create_tcp_stream(
++    socket_queue: &Option<Arc<SocketQueue>>,
++    peer: SocketAddr,
++) -> std::io::Result<TcpStream> {
+     match &socket_queue {
+         None => TcpStream::connect(peer).await,
+         Some(queue) => queue.recv_tcp(peer.ip().into()).await?.connect(peer).await,
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/lib.rs:137:
+     }
+ }
+
+-async fn create_udp_stream(socket_queue: &Option<Arc<SocketQueue>>, peer: SocketAddr) -> std::io::Result<UdpStream> {
++async fn create_udp_stream(
++    socket_queue: &Option<Arc<SocketQueue>>,
++    peer: SocketAddr,
++) -> std::io::Result<UdpStream> {
+     match &socket_queue {
+         None => {
+             let bind_addr = match peer {
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/lib.rs:164:
+ /// * `shutdown_token` - The token to exit the server
+ /// # Returns
+ /// * The number of sessions while exiting
+-pub async fn run<D>(device: D, mtu: u16, args: Args, shutdown_token: CancellationToken) -> crate::Result<usize>
++pub async fn run<D>(
++    device: D,
++    mtu: u16,
++    args: Args,
++    shutdown_token: CancellationToken,
++) -> crate::Result<usize>
+ where
+     D: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+ {
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/lib.rs:171:
+     log::info!("{} {} starting...", env!("CARGO_PKG_NAME"), version_info!());
+-    log::info!("Proxy {} server: {}", args.proxy.proxy_type, args.proxy.addr);
++    log::info!(
++        "Proxy {} server: {}",
++        args.proxy.proxy_type,
++        args.proxy.addr
++    );
+
+     let server_addr = args.proxy.addr;
+     let key = args.proxy.credentials.clone();
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/lib.rs:185:
+     let socket_queue = match args.socket_transfer_fd {
+         None => None,
+         Some(fd) => {
+-            use crate::socket_transfer::{reconstruct_socket, reconstruct_transfer_socket, request_sockets};
++            use crate::socket_transfer::{
++                reconstruct_socket, reconstruct_transfer_socket, request_sockets,
++            };
+             use tokio::sync::mpsc::channel;
+
+             let fd = reconstruct_socket(fd)?;
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/lib.rs:200:
+                     let (tx, rx) = channel(SOCKETS_PER_REQUEST);
+                     tokio::spawn(async move {
+                         loop {
+-                            let sockets =
+-                                match request_sockets(socket.lock().await, SocketDomain::$domain, SOCKETS_PER_REQUEST as u32).await {
+-                                    Ok(sockets) => sockets,
+-                                    Err(err) => {
+-                                        log::warn!("Socket allocation request failed: {err}");
+-                                        continue;
+-                                    }
+-                                };
++                            let sockets = match request_sockets(
++                                socket.lock().await,
++                                SocketDomain::$domain,
++                                SOCKETS_PER_REQUEST as u32,
++                            )
++                            .await
++                            {
++                                Ok(sockets) => sockets,
++                                Err(err) => {
++                                    log::warn!("Socket allocation request failed: {err}");
++                                    continue;
++                                }
++                            };
+                             for s in sockets {
+                                 if let Err(_) = tx.send(s).await {
+                                     return;
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/lib.rs:258:
+         let client = Arc::new(UdpGwClient::new(
+             mtu,
+             args.udpgw_connections.unwrap_or(UDPGW_MAX_CONNECTIONS),
+-            args.udpgw_keepalive.map(Duration::from_secs).unwrap_or(UDPGW_KEEPALIVE_TIME),
++            args.udpgw_keepalive
++                .map(Duration::from_secs)
++                .unwrap_or(UDPGW_KEEPALIVE_TIME),
+             args.udp_timeout,
+             addr,
+         ));
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/lib.rs:298:
+                     log::warn!("Too many sessions that over {max_sessions}, dropping new session");
+                     continue;
+                 }
+-                log::trace!("Session count {}", task_count.fetch_add(1, Relaxed).saturating_add(1));
++                log::trace!(
++                    "Session count {}",
++                    task_count.fetch_add(1, Relaxed).saturating_add(1)
++                );
+                 let info = SessionInfo::new(tcp.local_addr(), tcp.peer_addr(), IpProtocol::Tcp);
+                 let domain_name = if let Some(virtual_dns) = &virtual_dns {
+                     let mut virtual_dns = virtual_dns.lock().await;
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/lib.rs:313:
+                     if let Err(err) = handle_tcp_session(tcp, proxy_handler, socket_queue).await {
+                         log::error!("{info} error \"{err}\"");
+                     }
+-                    log::trace!("Session count {}", task_count.fetch_sub(1, Relaxed).saturating_sub(1));
++                    log::trace!(
++                        "Session count {}",
++                        task_count.fetch_sub(1, Relaxed).saturating_sub(1)
++                    );
+                 });
+             }
+             IpStackStream::Udp(udp) => {
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/lib.rs:325:
+                     log::warn!("Too many sessions that over {max_sessions}, dropping new session");
+                     continue;
+                 }
+-                log::trace!("Session count {}", task_count.fetch_add(1, Relaxed).saturating_add(1));
++                log::trace!(
++                    "Session count {}",
++                    task_count.fetch_add(1, Relaxed).saturating_add(1)
++                );
+                 let mut info = SessionInfo::new(udp.local_addr(), udp.peer_addr(), IpProtocol::Udp);
+                 if info.dst.port() == DNS_PORT {
+                     if is_private_ip(info.dst.ip()) {
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/lib.rs:336:
+                         let proxy_handler = mgr.new_proxy_handler(info, None, false).await?;
+                         let socket_queue = socket_queue.clone();
+                         tokio::spawn(async move {
+-                            if let Err(err) = handle_dns_over_tcp_session(udp, proxy_handler, socket_queue, ipv6_enabled).await {
++                            if let Err(err) = handle_dns_over_tcp_session(
++                                udp,
++                                proxy_handler,
++                                socket_queue,
++                                ipv6_enabled,
++                            )
++                            .await
++                            {
+                                 log::error!("{info} error \"{err}\"");
+                             }
+-                            log::trace!("Session count {}", task_count.fetch_sub(1, Relaxed).saturating_sub(1));
++                            log::trace!(
++                                "Session count {}",
++                                task_count.fetch_sub(1, Relaxed).saturating_sub(1)
++                            );
+                         });
+                         continue;
+                     }
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/lib.rs:346:
+                     if args.dns == ArgDns::Virtual {
+                         tokio::spawn(async move {
+                             if let Some(virtual_dns) = virtual_dns {
+-                                if let Err(err) = handle_virtual_dns_session(udp, virtual_dns).await {
++                                if let Err(err) = handle_virtual_dns_session(udp, virtual_dns).await
++                                {
+                                     log::error!("{info} error \"{err}\"");
+                                 }
+                             }
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/lib.rs:353:
+-                            log::trace!("Session count {}", task_count.fetch_sub(1, Relaxed).saturating_sub(1));
++                            log::trace!(
++                                "Session count {}",
++                                task_count.fetch_sub(1, Relaxed).saturating_sub(1)
++                            );
+                         });
+                         continue;
+                     }
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/lib.rs:366:
+                 #[cfg(feature = "udpgw")]
+                 if let Some(udpgw) = udpgw_client.clone() {
+                     let tcp_src = match udp.peer_addr() {
+-                        SocketAddr::V4(_) => SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)),
+-                        SocketAddr::V6(_) => SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0)),
++                        SocketAddr::V4(_) => {
++                            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
++                        }
++                        SocketAddr::V6(_) => {
++                            SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0))
++                        }
+                     };
+-                    let tcpinfo = SessionInfo::new(tcp_src, udpgw.get_udpgw_server_addr(), IpProtocol::Tcp);
++                    let tcpinfo =
++                        SessionInfo::new(tcp_src, udpgw.get_udpgw_server_addr(), IpProtocol::Tcp);
+                     let proxy_handler = mgr.new_proxy_handler(tcpinfo, None, false).await?;
+                     let queue = socket_queue.clone();
+                     tokio::spawn(async move {
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/lib.rs:376:
+                         let dst = info.dst; // real UDP destination address
+                         let dst_addr = match domain_name {
+-                            Some(ref d) => socks5_impl::protocol::Address::from((d.clone(), dst.port())),
++                            Some(ref d) => {
++                                socks5_impl::protocol::Address::from((d.clone(), dst.port()))
++                            }
+                             None => dst.into(),
+                         };
+-                        if let Err(e) = handle_udp_gateway_session(udp, udpgw, &dst_addr, proxy_handler, queue, ipv6_enabled).await {
++                        if let Err(e) = handle_udp_gateway_session(
++                            udp,
++                            udpgw,
++                            &dst_addr,
++                            proxy_handler,
++                            queue,
++                            ipv6_enabled,
++                        )
++                        .await
++                        {
+                             log::info!("Ending {info} with \"{e}\"");
+                         }
+-                        log::trace!("Session count {}", task_count.fetch_sub(1, Relaxed).saturating_sub(1));
++                        log::trace!(
++                            "Session count {}",
++                            task_count.fetch_sub(1, Relaxed).saturating_sub(1)
++                        );
+                     });
+                     continue;
+                 }
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/lib.rs:390:
+                         let socket_queue = socket_queue.clone();
+                         tokio::spawn(async move {
+                             let ty = args.proxy.proxy_type;
+-                            if let Err(err) = handle_udp_associate_session(udp, ty, proxy_handler, socket_queue, ipv6_enabled).await {
++                            if let Err(err) = handle_udp_associate_session(
++                                udp,
++                                ty,
++                                proxy_handler,
++                                socket_queue,
++                                ipv6_enabled,
++                            )
++                            .await
++                            {
+                                 log::info!("Ending {info} with \"{err}\"");
+                             }
+-                            log::trace!("Session count {}", task_count.fetch_sub(1, Relaxed).saturating_sub(1));
++                            log::trace!(
++                                "Session count {}",
++                                task_count.fetch_sub(1, Relaxed).saturating_sub(1)
++                            );
+                         });
+                     }
+                     Err(e) => {
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/lib.rs:403:
+             }
+             IpStackStream::UnknownTransport(u) => {
+                 let len = u.payload().len();
+-                log::info!("#0 unhandled transport - Ip Protocol {:?}, length {}", u.ip_protocol(), len);
++                log::info!(
++                    "#0 unhandled transport - Ip Protocol {:?}, length {}",
++                    u.ip_protocol(),
++                    len
++                );
+                 continue;
+             }
+             IpStackStream::UnknownNetwork(pkt) => {
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/lib.rs:415:
+     Ok(task_count.load(Relaxed))
+ }
+
+-async fn handle_virtual_dns_session(mut udp: IpStackUdpStream, dns: Arc<Mutex<VirtualDns>>) -> crate::Result<()> {
++async fn handle_virtual_dns_session(
++    mut udp: IpStackUdpStream,
++    dns: Arc<Mutex<VirtualDns>>,
++) -> crate::Result<()> {
+     let mut buf = [0_u8; 4096];
+     loop {
+         let len = match udp.read(&mut buf).await {
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/lib.rs:436:
+     Ok(())
+ }
+
+-async fn copy_and_record_traffic<R, W>(reader: &mut R, writer: &mut W, is_tx: bool) -> tokio::io::Result<u64>
++async fn copy_and_record_traffic<R, W>(
++    reader: &mut R,
++    writer: &mut W,
++    is_tx: bool,
++) -> tokio::io::Result<u64>
+ where
+     R: tokio::io::AsyncRead + Unpin + ?Sized,
+     W: tokio::io::AsyncWrite + Unpin + ?Sized,
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/lib.rs:526:
+                 }
+             }
+             None => {
+-                let mut tcp_server_stream = create_tcp_stream(&socket_queue, proxy_server_addr).await?;
++                let mut tcp_server_stream =
++                    create_tcp_stream(&socket_queue, proxy_server_addr).await?;
+                 if let Err(e) = handle_proxy_session(&mut tcp_server_stream, proxy_handler).await {
+                     return Err(format!("udpgw connection error: {e}").into());
+                 }
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/lib.rs:538:
+     let tcp_local_addr = stream.local_addr();
+     let sn = stream.serial_number();
+
+-    log::info!("[UdpGw] Beginning stream {} {} -> {}", sn, tcp_local_addr, udp_dst);
++    log::info!(
++        "[UdpGw] Beginning stream {} {} -> {}",
++        sn,
++        tcp_local_addr,
++        udp_dst
++    );
+
+     let Some(mut reader) = stream.get_reader() else {
+         return Err("get reader failed".into());
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/lib.rs:619:
+     }
+
+     if !stream.is_closed() {
+-        udpgw_client.store_server_connection_full(stream, reader, writer).await;
++        udpgw_client
++            .store_server_connection_full(stream, reader, writer)
++            .await;
+     }
+
+     Ok(())
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/lib.rs:821:
+ /// This function is used to handle the business logic of tun2proxy and SOCKS5 server.
+ /// When handling UDP proxy, the return value UDP associate IP address is the result of this business logic.
+ /// However, when handling TCP business logic, the return value Ok(None) is meaningless, just indicating that the operation was successful.
+-async fn handle_proxy_session(server: &mut TcpStream, proxy_handler: Arc<Mutex<dyn ProxyHandler>>) -> crate::Result<Option<SocketAddr>> {
++async fn handle_proxy_session(
++    server: &mut TcpStream,
++    proxy_handler: Arc<Mutex<dyn ProxyHandler>>,
++) -> crate::Result<Option<SocketAddr>> {
+     let mut launched = false;
+     let mut proxy_handler = proxy_handler.lock().await;
+     let dir = OutgoingDirection::ToServer;
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/session_info.rs:42:
+ impl SessionInfo {
+     pub fn new(src: SocketAddr, dst: SocketAddr, protocol: IpProtocol) -> Self {
+         let id = SESSION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+-        Self { src, dst, protocol, id }
++        Self {
++            src,
++            dst,
++            protocol,
++            id,
++        }
+     }
+ }
+
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/session_info.rs:49:
+ impl std::fmt::Display for SessionInfo {
+     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+-        write!(f, "#{} {} {} -> {}", self.id, self.protocol, self.src, self.dst)
++        write!(
++            f,
++            "#{} {} {} -> {}",
++            self.id, self.protocol, self.src, self.dst
++        )
+     }
+ }
+
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/socket_transfer.rs:4:
+ use nix::{
+     errno::Errno,
+     fcntl::{self, FdFlag},
+-    sys::socket::{ControlMessage, ControlMessageOwned, MsgFlags, SockType, cmsg_space, getsockopt, recvmsg, sendmsg, sockopt},
++    sys::socket::{
++        ControlMessage, ControlMessageOwned, MsgFlags, SockType, cmsg_space, getsockopt, recvmsg,
++        sendmsg, sockopt,
++    },
+ };
+ use serde::{Deserialize, Serialize};
+ use std::{
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/socket_transfer.rs:16:
+
+ const REQUEST_BUFFER_SIZE: usize = 64;
+
+-#[derive(bincode::Encode, bincode::Decode, Hash, Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
++#[derive(
++    bincode::Encode,
++    bincode::Decode,
++    Hash,
++    Copy,
++    Clone,
++    Eq,
++    PartialEq,
++    Debug,
++    Serialize,
++    Deserialize,
++)]
+ struct Request {
+     protocol: SocketProtocol,
+     domain: SocketDomain,
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/socket_transfer.rs:23:
+     number: u32,
+ }
+
+-#[derive(bincode::Encode, bincode::Decode, PartialEq, Debug, Hash, Copy, Clone, Eq, Serialize, Deserialize)]
++#[derive(
++    bincode::Encode,
++    bincode::Decode,
++    PartialEq,
++    Debug,
++    Hash,
++    Copy,
++    Clone,
++    Eq,
++    Serialize,
++    Deserialize,
++)]
+ enum Response {
+     Ok,
+ }
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/socket_transfer.rs:127:
+ /// Send [`Request`] to `socket` and return received [`TransferableSocket`]s
+ ///
+ /// Panics if called outside of tokio runtime
+-pub async fn request_sockets<S, T>(mut socket: S, domain: SocketDomain, number: u32) -> error::Result<Vec<T>>
++pub async fn request_sockets<S, T>(
++    mut socket: S,
++    domain: SocketDomain,
++    number: u32,
++) -> error::Result<Vec<T>>
+ where
+     S: DerefMut<Target = UnixDatagram>,
+     T: TransferableSocket,
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/socket_transfer.rs:158:
+         let mut buf = [0_u8; REQUEST_BUFFER_SIZE];
+         let mut iov = [IoSliceMut::new(&mut buf[..])];
+         let mut cmsg = vec![0; cmsg_space::<RawFd>() * number as usize];
+-        let msg = recvmsg::<()>(socket.as_fd().as_raw_fd(), &mut iov, Some(&mut cmsg), MsgFlags::empty());
++        let msg = recvmsg::<()>(
++            socket.as_fd().as_raw_fd(),
++            &mut iov,
++            Some(&mut cmsg),
++            MsgFlags::empty(),
++        );
+
+         let msg = match msg {
+             Err(Errno::EAGAIN) => continue,
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/socket_transfer.rs:196:
+ /// Process [`Request`]s received from `socket`
+ ///
+ /// Panics if called outside of tokio runtime
+-pub async fn process_socket_requests(socket: &UnixDatagram, shutdown_token: tokio_util::sync::CancellationToken) -> error::Result<()> {
++pub async fn process_socket_requests(
++    socket: &UnixDatagram,
++    shutdown_token: tokio_util::sync::CancellationToken,
++) -> error::Result<()> {
+     log::info!("socket_transfer: process_socket_requests started");
+     loop {
+         let mut buf = [0_u8; REQUEST_BUFFER_SIZE];
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/socks.rs:4:
+     proxy_handler::{ProxyHandler, ProxyHandlerManager},
+     session_info::SessionInfo,
+ };
+-use socks5_impl::protocol::{self, Address, AuthMethod, StreamOperation, UserKey, Version, handshake, password_method};
++use socks5_impl::protocol::{
++    self, Address, AuthMethod, StreamOperation, UserKey, Version, handshake, password_method,
++};
+ use std::{collections::VecDeque, net::SocketAddr, sync::Arc};
+ use tokio::sync::Mutex;
+
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/socks.rs:63:
+
+     fn send_client_hello_socks4(&mut self) -> Result<(), Error> {
+         let credentials = &self.credentials;
+-        self.server_outbuf.extend(&[self.version as u8, protocol::Command::Connect.into()]);
+-        self.server_outbuf.extend(self.info.dst.port().to_be_bytes());
++        self.server_outbuf
++            .extend(&[self.version as u8, protocol::Command::Connect.into()]);
++        self.server_outbuf
++            .extend(self.info.dst.port().to_be_bytes());
+         let mut ip_vec = Vec::<u8>::new();
+         let mut name_vec = Vec::<u8>::new();
+         match &self.info.dst {
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/socks.rs:96:
+
+     fn send_client_hello_socks5(&mut self) -> Result<(), Error> {
+         let credentials = &self.credentials;
+-        let mut methods = vec![AuthMethod::NoAuth, AuthMethod::from(4_u8), AuthMethod::from(100_u8)];
++        let mut methods = vec![
++            AuthMethod::NoAuth,
++            AuthMethod::from(4_u8),
++            AuthMethod::from(100_u8),
++        ];
+         if credentials.is_some() {
+             methods.push(AuthMethod::UserPass);
+         }
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/socks.rs:123:
+         }
+
+         if self.server_inbuf[1] != 0x5a {
+-            return Err(crate::Error::from("SOCKS4 server replied with an unexpected reply code.").into());
++            return Err(
++                crate::Error::from("SOCKS4 server replied with an unexpected reply code.").into(),
++            );
+         }
+
+         self.server_inbuf.drain(0..8);
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/socks.rs:147:
+         let auth_method = respones.method;
+
+         if auth_method != AuthMethod::NoAuth && self.credentials.is_none()
+-            || (auth_method != AuthMethod::NoAuth && auth_method != AuthMethod::UserPass) && self.credentials.is_some()
++            || (auth_method != AuthMethod::NoAuth && auth_method != AuthMethod::UserPass)
++                && self.credentials.is_some()
+         {
+-            return Err(crate::Error::from("SOCKS5 server requires an unsupported authentication method.").into());
++            return Err(crate::Error::from(
++                "SOCKS5 server requires an unsupported authentication method.",
++            )
++            .into());
+         }
+
+         self.state = if auth_method == AuthMethod::UserPass {
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/socks.rs:173:
+
+         const SESSION_INFO_MARKER: &str = "+info";
+         let username = if credentials.username.ends_with(SESSION_INFO_MARKER) {
+-            let base_username = &credentials.username[..credentials.username.len() - SESSION_INFO_MARKER.len()];
++            let base_username =
++                &credentials.username[..credentials.username.len() - SESSION_INFO_MARKER.len()];
+             let proto = match self.command {
+                 protocol::Command::Connect => "tcp",
+                 protocol::Command::UdpAssociate => "udp",
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/socks.rs:180:
+                 _ => "unknown",
+             };
+-            format!("{}|{}|{}|{}", base_username, proto, self.info.src.ip(), self.info.src.port())
++            format!(
++                "{}|{}|{}|{}",
++                base_username,
++                proto,
++                self.info.src.ip(),
++                self.info.src.port()
++            )
+         } else {
+             credentials.username.clone()
+         };
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/socks.rs:204:
+         let response = response?;
+         self.server_inbuf.drain(0..response.len());
+         if response.status != password_method::Status::Succeeded {
+-            return Err(crate::Error::from(format!("SOCKS authentication failed: {:?}", response.status)).into());
++            return Err(crate::Error::from(format!(
++                "SOCKS authentication failed: {:?}",
++                response.status
++            ))
++            .into());
+         }
+         self.state = SocksState::SendRequest;
+         self.state_change()
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/socks.rs:236:
+         let response = response?;
+         self.server_inbuf.drain(0..response.len());
+         if response.reply != protocol::Reply::Succeeded {
+-            return Err(crate::Error::from(format!("SOCKS connection failed: {}", response.reply)).into());
++            return Err(
++                crate::Error::from(format!("SOCKS connection failed: {}", response.reply)).into(),
++            );
+         }
+         if self.command == protocol::Command::UdpAssociate {
+             self.udp_associate = Some(SocketAddr::try_from(&response.address)?);
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/traffic_status.rs:17:
+         log::error!("set traffic status callback failed");
+     }
+     if send_interval_secs > 0 {
+-        SEND_INTERVAL_SECS.store(send_interval_secs as u64, std::sync::atomic::Ordering::Relaxed);
++        SEND_INTERVAL_SECS.store(
++            send_interval_secs as u64,
++            std::sync::atomic::Ordering::Relaxed,
++        );
+     }
+ }
+
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/traffic_status.rs:29:
+ }
+
+ #[derive(Clone)]
+-struct TrafficStatusCallback(Option<unsafe extern "C" fn(*const TrafficStatus, *mut c_void)>, *mut c_void);
++struct TrafficStatusCallback(
++    Option<unsafe extern "C" fn(*const TrafficStatus, *mut c_void)>,
++    *mut c_void,
++);
+
+ impl TrafficStatusCallback {
+     unsafe fn call(self, info: &TrafficStatus) {
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/traffic_status.rs:42:
+ unsafe impl Send for TrafficStatusCallback {}
+ unsafe impl Sync for TrafficStatusCallback {}
+
+-static TRAFFIC_STATUS_CALLBACK: std::sync::Mutex<Option<TrafficStatusCallback>> = std::sync::Mutex::new(None);
++static TRAFFIC_STATUS_CALLBACK: std::sync::Mutex<Option<TrafficStatusCallback>> =
++    std::sync::Mutex::new(None);
+ static SEND_INTERVAL_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+-static TRAFFIC_STATUS: LazyLock<Mutex<TrafficStatus>> = LazyLock::new(|| Mutex::new(TrafficStatus::default()));
+-static TIME_STAMP: LazyLock<Mutex<std::time::Instant>> = LazyLock::new(|| Mutex::new(std::time::Instant::now()));
++static TRAFFIC_STATUS: LazyLock<Mutex<TrafficStatus>> =
++    LazyLock::new(|| Mutex::new(TrafficStatus::default()));
++static TIME_STAMP: LazyLock<Mutex<std::time::Instant>> =
++    LazyLock::new(|| Mutex::new(std::time::Instant::now()));
+
+ pub(crate) fn traffic_status_update(delta_tx: usize, delta_rx: usize) -> Result<()> {
+     {
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/traffic_status.rs:53:
+-        let is_none_or_error = TRAFFIC_STATUS_CALLBACK.lock().map(|guard| guard.is_none()).unwrap_or_else(|e| {
+-            log::error!("Failed to acquire lock: {e}");
+-            true
+-        });
++        let is_none_or_error = TRAFFIC_STATUS_CALLBACK
++            .lock()
++            .map(|guard| guard.is_none())
++            .unwrap_or_else(|e| {
++                log::error!("Failed to acquire lock: {e}");
++                true
++            });
+         if is_none_or_error {
+             return Ok(());
+         }
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/traffic_status.rs:60:
+     }
+     let traffic_status = {
+-        let mut traffic_status = TRAFFIC_STATUS.lock().map_err(|e| Error::from(e.to_string()))?;
++        let mut traffic_status = TRAFFIC_STATUS
++            .lock()
++            .map_err(|e| Error::from(e.to_string()))?;
+         traffic_status.tx += delta_tx as u64;
+         traffic_status.rx += delta_rx as u64;
+         *traffic_status
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/udpgw.rs:95:
+
+ impl std::fmt::Display for Packet {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+-        let addr = self.address.as_ref().map_or("None".to_string(), |addr| addr.to_string());
++        let addr = self
++            .address
++            .as_ref()
++            .map_or("None".to_string(), |addr| addr.to_string());
+         let len = self.data.len();
+-        write!(f, "Packet {{ {}, address: {}, payload length: {} }}", self.header, addr, len)
++        write!(
++            f,
++            "Packet {{ {}, address: {}, payload length: {} }}",
++            self.header, addr, len
++        )
+     }
+ }
+
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/udpgw.rs:141:
+ impl Packet {
+     pub fn new(header: UdpgwHeader, address: Option<Address>, data: &[u8]) -> Self {
+         let data = data.to_vec();
+-        Packet { header, address, data }
++        Packet {
++            header,
++            address,
++            data,
++        }
+     }
+
+     pub fn build_keepalive_packet(conn_id: u16) -> Self {
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/udpgw.rs:152:
+         Packet::new(UdpgwHeader::new(UdpFlag::ERR, conn_id), None, &[])
+     }
+
+-    pub fn build_packet_from_address(conn_id: u16, remote_addr: &Address, data: &[u8]) -> std::io::Result<Self> {
++    pub fn build_packet_from_address(
++        conn_id: u16,
++        remote_addr: &Address,
++        data: &[u8],
++    ) -> std::io::Result<Self> {
+         use socks5_impl::protocol::Address::{DomainAddress, SocketAddress};
+         let packet = match remote_addr {
+             SocketAddress(addr) => Packet::build_ip_packet(conn_id, *addr, data),
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/udpgw.rs:159:
+-            DomainAddress(domain, port) => Packet::build_domain_packet(conn_id, *port, domain, data)?,
++            DomainAddress(domain, port) => {
++                Packet::build_domain_packet(conn_id, *port, domain, data)?
++            }
+         };
+         Ok(packet)
+     }
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/udpgw.rs:166:
+         Packet::new(UdpgwHeader::new(UdpFlag::DATA, conn_id), Some(addr), data)
+     }
+
+-    pub fn build_domain_packet(conn_id: u16, port: u16, domain: &str, data: &[u8]) -> std::io::Result<Self> {
++    pub fn build_domain_packet(
++        conn_id: u16,
++        port: u16,
++        domain: &str,
++        data: &[u8],
++    ) -> std::io::Result<Self> {
+         if domain.len() > 255 {
+             return Err(std::io::ErrorKind::InvalidInput.into());
+         }
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/udpgw.rs:173:
+         let addr = Address::from((domain, port));
+-        Ok(Packet::new(UdpgwHeader::new(UdpFlag::DATA, conn_id), Some(addr), data))
++        Ok(Packet::new(
++            UdpgwHeader::new(UdpFlag::DATA, conn_id),
++            Some(addr),
++            data,
++        ))
+     }
+ }
+
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/udpgw.rs:210:
+     }
+
+     fn len(&self) -> usize {
+-        UDPGW_LENGTH_FIELD_SIZE + self.header.len() + self.address.as_ref().map_or(0, |addr| addr.len()) + self.data.len()
++        UDPGW_LENGTH_FIELD_SIZE
++            + self.header.len()
++            + self.address.as_ref().map_or(0, |addr| addr.len())
++            + self.data.len()
+     }
+ }
+
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/udpgw.rs:413:
+ }
+
+ impl UdpGwClient {
+-    pub fn new(udp_mtu: u16, max_connections: usize, keepalive_time: Duration, udp_timeout: u64, udpgw_server: SocketAddr) -> Self {
++    pub fn new(
++        udp_mtu: u16,
++        max_connections: usize,
++        keepalive_time: Duration,
++        udp_timeout: u64,
++        udpgw_server: SocketAddr,
++    ) -> Self {
+         let server_connections = Mutex::new(VecDeque::with_capacity(max_connections));
+         UdpGwClient {
+             udp_mtu,
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/udpgw.rs:443:
+         }
+     }
+
+-    pub(crate) async fn store_server_connection_full(&self, mut stream: UdpGwClientStream, reader: OwnedReadHalf, writer: OwnedWriteHalf) {
++    pub(crate) async fn store_server_connection_full(
++        &self,
++        mut stream: UdpGwClientStream,
++        reader: OwnedReadHalf,
++        writer: OwnedWriteHalf,
++    ) {
+         if self.server_connections.lock().await.len() < self.max_connections {
+             stream.set_reader(Some(reader));
+             stream.set_writer(Some(writer));
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/udpgw.rs:456:
+     }
+
+     /// Heartbeat task asynchronous function to periodically check and maintain the active state of the server connection.
+-    pub(crate) async fn heartbeat_task(&self, shutdown_token: tokio_util::sync::CancellationToken) -> std::io::Result<()> {
++    pub(crate) async fn heartbeat_task(
++        &self,
++        shutdown_token: tokio_util::sync::CancellationToken,
++    ) -> std::io::Result<()> {
+         log::info!("udpgw: heartbeat task started");
+         loop {
+             tokio::select! {
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/udpgw.rs:495:
+                     log::warn!("stream {sn} {local_addr:?} send keepalive failed: {e}");
+                     continue;
+                 }
+-                match UdpGwClient::recv_udpgw_packet(self.udp_mtu, self.udp_timeout, &mut stream_reader).await {
++                match UdpGwClient::recv_udpgw_packet(
++                    self.udp_mtu,
++                    self.udp_timeout,
++                    &mut stream_reader,
++                )
++                .await
++                {
+                     Ok((len, UdpGwResponse::KeepAlive)) => {
+                         stream.update_activity();
+-                        self.store_server_connection_full(stream, stream_reader, stream_writer).await;
+-                        log::trace!("stream {sn} {local_addr:?} send keepalive and recieve it successfully");
++                        self.store_server_connection_full(stream, stream_reader, stream_writer)
++                            .await;
++                        log::trace!(
++                            "stream {sn} {local_addr:?} send keepalive and recieve it successfully"
++                        );
+                         rx += len;
+                     }
+                     Ok((len, v)) => {
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/udpgw.rs:506:
+-                        log::debug!("stream {sn} {local_addr:?} keepalive unexpected response: {v}");
++                        log::debug!(
++                            "stream {sn} {local_addr:?} keepalive unexpected response: {v}"
++                        );
+                         rx += len;
+                     }
+-                    Err(e) => log::debug!("stream {sn} {local_addr:?} keepalive no response, error \"{e}\""),
++                    Err(e) => log::debug!(
++                        "stream {sn} {local_addr:?} keepalive no response, error \"{e}\""
++                    ),
+                 }
+             }
+             crate::traffic_status::traffic_status_update(tx, rx)?;
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/udpgw.rs:541:
+     ///
+     /// # Returns
+     /// - `Result<UdpGwResponse>`: Returns a result type containing the parsed UDP gateway response, or an error if one occurs.
+-    pub(crate) async fn recv_udpgw_packet(udp_mtu: u16, udp_timeout: u64, stream: &mut OwnedReadHalf) -> Result<(usize, UdpGwResponse)> {
++    pub(crate) async fn recv_udpgw_packet(
++        udp_mtu: u16,
++        udp_timeout: u64,
++        stream: &mut OwnedReadHalf,
++    ) -> Result<(usize, UdpGwResponse)> {
+         let packet = tokio::time::timeout(
+             tokio::time::Duration::from_secs(udp_timeout + 2),
+             Packet::retrieve_from_async_stream(stream),
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/udpgw.rs:548:
+         )
+         .await
+         .map_err(std::io::Error::from)??;
+-        Ok((packet.len(), UdpGwClient::parse_udp_response(udp_mtu, packet)?))
++        Ok((
++            packet.len(),
++            UdpGwClient::parse_udp_response(udp_mtu, packet)?,
++        ))
+     }
+
+     /// Sends a UDP gateway packet.
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/udpgw.rs:577:
+         if !ipv6_enabled && remote_addr.get_type() == socks5_impl::protocol::AddressType::IPv6 {
+             return Err("ipv6 not support".into());
+         }
+-        let out_data: Vec<u8> = Packet::build_packet_from_address(conn_id, remote_addr, data)?.into();
++        let out_data: Vec<u8> =
++            Packet::build_packet_from_address(conn_id, remote_addr, data)?.into();
+         stream.write_all(&out_data).await?;
+
+         Ok(())
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/virtual_dns.rs:130:
+         let started_at = self.next_addr;
+
+         loop {
+-            if let RawEntryMut::Vacant(vacant) = self.lru_cache.raw_entry_mut().from_key(&self.next_addr) {
++            if let RawEntryMut::Vacant(vacant) =
++                self.lru_cache.raw_entry_mut().from_key(&self.next_addr)
++            {
+                 let expiry = Instant::now() + Duration::from_secs(MAPPING_TIMEOUT);
+                 let name0 = insert_name.clone();
+-                vacant.insert(self.next_addr, NameCacheEntry { name: insert_name, expiry });
++                vacant.insert(
++                    self.next_addr,
++                    NameCacheEntry {
++                        name: insert_name,
++                        expiry,
++                    },
++                );
+                 self.name_to_ip.insert(name0, self.next_addr);
+                 return Ok(self.next_addr);
+             }
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/win_svc.rs:70:
+         let default = format!("{:?},trust_dns_proto=warn", args.verbosity);
+         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default)).init();
+
+-        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
++        let rt = tokio::runtime::Builder::new_multi_thread()
++            .enable_all()
++            .build()?;
+         rt.block_on(async {
+-            unsafe extern "C" fn traffic_cb(status: *const crate::TrafficStatus, _: *mut std::ffi::c_void) {
++            unsafe extern "C" fn traffic_cb(
++                status: *const crate::TrafficStatus,
++                _: *mut std::ffi::c_void,
++            ) {
+                 let status = unsafe { &*status };
+                 log::debug!("Traffic: ▲ {} : ▼ {}", status.tx, status.rx);
+             }
+Diff in /code/Mahesh953-hub/requestr/native/tun2proxy-bridge/vendor/tun2proxy/src/win_svc.rs:79:
+-            unsafe { crate::tun2proxy_set_traffic_status_callback(1, Some(traffic_cb), std::ptr::null_mut()) };
++            unsafe {
++                crate::tun2proxy_set_traffic_status_callback(
++                    1,
++                    Some(traffic_cb),
++                    std::ptr::null_mut(),
++                )
++            };
+
+-            let ret = crate::general_run_async(args.clone(), tun::DEFAULT_MTU, false, shutdown_token).await;
++            let ret =
++                crate::general_run_async(args.clone(), tun::DEFAULT_MTU, false, shutdown_token)
++                    .await;
+             match &ret {
+-                Ok(sessions) => log::debug!("tun2proxy exited normally, current session count: {sessions}"),
++                Ok(sessions) => {
++                    log::debug!("tun2proxy exited normally, current session count: {sessions}")
++                }
+                 Err(e) => log::error!("failed to run tun2proxy with error: {e:?}"),
+             }
+             // Spawn a std thread so the timer survives runtime shutdown and reliably exits.

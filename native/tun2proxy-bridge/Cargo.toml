@@ -15,12 +15,14 @@ crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
 [dependencies]
-# Exact pin (not a caret range) so every ABI is built from byte-identical tun2proxy
-# source, per the reproducible-pin requirement. Cargo.lock (checked in) pins the full
-# transitive graph (ipstack, socks5-impl, tun, tproxy-config, etc.) on top of this.
-tun2proxy = { version = "=0.8.3", default-features = false, features = ["udpgw"] }
+# Vendored fork of tun2proxy 0.8.3 — see vendor/README.md for provenance, checksum
+# and patch list. Path dependency replaces the former crates.io `=0.8.3` pin so that
+# requestr's extension patches (event channel, tee, UDP policy, protect callback) are
+# compiled from the local tree. Cargo.lock (checked in) pins the full transitive graph.
+tun2proxy = { path = "vendor/tun2proxy", default-features = false, features = ["udpgw"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
 log = "0.4"
 # Used directly (not just transitively through tun2proxy) to build/drive our own dedicated
 # Tokio runtime + CancellationToken in `lib.rs::run_bridge_thread`, matching the exact

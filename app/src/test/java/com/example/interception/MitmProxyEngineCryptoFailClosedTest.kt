@@ -69,7 +69,7 @@ class MitmProxyEngineCryptoFailClosedTest {
     private fun neverConnectUpstream(host: String = "crypto.example", port: Int = 443) =
         LazyUpstreamConnection(
             host, port,
-            connectionFactory = { _, _ -> throw AssertionError("a failed crypto rule must never dial upstream") },
+            socketConnector = { _, _ -> throw AssertionError("a failed crypto rule must never dial upstream") },
         )
 
     // ── Request-side: BODY_ENCRYPT_AES failure must never forward the plaintext upstream ──

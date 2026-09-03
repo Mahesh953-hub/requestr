@@ -1,0 +1,17 @@
+Validating schema structure...
+  v10: identityHash=beb1b02d3f1d673d2ee25400f279e5de OK
+  v11: identityHash=55f78001c78443123a0ed188ba94bdfb OK
+  v12: identityHash=54134c9620100059f17dfd80c2a29f25 OK
+  v13: identityHash=54394e8a7c8e8bc945b9e5a82ef747ab OK
+  v14: identityHash=98f87d3a438e74e298a3c39c836f2cef OK
+  v15: identityHash=7abe0606f5f3c606c1afb275fe144694 OK
+  v16: identityHash=1937f67d2f2dd3ef1768467b35ab1389 OK
+  v17: identityHash=7176486154bf53fd3ed511f87d2db6ce OK
+  v18: identityHash=c38ce3920700d39c564050e28243920e OK
+  v8: identityHash=a6a3318b2ee6eeed360f77e7a089bf91 OK
+  v9: identityHash=1f8abd5e6e1c54785aebcc9f7d702500 OK
+
+All 11 schema files structurally valid.
+
+Checking for schema drift (git diff)...
+No schema drift detected. Committed schemas match KSP output.
