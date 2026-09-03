@@ -265,4 +265,68 @@ mod tests {
         assert!(col.take().is_empty());
         requestr_hooks::clear_packet_tee_sink();
     }
+
+    /// Mock writer whose first `poll_write` call returns `Poll::Pending` (after arranging a
+    /// wakeup so the executor polls again), and every subsequent call accepts the full buffer.
+    /// Used to prove `TeeDevice` only tees bytes once the underlying write is actually
+    /// accepted (`Poll::Ready(Ok(n))`), never on a `Poll::Pending` poll -- a `Pending` poll
+    /// must produce zero tee callbacks even though `poll_write` was invoked.
+    struct PendingThenAcceptWriter {
+        calls: StdMutex<u32>,
+    }
+    impl PendingThenAcceptWriter {
+        fn new() -> Self {
+            Self {
+                calls: StdMutex::new(0),
+            }
+        }
+    }
+    impl AsyncWrite for PendingThenAcceptWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            if *calls == 1 {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(buf.len()))
+            }
+        }
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_write_does_not_tee_until_accepted_retry() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        let col = install_collector();
+        let mut tee = TeeDevice::new(PendingThenAcceptWriter::new(), true);
+
+        let data = vec![0x11, 0x22, 0x33, 0x44];
+        // `write().await` drives poll_write to completion, retrying across the Pending poll.
+        let n = tee.write(&data).await.unwrap();
+        assert_eq!(n, data.len());
+
+        // Exactly one tee callback -- proving the Pending poll (call #1) produced zero tees
+        // and only the accepted retry (call #2) teed the bytes.
+        let teed = col.take();
+        assert_eq!(teed.len(), 1);
+        assert_eq!(teed[0].1, data);
+        assert!(!teed[0].2); // is_tx=false (write to TUN = inbound)
+        requestr_hooks::clear_packet_tee_sink();
+    }
 }

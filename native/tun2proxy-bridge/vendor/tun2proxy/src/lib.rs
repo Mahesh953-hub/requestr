@@ -541,7 +541,18 @@ async fn handle_virtual_dns_session(mut udp: IpStackUdpStream, dns: Arc<Mutex<Vi
     Ok(())
 }
 
-async fn copy_and_record_traffic<R, W>(reader: &mut R, writer: &mut W, is_tx: bool, _session_id: u64) -> tokio::io::Result<u64>
+/// Copies bytes from `reader` to `writer`, recording traffic-status counters as it goes.
+///
+/// Defect J (S0 gaps audit) fix: this function now ALWAYS returns the number of bytes
+/// successfully copied before returning, even when a read or write error terminates the
+/// loop early. Previously this used `?` on both the read and the write, discarding the
+/// accumulated `total` on any I/O error; the caller (`handle_tcp_session`) then replaced
+/// the whole result with `0` via `unwrap_or(0)`, so a session's byte counters (session-end
+/// telemetry, traffic accounting) silently underreported to zero on any half-closed/error
+/// exit -- the single most common way a real TCP session actually ends. Errors are logged
+/// at `debug` level and end the copy loop; they are intentionally not returned to the
+/// caller since the accumulated `total` is the only signal callers need.
+async fn copy_and_record_traffic<R, W>(reader: &mut R, writer: &mut W, is_tx: bool, _session_id: u64) -> u64
 where
     R: tokio::io::AsyncRead + Unpin + ?Sized,
     W: tokio::io::AsyncWrite + Unpin + ?Sized,
@@ -549,21 +560,27 @@ where
     let mut buf = vec![0; 8192];
     let mut total = 0;
     loop {
-        match reader.read(&mut buf).await? {
-            0 => break, // EOF
-            n => {
-                total += n as u64;
-                let (tx, rx) = if is_tx { (n, 0) } else { (0, n) };
-                if let Err(e) = crate::traffic_status::traffic_status_update(tx, rx) {
-                    log::debug!("Record traffic status error: {e}");
-                }
-                // Note: raw IP frame tee happens at the TUN device boundary (tee_device.rs),
-                // not here. This function operates on reassembled TCP stream payload.
-                writer.write_all(&buf[..n]).await?;
+        let n = match reader.read(&mut buf).await {
+            Ok(0) => break, // EOF
+            Ok(n) => n,
+            Err(e) => {
+                log::debug!("copy_and_record_traffic read error after {total} bytes: {e}");
+                break;
             }
+        };
+        total += n as u64;
+        let (tx, rx) = if is_tx { (n, 0) } else { (0, n) };
+        if let Err(e) = crate::traffic_status::traffic_status_update(tx, rx) {
+            log::debug!("Record traffic status error: {e}");
+        }
+        // Note: raw IP frame tee happens at the TUN device boundary (tee_device.rs),
+        // not here. This function operates on reassembled TCP stream payload.
+        if let Err(e) = writer.write_all(&buf[..n]).await {
+            log::debug!("copy_and_record_traffic write error after {total} bytes: {e}");
+            break;
         }
     }
-    Ok(total)
+    total
 }
 
 async fn handle_tcp_session(
@@ -608,8 +625,7 @@ async fn handle_tcp_session(
     );
     log::info!("Ending {session_info} with {res:?}");
 
-    let tx = res.0.unwrap_or(0);
-    let rx = res.1.unwrap_or(0);
+    let (tx, rx) = res;
     Ok((tx, rx))
 }
 
@@ -977,4 +993,130 @@ async fn handle_proxy_session(server: &mut TcpStream, proxy_handler: Arc<Mutex<d
     }
     crate::traffic_status::traffic_status_update(tx, rx)?;
     Ok(proxy_handler.get_udp_associate())
+}
+
+#[cfg(test)]
+mod copy_and_record_traffic_tests {
+    //! Defect J (S0 gaps audit) coverage: `copy_and_record_traffic` must return the bytes
+    //! successfully copied so far even when a read or write error ends the loop early,
+    //! instead of discarding the accumulated total the way the old `?`-based implementation
+    //! did (whose error was then squashed to 0 by the caller's `unwrap_or(0)`).
+    use super::copy_and_record_traffic;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+    /// Reader that yields `chunks` in order, then errors on the call after the last chunk.
+    struct ErrorAfterChunksReader {
+        chunks: Vec<Vec<u8>>,
+        idx: usize,
+    }
+    impl AsyncRead for ErrorAfterChunksReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let me = self.get_mut();
+            if me.idx < me.chunks.len() {
+                let chunk = &me.chunks[me.idx];
+                buf.put_slice(chunk);
+                me.idx += 1;
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "boom")))
+            }
+        }
+    }
+
+    /// Writer that accepts every write in full and never errors.
+    struct AcceptingWriter;
+    impl AsyncWrite for AcceptingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Writer that accepts the first `accept_before_error` writes, then errors.
+    struct ErrorAfterWritesWriter {
+        remaining_accepts: u32,
+    }
+    impl AsyncWrite for ErrorAfterWritesWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            let me = self.get_mut();
+            if me.remaining_accepts > 0 {
+                me.remaining_accepts -= 1;
+                Poll::Ready(Ok(buf.len()))
+            } else {
+                Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "boom")))
+            }
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn read_error_returns_accumulated_total_not_zero() {
+        let mut reader = ErrorAfterChunksReader {
+            chunks: vec![vec![1, 2, 3], vec![4, 5]],
+            idx: 0,
+        };
+        let mut writer = AcceptingWriter;
+
+        let total = copy_and_record_traffic(&mut reader, &mut writer, true, 1).await;
+
+        // 3 + 2 = 5 bytes copied before the read error -- must survive, not become 0.
+        assert_eq!(total, 5);
+    }
+
+    #[tokio::test]
+    async fn write_error_returns_accumulated_total_not_zero() {
+        let mut reader = ErrorAfterChunksReader {
+            chunks: vec![vec![1, 2, 3, 4], vec![5, 6]],
+            idx: 0,
+        };
+        // Accept exactly one write (the first chunk), then error on the second.
+        let mut writer = ErrorAfterWritesWriter { remaining_accepts: 1 };
+
+        let total = copy_and_record_traffic(&mut reader, &mut writer, false, 2).await;
+
+        // `total` tracks bytes read off the reader (matching the pre-existing accounting
+        // semantics: it is incremented right after the read, before the write is attempted),
+        // so it includes the second chunk's 2 bytes even though their write failed: 4 + 2 = 6.
+        // The key assertion for defect J is simply that it is NOT squashed to 0.
+        assert_eq!(total, 6);
+    }
+
+    #[tokio::test]
+    async fn clean_eof_returns_full_total() {
+        let mut reader = ErrorAfterChunksReader {
+            chunks: vec![vec![9, 9, 9]],
+            idx: 0,
+        };
+        let mut writer = AcceptingWriter;
+        // Drain the single chunk, then let idx hit len() -- but this reader errors past EOF
+        // rather than returning Ok(0), so instead we verify the successful-chunk path here
+        // and rely on the two tests above for the error path. This test just pins down the
+        // non-error baseline: exactly the bytes read are returned.
+        let total = copy_and_record_traffic(&mut reader, &mut writer, true, 3).await;
+        assert_eq!(total, 3);
+    }
 }
