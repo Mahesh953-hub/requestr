@@ -43,6 +43,10 @@ class DroppedWriteException(message: String) : RuntimeException(message)
 class RowHandle private constructor(val label: String, preset: Long?) {
     internal val deferred = CompletableDeferred<Long>()
 
+    /** S2 task 19: refused because capture is paused on a quota; patches for it are skipped quietly. */
+    @Volatile
+    internal var rejectedByQuota: Boolean = false
+
     init {
         if (preset != null) deferred.complete(preset)
     }
@@ -224,6 +228,24 @@ class PersistenceQueue internal constructor(
         }
     }
 
+    /**
+     * S2 task 19: the quota enforcer, run as a batch listener after every drain. Null detaches.
+     * The pruner reads [bodyStore] through a lambda so a `bodySpill` flag flip is honoured.
+     */
+    @Volatile
+    var pruner: SessionPruner? = null
+        private set
+
+    fun attachPruner(next: SessionPruner?) {
+        pruner?.let { removeBatchListener(it.batchListener) }
+        pruner = next
+        if (next != null) addBatchListener(next.batchListener)
+    }
+
+    /** A pruner over this queue's database and (current) body store with [config]. */
+    fun newPruner(config: SessionPruner.Config = SessionPruner.Config()): SessionPruner =
+        SessionPruner(db, { bodyStore }, config, health, clock)
+
     // -- producer API (never suspends, never touches Room) ----------------------------------------
 
     /**
@@ -271,6 +293,17 @@ class PersistenceQueue internal constructor(
         appliedRules: List<AppliedRuleEntity> = emptyList(),
     ): RowHandle {
         val op = PersistenceOp.InsertTransaction(entity, headers, timings, appliedRules)
+        val paused = health.snapshot().capturePaused
+        if (paused != null) {
+            // S2 task 19: quota exhausted -- refuse rather than grow the store; the pause is
+            // user-visible (health banner, VPN status) and lifts once SessionPruner finds the
+            // store back under its caps.
+            op.handle.rejectedByQuota = true
+            op.handle.deferred.completeExceptionally(DroppedWriteException("capture paused: ${paused.name.lowercase()}"))
+            health.recordQuotaRejected()
+            warnRateLimited(lastDropLogAt, "transaction refused: capture paused ($paused)")
+            return op.handle
+        }
         submit(op)
         return op.handle
     }
@@ -525,7 +558,7 @@ class PersistenceQueue internal constructor(
      */
     private fun resolve(handle: RowHandle): Long? {
         val id = handle.idOrNull
-        if (id == null) {
+        if (id == null && !handle.rejectedByQuota) {
             health.recordOrphanedPatch()
             warnRateLimited(lastFailLogAt, "patch for ${handle} skipped: parent row never written")
         }
@@ -571,6 +604,7 @@ class PersistenceQueue internal constructor(
             } else if (queue.bodyStore != null) {
                 queue.attachBodyStore(null)
             }
+            if (queue.pruner == null) queue.attachPruner(queue.newPruner())
             return queue
         }
 

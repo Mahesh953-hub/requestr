@@ -284,6 +284,25 @@ interface CapturedTrafficDao {
 
     @Query("DELETE FROM captured_traffic")
     suspend fun clearAll()
+
+    // -- S2 task 19: session pruning -------------------------------------------------------------
+
+    @Query("SELECT COUNT(*) FROM captured_traffic WHERE sessionId = :sessionId")
+    suspend fun countForSession(sessionId: Long): Int
+
+    /** Oldest-first (capture order) rows of one session, with their spill references; pruning picks the head. */
+    @Query(
+        "SELECT id, requestBodyFilePath, responseBodyFilePath FROM captured_traffic " +
+            "WHERE sessionId = :sessionId ORDER BY timestamp ASC, id ASC LIMIT :limit",
+    )
+    suspend fun getOldestRefsForSession(sessionId: Long, limit: Int): List<SpilledBodyRef>
+
+    /** Child rows (headers, timings, applied rules) go with the parent through `ON DELETE CASCADE`. */
+    @Query("DELETE FROM captured_traffic WHERE id IN (:ids)")
+    suspend fun deleteByIds(ids: List<Long>): Int
+
+    @Query("DELETE FROM captured_traffic WHERE sessionId = :sessionId")
+    suspend fun clearSession(sessionId: Long): Int
 }
 
 /** Projection of the body-file reference columns of one `captured_traffic` row. */
@@ -323,6 +342,15 @@ interface CaptureSessionDao {
 
     @Query("DELETE FROM capture_sessions")
     suspend fun clearAll()
+
+    // -- S2 task 19: session pruning -------------------------------------------------------------
+
+    /** Ended sessions, oldest first -- the order the pruner evicts whole sessions in. */
+    @Query("SELECT * FROM capture_sessions WHERE endedAt IS NOT NULL ORDER BY startedAt ASC, id ASC")
+    suspend fun getEndedOldestFirst(): List<CaptureSessionEntity>
+
+    @Query("DELETE FROM capture_sessions WHERE id = :id")
+    suspend fun deleteById(id: Long)
 }
 
 @Dao

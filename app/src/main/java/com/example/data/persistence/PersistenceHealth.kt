@@ -68,6 +68,8 @@ object PersistenceHealth {
         val prunedTransactions: Long = 0,
         val capturePaused: PauseReason? = null,
         val capturePausedDetail: String? = null,
+        /** Transactions refused at the producer because capture was paused on a quota. */
+        val quotaRejectedWrites: Long = 0,
     ) {
         /** Anything a user should be told about, in one line; null when everything is healthy. */
         val headline: String?
@@ -146,6 +148,8 @@ object PersistenceHealth {
     // -- quota (task 19) -----------------------------------------------------------------------
 
     fun recordPruned(count: Int) = update { it.copy(prunedTransactions = it.prunedTransactions + count) }
+
+    fun recordQuotaRejected() = update { it.copy(quotaRejectedWrites = it.quotaRejectedWrites + 1) }
 
     fun pauseCapture(reason: PauseReason, detail: String?) = update {
         it.copy(capturePaused = reason, capturePausedDetail = detail)
