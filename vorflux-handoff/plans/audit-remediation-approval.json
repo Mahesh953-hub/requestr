@@ -1,0 +1,17 @@
+[
+  {
+    "question": "Approve this bounded remediation design? Extract the tested cookie/hex/highlighting helpers into a focused response-inspection helper file; enhance ApiTestrScreen's existing inline response tabs with Text/Hex, in-body search, Set-Cookies, per-header and copy-all actions, and body export/share while preserving Beautify, Compare Runs, metrics, and tests; then delete ResponseInspectorView.kt, DynamicIconPress, KeyValueTableRow, the stale CaP12Exchange KDoc, and the connectionId reflection shim, plus correct only the audit's verified stale docs/labels. I will not run a build, per your instruction.",
+    "rationale": "The added brainstorming skill requires explicit approval before implementation. This stays within the audit correction and does not pull in the later interception/API/CLI/browser research program.",
+    "options": [
+      {
+        "label": "Approve and fix",
+        "description": "Implement exactly this scoped harvest-and-cleanup change.",
+        "recommended": true
+      },
+      {
+        "label": "Revise scope",
+        "description": "Pause implementation so the remediation boundary can be adjusted."
+      }
+    ]
+  }
+]

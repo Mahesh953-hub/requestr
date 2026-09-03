@@ -1,5 +1,8 @@
 package com.example.interception
 
+import com.example.interception.net.SocketProtector
+import java.net.InetSocketAddress
+import java.net.SocketAddress
 import java.security.cert.X509Certificate
 import java.util.Date
 import javax.net.ssl.SNIHostName
@@ -49,16 +52,26 @@ object RemoteCertificateMirror {
      * default, all-trusting [SSLContext] is used deliberately: this only reads metadata off
      * whatever cert the server presents, it does not make a trust decision).
      */
-    fun fetchRemoteLeaf(host: String, port: Int = 443, timeoutMs: Int = 5_000): X509Certificate? = runCatching {
+    fun fetchRemoteLeaf(
+        host: String,
+        port: Int = 443,
+        timeoutMs: Int = 5_000,
+        socketFactory: (SSLContext) -> SSLSocket = { it.socketFactory.createSocket() as SSLSocket },
+        socketConnector: (SSLSocket, SocketAddress, Int) -> Unit = { socket, address, timeout ->
+            socket.connect(address, timeout)
+        },
+    ): X509Certificate? = runCatching {
         val trustAll = arrayOf<javax.net.ssl.TrustManager>(object : javax.net.ssl.X509TrustManager {
             override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
             override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
             override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
         })
         val context = SSLContext.getInstance("TLS").apply { init(null, trustAll, java.security.SecureRandom()) }
-        val socket = context.socketFactory.createSocket() as SSLSocket
+        val socket = socketFactory(context)
         socket.use { s ->
-            s.connect(java.net.InetSocketAddress(host, port), timeoutMs)
+            val protectResult = SocketProtector.protectSocket(s)
+            if (protectResult == SocketProtector.ProtectResult.Failed) return@runCatching null
+            socketConnector(s, InetSocketAddress(host, port), timeoutMs)
             s.soTimeout = timeoutMs
             runCatching {
                 s.sslParameters = SSLParameters().apply { serverNames = listOf(SNIHostName(host)) }

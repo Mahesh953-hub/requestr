@@ -25,6 +25,7 @@ import com.example.data.local.CaptureTier
 import com.example.data.local.RequestrDatabase
 import com.example.data.prefs.AppFilterMode
 import com.example.data.prefs.SettingsDataStore
+import com.example.interception.net.SocketProtector
 import com.example.interception.tls.TlsKeyLogRegistry
 import com.example.interception.tun.NativeTun2Proxy
 import com.example.interception.tun.ProtectHook
@@ -63,6 +64,7 @@ class RequestrVpnService : VpnService() {
     // widening the real public API surface (still module-internal).
     internal var tunInterface: ParcelFileDescriptor? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var startJob: Job? = null
     private var pumpJob: Job? = null
     private var filterObserverJob: Job? = null
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO)
@@ -75,6 +77,7 @@ class RequestrVpnService : VpnService() {
     // until the entire outer launched block finishes, regardless of statement order inside it.
     internal var stopCaptureStepRecorder: (String) -> Unit = {}
     private var sessionId: Long? = null
+    internal var socketProtectorRegistration: SocketProtector.Registration? = null
 
     /**
      * Gap #1 Approach A: true once the native tun2proxy bridge has genuinely taken over the
@@ -85,6 +88,17 @@ class RequestrVpnService : VpnService() {
      * that whole session; there is never a silent mid-session switch either way.
      */
     private var usingNativeBridge = false
+
+    /**
+     * Defect D/E (S0 gaps audit): set true when [Tun2ProxyBridge.start] returned
+     * [Tun2ProxyBridge.StartResult.Indeterminate] -- the native side could not confirm it had
+     * quiesced after a start-timeout, so it may still be holding/using the tun fd, the MITM
+     * engine, and every native callback registration. While this is true, [cleanup] must not
+     * touch [tunInterface], [activeMitmEngine], or [socketProtectorRegistration] at all; a
+     * later, unrelated capture attempt must not silently reuse or close a fd the native side
+     * might still be reading/writing.
+     */
+    private var tunFdUnsafeToTouch = false
 
     /**
      * This service's own `MitmProxyEngine` instance (separate from [PreflightController]'s
@@ -122,7 +136,7 @@ class RequestrVpnService : VpnService() {
      * outside the tun instead of looping back into it. Must run before connect/send on every
      * relay socket; [com.example.interception.tun.TunRelay] guarantees that ordering.
      */
-    private val protectHook = object : ProtectHook {
+    private val protectHook = object : ProtectHook, SocketProtector.Backing {
         override fun protectSocket(socket: java.net.Socket): Boolean =
             runCatching { protect(socket) }.getOrDefault(false)
 
@@ -150,7 +164,7 @@ class RequestrVpnService : VpnService() {
             return
         }
 
-        scope.launch {
+        startJob = scope.launch {
             try {
                 val prefs = SettingsDataStore.get(applicationContext)
                 val port = prefs.proxyPort.first()
@@ -209,6 +223,12 @@ class RequestrVpnService : VpnService() {
                 }
                 tunInterface = tun
 
+                // S0 Task 4: install the process-wide socket protector so every egress
+                // path (LazyUpstreamConnection, RemoteCertificateMirror, HttpProxyShared,
+                // ConnectReplay, and the native-bridge callback) protects before connect.
+                socketProtectorRegistration = SocketProtector.install(protectHook)
+                SocketProtector.resetMetrics()
+
                 // Persist a real session row; counters are updated from actual traffic.
                 val db = RequestrDatabase.get(applicationContext)
                 val newId = db.captureSessionDao().insert(
@@ -253,7 +273,10 @@ class RequestrVpnService : VpnService() {
                 // back to this session's real tier/session id immediately below, regardless
                 // of which branch is taken next.
                 val bridgeResult = Tun2ProxyBridge.start(
-                    Tun2ProxyConfig.forMitmProxyEngine(mitmPort),
+                    Tun2ProxyConfig.forMitmProxyEngine(
+                        mitmPort,
+                        teeEnabled = com.example.data.persistence.TeeRolloutFlag.get(applicationContext).isEnabled,
+                    ),
                     tun.fd,
                 )
                 when (bridgeResult) {
@@ -298,6 +321,25 @@ class RequestrVpnService : VpnService() {
                             lifecycleOwner = CaptureMethod.VPN_TUN.engineLifecycleOwner(),
                         )
                         InterceptionStateRepository.setWatcherStatus(WatcherStatus.DEGRADED)
+                    }
+                    is Tun2ProxyBridge.StartResult.Indeterminate -> {
+                        // Defect D/E: the native side could not confirm shutdown after a start
+                        // timeout. It may still be reading/writing the tun fd right now, so we
+                        // must not hand that same fd to the legacy TunRelay/PacketPump pipeline
+                        // (double-consuming a fd is worse than failing the attempt), and we must
+                        // not close it either. Stop only what is unambiguously safe: this
+                        // service's own local-port MitmProxyEngine instance never touched the
+                        // tun fd directly (native tun2proxy speaks CONNECT to it over loopback).
+                        usingNativeBridge = false
+                        runCatching { mitmEngine.stop() }
+                        tunFdUnsafeToTouch = true
+                        Log.e(TAG, "Native tun2proxy bridge indeterminate after start timeout: ${bridgeResult.message}")
+                        fail(
+                            "Native capture bridge did not confirm shutdown after a start " +
+                                "timeout; capture stopped for safety without touching the tun " +
+                                "interface. Try again."
+                        )
+                        return@launch
                     }
                 }
 
@@ -380,6 +422,8 @@ class RequestrVpnService : VpnService() {
             } catch (t: Throwable) {
                 if (t is kotlinx.coroutines.CancellationException) throw t
                 fail("Capture failed to start: ${t.message ?: t::class.java.simpleName}")
+            } finally {
+                startJob = null
             }
         }
     }
@@ -481,6 +525,8 @@ class RequestrVpnService : VpnService() {
     }
 
     private fun cleanup() {
+        startJob?.cancel()
+        startJob = null
         filterObserverJob?.cancel()
         filterObserverJob = null
         pumpJob?.cancel()
@@ -491,27 +537,73 @@ class RequestrVpnService : VpnService() {
         // loop is already blocked/stuck and never reaches that finally block).
         runCatching { activePump?.relay?.stop() }
         activePump = null
+
+        if (tunFdUnsafeToTouch) {
+            // Defect D/E: an earlier start attempt left the native bridge's shutdown state
+            // indeterminate -- the tun fd, MITM engine, and socket protector registration may
+            // still be in use by the native side right now. Never touch them here. Everything
+            // below this point is independent of the fd and safe to tear down unconditionally.
+            Log.w(TAG, "cleanup(): tun fd/MITM engine/socket protector left untouched (indeterminate native shutdown from a prior start attempt)")
+            runCatching { com.example.interception.packet.PacketCaptureEngine.stop() }
+            runCatching { TlsKeyLogRegistry.clear() }
+            releaseWakeLock()
+            stopForegroundCompat()
+            return
+        }
+
         // Gap #1 Approach A: signal the native bridge to stop and give it a bounded window
         // to actually observe the cancellation before the tun ParcelFileDescriptor is closed
         // out from under it -- stop() itself is cooperative/async (fire-and-forget), not a
         // blocking join, so this ordering is the mitigation for "protect native sockets/fd".
         if (usingNativeBridge) {
             runCatching { Tun2ProxyBridge.stop() }
-            val awaitRc = Tun2ProxyBridge.awaitStoppedOrTimeout()
-            if (awaitRc == NativeTun2Proxy.ERR_TIMEOUT) {
-                // The native thread did not provably finish within the bound. Escalate loudly and
-                // do NOT voluntarily let the fd keep getting used -- but we also must not leave the
-                // session half-torn-down. We proceed with the rest of teardown (the native thread
-                // holding the fd is the lesser of two evils vs. leaking the whole VPN session);
-                // the bridge thread itself never blocks the process exit because it is a daemon.
-                Log.e(TAG, "Native tun2proxy bridge did not confirm shutdown within ${Tun2ProxyBridge.STOP_QUIESCENCE_TIMEOUT_MS}ms; closing tun fd anyway (unsafe exit of the native thread)")
+            var awaitRc = Tun2ProxyBridge.awaitStoppedOrTimeout()
+            var attempt = 1
+            // Defect D/E: finite escalation instead of a single window -- retry the
+            // stop-and-await cycle up to STOP_MAX_ATTEMPTS times before giving up.
+            while (awaitRc == NativeTun2Proxy.ERR_TIMEOUT && attempt < STOP_MAX_ATTEMPTS) {
+                attempt++
+                Log.w(
+                    TAG,
+                    "Native tun2proxy bridge stop attempt $attempt/$STOP_MAX_ATTEMPTS: " +
+                        "still not confirmed stopped after ${Tun2ProxyBridge.STOP_QUIESCENCE_TIMEOUT_MS}ms; retrying"
+                )
+                runCatching { Tun2ProxyBridge.stop() }
+                awaitRc = Tun2ProxyBridge.awaitStoppedOrTimeout()
             }
+
+            val nativeBridgeConfirmedStopped =
+                awaitRc == NativeTun2Proxy.OK || awaitRc == NativeTun2Proxy.ERR_NOT_RUNNING
+
+            if (!nativeBridgeConfirmedStopped) {
+                // Never confirmed after STOP_MAX_ATTEMPTS attempts. Do NOT close the tun fd,
+                // stop the MITM engine, or clear the socket protector out from under a native
+                // thread that may still be using them. Keep usingNativeBridge=true so a later
+                // stopCapture() call retries convergence instead of silently re-arming a second
+                // bridge on top of the same fd. Everything below is independent of the fd and
+                // still torn down.
+                Log.e(
+                    TAG,
+                    "Native tun2proxy bridge never confirmed shutdown after $STOP_MAX_ATTEMPTS " +
+                        "attempts; leaving tun fd, MITM engine, and socket protector registered"
+                )
+                runCatching { com.example.interception.packet.PacketCaptureEngine.stop() }
+                runCatching { TlsKeyLogRegistry.clear() }
+                releaseWakeLock()
+                stopForegroundCompat()
+                return
+            }
+            usingNativeBridge = false
         }
-        usingNativeBridge = false
+
         runCatching { activeMitmEngine?.stop() }
         activeMitmEngine = null
         runCatching { tunInterface?.close() }
         tunInterface = null
+        // All relays have stopped, but clear before slow persistence/backup teardown below so a
+        // completed onRevoke/failed start cannot leave process-wide VPN state installed.
+        socketProtectorRegistration?.let(SocketProtector::clear)
+        socketProtectorRegistration = null
         // T1: stop PCAP export with the rest of this session's lifecycle -- flushes and closes
         // the .pcap file. No-op (guarded by its own `active` flag) if it was never started.
         runCatching { com.example.interception.packet.PacketCaptureEngine.stop() }
@@ -607,6 +699,15 @@ class RequestrVpnService : VpnService() {
 
         // Re-acquired per session; bounded so a crashed session cannot pin the CPU forever.
         private const val WAKE_LOCK_TIMEOUT_MS = 4L * 60L * 60L * 1000L
+
+        /**
+         * Defect D/E (S0 gaps audit): bounded escalation for confirming native tun2proxy
+         * shutdown in [cleanup] before touching the tun fd / MITM engine / socket protector.
+         * Each attempt re-signals [Tun2ProxyBridge.stop] and waits up to
+         * [Tun2ProxyBridge.STOP_QUIESCENCE_TIMEOUT_MS] again -- finite, not unbounded, but more
+         * forgiving than giving up after a single window.
+         */
+        private const val STOP_MAX_ATTEMPTS = 3
 
         private const val MTU = 1500
         private const val TUN_ADDRESS = "10.111.222.1"

@@ -15,6 +15,9 @@ navigationCompose = "2.8.9"
 roomRuntime = "2.7.0"
 roomKtx = "2.7.0"
 roomCompiler = "2.7.0"
+# Room 2.7.0 depends on androidx.sqlite 2.5.0. The bundled artifact ships a compiled
+# SQLite binary so FTS5 is guaranteed regardless of the device's system SQLite version.
+sqliteBundled = "2.5.0"
 kotlinxCoroutinesTest = "1.10.2"
 core = "1.6.1"
 runner = "1.6.2"
@@ -80,6 +83,10 @@ androidx-room-runtime = { group = "androidx.room", name = "room-runtime", versio
 androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "roomKtx" }
 androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "roomCompiler" }
 androidx-room-testing = { group = "androidx.room", name = "room-testing", version.ref = "roomRuntime" }
+# Bundled SQLite: ships a compiled native SQLite library so the app controls the exact SQLite
+# version and feature set (FTS5, JSON1, etc.) instead of depending on whatever the OEM
+# pre-installed. Compatible with Room 2.7.0's setDriver(SQLiteDriver) API.
+androidx-sqlite-bundled = { group = "androidx.sqlite", name = "sqlite-bundled", version.ref = "sqliteBundled" }
 kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "kotlinxCoroutinesTest" }
 androidx-core = { group = "androidx.test", name = "core", version.ref = "core" }
 androidx-runner = { group = "androidx.test", name = "runner", version.ref = "runner" }

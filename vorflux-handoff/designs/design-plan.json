@@ -1,0 +1,424 @@
+{
+  "title": "Cohesive requestr interceptor program",
+  "summary": "Retains the complete interceptor design set and adds scoped advanced trust, guided capture remediation, and a focused API-Testr protocol extension. Every surface follows the current requestr theme and glass lineage; light remains the product-default recommendation.",
+  "sections": [
+    {
+      "title": "Capture workspace",
+      "key": "capture-workspace",
+      "description": "Capture workspace using the current requestr shell, tokens, and operational copy patterns.",
+      "variations": [
+        {
+          "title": "Capture workspace \u2014 Light",
+          "key": "light",
+          "html_link": "capture-workspace-light.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Capture workspace \u2014 Dark",
+          "key": "dark",
+          "html_link": "capture-workspace-dark.html",
+          "is_recommended": false
+        }
+      ]
+    },
+    {
+      "title": "Protocol-adaptive transaction inspector",
+      "key": "inspector",
+      "description": "Protocol-adaptive transaction inspector using the current requestr shell, tokens, and operational copy patterns.",
+      "variations": [
+        {
+          "title": "Protocol-adaptive transaction inspector \u2014 Light",
+          "key": "light",
+          "html_link": "inspector-light.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Protocol-adaptive transaction inspector \u2014 Dark",
+          "key": "dark",
+          "html_link": "inspector-dark.html",
+          "is_recommended": false
+        }
+      ]
+    },
+    {
+      "title": "Filters, search, and sessions",
+      "key": "session-workspace",
+      "description": "Filters, search, and sessions using the current requestr shell, tokens, and operational copy patterns.",
+      "variations": [
+        {
+          "title": "Filters, search, and sessions \u2014 Light",
+          "key": "light",
+          "html_link": "session-workspace-light.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Filters, search, and sessions \u2014 Dark",
+          "key": "dark",
+          "html_link": "session-workspace-dark.html",
+          "is_recommended": false
+        }
+      ]
+    },
+    {
+      "title": "Full rule library",
+      "key": "rule-library",
+      "description": "All ten typed rule stages in evaluation order, with folders, import/export, toggles, and current-capture applied counts.",
+      "variations": [
+        {
+          "title": "Full rule library \u2014 Light",
+          "key": "light",
+          "html_link": "rule-library-light.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Full rule library \u2014 Dark",
+          "key": "dark",
+          "html_link": "rule-library-dark.html",
+          "is_recommended": false
+        }
+      ]
+    },
+    {
+      "title": "Rule editor \u00b7 Gateway",
+      "key": "gateway-editor",
+      "description": "Rule editor \u00b7 Gateway using the current requestr shell, tokens, and operational copy patterns.",
+      "variations": [
+        {
+          "title": "Rule editor \u00b7 Gateway \u2014 Light",
+          "key": "light",
+          "html_link": "gateway-editor-light.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Rule editor \u00b7 Gateway \u2014 Dark",
+          "key": "dark",
+          "html_link": "gateway-editor-dark.html",
+          "is_recommended": false
+        }
+      ]
+    },
+    {
+      "title": "Rule editor \u00b7 Mirror",
+      "key": "mirror-editor",
+      "description": "Rule editor \u00b7 Mirror using the current requestr shell, tokens, and operational copy patterns.",
+      "variations": [
+        {
+          "title": "Rule editor \u00b7 Mirror \u2014 Light",
+          "key": "light",
+          "html_link": "mirror-editor-light.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Rule editor \u00b7 Mirror \u2014 Dark",
+          "key": "dark",
+          "html_link": "mirror-editor-dark.html",
+          "is_recommended": false
+        }
+      ]
+    },
+    {
+      "title": "Rule editor \u00b7 Rewrite",
+      "key": "rewrite-editor",
+      "description": "Rule editor \u00b7 Rewrite using the current requestr shell, tokens, and operational copy patterns.",
+      "variations": [
+        {
+          "title": "Rule editor \u00b7 Rewrite \u2014 Light",
+          "key": "light",
+          "html_link": "rewrite-editor-light.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Rule editor \u00b7 Rewrite \u2014 Dark",
+          "key": "dark",
+          "html_link": "rewrite-editor-dark.html",
+          "is_recommended": false
+        }
+      ]
+    },
+    {
+      "title": "Rule editor \u00b7 Mock",
+      "key": "mock-editor",
+      "description": "Rule editor \u00b7 Mock using the current requestr shell, tokens, and operational copy patterns.",
+      "variations": [
+        {
+          "title": "Rule editor \u00b7 Mock \u2014 Light",
+          "key": "light",
+          "html_link": "mock-editor-light.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Rule editor \u00b7 Mock \u2014 Dark",
+          "key": "dark",
+          "html_link": "mock-editor-dark.html",
+          "is_recommended": false
+        }
+      ]
+    },
+    {
+      "title": "Rule editor \u00b7 Throttle",
+      "key": "throttle-editor",
+      "description": "Rule editor \u00b7 Throttle using the current requestr shell, tokens, and operational copy patterns.",
+      "variations": [
+        {
+          "title": "Rule editor \u00b7 Throttle \u2014 Light",
+          "key": "light",
+          "html_link": "throttle-editor-light.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Rule editor \u00b7 Throttle \u2014 Dark",
+          "key": "dark",
+          "html_link": "throttle-editor-dark.html",
+          "is_recommended": false
+        }
+      ]
+    },
+    {
+      "title": "Breakpoint queue and request/response editor",
+      "key": "breakpoint-workspace",
+      "description": "Breakpoint queue and request/response editor using the current requestr shell, tokens, and operational copy patterns.",
+      "variations": [
+        {
+          "title": "Breakpoint queue and request/response editor \u2014 Light",
+          "key": "light",
+          "html_link": "breakpoint-workspace-light.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Breakpoint queue and request/response editor \u2014 Dark",
+          "key": "dark",
+          "html_link": "breakpoint-workspace-dark.html",
+          "is_recommended": false
+        }
+      ]
+    },
+    {
+      "title": "Protocol viewer \u00b7 WebSocket",
+      "key": "websocket-viewer",
+      "description": "Protocol viewer \u00b7 WebSocket using the current requestr shell, tokens, and operational copy patterns.",
+      "variations": [
+        {
+          "title": "Protocol viewer \u00b7 WebSocket \u2014 Light",
+          "key": "light",
+          "html_link": "websocket-viewer-light.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Protocol viewer \u00b7 WebSocket \u2014 Dark",
+          "key": "dark",
+          "html_link": "websocket-viewer-dark.html",
+          "is_recommended": false
+        }
+      ]
+    },
+    {
+      "title": "Protocol viewer \u00b7 Server-Sent Events",
+      "key": "sse-viewer",
+      "description": "Protocol viewer \u00b7 Server-Sent Events using the current requestr shell, tokens, and operational copy patterns.",
+      "variations": [
+        {
+          "title": "Protocol viewer \u00b7 Server-Sent Events \u2014 Light",
+          "key": "light",
+          "html_link": "sse-viewer-light.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Protocol viewer \u00b7 Server-Sent Events \u2014 Dark",
+          "key": "dark",
+          "html_link": "sse-viewer-dark.html",
+          "is_recommended": false
+        }
+      ]
+    },
+    {
+      "title": "Protocol viewer \u00b7 gRPC",
+      "key": "grpc-viewer",
+      "description": "Protocol viewer \u00b7 gRPC using the current requestr shell, tokens, and operational copy patterns.",
+      "variations": [
+        {
+          "title": "Protocol viewer \u00b7 gRPC \u2014 Light",
+          "key": "light",
+          "html_link": "grpc-viewer-light.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Protocol viewer \u00b7 gRPC \u2014 Dark",
+          "key": "dark",
+          "html_link": "grpc-viewer-dark.html",
+          "is_recommended": false
+        }
+      ]
+    },
+    {
+      "title": "Protocol viewer \u00b7 HTTP/3",
+      "key": "http3-viewer",
+      "description": "Protocol viewer \u00b7 HTTP/3 using the current requestr shell, tokens, and operational copy patterns.",
+      "variations": [
+        {
+          "title": "Protocol viewer \u00b7 HTTP/3 \u2014 Light",
+          "key": "light",
+          "html_link": "http3-viewer-light.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Protocol viewer \u00b7 HTTP/3 \u2014 Dark",
+          "key": "dark",
+          "html_link": "http3-viewer-dark.html",
+          "is_recommended": false
+        }
+      ]
+    },
+    {
+      "title": "Capture diagnostics, trust, and remediation",
+      "key": "diagnostics",
+      "description": "Capture diagnostics, trust, and remediation using the current requestr shell, tokens, and operational copy patterns.",
+      "variations": [
+        {
+          "title": "Capture diagnostics, trust, and remediation \u2014 Light",
+          "key": "light",
+          "html_link": "diagnostics-light.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Capture diagnostics, trust, and remediation \u2014 Dark",
+          "key": "dark",
+          "html_link": "diagnostics-dark.html",
+          "is_recommended": false
+        }
+      ]
+    },
+    {
+      "title": "Script Console",
+      "key": "script-console",
+      "description": "Script library and lifecycle editor with logs, backtraces, shared context, isolated-host controls, and persistent safety state.",
+      "variations": [
+        {
+          "title": "Script Console \u2014 Light",
+          "key": "light",
+          "html_link": "script-console-light.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Script Console \u2014 Dark",
+          "key": "dark",
+          "html_link": "script-console-dark.html",
+          "is_recommended": false
+        }
+      ]
+    },
+    {
+      "title": "Replay Queue & Results",
+      "key": "replay-queue",
+      "description": "Advanced repeat scheduling with a visible 255-connection ceiling, FIFO queue, persisted result status, and capture linkage.",
+      "variations": [
+        {
+          "title": "Replay Queue & Results \u2014 Light",
+          "key": "light",
+          "html_link": "replay-queue-light.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Replay Queue & Results \u2014 Dark",
+          "key": "dark",
+          "html_link": "replay-queue-dark.html",
+          "is_recommended": false
+        }
+      ]
+    },
+    {
+      "title": "Diff Workspace",
+      "key": "diff-workspace",
+      "description": "Any-two-flow comparison across request/response headers, bodies, raw data, and semantic timing modes.",
+      "variations": [
+        {
+          "title": "Diff Workspace \u2014 Light",
+          "key": "light",
+          "html_link": "diff-workspace-light.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Diff Workspace \u2014 Dark",
+          "key": "dark",
+          "html_link": "diff-workspace-dark.html",
+          "is_recommended": false
+        }
+      ]
+    },
+    {
+      "title": "Responsive tabs \u00b7 component state board",
+      "key": "responsive-tabs",
+      "description": "Intrinsic single-line tabs across measured overflow, selected visibility, six glass modes, three font scales, and adaptive protocols.",
+      "variations": [
+        {
+          "title": "Responsive tabs \u00b7 component state board \u2014 Light",
+          "key": "light",
+          "html_link": "responsive-tabs-light.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Responsive tabs \u00b7 component state board \u2014 Dark",
+          "key": "dark",
+          "html_link": "responsive-tabs-dark.html",
+          "is_recommended": false
+        }
+      ]
+    },
+    {
+      "title": "Pinning & System Trust",
+      "key": "pinning-system-trust",
+      "description": "Complete scoped CA and instrumentation trust controls",
+      "variations": [
+        {
+          "title": "Light",
+          "key": "light",
+          "html_link": "pinning-system-trust-light.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Dark",
+          "key": "dark",
+          "html_link": "pinning-system-trust-dark.html",
+          "is_recommended": false
+        }
+      ]
+    },
+    {
+      "title": "Guided Capture Setup & Remediation",
+      "key": "guided-capture-setup",
+      "description": "Complete guided trust, proxy, browser validation, and diagnostics flow",
+      "variations": [
+        {
+          "title": "Light",
+          "key": "light",
+          "html_link": "guided-capture-setup-light.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Dark",
+          "key": "dark",
+          "html_link": "guided-capture-setup-dark.html",
+          "is_recommended": false
+        }
+      ]
+    },
+    {
+      "title": "API Testr protocol extension",
+      "key": "api-testr-protocol",
+      "description": "Existing request builder extended with protocol preferences and honest result states",
+      "variations": [
+        {
+          "title": "Light",
+          "key": "light",
+          "html_link": "api-testr-protocol-light.html",
+          "is_recommended": true
+        },
+        {
+          "title": "Dark",
+          "key": "dark",
+          "html_link": "api-testr-protocol-dark.html",
+          "is_recommended": false
+        }
+      ]
+    }
+  ]
+}

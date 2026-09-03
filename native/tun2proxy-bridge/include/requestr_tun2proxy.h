@@ -22,6 +22,23 @@
 
 #define ERR_NULL_PTR -5
 
+/**
+ * P1 bug #1 fix: the background thread was spawned but reported [`BridgeState::Failed`]
+ * within the bounded readiness window -- `state::last_error()` has the real reason. Distinct
+ * from [`ERR_INVALID_CONFIG`] (a synchronous, pre-spawn validation failure) so callers can
+ * tell "never even tried" apart from "tried and the runtime itself rejected it".
+ */
+#define ERR_RUNTIME_FAILED -6
+
+/**
+ * P1 bug #1/#2 fix: a bounded wait elapsed without a definite outcome -- either
+ * `requestr_tun2proxy_start`'s readiness handshake never observed a transition to
+ * Running/Failed, or `requestr_tun2proxy_await_stopped` never observed the background thread
+ * finish. Ambiguous, not success: callers must treat this the same as a real failure (for
+ * start) or escalate rather than touch the tun fd (for stop).
+ */
+#define ERR_TIMEOUT -7
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -35,9 +52,16 @@ extern "C" {
  * standalone binary, which would take the whole Android app process down with it; this bridge
  * manages its own runtime lifecycle instead so `requestr_tun2proxy_stop` can cancel cleanly.
  *
- * Returns `0` only once the background thread has actually been spawned with a valid config.
- * Returns a negative code (see the `ERR_*` constants) and records `state::last_error()`
- * otherwise -- including when a bridge is already running.
+ * P1 bug #1 fix (readiness handshake): this call does not return until the background thread
+ * has reported a *real* outcome -- [`BridgeState::Running`] (returns [`OK`]) or
+ * [`BridgeState::Failed`] (returns [`ERR_RUNTIME_FAILED`], with `state::last_error()` set to
+ * the genuine reason) -- or [`START_READINESS_TIMEOUT`] elapses first (returns [`ERR_TIMEOUT`],
+ * ambiguous: the thread may still be starting). Previously this returned [`OK`] the instant the
+ * thread was merely *spawned*, racing the caller (which took `OK` as "definitely running" and
+ * disabled its legacy fallback) against the background thread's own, sometimes much later,
+ * first real state transition -- observed on the host to take ~20ms for an immediate failure
+ * while the spawn itself returns in ~150µs. Never returns [`OK`] without the background thread
+ * having genuinely reached [`BridgeState::Running`].
  *
  * # Safety
  * `config_json` must be a valid, NUL-terminated C string pointer, live for the duration of
@@ -62,6 +86,22 @@ int requestr_tun2proxy_stop(void);
 int requestr_tun2proxy_state(void);
 
 /**
+ * Blocks up to `timeout_ms` millisecond for the background bridge thread to fully finish, then
+ * joins the retained [`THREAD_HANDLE`] so the caller has a real guarantee — not an inference
+ * from polling [`requestr_tun2proxy_state`] — that the thread will never touch the tun fd again
+ * before the caller closes it. Returns [`OK`] when the thread is confirmed finished and joined,
+ * [`ERR_NOT_RUNNING`] when there was no thread to wait on (never started, or already consumed),
+ * or [`ERR_TIMEOUT`] when the bound elapsed first (ambiguous — the caller must escalate rather
+ * than touch the fd).
+ *
+ * # Safety
+ * Safe to call from any thread; the underlying [`JoinHandle`] is only ever consumed by this
+ * function and by [`start_with_readiness_timeout`]'s stale-handle join, both of which are
+ * serialized by the same [`THREAD_HANDLE`] mutex.
+ */
+int requestr_tun2proxy_await_stopped(int timeout_ms);
+
+/**
  * Copies the most recent recorded error message (if any) into `buf`, NUL-terminated,
  * truncating to fit within `buf_len` bytes (terminator included). Returns the number of
  * message bytes written (excluding the terminator, which may be fewer than the real message
@@ -82,6 +122,35 @@ int requestr_tun2proxy_last_error(char *buf, int buf_len);
  * `tx_out` and `rx_out` must each point to a valid, writable `u64`.
  */
 int requestr_tun2proxy_traffic_stats(uint64_t *tx_out, uint64_t *rx_out);
+
+/**
+ * Registers a function-pointer-based event sink for the bridge event protocol.
+ *
+ * The callback receives a NUL-terminated JSON string for each bridge event.
+ * **The callback MUST be nonblocking** — it is called from the event consumer
+ * thread and a blocking callback will delay all subsequent event delivery.
+ * Pass `None` (null function pointer) to clear the sink.
+ *
+ * # Safety
+ * If non-null, `callback` must be safe to call from any thread with a valid
+ * NUL-terminated C string pointer that remains valid only for the duration of the call.
+ * `ctx` is passed through opaquely.
+ */
+void requestr_tun2proxy_set_event_sink(void (*callback)(const char*, void*), void *ctx);
+
+/**
+ * Registers a C function pointer as the socket-protect callback. The native bridge
+ * calls this before every egress TCP connect and UDP bind. Return `true` from the
+ * callback to allow the connect, `false` to fail it closed.
+ *
+ * Pass `None` to clear the callback. When `protect_available` is set in config,
+ * the bridge sets `protect_required(true)` so a missing callback fails closed.
+ *
+ * # Safety
+ * If non-null, `callback` must be safe to call from any thread with a valid raw fd.
+ * `ctx` is passed through opaquely.
+ */
+void requestr_tun2proxy_set_protect_callback(bool (*callback)(int, void*), void *ctx);
 
 #ifdef __cplusplus
 }  // extern "C"

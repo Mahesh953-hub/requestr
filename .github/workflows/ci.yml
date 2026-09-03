@@ -1,0 +1,224 @@
+# .github/workflows/ci.yml
+#
+# S0 CI skeleton for requestr (plan task 5).
+#
+# Runs on every push and pull request targeting main or the interceptor
+# development branches. Two parallel jobs:
+#
+#   kotlin  – unit tests (app + cli + sdk + sdk-noop), lint, assembly,
+#             Room schema drift check
+#   rust    – cargo fmt (maintained code only), cargo check (host + Android),
+#             cargo test, vendor integrity, C ABI header syntax check
+#
+# Does NOT include: Firebase Test Lab, physical-device tests, benchmarks,
+# screenshot tests, fuzz harnesses, or any job requiring secrets not
+# committed to the repository. Those belong to later S8 tasks.
+
+name: CI
+
+on:
+  push:
+    branches: [main, "vorflux/**"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JAVA_VERSION: "17"
+  JAVA_DISTRIBUTION: "temurin"
+
+# ---------------------------------------------------------------------------
+# Kotlin / Android job
+# ---------------------------------------------------------------------------
+jobs:
+  kotlin:
+    name: Kotlin (test · lint · assemble)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+
+      # Official Gradle action: validates the wrapper JAR checksum and
+      # caches ~/.gradle (distribution, dependencies, build cache).
+      # Cache key is OS + job + commit SHA, so any build-file change
+      # (gradle-wrapper.properties, settings.gradle.kts, build scripts,
+      # gradle/libs.versions.toml) lands in a new commit and therefore a
+      # new cache entry; restore-keys fall back to the previous commit's
+      # cache, and Gradle resolves the delta at build time.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          # PRs get read-only cache; pushes populate it.
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+
+      # google-services plugin uses MissingGoogleServicesStrategy.WARN,
+      # so builds succeed without google-services.json. Create .env from
+      # the committed .env.example so the Secrets plugin does not fail.
+      - name: Prepare environment
+        run: cp .env.example .env
+
+      # ---- Unit tests ----
+      # :app — Robolectric + plain JVM tests. Also triggers KSP, which
+      # regenerates Room schema JSONs for the drift check below.
+      # :cli — pure JVM (JUnit Platform).
+      # :sdk / :sdk-noop — Android library unit tests (Robolectric).
+      - name: Run unit tests
+        run: >
+          ./gradlew
+          :app:testDebugUnitTest
+          :cli:test
+          :sdk:testDebugUnitTest
+          :sdk-noop:testDebugUnitTest
+          --no-build-cache
+          -Dorg.gradle.daemon=false
+          -Dorg.gradle.parallel=true
+
+      # ---- Lint ----
+      - name: Run Android Lint
+        run: >
+          ./gradlew :app:lintDebug
+          -Dorg.gradle.daemon=false
+
+      - name: Upload lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-report
+          path: app/build/reports/lint-results-debug.html
+          retention-days: 14
+
+      # ---- Assembly ----
+      # Native bridge is excluded (-x cargoBuildTun2ProxyBridge) because
+      # Rust cross-compilation is validated in the parallel rust job.
+      # The release keystore and signing config are committed to the repo
+      # so assembleRelease works without external secrets.
+      - name: Assemble debug APK
+        run: >
+          ./gradlew :app:assembleDebug
+          -x cargoBuildTun2ProxyBridge
+          -Dorg.gradle.daemon=false
+
+      - name: Assemble release APK
+        run: >
+          ./gradlew :app:assembleRelease
+          -x cargoBuildTun2ProxyBridge
+          -Dorg.gradle.daemon=false
+
+      # ---- Room schema drift check ----
+      # Validates every exported schema JSON structurally (well-formed,
+      # non-empty identityHash, version matches filename), then checks
+      # git diff to catch schemas that are stale relative to KSP output.
+      - name: Check Room schema drift
+        run: bash tools/ci/check-schema-drift.sh
+
+      # ---- Test results ----
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            app/build/test-results/
+            cli/build/test-results/
+            sdk/build/test-results/
+            sdk-noop/build/test-results/
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Rust / native bridge job
+  # ---------------------------------------------------------------------------
+  rust:
+    name: Rust (fmt · check · test · Android target)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: native/tun2proxy-bridge
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: aarch64-linux-android
+
+      # Cache Cargo registry, git checkouts, and the target directory.
+      # Key is tied to Cargo.lock (transitive graph), Cargo.toml (direct
+      # deps/features), and the vendor manifest (vendor content hash).
+      - name: Cache Cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            native/tun2proxy-bridge/target/
+          key: cargo-${{ runner.os }}-${{ hashFiles('native/tun2proxy-bridge/Cargo.lock', 'native/tun2proxy-bridge/Cargo.toml', 'tools/ci/vendor-sha256.manifest') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      # Resolve the NDK toolchain for Android cross-compilation checks.
+      # GitHub Actions ubuntu-latest ships an NDK under $ANDROID_HOME.
+      - name: Configure NDK toolchain
+        run: |
+          NDK_HOME="${ANDROID_NDK_HOME:-${ANDROID_HOME}/ndk/$(ls ${ANDROID_HOME}/ndk/ | sort -V | tail -1)}"
+          TOOLCHAIN="${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
+          echo "NDK_HOME=${NDK_HOME}" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${TOOLCHAIN}/bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "CC_aarch64_linux_android=${TOOLCHAIN}/bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=${TOOLCHAIN}/bin/llvm-ar" >> "$GITHUB_ENV"
+        working-directory: .
+
+      # ---- Vendor integrity ----
+      # Verify vendored tun2proxy source matches the committed SHA-256
+      # manifest. Catches accidental edits to upstream code.
+      - name: Check vendor integrity
+        working-directory: .
+        run: bash tools/ci/check-vendor-integrity.sh
+
+      # ---- Header syntax (C ABI) ----
+      # Compile the public FFI header in both C and C++ modes with a
+      # syntax-only pass. Catches a header that would break every native
+      # (non-JNI) consumer of the bridge's C ABI -- nothing else in this
+      # pipeline ever parses this header.
+      - name: Check header syntax (C ABI)
+        working-directory: .
+        run: bash tools/ci/check-header-syntax.sh
+
+      # ---- Format check (maintained code only) ----
+      # Only check formatting on requestr's own bridge source files,
+      # not the vendored upstream tree. Vendor code uses upstream style
+      # and is validated by the integrity manifest instead.
+      - name: Check formatting (cargo fmt — bridge src only)
+        run: |
+          rustfmt --edition 2021 --check src/*.rs
+
+      # ---- Compile check (host target) ----
+      - name: Cargo check (host)
+        run: cargo check --lib --tests
+
+      # ---- Compile check (Android aarch64) ----
+      # Compiles with cfg(target_os = "android") active so jni_bridge.rs,
+      # android_logger, and all Android-gated code paths are verified.
+      # Uses the NDK clang as linker/CC for any crate build scripts that
+      # probe the target toolchain.
+      - name: Cargo check (aarch64-linux-android)
+        run: cargo check --lib --target aarch64-linux-android
+
+      # ---- Tests (host target — JNI module is cfg-gated out) ----
+      - name: Run Rust tests
+        run: cargo test --lib

@@ -154,4 +154,65 @@ object NativeTun2Proxy {
 
     @JvmStatic
     private external fun nativeTrafficStats(): Long
+
+    /**
+     * Registers a native event listener. The native side calls [listener]'s method
+     * from the tun2proxy packet thread for each bridge event (session start/end, DNS,
+     * UDP policy, packet tee, error). The listener must not block.
+     *
+     * The native implementation stores a JNI GlobalRef to [listener] so it survives
+     * GC until [nativeUnregisterEventListener] is called.
+     */
+    @JvmStatic
+    private external fun nativeRegisterEventListener(listener: Any): Int
+
+    /** Clears the native event listener GlobalRef. Safe to call even if none was registered. */
+    @JvmStatic
+    private external fun nativeUnregisterEventListener(): Int
+
+    /**
+     * Registers a native socket protect callback. The native side calls [protector]'s
+     * `protectFd(int)` method before every egress TCP connect and UDP bind.
+     * Returns true from protectFd to allow the connect, false to fail it closed.
+     */
+    @JvmStatic
+    private external fun nativeRegisterProtectCallback(protector: Any): Int
+
+    /** Clears the native protect callback. */
+    @JvmStatic
+    private external fun nativeUnregisterProtectCallback(): Int
+
+    // --- Kotlin wrappers for event listener ---
+
+    fun registerEventListener(listener: Any): Int {
+        if (!loaded) return ERR_NOT_RUNNING
+        return runCatching { nativeRegisterEventListener(listener) }.getOrElse {
+            Log.w(TAG, "nativeRegisterEventListener threw: ${it.message}")
+            ERR_LOCK
+        }
+    }
+
+    fun unregisterEventListener(): Int {
+        if (!loaded) return ERR_NOT_RUNNING
+        return runCatching { nativeUnregisterEventListener() }.getOrElse {
+            Log.w(TAG, "nativeUnregisterEventListener threw: ${it.message}")
+            ERR_LOCK
+        }
+    }
+
+    fun registerProtectCallback(protector: Any): Int {
+        if (!loaded) return ERR_NOT_RUNNING
+        return runCatching { nativeRegisterProtectCallback(protector) }.getOrElse {
+            Log.w(TAG, "nativeRegisterProtectCallback threw: ${it.message}")
+            ERR_LOCK
+        }
+    }
+
+    fun unregisterProtectCallback(): Int {
+        if (!loaded) return ERR_NOT_RUNNING
+        return runCatching { nativeUnregisterProtectCallback() }.getOrElse {
+            Log.w(TAG, "nativeUnregisterProtectCallback threw: ${it.message}")
+            ERR_LOCK
+        }
+    }
 }

@@ -220,6 +220,9 @@ dependencies {
   implementation(libs.androidx.navigation.compose)
   implementation(libs.androidx.room.ktx)
   implementation(libs.androidx.room.runtime)
+  // S0 task 3: bundled SQLite runtime so FTS5 is guaranteed regardless of device (D4).
+  // Provides BundledSQLiteDriver for Room 2.7.0's setDriver() API.
+  implementation(libs.androidx.sqlite.bundled)
   implementation(libs.converter.moshi)
   implementation(libs.firebase.ai)
   // Uncomment to use Firestore:
@@ -359,6 +362,11 @@ val cargoBuildTun2ProxyBridge = tasks.register<Exec>("cargoBuildTun2ProxyBridge"
     "and packages librequestr_tun2proxy.so into jniLibs (Gap #1 Approach A)."
 
   inputs.dir(file("$tun2proxyBridgeDir/src"))
+  // The vendored tun2proxy fork is a `path` dependency compiled straight into the .so, so its
+  // sources are just as much an input as the bridge's own -- without this, a vendor-only patch
+  // (e.g. a fix inside vendor/tun2proxy/src/lib.rs) would leave a stale .so UP-TO-DATE.
+  inputs.dir(file("$tun2proxyBridgeDir/vendor/tun2proxy/src"))
+  inputs.file(file("$tun2proxyBridgeDir/vendor/tun2proxy/Cargo.toml"))
   inputs.file(file("$tun2proxyBridgeDir/Cargo.toml"))
   inputs.file(file("$tun2proxyBridgeDir/Cargo.lock"))
   outputs.dir(tun2proxyBridgeOutDir)

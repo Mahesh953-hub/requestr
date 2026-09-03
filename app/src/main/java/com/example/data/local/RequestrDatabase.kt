@@ -1,12 +1,20 @@
 package com.example.data.local
 
 import android.content.Context
+import android.os.Looper
+import android.util.Log
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
 import androidx.room.migration.Migration
+import androidx.sqlite.SQLiteConnection
 import androidx.sqlite.db.SupportSQLiteDatabase
+import androidx.sqlite.driver.bundled.BundledSQLiteDriver
+import com.example.data.persistence.DbBackup
+import com.example.data.persistence.DbDriverFlag
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.runBlocking
 
 /**
  * Real on-device persistence for interception.
@@ -123,34 +131,219 @@ abstract class RequestrDatabase : RoomDatabase() {
     abstract fun connectAttemptDao(): ConnectAttemptDao
 
     companion object {
+        private const val TAG = "RequestrDatabase"
+
+        /**
+         * The current schema version declared in the [@Database] annotation above.
+         * Kept in sync manually; a CI schema-drift check validates the exported JSON.
+         */
+        const val SCHEMA_VERSION = 18
+
         @Volatile
         private var INSTANCE: RequestrDatabase? = null
 
-        fun get(context: Context): RequestrDatabase =
-            INSTANCE ?: synchronized(this) {
-                INSTANCE ?: Room.databaseBuilder(
-                    context.applicationContext,
-                    RequestrDatabase::class.java,
-                    "requestr.db",
-                )
-                    // Real migration path as of v9 -- v8 now preserves all user data via
-                    // MIGRATION_8_9. But `main` has shipped released builds at versions 1-7
-                    // (confirmed via `git log -p` on this file's `version =` field) with
-                    // exportSchema = false the whole time, so there is no exported schema JSON
-                    // for any of those versions to author a faithful migration against -- only
-                    // 8.json and 9.json exist under app/schemas/. Rather than crash every
-                    // pre-8 install with Room's "A migration from N to 9 was required but not
-                    // found" IllegalStateException on every launch, fall back to destructive
-                    // recreation *only* for those specific unsupported legacy versions (1-7).
-                    // This wipes captured traffic/saved requests/flow graphs for pre-8 users --
-                    // real, disclosed data loss (see AUDIT_REPORT.md/TODO_v5.md) -- but it is
-                    // strictly better than a crash loop, and it does not touch the v8->v9 path,
-                    // which stays a real, non-destructive migration.
-                    .addMigrations(MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18)
-                    .fallbackToDestructiveMigrationFrom(/* dropAllTables = */ true, 1, 2, 3, 4, 5, 6, 7)
-                    .build()
-                    .also { INSTANCE = it }
+        /**
+         * Deferred that completes when the first [initAsync] finishes building.
+         * Replaced by a fresh instance if a test resets the singleton.
+         */
+        @Volatile
+        private var ready = CompletableDeferred<RequestrDatabase>()
+
+        // ── Public entry point ───────────────────────────────────────────────
+
+        /**
+         * Eagerly initializes the database on the caller's thread (expected to be
+         * `Dispatchers.IO`).  Called from [com.example.RequestrApplication.onCreate].
+         *
+         * All file I/O (backup/restore, WAL checkpoint, version read) happens here,
+         * off the main thread.  When this completes, [get] returns immediately.
+         */
+        fun initAsync(context: Context) {
+            if (INSTANCE != null) return
+            synchronized(this) {
+                if (INSTANCE != null) return
+                val db = buildDatabase(context, DbDriverFlag.get(context).isEnabled)
+                INSTANCE = db
+                ready.complete(db)
             }
+        }
+
+        /**
+         * Returns the singleton database instance.
+         *
+         * **Fast path** (post-init): returns the cached [INSTANCE] with zero I/O.
+         * Safe to call on any thread including main.
+         *
+         * **Main-thread cold path**: if [initAsync] was launched (from [RequestrApplication])
+         * but has not finished yet, suspends until the in-flight IO init completes.
+         * This window is bounded by the IO init duration on cold start and is
+         * strictly shorter than the prior architecture where the entire
+         * backup/checkpoint/build ran synchronously on main.
+         *
+         * **Background cold path**: if `initAsync` was never called (unit tests,
+         * isolated services), performs the full init synchronously on the current
+         * background thread.
+         *
+         * ### S0 runtime foundation (tasks 3 + 5)
+         *
+         * - **Bundled SQLite** (gated by [DbDriverFlag], default **on** in S0): uses
+         *   [BundledSQLiteDriver] so FTS5/JSON1 are guaranteed on every device.
+         * - **Explicit WAL**: `JournalMode.WRITE_AHEAD_LOGGING`.
+         * - **Pre-migration backup**: [DbBackup] checkpoints WAL and copies the DB
+         *   before any migration, with explicit metadata so data loss is never silent.
+         * - **Downgrade safety**: `fallbackToDestructiveMigrationOnDowngrade` is the
+         *   non-bricking last resort; [DbBackup] restores on re-upgrade.
+         */
+        fun get(context: Context): RequestrDatabase {
+            // Fast path: already initialized — zero I/O, main-thread safe.
+            INSTANCE?.let { return it }
+
+            val mainLooper = Looper.getMainLooper()
+            val onMain = mainLooper != null && Looper.myLooper() == mainLooper
+
+            if (onMain && ready.isActive) {
+                // Main-thread cold path: initAsync is in-flight, wait for it.
+                return runBlocking { ready.await() }
+            }
+
+            // Background cold path (or Robolectric where Looper is null/main): init
+            // synchronously.  This is the test and early-Service path.
+            initAsync(context)
+            return INSTANCE!!
+        }
+
+        /**
+         * Resets the singleton for test isolation.  Production code must never call this.
+         */
+        @androidx.annotation.VisibleForTesting
+        internal fun resetForTest() {
+            INSTANCE?.close()
+            INSTANCE = null
+            ready = CompletableDeferred()
+        }
+
+        /**
+         * Builds the database.  Extracted so tests can call it with an explicit
+         * [useBundledDriver] flag without touching the singleton.
+         *
+         * @param useBundledDriver `true` → [BundledSQLiteDriver] (on-device only);
+         *                         `false` → framework `SupportSQLiteOpenHelper`.
+         */
+        internal fun buildDatabase(
+            context: Context,
+            useBundledDriver: Boolean,
+        ): RequestrDatabase {
+            val appContext = context.applicationContext
+            val backup = DbBackup(appContext)
+            val dbFile = appContext.getDatabasePath(DbBackup.DB_NAME)
+
+            // ── Phase 1: restore from a previous downgrade-wipe backup ───────
+            if (backup.shouldRestoreBeforeOpen(SCHEMA_VERSION)) {
+                Log.i(TAG, "Viable backup after previous downgrade wipe — restoring")
+                backup.restoreBackup()
+            }
+
+            // ── Phase 2: backup before any migration ─────────────────────────
+            val preOpenVersion: Int = if (dbFile.exists()) {
+                backup.readDatabaseVersion(dbFile)
+            } else {
+                0
+            }
+            if (preOpenVersion >= DbBackup.MINIMUM_RESTORABLE_VERSION &&
+                preOpenVersion != SCHEMA_VERSION
+            ) {
+                backup.backupBeforeMigration(preOpenVersion)
+            }
+
+            // ── Phase 2b: bump open generation for stable-launch tracking ────
+            backup.bumpOpenGeneration()
+
+            // ── Phase 3: build ───────────────────────────────────────────────
+            //
+            // Room 2.7.0 pure driver mode requires migrations to override
+            // migrate(SQLiteConnection).  The existing v8→v18 migrations only
+            // override migrate(SupportSQLiteDatabase), so the bundled driver
+            // can only be used when the on-disk version already matches
+            // SCHEMA_VERSION (no migration needed) or on a fresh install.
+            // If a migration is required, fall back to the support driver.
+            val needsMigration = preOpenVersion in 1 until SCHEMA_VERSION
+            val effectiveBundled = useBundledDriver && !needsMigration
+
+            if (useBundledDriver && needsMigration) {
+                Log.i(
+                    TAG,
+                    "Bundled driver requested but v$preOpenVersion→v$SCHEMA_VERSION " +
+                        "migration needed — falling back to support driver for this open"
+                )
+            }
+
+            val builder = Room.databaseBuilder(
+                appContext,
+                RequestrDatabase::class.java,
+                DbBackup.DB_NAME,
+            )
+                .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
+                .addMigrations(*ALL_MIGRATIONS)
+                .fallbackToDestructiveMigrationFrom(
+                    /* dropAllTables = */ true, 1, 2, 3, 4, 5, 6, 7
+                )
+                .fallbackToDestructiveMigrationOnDowngrade(/* dropAllTables = */ true)
+                .addCallback(BackupCallback(backup, preOpenVersion))
+
+            if (effectiveBundled) {
+                builder.setDriver(BundledSQLiteDriver())
+            }
+
+            return builder.build()
+        }
+
+        /**
+         * Room callback that fires in **both** support-driver and bundled-driver modes.
+         *
+         * When Room uses a `SQLiteDriver` (bundled mode), it calls the
+         * `SQLiteConnection` overloads. When using the default
+         * `SupportSQLiteOpenHelper` path, it calls the `SupportSQLiteDatabase`
+         * overloads.  We override both so backup/restore works regardless of mode.
+         */
+        private class BackupCallback(
+            private val backup: DbBackup,
+            private val preOpenVersion: Int,
+        ) : Callback() {
+
+            // ── Support-driver mode (default / Robolectric) ──────────────────
+
+            override fun onDestructiveMigration(db: SupportSQLiteDatabase) {
+                handleDestructiveMigration()
+            }
+
+            override fun onOpen(db: SupportSQLiteDatabase) {
+                handleOpen()
+            }
+
+            // ── Bundled-driver mode (on-device with BundledSQLiteDriver) ─────
+
+            override fun onDestructiveMigration(connection: SQLiteConnection) {
+                handleDestructiveMigration()
+            }
+
+            override fun onOpen(connection: SQLiteConnection) {
+                handleOpen()
+            }
+
+            // ── Shared logic ─────────────────────────────────────────────────
+
+            private fun handleDestructiveMigration() {
+                backup.recordDestructiveWipe(preOpenVersion, SCHEMA_VERSION)
+            }
+
+            private fun handleOpen() {
+                backup.markCleanLaunch()
+            }
+        }
+
+        // ── Migrations ───────────────────────────────────────────────────────
+        //
+        // All ten migrations v8→v18 are preserved exactly as shipped.
 
         /**
          * v8 -> v9 (task 10). The first real (non-destructive) migration this database has
@@ -331,21 +524,11 @@ abstract class RequestrDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE saved_api_requests ADD COLUMN mockStatusCode INTEGER NOT NULL DEFAULT 200")
                 db.execSQL("ALTER TABLE saved_api_requests ADD COLUMN mockStatusMessage TEXT NOT NULL DEFAULT 'OK'")
                 db.execSQL("ALTER TABLE saved_api_requests ADD COLUMN mockHeaders TEXT NOT NULL DEFAULT '[]'")
-                // The mockBody default is spelled out here to match
-                // ApiRequestItem.mockBody/SavedApiRequestEntity.mockBody exactly, so an upgraded
-                // request and a freshly-created one behave identically once mock mode is enabled.
                 db.execSQL("ALTER TABLE saved_api_requests ADD COLUMN mockBody TEXT NOT NULL DEFAULT '{\"mocked\": true}'")
                 db.execSQL("ALTER TABLE saved_api_requests ADD COLUMN mockDelayMs INTEGER NOT NULL DEFAULT 0")
             }
         }
 
-        /**
-         * v10 -> v11 (transplant slice 11). Adds the `flow_pipelines` table for
-         * multi-flow persistence. Existing `flow_nodes`/`flow_connections` rows
-         * keep their `flowId` column (already present since v5) — they are
-         * associated with the default pipeline seeded on first post-migration
-         * launch by [FlowRepository.init].
-         */
         val MIGRATION_10_11: Migration = object : Migration(10, 11) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL(
@@ -419,10 +602,6 @@ abstract class RequestrDatabase : RoomDatabase() {
                 )
 
                 // ── Section C: connect_attempts table (SDK scope's ConnectAttemptEntity) ──
-                // Kotlin default values on the @Entity (e.g. `sourceIp: String? = null`,
-                // `timestamp: Long = System.currentTimeMillis()`) are NOT database defaults --
-                // Room only uses them when the field is omitted from an object at insert time,
-                // so no SQL DEFAULT clause is added here for any column.
                 db.execSQL(
                     "CREATE TABLE IF NOT EXISTS connect_attempts (" +
                         "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
@@ -455,5 +634,12 @@ abstract class RequestrDatabase : RoomDatabase() {
                 )
             }
         }
+
+        /** All ten registered migrations v8→v18, exposed for tests and the builder. */
+        val ALL_MIGRATIONS: Array<Migration> = arrayOf(
+            MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
+            MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16,
+            MIGRATION_16_17, MIGRATION_17_18,
+        )
     }
 }

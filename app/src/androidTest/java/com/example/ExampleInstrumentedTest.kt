@@ -15,8 +15,9 @@ import org.junit.runner.RunWith
 class ExampleInstrumentedTest {
   @Test
   fun useAppContext() {
-    // Context of the app under test.
+    // Context of the app under test. The Gradle `namespace` (com.example) differs from the
+    // `applicationId` (com.kailashhh.requestr); the runtime package name is the applicationId.
     val appContext = InstrumentationRegistry.getInstrumentation().targetContext
-    assertEquals("com.example", appContext.packageName)
+    assertEquals(BuildConfig.APPLICATION_ID, appContext.packageName)
   }
 }

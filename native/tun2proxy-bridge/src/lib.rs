@@ -22,7 +22,10 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 pub mod config;
+pub mod events;
 pub mod state;
+pub mod tee;
+pub mod udp_policy;
 
 #[cfg(target_os = "android")]
 pub mod jni_bridge;
@@ -93,7 +96,10 @@ const START_READINESS_TIMEOUT: Duration = Duration::from_millis(3000);
 /// `ParcelFileDescriptor`); this function never closes it itself (`close_fd_on_drop` is always
 /// forced to `false` in `config::build_args`).
 #[no_mangle]
-pub unsafe extern "C" fn requestr_tun2proxy_start(config_json: *const c_char, tun_fd: c_int) -> c_int {
+pub unsafe extern "C" fn requestr_tun2proxy_start(
+    config_json: *const c_char,
+    tun_fd: c_int,
+) -> c_int {
     unsafe { start_with_readiness_timeout(config_json, tun_fd, START_READINESS_TIMEOUT) }
 }
 
@@ -103,7 +109,11 @@ pub unsafe extern "C" fn requestr_tun2proxy_start(config_json: *const c_char, tu
 ///
 /// # Safety
 /// Same contract as [`requestr_tun2proxy_start`].
-unsafe fn start_with_readiness_timeout(config_json: *const c_char, tun_fd: c_int, readiness_timeout: Duration) -> c_int {
+unsafe fn start_with_readiness_timeout(
+    config_json: *const c_char,
+    tun_fd: c_int,
+    readiness_timeout: Duration,
+) -> c_int {
     if config_json.is_null() {
         state::set_last_error("config_json is null");
         state::set_state(BridgeState::Failed);
@@ -117,7 +127,12 @@ unsafe fn start_with_readiness_timeout(config_json: *const c_char, tun_fd: c_int
             return ERR_LOCK;
         }
     };
-    if guard.is_some() || matches!(state::get_state(), BridgeState::Starting | BridgeState::Running) {
+    if guard.is_some()
+        || matches!(
+            state::get_state(),
+            BridgeState::Starting | BridgeState::Running
+        )
+    {
         return ERR_ALREADY_RUNNING;
     }
 
@@ -180,10 +195,16 @@ unsafe fn start_with_readiness_timeout(config_json: *const c_char, tun_fd: c_int
     // simply replaces it, which is fine since only one bridge instance ever runs at a time
     // (enforced by the `guard.is_some()` check above).
     unsafe {
-        tun2proxy::tun2proxy_set_traffic_status_callback(1, Some(traffic_callback), std::ptr::null_mut());
+        tun2proxy::tun2proxy_set_traffic_status_callback(
+            1,
+            Some(traffic_callback),
+            std::ptr::null_mut(),
+        );
     }
 
-    let spawn_result = std::thread::Builder::new().name("requestr-tun2proxy".into()).spawn(move || run_bridge_thread(args, mtu, shutdown_token));
+    let spawn_result = std::thread::Builder::new()
+        .name("requestr-tun2proxy".into())
+        .spawn(move || run_bridge_thread(args, mtu, shutdown_token, parsed));
 
     match spawn_result {
         Ok(handle) => {
@@ -212,7 +233,12 @@ unsafe fn start_with_readiness_timeout(config_json: *const c_char, tun_fd: c_int
 /// runtime (kept off the JNI/Kotlin thread entirely) and blocks on `general_run_async` until it
 /// returns -- either because a real fatal error occurred inside tun2proxy, or because
 /// `requestr_tun2proxy_stop` cancelled `shutdown_token`.
-fn run_bridge_thread(args: tun2proxy::Args, mtu: u16, shutdown_token: CancellationToken) {
+fn run_bridge_thread(
+    args: tun2proxy::Args,
+    mtu: u16,
+    shutdown_token: CancellationToken,
+    parsed_config: config::BridgeConfig,
+) {
     // P1 bug #2 fix: declared first so it drops *last* (Rust drops locals in reverse
     // declaration order), i.e. only after every other statement in this function body --
     // including the final `state::set_state` terminal transition -- has already run. This is
@@ -229,7 +255,10 @@ fn run_bridge_thread(args: tun2proxy::Args, mtu: u16, shutdown_token: Cancellati
     }
     let _done_guard = ThreadDoneGuard;
 
-    let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
         Ok(rt) => rt,
         Err(e) => {
             state::set_last_error(format!("failed to build tokio runtime: {e}"));
@@ -242,7 +271,32 @@ fn run_bridge_thread(args: tun2proxy::Args, mtu: u16, shutdown_token: Cancellati
     };
 
     state::set_state(BridgeState::Running);
-    let result = rt.block_on(tun2proxy::general_run_async(args, mtu, false, shutdown_token));
+
+    // Start the bounded event consumer thread before installing hooks
+    events::start_event_consumer();
+
+    // Install vendor hooks based on config
+    tun2proxy::requestr_hooks::set_session_event_sink(std::sync::Arc::new(
+        events::VendorEventAdapter,
+    ));
+    tun2proxy::requestr_hooks::set_udp_policy_hook(udp_policy::ConfigDrivenUdpPolicy::new(
+        parsed_config.udp_policy,
+    ));
+    if parsed_config.tee_enabled {
+        tun2proxy::requestr_hooks::set_packet_tee_sink(std::sync::Arc::new(
+            events::VendorTeeSinkAdapter,
+        ));
+    }
+    if parsed_config.protect_available {
+        tun2proxy::requestr_hooks::set_protect_required(true);
+    }
+
+    let result = rt.block_on(tun2proxy::general_run_async(
+        args,
+        mtu,
+        false,
+        shutdown_token,
+    ));
 
     // Clear the shutdown handle before publishing the terminal state so a caller that observes
     // `Idle`/`Failed` via `requestr_tun2proxy_state` and immediately calls
@@ -259,6 +313,11 @@ fn run_bridge_thread(args: tun2proxy::Args, mtu: u16, shutdown_token: Cancellati
             state::set_state(BridgeState::Failed);
         }
     }
+
+    // Clear all vendor hooks and stop the event consumer on bridge exit.
+    tun2proxy::requestr_hooks::clear_all_hooks();
+    events::stop_event_consumer();
+    events::clear_event_sink();
 }
 
 /// Cancels the running bridge, if any. Returns `0` if a live bridge was signalled to stop,
@@ -371,7 +430,10 @@ pub unsafe extern "C" fn requestr_tun2proxy_last_error(buf: *mut c_char, buf_len
 /// # Safety
 /// `tx_out` and `rx_out` must each point to a valid, writable `u64`.
 #[no_mangle]
-pub unsafe extern "C" fn requestr_tun2proxy_traffic_stats(tx_out: *mut u64, rx_out: *mut u64) -> c_int {
+pub unsafe extern "C" fn requestr_tun2proxy_traffic_stats(
+    tx_out: *mut u64,
+    rx_out: *mut u64,
+) -> c_int {
     if tx_out.is_null() || rx_out.is_null() {
         return ERR_NULL_PTR;
     }
@@ -391,6 +453,100 @@ unsafe extern "C" fn traffic_callback(status: *const tun2proxy::TrafficStatus, _
     }
     let status = unsafe { &*status };
     state::record_traffic(status.tx, status.rx);
+}
+
+/// Registers a function-pointer-based event sink for the bridge event protocol.
+///
+/// The callback receives a NUL-terminated JSON string for each bridge event.
+/// **The callback MUST be nonblocking** — it is called from the event consumer
+/// thread and a blocking callback will delay all subsequent event delivery.
+/// Pass `None` (null function pointer) to clear the sink.
+///
+/// # Safety
+/// If non-null, `callback` must be safe to call from any thread with a valid
+/// NUL-terminated C string pointer that remains valid only for the duration of the call.
+/// `ctx` is passed through opaquely.
+#[no_mangle]
+pub unsafe extern "C" fn requestr_tun2proxy_set_event_sink(
+    callback: Option<unsafe extern "C" fn(*const c_char, *mut c_void)>,
+    ctx: *mut c_void,
+) {
+    match callback {
+        Some(cb) => {
+            let sink = std::sync::Arc::new(FfiEventSink {
+                callback: cb,
+                ctx: ctx as usize, // Store as usize for Send+Sync; cast back on call.
+            });
+            events::set_event_sink(sink);
+        }
+        None => {
+            events::clear_event_sink();
+        }
+    }
+}
+
+/// Wraps a C function pointer as an [`events::EventSink`].
+struct FfiEventSink {
+    callback: unsafe extern "C" fn(*const c_char, *mut c_void),
+    ctx: usize,
+}
+
+// Safety: the callback is a plain function pointer (no captured state beyond `ctx`),
+// and `ctx` is an opaque pointer the caller guarantees is safe to use from any thread.
+unsafe impl Send for FfiEventSink {}
+unsafe impl Sync for FfiEventSink {}
+
+impl events::EventSink for FfiEventSink {
+    fn on_event(&self, json: &str) {
+        if let Ok(c_json) = CString::new(json) {
+            unsafe {
+                (self.callback)(c_json.as_ptr(), self.ctx as *mut c_void);
+            }
+        }
+    }
+}
+
+/// Registers a C function pointer as the socket-protect callback. The native bridge
+/// calls this before every egress TCP connect and UDP bind. Return `true` from the
+/// callback to allow the connect, `false` to fail it closed.
+///
+/// Pass `None` to clear the callback. When `protect_available` is set in config,
+/// the bridge sets `protect_required(true)` so a missing callback fails closed.
+///
+/// # Safety
+/// If non-null, `callback` must be safe to call from any thread with a valid raw fd.
+/// `ctx` is passed through opaquely.
+#[no_mangle]
+pub unsafe extern "C" fn requestr_tun2proxy_set_protect_callback(
+    callback: Option<unsafe extern "C" fn(c_int, *mut c_void) -> bool>,
+    ctx: *mut c_void,
+) {
+    match callback {
+        Some(cb) => {
+            let hook = std::sync::Arc::new(FfiProtectHook {
+                callback: cb,
+                ctx: ctx as usize,
+            });
+            tun2proxy::requestr_hooks::set_socket_protect_hook(hook);
+        }
+        None => {
+            tun2proxy::requestr_hooks::clear_socket_protect_hook();
+        }
+    }
+}
+
+struct FfiProtectHook {
+    callback: unsafe extern "C" fn(c_int, *mut c_void) -> bool,
+    ctx: usize,
+}
+
+unsafe impl Send for FfiProtectHook {}
+unsafe impl Sync for FfiProtectHook {}
+
+impl tun2proxy::requestr_hooks::SocketProtectHook for FfiProtectHook {
+    fn protect_fd(&self, fd: i32) -> bool {
+        unsafe { (self.callback)(fd as c_int, self.ctx as *mut c_void) }
+    }
 }
 
 #[cfg(test)]
@@ -535,7 +691,57 @@ mod tests {
         let elapsed = start.elapsed();
         assert_eq!(rc, ERR_TIMEOUT);
         assert!(elapsed >= Duration::from_millis(50), "elapsed={elapsed:?}");
-        assert!(elapsed < Duration::from_millis(1000), "elapsed={elapsed:?} (not bounded)");
+        assert!(
+            elapsed < Duration::from_millis(1000),
+            "elapsed={elapsed:?} (not bounded)"
+        );
         state::mark_thread_done();
+    }
+
+    #[test]
+    fn event_sink_ffi_round_trips_through_bounded_channel() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let _guard = crate::state::lock_test_state();
+
+        static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+        CALL_COUNT.store(0, Ordering::SeqCst);
+
+        unsafe extern "C" fn test_callback(_json: *const c_char, _ctx: *mut c_void) {
+            CALL_COUNT.fetch_add(1, Ordering::SeqCst);
+        }
+
+        // Register the callback-based sink and start the consumer
+        unsafe {
+            requestr_tun2proxy_set_event_sink(Some(test_callback), std::ptr::null_mut());
+        }
+        events::start_event_consumer();
+
+        // Emit an event — consumer thread delivers it asynchronously
+        events::emit_event(&events::BridgeEvent::Dns {
+            name: "test.local".into(),
+            address: "198.18.0.1".into(),
+            is_virtual: false,
+        });
+
+        // Wait for async delivery
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(CALL_COUNT.load(Ordering::SeqCst), 1);
+
+        // Clear the sink and stop the consumer
+        events::stop_event_consumer();
+        unsafe {
+            requestr_tun2proxy_set_event_sink(None, std::ptr::null_mut());
+        }
+
+        events::emit_event(&events::BridgeEvent::Dns {
+            name: "test2.local".into(),
+            address: "198.18.0.2".into(),
+            is_virtual: false,
+        });
+
+        // No delivery after shutdown
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(CALL_COUNT.load(Ordering::SeqCst), 1);
     }
 }

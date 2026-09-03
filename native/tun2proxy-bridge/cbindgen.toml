@@ -23,6 +23,9 @@ include = [
   "requestr_tun2proxy_state",
   "requestr_tun2proxy_last_error",
   "requestr_tun2proxy_traffic_stats",
+  "requestr_tun2proxy_await_stopped",
+  "requestr_tun2proxy_set_event_sink",
+  "requestr_tun2proxy_set_protect_callback",
 ]
 
 [parse]

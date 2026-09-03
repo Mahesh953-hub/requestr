@@ -1,0 +1,8 @@
+
+--- runtime bridge disconnected evidence ---
+
+--- active bridge imports ---
+app/src/main/java/com/example/interception/tun/Tun2ProxyConfig.kt:6: * [NativeTun2Proxy.start]/[Tun2ProxyBridge.start] -- keep it byte-for-byte in sync with the
+app/src/main/java/com/example/interception/RequestrVpnService.kt:33:import com.example.interception.tun.Tun2ProxyConfig
+app/src/main/java/com/example/interception/RequestrVpnService.kt:83:     * [Tun2ProxyBridge.start] returned [Tun2ProxyBridge.StartResult.Started]. False for the
+app/src/main/java/com/example/interception/RequestrVpnService.kt:271:                val bridgeResult = Tun2ProxyBridge.start(

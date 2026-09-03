@@ -135,6 +135,9 @@ class CaptureMethodWatcher(
         }.getOrDefault(true) // err on the side of not false-alarming
     }
 
+    // Deliberately not SocketProtector-managed: these are loopback-only health probes into this
+    // process's listening proxy/Frida ports, not capture or replay upstream egress. Protecting them
+    // would route them outside the VPN unnecessarily and make watcher health depend on VPN state.
     private fun checkProxyPort(port: Int): Boolean = runCatching {
         java.net.Socket().use { sock ->
             sock.connect(java.net.InetSocketAddress("127.0.0.1", port), 500)

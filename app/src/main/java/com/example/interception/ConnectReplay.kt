@@ -5,7 +5,10 @@ import android.os.Build
 import com.example.data.interception.CaState
 import com.example.data.interception.CaptureMethod
 import com.example.data.interception.InterceptionStateRepository
+import com.example.interception.net.SocketProtector
+import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketAddress
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import javax.net.ssl.SSLContext
@@ -87,6 +90,10 @@ object ConnectReplay {
         targetHost: String,
         targetPort: Int,
         forceMitm: Boolean = false,
+        socketFactory: () -> Socket = { Socket() },
+        socketConnector: (Socket, SocketAddress, Int) -> Unit = { socket, address, timeout ->
+            socket.connect(address, timeout)
+        },
     ): ReplayResult {
         val start = System.currentTimeMillis()
 
@@ -106,7 +113,21 @@ object ConnectReplay {
         }
 
         return try {
-            Socket(dialTarget.first, dialTarget.second).use { socket ->
+            val socket = socketFactory()
+            try {
+                val protectResult = SocketProtector.protectSocket(socket)
+                if (protectResult == SocketProtector.ProtectResult.Failed) {
+                    return ReplayResult(
+                        "FAILED", System.currentTimeMillis() - start, null,
+                        "SocketProtector.protectSocket failed for ${dialTarget.first}:${dialTarget.second}",
+                    ).also { runCatching { socket.close() } }
+                }
+                socketConnector(socket, InetSocketAddress(dialTarget.first, dialTarget.second), SOCKET_TIMEOUT_MS)
+            } catch (t: Throwable) {
+                runCatching { socket.close() }
+                throw t
+            }
+            socket.use {
                 socket.soTimeout = SOCKET_TIMEOUT_MS
                 val output = socket.getOutputStream()
                 output.write(

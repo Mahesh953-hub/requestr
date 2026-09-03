@@ -55,7 +55,7 @@ import org.robolectric.annotation.Config
  * [MitmProxyEngine] over loopback sockets, but the fake upstream here is a real
  * [SSLServerSocket] whose accept-count is the ground truth for "did the engine actually try to
  * reach the real server". [MitmProxyEngineMockResponseTest] proves the same "never dials
- * upstream" property at the [MitmProxyEngine.handleParsedRequest]-unit level (a `connectionFactory`
+ * upstream" property at the [MitmProxyEngine.handleParsedRequest]-unit level (a `socketConnector`
  * that throws if invoked); this file proves it end-to-end through the full CONNECT/TLS pipeline.
  */
 @RunWith(RobolectricTestRunner::class)
