@@ -124,34 +124,65 @@ internal object HttpProxyShared {
         sleep: (Long) -> Unit = Thread::sleep,
         socketFactory: () -> Socket = { Socket() },
         socketConnector: (Socket, InetSocketAddress) -> Unit = { socket, address -> socket.connect(address) },
+        replies: ConnectReplies = ConnectReplies.http(output),
         onBytesTransferred: (clientToUpstream: Long, upstreamToClient: Long) -> Unit = { _, _ -> },
     ) {
         when (disposition) {
-            is ConnectControl.Disposition.Block -> {
-                output.write("HTTP/1.1 403 Blocked by requestr\r\n\r\n".toByteArray())
-                output.flush()
-            }
+            is ConnectControl.Disposition.Block -> replies.blocked()
             is ConnectControl.Disposition.AllowOpaque -> {
                 val (host, port) = parseHostPort(target, 443)
                 NetworkConditionInjector.apply(networkCondition, random, sleep)
-                output.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray())
-                output.flush()
+                replies.established()
                 relay(client, host, port, onBytesTransferred, socketFactory, socketConnector)
             }
             is ConnectControl.Disposition.Redirect -> {
                 val (host, port) = parseHostPort(disposition.target, 443)
                 NetworkConditionInjector.apply(networkCondition, random, sleep)
-                output.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray())
-                output.flush()
+                replies.established()
                 relay(client, host, port, onBytesTransferred, socketFactory, socketConnector)
             }
             is ConnectControl.Disposition.ForceMitm -> {
                 // A plain Socket relay can never terminate TLS -- only MitmProxyEngine can
                 // honor FORCE_MITM. Callers that can't MITM (HttpProxyEngine, GatewayEngine)
                 // must report this honestly rather than silently tunneling opaquely.
-                output.write("HTTP/1.1 403 MITM required but not available\r\n\r\n".toByteArray())
-                output.flush()
+                replies.mitmUnavailable()
             }
+        }
+    }
+
+    /**
+     * How [handleConnectAttempt] answers the client. The wire encoding depends on how the
+     * connection entered the gateway -- an HTTP `CONNECT` wants status lines, a SOCKS5 tunnel
+     * wants a 10-byte reply, a transparent capture wants nothing at all -- so the caller passes
+     * the right encoder instead of this helper hardcoding HTTP. [http] is the legacy default.
+     */
+    class ConnectReplies(
+        val established: () -> Unit,
+        val blocked: () -> Unit,
+        val mitmUnavailable: () -> Unit,
+    ) {
+        companion object {
+            fun http(output: OutputStream): ConnectReplies = ConnectReplies(
+                established = {
+                    output.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray())
+                    output.flush()
+                },
+                blocked = {
+                    output.write("HTTP/1.1 403 Blocked by requestr\r\n\r\n".toByteArray())
+                    output.flush()
+                },
+                mitmUnavailable = {
+                    output.write("HTTP/1.1 403 MITM required but not available\r\n\r\n".toByteArray())
+                    output.flush()
+                },
+            )
+
+            fun forSession(session: com.example.interception.gateway.local.GatewaySession): ConnectReplies =
+                ConnectReplies(
+                    established = session::replyEstablished,
+                    blocked = session::replyBlocked,
+                    mitmUnavailable = session::replyMitmUnavailable,
+                )
         }
     }
 

@@ -22,5 +22,16 @@ Exported from the platform todo list at handoff time.
 - 59608 — S0.5 Add CI foundation and downgrade-safe database backup/restore — pending
 - d5c8e — Verify, review, test, and open the S0 runtime-foundation PR — pending
 
-## S1–S8 (approved interceptor architecture slices — NOT STARTED)
-- cbaea — Execute S1–S8 approved interceptor architecture slices — pending
+## S1–S8 (approved interceptor architecture slices)
+- cbaea — Execute S1–S8 approved interceptor architecture slices — in_progress
+  - S0 closed on branch `vorflux/interceptor-s0-runtime` (PR #18, incl. the ci.yml
+    header-check wiring `d37adf8`).
+  - S1 task 6 (`LocalGateway` multi-protocol listener) — done on
+    `vorflux/interceptor-s1-transport`: SOCKS5 (+info) / SOCKS4(a) / HTTP CONNECT /
+    absolute-form / transparent TLS-by-SNI / transparent HTTP-by-Host entries;
+    `MitmProxyEngine` + `HttpProxyEngine` demoted to `GatewaySessionHandler`s; bridge
+    `+info` username encoding fixed to match vendored `socks.rs`; VPN tier routes via
+    SOCKS5 `Tun2ProxyConfig.forLocalGateway`. `SO_ORIGINAL_DST` is exposed as the
+    `OriginalDstResolver` hook and gets its implementation in task 48.
+  - S1 tasks 7–13 (relay pool/state machine, CertificateEngine, UdpPolicyRouter, UidAttributor,
+    VPN lifecycle, PcapNgWriter, TrustDiagnostics) — pending.

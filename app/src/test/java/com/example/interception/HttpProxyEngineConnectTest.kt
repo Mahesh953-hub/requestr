@@ -127,4 +127,85 @@ class HttpProxyEngineConnectTest {
         assertEquals("BLOCKED", match?.disposition)
         assertEquals("MITM not available in HTTP_PROXY tier", match?.failureReason)
     }
+
+    private fun readExactly(socket: Socket, n: Int): ByteArray {
+        val buf = ByteArray(n)
+        var off = 0
+        while (off < n) {
+            val r = socket.getInputStream().read(buf, off, n - off)
+            if (r < 0) break
+            off += r
+        }
+        return buf.copyOf(off)
+    }
+
+    /** Minimal one-shot HTTP/1.1 origin server that echoes the request line back in its body. */
+    private fun startEchoUpstream(): Pair<java.net.ServerSocket, Thread> {
+        val server = java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"))
+        val thread = Thread {
+            runCatching {
+                server.accept().use { s ->
+                    s.soTimeout = 5000
+                    val requestLine = HttpProxyShared.readLine(s.getInputStream()) ?: return@use
+                    while (true) {
+                        val line = HttpProxyShared.readLine(s.getInputStream()) ?: break
+                        if (line.isEmpty()) break
+                    }
+                    val body = "echo: $requestLine".toByteArray()
+                    s.getOutputStream().write(
+                        ("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: ${body.size}\r\n\r\n").toByteArray() + body,
+                    )
+                    s.getOutputStream().flush()
+                }
+            }
+        }
+        thread.start()
+        return server to thread
+    }
+
+    @Test
+    fun `absolute-form GET is forwarded through the gateway instead of answered with 400`() {
+        val (upstream, upstreamThread) = startEchoUpstream()
+        val port = engine.start(context, 0)
+        val socket = Socket("127.0.0.1", port)
+        socket.soTimeout = 5000
+        socket.getOutputStream().write(
+            "GET http://127.0.0.1:${upstream.localPort}/hello?x=1 HTTP/1.1\r\nHost: 127.0.0.1:${upstream.localPort}\r\nConnection: close\r\n\r\n".toByteArray(),
+        )
+        socket.getOutputStream().flush()
+        val response = String(socket.getInputStream().readBytes())
+        socket.close()
+        upstreamThread.join(5000)
+        upstream.close()
+
+        assertTrue("expected 200 from upstream, got: $response", response.startsWith("HTTP/1.1 200"))
+        assertTrue(response.contains("echo: GET /hello?x=1 HTTP/1.1"))
+    }
+
+    @Test
+    fun `SOCKS5 CONNECT to a BLOCK-ruled host is refused with reply 0x02 and persisted as BLOCKED`() {
+        runBlocking {
+            RequestrDatabase.get(context).interceptRuleDao().insert(
+                InterceptRuleEntity(name = "test", domain = "socks-blocked.example", action = RuleAction.BLOCK)
+            )
+        }
+        val port = engine.start(context, 0)
+        val socket = Socket("127.0.0.1", port)
+        socket.soTimeout = 5000
+        val out = socket.getOutputStream()
+        out.write(byteArrayOf(0x05, 0x01, 0x00)); out.flush()
+        val method = readExactly(socket, 2)
+        assertEquals(0x00, method[1].toInt())
+        val host = "socks-blocked.example".toByteArray()
+        out.write(byteArrayOf(0x05, 0x01, 0x00, 0x03, host.size.toByte()) + host + byteArrayOf(0x01, 0xBB.toByte()))
+        out.flush()
+        val reply = readExactly(socket, 10)
+        socket.close()
+        assertEquals(10, reply.size)
+        assertEquals(0x05, reply[0].toInt())
+        assertEquals("SOCKS5 REP must be 0x02 (not allowed by ruleset)", 0x02, reply[1].toInt())
+
+        val match = pollForConnectAttempt(port = 443, host = "socks-blocked.example")
+        assertEquals("BLOCKED", match?.disposition)
+    }
 }

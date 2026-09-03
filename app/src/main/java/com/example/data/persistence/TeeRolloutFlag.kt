@@ -6,7 +6,7 @@ import android.content.SharedPreferences
 /**
  * Rollout flag for the native tun2proxy bridge's packet-tee surface (defect G, S0 gaps audit).
  *
- * [com.example.interception.tun.Tun2ProxyConfig.forMitmProxyEngine] must set `teeEnabled=true`
+ * [com.example.interception.tun.Tun2ProxyConfig.forLocalGateway] must set `teeEnabled=true`
  * for production VPN-tier capture -- otherwise the tee surface (S1's PCAPng export / passive
  * QUIC decode consumer) never receives frames even though the native bridge is fully capable of
  * producing them. Modeled directly on [DbDriverFlag]'s `SharedPreferences`-backed singleton

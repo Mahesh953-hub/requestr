@@ -417,3 +417,54 @@ afterEvaluate {
   tasks.matching { it.name.startsWith("merge") && it.name.endsWith("JniLibFolders") }
     .configureEach { dependsOn(cargoBuildTun2ProxyBridge) }
 }
+
+// Robolectric/plain-JVM unit tests open the real Room database through the shipped
+// BundledSQLiteDriver, whose Android artifact only bundles Android-ABI `libsqliteJni.so` and
+// loads the host copy via `System.loadLibrary("sqliteJni")`. Without a host build on
+// `java.library.path` every DB-backed test dies in `<clinit>` with
+// `UnsatisfiedLinkError: no sqliteJni in java.library.path`. Pull the host native out of the
+// matching `sqlite-bundled-jvm` jar (same version, resolved through the normal repositories,
+// so it is cache-friendly and needs no toolchain) and put it on the unit-test library path.
+val sqliteJvmNatives: Configuration by configurations.creating {
+  isCanBeConsumed = false
+  isCanBeResolved = true
+  isTransitive = false
+}
+dependencies {
+  sqliteJvmNatives(libs.androidx.sqlite.bundled.jvm)
+}
+val sqliteJniHostDir: String = run {
+  val os = System.getProperty("os.name").lowercase()
+  val arch = System.getProperty("os.arch").lowercase()
+  val isArm64 = arch == "aarch64" || arch == "arm64"
+  when {
+    os.contains("mac") -> if (isArm64) "osx_arm64" else "osx_x64"
+    os.contains("win") -> "windows_x64"
+    else -> if (isArm64) "linux_arm64" else "linux_x64"
+  }
+}
+val sqliteJniUnitTestDir = layout.buildDirectory.dir("sqlite-jni/$sqliteJniHostDir")
+val extractSqliteJniForUnitTests by tasks.registering(Sync::class) {
+  description = "Extracts the host libsqliteJni from sqlite-bundled-jvm for Robolectric/JVM unit tests."
+  dependsOn(sqliteJvmNatives)
+  // Non-transitive configuration with a single artifact; zipTree over the resolved-file provider
+  // stays configuration-cache safe (no script-object capture inside a lazy lambda).
+  from(zipTree(sqliteJvmNatives.elements.map { jars -> jars.single().asFile })) {
+    include("natives/$sqliteJniHostDir/*")
+    eachFile { relativePath = RelativePath(true, name) }
+    includeEmptyDirs = false
+  }
+  into(sqliteJniUnitTestDir)
+}
+tasks.withType<Test>().configureEach {
+  dependsOn(extractSqliteJniForUnitTests)
+  val nativeDir = sqliteJniUnitTestDir.get().asFile.absolutePath
+  doFirst {
+    val existing = systemProperties["java.library.path"]?.toString()
+      ?.takeIf { it.isNotBlank() }
+    systemProperty(
+      "java.library.path",
+      listOfNotNull(existing, nativeDir).joinToString(File.pathSeparator),
+    )
+  }
+}

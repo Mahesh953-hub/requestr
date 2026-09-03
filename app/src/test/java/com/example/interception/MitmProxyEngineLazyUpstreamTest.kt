@@ -25,6 +25,7 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.TrustManagerFactory
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.bouncycastle.asn1.x500.X500Name
 import org.bouncycastle.asn1.x509.BasicConstraints
@@ -106,8 +107,12 @@ class MitmProxyEngineLazyUpstreamTest {
         // method in this class (Robolectric does not recreate it per-@Test). Start every test
         // from a clean rules table so an earlier test's MOCK_RESPONSE rule can never leak into
         // and shadow a later test's rule matching.
+        // Driver-agnostic wipe: `openHelper` throws under the BundledSQLiteDriver ("no
+        // SupportSQLiteOpenHelper.Factory was configured with Room"), which is the shipped
+        // production path since the DbDriverFlag rollout -- go through the DAO instead.
         runBlocking {
-            RequestrDatabase.get(context).openHelper.writableDatabase.execSQL("DELETE FROM intercept_rules")
+            val dao = RequestrDatabase.get(context).interceptRuleDao()
+            dao.observeAll().first().forEach { dao.delete(it) }
         }
 
         // RuleEnforcer.checkRules is shared, first-match-wins, unconditional-per-call: both

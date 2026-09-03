@@ -24,14 +24,18 @@ import com.example.interception.http.HttpParser
 import com.example.interception.http.ParsedHttpMessage
 import com.example.interception.http.WebSocketParser
 import com.example.interception.http.WsMessageAssembler
+import com.example.interception.gateway.GatewaySessionHandler
+import com.example.interception.gateway.LocalGateway
+import com.example.interception.gateway.OriginalDstResolver
+import com.example.interception.gateway.local.EntryKind
+import com.example.interception.gateway.local.GatewaySession
+import com.example.interception.gateway.local.ProtocolClassifier
+import com.example.interception.gateway.local.Socks5Credentials
 import com.example.interception.tls.ClientHelloCapture
 import com.example.interception.tls.TlsClientHello
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 import org.bouncycastle.asn1.x500.X500Name
 import org.bouncycastle.asn1.x509.BasicConstraints
 import org.bouncycastle.asn1.x509.Extension
@@ -43,7 +47,6 @@ import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.math.BigInteger
-import java.net.ServerSocket
 import java.net.Socket
 import java.security.KeyPair
 import java.security.KeyPairGenerator
@@ -128,10 +131,16 @@ class MitmProxyEngine(
      * can be asserted without actually waiting five seconds.
      */
     private val chaosSleep: (Long) -> Unit = { millis -> Thread.sleep(millis) },
-) {
-    private var serverSocket: ServerSocket? = null
-    private var acceptJob: Job? = null
+) : GatewaySessionHandler {
+    private var gateway: LocalGateway? = null
+    private var appContext: Context? = null
     private val running = AtomicBoolean(false)
+    /**
+     * Plaintext HTTP inside this tier (absolute-form forward-proxy requests, transparent HTTP,
+     * or plaintext spoken inside a CONNECT tunnel) is forwarded by the same code path the
+     * HTTP_PROXY tier uses, rather than a second copy of the request loop.
+     */
+    private val plaintextDelegate: HttpProxyEngine by lazy { HttpProxyEngine(scope) }
     private val packetCount = AtomicLong(0)
     private val sessionId = AtomicLong(System.currentTimeMillis())
     /**
@@ -141,10 +150,16 @@ class MitmProxyEngine(
      */
     private val certCache = ExpiringLruCertCache()
 
-    val port: Int get() = serverSocket?.localPort ?: 0
+    val port: Int get() = gateway?.port ?: 0
+
+    /** Connections the underlying [LocalGateway] dropped itself, keyed by reason. */
+    val gatewayRejectCounts: Map<com.example.interception.gateway.local.GatewayRejectReason, Long>
+        get() = gateway?.rejectCounts ?: emptyMap()
 
     companion object {
         private const val TAG = "MitmProxy"
+        /** How long a tunnel client may stay silent after the tunnel is established. */
+        private const val TUNNEL_FIRST_BYTE_TIMEOUT_MS = 15_000
         private const val BUFFER_SIZE = 8192
         /** Bytes buffered without a successful parse before falling back to blind relay. */
         private const val MAX_UNPARSED_BUFFER = 1024 * 1024
@@ -153,65 +168,90 @@ class MitmProxyEngine(
         )
     }
 
-    fun start(context: Context, port: Int = 0): Int {
+    /**
+     * Starts a [LocalGateway] routed to this engine and returns the bound port.
+     *
+     * [socks5Credentials] (per-session, see [Socks5Credentials.random]) makes the SOCKS5 entry
+     * require RFC 1929 auth -- the tun2proxy bridge supplies them plus the `+info` origin suffix.
+     * [originalDstResolver] optionally resolves transparent TLS sessions that carry no SNI.
+     */
+    fun start(
+        context: Context,
+        port: Int = 0,
+        socks5Credentials: Socks5Credentials? = null,
+        originalDstResolver: OriginalDstResolver? = null,
+    ): Int {
         if (running.get()) return this.port
+        appContext = context.applicationContext
+        plaintextDelegate.bind(context)
 
         // Pre-warm cert cache with CA material
         kotlinx.coroutines.runBlocking {
             CertificateAuthority.getOrCreate(context)
         }
 
-        serverSocket = ServerSocket(port)
+        val gw = LocalGateway(
+            handler = this,
+            scope = scope,
+            socks5Credentials = socks5Credentials,
+            originalDstResolver = originalDstResolver,
+            logTag = TAG,
+        )
+        val boundPort = gw.start(port)
+        gateway = gw
         running.set(true)
 
         InterceptionStateRepository.markActive(
             sessionId = sessionId.get(), tier = CaptureMethod.MITM_PROXY.engineTier(),
-            port = serverSocket!!.localPort, method = CaptureMethod.MITM_PROXY,
+            port = boundPort, method = CaptureMethod.MITM_PROXY,
             lifecycleOwner = CaptureMethod.MITM_PROXY.engineLifecycleOwner(),
         )
-
-        acceptJob = scope.launch {
-            while (isActive && running.get()) {
-                try {
-                    val client = serverSocket?.accept() ?: break
-                    launch { handleClient(context, client) }
-                } catch (e: Exception) {
-                    if (running.get()) Log.w(TAG, "Accept: ${e.message}")
-                }
-            }
-        }
-        return serverSocket!!.localPort
+        return boundPort
     }
 
     fun stop() {
         running.set(false)
-        acceptJob?.cancel()
-        runCatching { serverSocket?.close() }
-        serverSocket = null
+        gateway?.stop()
+        gateway = null
         Log.i(TAG, "MITM proxy stopped")
     }
 
-    private suspend fun handleClient(context: Context, client: Socket) {
+    // ── GatewaySessionHandler ──────────────────────────────────────────────
+
+    override suspend fun handlePlaintext(session: GatewaySession) {
+        plaintextDelegate.handlePlaintext(session)
+    }
+
+    /**
+     * Rule-evaluated tunnel. The gateway has already consumed the protocol prelude (SOCKS
+     * handshake / `CONNECT` head), so what remains on [GatewaySession.socket] is exactly the
+     * client's payload: for a FORCE_MITM destination we peek it to decide between TLS
+     * termination, plaintext HTTP forwarding, or an opaque relay.
+     */
+    override suspend fun handleTunnel(session: GatewaySession) {
+        val context = appContext
+        if (context == null) {
+            Log.w(TAG, "handleTunnel before start(): refusing ${session.destination}")
+            session.replyUnreachable()
+            runCatching { session.socket.close() }
+            return
+        }
+        handleClient(context, session)
+    }
+
+    private suspend fun handleClient(context: Context, session: GatewaySession) {
+        var client: Socket = session.socket
         try {
             runCatching { client.setTcpNoDelay(true) }
-            val input = client.getInputStream()
             val output = client.getOutputStream()
 
-            val requestLine = readLine(input) ?: return
-            val parts = requestLine.split(" ")
-            if (parts.size < 2 || !parts[0].equals("CONNECT", ignoreCase = true)) {
-                output.write("HTTP/1.1 400 Bad Request\r\n\r\n".toByteArray())
-                return
-            }
-
-            // Drain the rest of the CONNECT request (headers + terminating empty line) so
-            // that the bytes remaining on the socket are exactly the client's TLS handshake.
-            // Without this, leftover headers are interpreted as the TLS ClientHello and the
-            // handshake fails with "wrong version number" / "Unable to parse TLS packet header".
-            skipHeaders(input)
-
-            val target = parts[1]
-            val (host, port) = parseHostPort(target, 443)
+            // The gateway already consumed the CONNECT head / SOCKS handshake, so the bytes
+            // remaining on the socket are exactly the client's payload (normally a TLS
+            // ClientHello). `target` keeps the client's own spelling for the opaque relay.
+            val target = session.rawTarget
+            val host = session.destination.host
+            val port = session.destination.port
+            val replies = HttpProxyShared.ConnectReplies.forSession(session)
 
             val db = RequestrDatabase.get(context)
             val disposition = ConnectControl.evaluate(db, host, port)
@@ -223,18 +263,18 @@ class MitmProxyEngine(
             when (disposition) {
                 is ConnectControl.Disposition.Block -> {
                     Log.i(TAG, "BLOCKED by rule: $host")
-                    output.write("HTTP/1.1 403 Blocked by requestr\r\n\r\n".toByteArray())
-                    output.flush()
+                    session.replyBlocked()
                     persistConnectAttempt(context, client, db, host, port, "BLOCKED", failureReason = disposition.reason)
                     return
                 }
                 is ConnectControl.Disposition.Redirect -> {
                     // Rule redirects this CONNECT to a different upstream — tunnel opaquely to
                     // the redirect target instead of the original (no MITM either way here).
-                    // HttpProxyShared.handleConnectAttempt writes the 200 response itself.
+                    // HttpProxyShared.handleConnectAttempt answers the client via `replies`.
                     HttpProxyShared.handleConnectAttempt(
                         client, disposition.target, ConnectControl.Disposition.AllowOpaque, output,
                         networkCondition = opaqueNetworkCondition,
+                        replies = replies,
                     ) { sent, recv ->
                         persistConnectAttempt(
                             context, client, db, host, port, "REDIRECTED",
@@ -246,10 +286,11 @@ class MitmProxyEngine(
                 is ConnectControl.Disposition.AllowOpaque -> {
                     // No FORCE_MITM rule matched — tunnel opaquely rather than terminate TLS,
                     // even though this engine is capable of MITM.
-                    // HttpProxyShared.handleConnectAttempt writes the 200 response itself.
+                    // HttpProxyShared.handleConnectAttempt answers the client via `replies`.
                     HttpProxyShared.handleConnectAttempt(
                         client, target, ConnectControl.Disposition.AllowOpaque, output,
                         networkCondition = opaqueNetworkCondition,
+                        replies = replies,
                     ) { sent, recv ->
                         persistConnectAttempt(
                             context, client, db, host, port, "ALLOWED_OPAQUE",
@@ -274,6 +315,7 @@ class MitmProxyEngine(
                         HttpProxyShared.handleConnectAttempt(
                             client, target, ConnectControl.Disposition.AllowOpaque, output,
                             networkCondition = opaqueNetworkCondition,
+                            replies = replies,
                         ) { sent, recv ->
                             persistConnectAttempt(
                                 context, client, db, host, port, "ALLOWED_OPAQUE",
@@ -289,9 +331,51 @@ class MitmProxyEngine(
                 }
             }
 
-            // Send 200 to client — we're about to MITM
-            output.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray())
-            output.flush()
+            // Tell the client the tunnel is up (HTTP 200 / SOCKS success / nothing for
+            // transparent entries) — we're about to MITM.
+            session.replyEstablished()
+
+            // The tunnel payload is not guaranteed to be TLS: a FORCE_MITM rule can match an
+            // `http://` CONNECT, a SOCKS5 client dialing port 80, or a non-TLS binary protocol.
+            // Peek the first bytes and route accordingly instead of feeding JSSE garbage.
+            val firstBytes = LocalGateway.peekPrefix(client, TUNNEL_FIRST_BYTE_TIMEOUT_MS)
+            if (firstBytes == null) {
+                persistConnectAttempt(
+                    context, client, db, host, port, "FAILED",
+                    failureReason = "client sent no payload after tunnel establishment",
+                )
+                return
+            }
+            val (prefix, replaying) = firstBytes
+            client = replaying
+            when (ProtocolClassifier.classify(prefix)) {
+                ProtocolClassifier.Classification.Tls -> Unit // fall through to TLS termination below
+                ProtocolClassifier.Classification.HttpAbsolute,
+                ProtocolClassifier.Classification.HttpOrigin,
+                ProtocolClassifier.Classification.HttpConnect -> {
+                    Log.i(TAG, "Plaintext HTTP inside tunnel to $host:$port -- forwarding decoded")
+                    plaintextDelegate.handlePlaintext(
+                        GatewaySession(replaying, EntryKind.TRANSPARENT_HTTP, session.destination, session.origin, target),
+                    )
+                    persistConnectAttempt(context, replaying, db, host, port, "PLAINTEXT_FORWARDED")
+                    return
+                }
+                else -> {
+                    Log.i(TAG, "Non-TLS payload inside tunnel to $host:$port -- relaying opaquely")
+                    HttpProxyShared.handleConnectAttempt(
+                        replaying, target, ConnectControl.Disposition.AllowOpaque, output,
+                        networkCondition = opaqueNetworkCondition,
+                        replies = HttpProxyShared.ConnectReplies({}, {}, {}),
+                    ) { sent, recv ->
+                        persistConnectAttempt(
+                            context, replaying, db, host, port, "ALLOWED_OPAQUE",
+                            failureReason = "FORCE_MITM rule matched, but the tunnel payload is not TLS -- relayed opaquely",
+                            bytesToUpstream = sent, bytesToClient = recv,
+                        )
+                    }
+                    return
+                }
+            }
 
             // Get or create per-host certificate. ExpiringLruCertCache.getOrCompute (§3) keeps
             // the same "generate at most once per host, even under concurrent callers" semantics
@@ -1589,37 +1673,4 @@ class MitmProxyEngine(
             init(kmf.keyManagers, null, SecureRandom())
         }
     }
-
-    // ── I/O helpers ─────────────────────────────────────────────────────
-
-    private fun readLine(input: InputStream): String? {
-        val sb = StringBuilder()
-        var prev = -1
-        while (true) {
-            val b = input.read()
-            if (b == -1) return sb.toString().ifEmpty { null }
-            if (b == '\n'.code && prev == '\r'.code) {
-                sb.setLength(sb.length - 1)
-                return sb.toString()
-            }
-            sb.append(b.toChar())
-            prev = b
-        }
-    }
-
-    /** Drains the header block of an HTTP request up to and including the terminating empty line. */
-    private fun skipHeaders(input: InputStream) {
-        while (true) {
-            val line = readLine(input) ?: break
-            if (line.isEmpty()) break
-        }
-    }
-
-    private fun parseHostPort(target: String, defaultPort: Int): Pair<String, Int> {
-        val colon = target.lastIndexOf(':')
-        return if (colon > 0)
-            target.substring(0, colon) to (target.substring(colon + 1).toIntOrNull() ?: defaultPort)
-        else target to defaultPort
-    }
-
 }

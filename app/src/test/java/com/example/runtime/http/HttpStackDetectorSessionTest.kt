@@ -27,13 +27,13 @@ class HttpStackDetectorSessionTest {
     @Before
     fun setUp() {
         StackSignalStore.clear()
-        db.openHelper.writableDatabase.execSQL("DELETE FROM captured_traffic")
+        runBlocking { db.capturedTrafficDao().clearAll() }
     }
 
     @After
     fun tearDown() {
         StackSignalStore.clear()
-        db.openHelper.writableDatabase.execSQL("DELETE FROM captured_traffic")
+        runBlocking { db.capturedTrafficDao().clearAll() }
     }
 
     @Test
