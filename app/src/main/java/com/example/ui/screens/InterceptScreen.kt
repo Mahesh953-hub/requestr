@@ -468,6 +468,14 @@ fun InterceptScreen(
                 onExpand = { showRelayHealthSheet = true },
             )
 
+            // S2 task 17: persistence failure table (dropped/failed writes, spill failures,
+            // migration backup/restore/wipe, quota pause). Renders nothing while healthy.
+            val persistenceHealth by InterceptionStateRepository.persistence.collectAsState()
+            if (persistenceHealth.headline != null) {
+                Spacer(modifier = Modifier.height(6.dp))
+                com.example.ui.components.PersistenceHealthBanner(snapshot = persistenceHealth)
+            }
+
             Spacer(modifier = Modifier.height(6.dp))
 
             // Search and Fast Method Filters

@@ -31,7 +31,14 @@ import kotlinx.coroutines.flow.update
  */
 object PersistenceHealth {
 
-    enum class MigrationEvent { NONE, BACKED_UP, RESTORED_FROM_BACKUP, DESTRUCTIVE_WIPE }
+    /**
+     * Task 17: what happened to the database at this process's open, most severe first when
+     * several apply. [BACKED_UP] is informational; [RESTORED_FROM_BACKUP] means a downgrade wipe
+     * was undone; [BACKUP_FAILED] means the migration ran without a safety copy;
+     * [DESTRUCTIVE_WIPE] means rows were lost; [MIGRATION_FAILED] means the schema upgrade threw
+     * and the file is still on the previous version.
+     */
+    enum class MigrationEvent { NONE, BACKED_UP, RESTORED_FROM_BACKUP, BACKUP_FAILED, DESTRUCTIVE_WIPE, MIGRATION_FAILED }
 
     enum class PauseReason { QUOTA_TRANSACTIONS, QUOTA_DB_BYTES, QUOTA_SPILL_BYTES, STORAGE_FULL }
 
@@ -69,14 +76,16 @@ object PersistenceHealth {
                 saturated -> "Persistence saturated: $droppedWrites write${if (droppedWrites == 1L) "" else "s"} dropped"
                 failedWrites > 0 -> "$failedWrites write${if (failedWrites == 1L) "" else "s"} failed: ${lastFailure ?: "unknown"}"
                 spillFailures > 0 -> "$spillFailures large bod${if (spillFailures == 1L) "y" else "ies"} could not be saved to disk"
-                migration == MigrationEvent.RESTORED_FROM_BACKUP -> "Database restored from backup${migrationDetail?.let { " ($it)" } ?: ""}"
+                migration == MigrationEvent.MIGRATION_FAILED -> "Database upgrade failed${migrationDetail?.let { ": $it" } ?: ""} -- still on the previous version"
                 migration == MigrationEvent.DESTRUCTIVE_WIPE -> "Database was reset${migrationDetail?.let { " ($it)" } ?: ""}"
+                migration == MigrationEvent.RESTORED_FROM_BACKUP -> "Database restored from backup${migrationDetail?.let { " ($it)" } ?: ""}"
+                migration == MigrationEvent.BACKUP_FAILED -> "Pre-upgrade backup failed${migrationDetail?.let { " ($it)" } ?: ""} -- upgrade ran without a safety copy"
                 else -> null
             }
 
         val hasDataLoss: Boolean
             get() = droppedWrites > 0 || failedWrites > 0 || spillFailures > 0 ||
-                migration == MigrationEvent.DESTRUCTIVE_WIPE
+                migration == MigrationEvent.DESTRUCTIVE_WIPE || migration == MigrationEvent.MIGRATION_FAILED
     }
 
     private val _state = MutableStateFlow(Snapshot())
@@ -118,8 +127,14 @@ object PersistenceHealth {
 
     // -- migration (task 17) -------------------------------------------------------------------
 
+    /**
+     * Records a migration/recovery event. Severity is monotonic within a process: a later,
+     * less severe event (e.g. BACKED_UP after RESTORED_FROM_BACKUP in the same open) never hides
+     * a more severe one; [MigrationEvent.NONE] always resets.
+     */
     fun recordMigration(event: MigrationEvent, detail: String? = null) = update {
-        it.copy(migration = event, migrationDetail = detail)
+        if (event != MigrationEvent.NONE && event.ordinal < it.migration.ordinal) it
+        else it.copy(migration = event, migrationDetail = detail)
     }
 
     // -- S3 / task 18 --------------------------------------------------------------------------

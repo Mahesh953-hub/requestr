@@ -1063,6 +1063,46 @@ fun SettingsScreen(
                 }
             }
 
+            // S2 task 17: persisted database recovery diagnostics rows (DbBackup metadata) plus
+            // this process's live persistence health -- what happened to the data on the last
+            // few opens, in the user's own words rather than a log file.
+            item {
+                SettingsSectionHeader("DATABASE RECOVERY")
+                GlassCard(modifier = Modifier.fillMaxWidth(), backgroundColor = MaterialTheme.colorScheme.surface) {
+                    val persistenceHealth by InterceptionStateRepository.persistence.collectAsState()
+                    val recoveryEvents by produceState<List<com.example.data.persistence.DbBackup.RecoveryEvent>>(initialValue = emptyList(), persistenceHealth.migration) {
+                        value = withContext(Dispatchers.IO) {
+                            runCatching { com.example.data.persistence.DbBackup(settingsContext).readRecoveryEvents() }.getOrDefault(emptyList())
+                        }
+                    }
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Text("Schema v${com.example.data.local.RequestrDatabase.SCHEMA_VERSION}", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            persistenceHealth.headline ?: "Persistence healthy: ${persistenceHealth.committedWrites} write(s) committed this session, none dropped or failed.",
+                            fontSize = 11.sp,
+                            color = if (persistenceHealth.hasDataLoss) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        if (persistenceHealth.orphanedSpillFilesRemoved > 0) {
+                            Text("Orphan sweep removed ${persistenceHealth.orphanedSpillFilesRemoved} unreferenced body file(s) at start.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        if (recoveryEvents.isEmpty()) {
+                            Text("No backup, restore or wipe events recorded.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        } else {
+                            recoveryEvents.asReversed().take(5).forEach { ev ->
+                                Text(
+                                    "${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).format(java.util.Date(ev.at))}  ${ev.kind}: ${ev.detail}",
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             // Section 5.8: Observation Report (D3) — honest fraction-of-traffic-observed
             // summary for the active/most-recent capture session, computed by
             // VisibilityAnalyzer from real persisted rows (no synthetic/demo numbers).
