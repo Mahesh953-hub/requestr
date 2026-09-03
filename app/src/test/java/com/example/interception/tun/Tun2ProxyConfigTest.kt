@@ -37,7 +37,10 @@ class Tun2ProxyConfigTest {
         assertTrue(json.contains("\"proxy\":"))
         assertTrue(json.contains("\"proxy_type\":\"http\""))
         assertTrue(json.contains("\"address\":\"127.0.0.1:8443\""))
-        assertTrue(json.contains("\"dns_mode\":\"direct\""))
+        // forMitmProxyEngine() deliberately uses VIRTUAL dns mode (not the data class's own
+        // DIRECT default) -- see its KDoc: tun2proxy must preserve original hostnames per-flow
+        // so the HTTP CONNECT target this config feeds gets a real hostname, not a bare IP.
+        assertTrue(json.contains("\"dns_mode\":\"virtual\""))
         assertTrue(json.contains("\"dns_addr\":\"8.8.8.8\""))
         assertTrue(json.contains("\"virtual_dns_pool\":\"198.18.0.0/15\""))
         assertTrue(json.contains("\"bypass_cidrs\":[]"))

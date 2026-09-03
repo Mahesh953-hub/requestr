@@ -164,16 +164,28 @@ data class Tun2ProxyConfig(
          * when used from VPN service (caller should set protectAvailable=true when
          * SocketProtector is installed). SOCKS5 +info attribution activates in S1 when
          * LocalGateway replaces MitmProxyEngine as the local proxy.
+         *
+         * Defect G (S0 gaps audit): [teeEnabled] defaults to `true` here (the call-site
+         * default), NOT via [Tun2ProxyConfig]'s own `teeEnabled` data-class default (which stays
+         * `false` so an explicit [Tun2ProxyConfig] construction elsewhere doesn't silently
+         * enable teeing). The one production call site
+         * ([com.example.interception.RequestrVpnService]) overrides this default by resolving
+         * `TeeRolloutFlag` via its `applicationContext` and passing the result through, so the
+         * tee surface can be rolled back process-wide without a code change. This class
+         * deliberately stays Android/Context-decoupled (see its class doc) -- it does not read
+         * the flag itself.
          */
         fun forMitmProxyEngine(
             mitmPort: Int,
             mtu: Int = 1500,
             protectAvailable: Boolean = true,
+            teeEnabled: Boolean = true,
         ): Tun2ProxyConfig = Tun2ProxyConfig(
             proxy = ProxyTarget(proxyType = ProxyType.HTTP, address = "127.0.0.1:$mitmPort"),
             dnsMode = DnsMode.VIRTUAL,
             mtu = mtu,
             protectAvailable = protectAvailable,
+            teeEnabled = teeEnabled,
         )
 
         /** Minimal JSON string escaping. */
