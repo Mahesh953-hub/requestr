@@ -13,7 +13,9 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
@@ -129,6 +131,56 @@ class RequestrVpnServiceLifecycleTest {
 
         assertEquals(false, SocketProtector.isInstalled)
         protectorRegistration = null
+    }
+
+    @Test
+    fun `onStartCommand promotes to foreground before the first DataStore read`() {
+        // S1 task 11: the companion start() now uses startForegroundService(), so the service
+        // must call startForeground() inside the system's window -- synchronously in
+        // onStartCommand -- and never behind a suspending SettingsDataStore read. Under
+        // Robolectric establish() returns null, so the launched startCapture() fails and cleans
+        // up on its own; the ordering seam is what this test is about.
+        val controller = Robolectric.buildService(RequestrVpnService::class.java).create()
+        val service = controller.get()
+        val steps = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val settingsRead = java.util.concurrent.CountDownLatch(1)
+        service.lifecycleStepRecorder = { step ->
+            steps += step
+            if (step == "settingsRead") settingsRead.countDown()
+        }
+
+        service.onStartCommand(android.content.Intent(service, RequestrVpnService::class.java), 0, 1)
+
+        assertEquals("startForeground must have run synchronously inside onStartCommand", "startForeground", steps.first())
+        assertNotNull(
+            "a foreground notification must be posted before any DataStore read",
+            org.robolectric.Shadows.shadowOf(service).lastForegroundNotification,
+        )
+        assertTrue(settingsRead.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        assertEquals(listOf("startForeground", "settingsRead"), steps.take(2))
+        // Let the launched start attempt finish (establish() is null under Robolectric, so it
+        // ends in fail() -> ERROR) before the next test resets the repository.
+        runBlocking {
+            runCatching {
+                withTimeout(5_000) {
+                    InterceptionStateRepository.state.first { it.status == InterceptionStatus.ERROR }
+                }
+            }
+        }
+        assertNull(service.tunInterface)
+    }
+
+    @Test
+    fun `health line reports relay counters and degraded network honestly`() {
+        val service = Robolectric.buildService(RequestrVpnService::class.java).create().get()
+        val idle = com.example.interception.relay.RelayMetrics.Snapshot(
+            active = 0, peakActive = 0, queued = 0, peakQueued = 0, admitted = 0, rejected = 0, evicted = 0,
+            completed = 0, failed = 0, bytesToUpstream = 0, bytesToClient = 0, rejectReasons = emptyMap(),
+        )
+        assertEquals("0 active \u00b7 up 0 B / down 0 B", service.healthLine(idle))
+        val busy = idle.copy(active = 12, queued = 3, rejected = 2, bytesToUpstream = 1_536, bytesToClient = 3L shl 20)
+        assertEquals("12 active \u00b7 3 queued \u00b7 up 1.5 KB / down 3.0 MB \u00b7 2 shed", service.healthLine(busy))
+        assertEquals("2.0 GB", RequestrVpnService.formatBytes(2L shl 30))
     }
 
     @Test

@@ -1,6 +1,7 @@
 package com.example.interception.gateway
 
 import android.util.Log
+import com.example.interception.gateway.local.ClientOrigin
 import com.example.interception.gateway.local.Destination
 import com.example.interception.gateway.local.EntryKind
 import com.example.interception.gateway.local.GatewayRejectReason
@@ -10,12 +11,15 @@ import com.example.interception.gateway.local.ProtocolClassifier
 import com.example.interception.gateway.local.ProtocolClassifier.Classification
 import com.example.interception.gateway.local.Socks4Handler
 import com.example.interception.gateway.local.Socks5Credentials
+
 import com.example.interception.gateway.local.Socks5Handler
+import com.example.interception.relay.RelayPool
 import com.example.interception.tls.ClientHelloCapture
 import com.example.interception.tls.PeekedSocket
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.IOException
@@ -47,6 +51,15 @@ interface GatewaySessionHandler {
     suspend fun handlePlaintext(session: GatewaySession)
 }
 
+/**
+ * Serves a SOCKS5 `UDP ASSOCIATE` control connection (S1 task 9). The implementation owns
+ * [control] from here on, must write the RFC 1928 reply itself and close the socket when the
+ * association ends.
+ */
+fun interface UdpAssociationHandler {
+    suspend fun handleUdpAssociate(control: Socket, requested: Destination, origin: ClientOrigin?)
+}
+
 /** Optional `SO_ORIGINAL_DST`-style lookup for transparent sessions that carry no SNI/Host. */
 fun interface OriginalDstResolver {
     fun resolve(client: Socket): Destination?
@@ -76,6 +89,17 @@ class LocalGateway(
     private val onRejected: (GatewayRejectReason, String) -> Unit = { _, _ -> },
     private val serverSocketFactory: (Int) -> ServerSocket = { ServerSocket(it, 128, InetAddress.getByName("127.0.0.1")) },
     private val logTag: String = TAG,
+    /**
+     * Bounded relay pool every accepted connection is admitted through (S1 task 7). Sessions run
+     * on [RelayPool.dispatcher]; a connection the pool refuses is closed and counted under
+     * [GatewayRejectReason.RELAY_POOL_SATURATED] instead of being dropped silently.
+     */
+    private val relayPool: RelayPool = RelayPool.shared(),
+    /**
+     * S1 task 9: when non-null, SOCKS5 `UDP ASSOCIATE` is served through it; when null the
+     * command is refused with `0x07` and counted as [GatewayRejectReason.SOCKS_COMMAND_UNSUPPORTED].
+     */
+    private val udpAssociationHandler: UdpAssociationHandler? = null,
 ) {
     private var serverSocket: ServerSocket? = null
     private var acceptJob: Job? = null
@@ -97,6 +121,7 @@ class LocalGateway(
         running.set(true)
         Log.i(logTag, "LocalGateway listening on ${server.localPort} (socks5Auth=${socks5Credentials != null})")
         acceptJob = scope.launch {
+            var consecutiveFailures = 0
             while (isActive && running.get()) {
                 val client = try {
                     server.accept()
@@ -104,10 +129,30 @@ class LocalGateway(
                     if (running.get()) Log.w(logTag, "Accept error: ${e.message}")
                     break
                 }
-                launch { dispatch(client) }
+                // Exponential accept backoff (1 ms doubling to 100 ms) while the pool is saturated,
+                // so a burst past the permit bound does not turn the accept loop into a hot spin.
+                val saturated = relayPool.bounded && relayPool.availablePermits == 0 &&
+                    relayPool.queuedCount >= relayPool.maxQueued
+                consecutiveFailures = if (saturated) consecutiveFailures + 1 else 0
+                val backoff = RelayPool.acceptBackoffMs(consecutiveFailures)
+                if (backoff > 0) delay(backoff)
+                launch(relayPool.dispatcher) { admitAndDispatch(client) }
             }
         }
         return server.localPort
+    }
+
+    /** Runs [dispatch] under one relay permit, rejecting the connection if the pool refuses. */
+    internal suspend fun admitAndDispatch(client: Socket) {
+        when (val admission = relayPool.admit()) {
+            is RelayPool.Admission.Rejected ->
+                reject(client, GatewayRejectReason.RELAY_POOL_SATURATED, admission.reason.name)
+            is RelayPool.Admission.Admitted -> try {
+                dispatch(client)
+            } finally {
+                admission.release()
+            }
+        }
     }
 
     fun stop() {
@@ -165,6 +210,18 @@ class LocalGateway(
             is Socks5Handler.Outcome.Connect -> handler.handleTunnel(
                 GatewaySession(replay, EntryKind.SOCKS5, outcome.destination, outcome.origin),
             )
+            is Socks5Handler.Outcome.UdpAssociate -> {
+                val udp = udpAssociationHandler
+                if (udp == null) {
+                    runCatching {
+                        replay.getOutputStream().write(Socks5Handler.reply(Socks5Handler.REP_COMMAND_NOT_SUPPORTED))
+                        replay.getOutputStream().flush()
+                    }
+                    reject(client, GatewayRejectReason.SOCKS_COMMAND_UNSUPPORTED, "SOCKS5 UDP ASSOCIATE not supported (no UDP policy router)")
+                } else {
+                    udp.handleUdpAssociate(replay, outcome.requested, outcome.origin)
+                }
+            }
         }
     }
 

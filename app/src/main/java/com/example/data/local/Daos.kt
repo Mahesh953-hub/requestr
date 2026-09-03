@@ -591,6 +591,7 @@ interface QuicConnectionDao {
     @Query(
         "UPDATE quic_connections SET " +
             "decodeStatus = CASE WHEN :decodeStatusRank > (CASE decodeStatus " +
+            "    WHEN 'BLOCKED_BY_POLICY' THEN 9 " +
             "    WHEN 'FULLY_DECODED' THEN 3 WHEN 'PARTIALLY_DECODED' THEN 2 " +
             "    WHEN 'OBSERVED_NO_KEYS' THEN 1 ELSE 0 END) " +
             "  THEN :decodeStatus ELSE decodeStatus END, " +

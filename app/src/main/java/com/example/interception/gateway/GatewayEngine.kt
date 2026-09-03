@@ -216,15 +216,13 @@ object GatewayEngine {
                         networkCondition = networkCondition,
                     ) { sentBytes, recvBytes ->
                         runCatching {
-                            kotlinx.coroutines.runBlocking {
-                                RequestrDatabase.get(ctx).connectAttemptDao().insert(
-                                    entity.copy(
-                                        bytesToUpstream = sentBytes,
-                                        bytesToClient = recvBytes,
-                                        finishedAt = System.currentTimeMillis(),
-                                    )
+                            RequestrDatabase.get(ctx).connectAttemptDao().insert(
+                                entity.copy(
+                                    bytesToUpstream = sentBytes,
+                                    bytesToClient = recvBytes,
+                                    finishedAt = System.currentTimeMillis(),
                                 )
-                            }
+                            )
                         }.onFailure { Log.w(TAG, "Failed to persist gateway CONNECT attempt: ${it.message}") }
                     }
                     if (disposition is com.example.interception.ConnectControl.Disposition.Block) {

@@ -6,12 +6,20 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import com.example.MainActivity
 import com.example.data.interception.ActiveTier
 import com.example.data.interception.CaptureLifecycleOwner
@@ -37,6 +45,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.drop
@@ -76,7 +86,36 @@ class RequestrVpnService : VpnService() {
     // *nested* resume (the collector waking up from inside markStopped()'s StateFlow emission)
     // until the entire outer launched block finishes, regardless of statement order inside it.
     internal var stopCaptureStepRecorder: (String) -> Unit = {}
+    /**
+     * S1 task 11 test seam (same shape as [stopCaptureStepRecorder]): records, in real runtime
+     * order, `"startForeground"` (the synchronous call at the top of [onStartCommand]) and
+     * `"settingsRead"` (the first suspending `SettingsDataStore` read inside [startCapture]) so
+     * a test can prove the foreground promotion never waits on DataStore.
+     */
+    internal var lifecycleStepRecorder: (String) -> Unit = {}
     private var sessionId: Long? = null
+    private var healthJob: Job? = null
+    private var persistJob: Job? = null
+    private var foregroundStarted = false
+
+    /**
+     * S1 task 11: bounded persistence sink replacing the two `runBlocking(Dispatchers.IO)` Room
+     * writes that used to run on the relay/pump threads ([onDecryptedTransaction] and
+     * [onDnsObserved]). One consumer drains it; when the database falls behind, the *oldest*
+     * queued write is dropped and counted ([persistDropped]) rather than stalling a relay --
+     * a stalled relay silently back-pressures the tun and every app on the device.
+     */
+    private val persistQueue = Channel<suspend () -> Unit>(
+        capacity = PERSIST_QUEUE_CAPACITY,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    private val persistDropped = java.util.concurrent.atomic.AtomicLong()
+
+    /** S1 task 11: Wi-Fi/LTE handover coordinator; null while no capture is running. */
+    @Volatile private var networkHandoff: VpnNetworkHandoff? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    /** Fingerprint of the network the current tun was established against (health/diagnostics). */
+    @Volatile private var establishedLink: VpnNetworkHandoff.LinkFingerprint? = null
     internal var socketProtectorRegistration: SocketProtector.Registration? = null
 
     /**
@@ -88,6 +127,18 @@ class RequestrVpnService : VpnService() {
      * that whole session; there is never a silent mid-session switch either way.
      */
     private var usingNativeBridge = false
+
+    /** S1 task 9: per-capture UDP/QUIC policy router (null when the `quicTeePolicy` flag is off). */
+    @Volatile private var udpPolicyRouter: com.example.interception.quic.UdpPolicyRouter? = null
+
+    /** S1 task 10: process-wide UID attributor shared with the MITM engine. */
+    private val uidAttributor by lazy { com.example.interception.uid.UidAttributor.shared(applicationContext) }
+
+    /**
+     * S1 task 12: tee -> PCAPng consumer, registered on the bridge only while a packet export is
+     * running in native-bridge mode (the legacy pump feeds [PacketCaptureEngine] directly).
+     */
+    @Volatile private var teeRecorder: com.example.interception.packet.PacketTeeRecorder? = null
 
     /**
      * Defect D/E (S0 gaps audit): set true when [Tun2ProxyBridge.start] returned
@@ -153,7 +204,18 @@ class RequestrVpnService : VpnService() {
                 stopCapture("Stopped by user")
                 return START_NOT_STICKY
             }
-            else -> startCapture()
+            else -> {
+                // S1 task 11: promote to foreground synchronously, *before* the first suspending
+                // DataStore read in startCapture(). Since the companion start() uses
+                // startForegroundService() on API 26+, the system gives us a short window to call
+                // startForeground(); a slow DataStore read used to be able to miss it
+                // (ForegroundServiceDidNotStartInTimeException) and kill the capture at start.
+                if (tunInterface == null) {
+                    startForegroundNotification(port = null)
+                    lifecycleStepRecorder("startForeground")
+                }
+                startCapture()
+            }
         }
         return START_STICKY
     }
@@ -166,21 +228,48 @@ class RequestrVpnService : VpnService() {
 
         startJob = scope.launch {
             try {
+                // Re-entry from the filter observer / network handoff restarts: the foreground
+                // notification is already showing, but a fresh start from onStartCommand posted
+                // the minimal one above; either way we are in the foreground before this read.
+                if (!foregroundStarted) startForegroundNotification(port = null)
+                lifecycleStepRecorder("settingsRead")
                 val prefs = SettingsDataStore.get(applicationContext)
                 val port = prefs.proxyPort.first()
                 val filterMode = prefs.appFilterMode.first()
                 val selected = prefs.selectedPackages.first()
+                val quicObserveOverride = prefs.quicObserveOverride.first()
+                val quicBypassPackages = prefs.quicBypassPackages.first()
 
-                startForegroundNotification(port)
+                updateNotification(port, healthLine(null))
                 acquireWakeLock()
+
+                // S1 task 11: DNS. With the native bridge available every query terminates in
+                // tun2proxy's virtual resolver (hostnames for SessionStart, DNS rows, SNI-less
+                // attribution), so the tun advertises one resolver *inside* the virtual pool.
+                // Only the legacy relay path (no native library) still needs real resolvers;
+                // there the active network's own come first so captive/enterprise networks
+                // keep resolving, with the public pair as the last resort.
+                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                val activeNetwork: Network? = runCatching { cm?.activeNetwork }.getOrNull()
+                val activeLink: LinkProperties? = runCatching { activeNetwork?.let { cm?.getLinkProperties(it) } }.getOrNull()
+                val virtualDns = NativeTun2Proxy.isAvailable()
+                val dnsServers = VpnDnsPlan.resolvers(
+                    virtualDns = virtualDns,
+                    systemResolvers = activeLink?.dnsServers?.mapNotNull { it.hostAddress }.orEmpty(),
+                )
 
                 val builder = Builder()
                     .setSession("requestr")
                     .setMtu(MTU)
                     .addAddress(TUN_ADDRESS, TUN_PREFIX)
                     .addRoute("0.0.0.0", 0)
-                    .addDnsServer("1.1.1.1")
-                    .addDnsServer("8.8.8.8")
+                    // S1 task 11: blocking reads. The pump and the native bridge both read the tun
+                    // from dedicated threads; a non-blocking fd made those loops spin on EAGAIN.
+                    .setBlocking(true)
+                dnsServers.forEach { server ->
+                    runCatching { builder.addDnsServer(server) }
+                        .onFailure { Log.w(TAG, "Cannot advertise DNS server $server: ${it.message}") }
+                }
 
                 // Task 9: IPv6 was previously entirely dark -- no v6 address, no v6 route, so
                 // any IPv6-capable network's traffic never even entered the tun. Guarded with
@@ -199,7 +288,45 @@ class RequestrVpnService : VpnService() {
                 // an allowed set OR a disallowed set, never both -- mixing them throws
                 // UnsupportedOperationException at establish() time, which is exactly why
                 // SELECTED_APPS mode never worked before this fix (see resolveFilterPlan doc).
-                when (val plan = resolveFilterPlan(filterMode, selected, packageName)) {
+                val plan = resolveFilterPlan(filterMode, selected, packageName)
+                // S1 task 10: the allow-list is the only legitimate input to the attributor's
+                // single-app inference step; everything else is attributed from the kernel.
+                com.example.interception.uid.UidAttributor.captureSelectionSnapshot =
+                    (plan as? FilterPlan.Allowlist)?.packages ?: emptySet()
+                // S1 task 9 (D6): capture-scoped UDP/QUIC policy. The bridge's own udp_policy stays
+                // PASS_ALL so every non-DNS UDP session reaches the gateway's UDP ASSOCIATE relay,
+                // where the decision is made per datagram from the owning UID. With the
+                // `quicTeePolicy` flag off the gateway refuses UDP ASSOCIATE exactly as before.
+                val captureScope = com.example.interception.quic.UdpPolicyRouter.CaptureScope(
+                    allApps = plan !is FilterPlan.Allowlist,
+                    selectedPackages = (plan as? FilterPlan.Allowlist)?.packages ?: emptySet(),
+                    bypassPackages = quicBypassPackages,
+                )
+                udpPolicyRouter = if (com.example.data.persistence.InterceptorFlags.get(applicationContext).quicTeePolicy) {
+                    com.example.interception.quic.UdpPolicyRouter(
+                        attributor = uidAttributor,
+                        scope = { captureScope },
+                        observeOverride = { quicObserveOverride },
+                        packagesForUid = { uid -> runCatching { packageManager.getPackagesForUid(uid)?.toList() }.getOrNull().orEmpty() },
+                        tee = { payload, offset, length, source, destination, _, decision ->
+                            val pump = activePump
+                            val quic = destination.port == com.example.interception.quic.UdpPolicyRouter.QUIC_PORT ||
+                                source.port == com.example.interception.quic.UdpPolicyRouter.QUIC_PORT
+                            if (pump != null && quic) {
+                                pump.ingestQuicDatagram(
+                                    payload.copyOfRange(offset, offset + length),
+                                    source.address.hostAddress ?: source.hostString, source.port,
+                                    destination.address.hostAddress ?: destination.hostString, destination.port,
+                                    isIpv6 = source.address is java.net.Inet6Address,
+                                    blockedByPolicy = decision.action == com.example.interception.quic.UdpPolicyRouter.Action.TEE_AND_DROP,
+                                )
+                            }
+                        },
+                    )
+                } else {
+                    null
+                }
+                when (plan) {
                     is FilterPlan.Allowlist -> {
                         plan.packages.forEach { pkg ->
                             runCatching { builder.addAllowedApplication(pkg) }
@@ -215,6 +342,12 @@ class RequestrVpnService : VpnService() {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     builder.setMetered(false)
                 }
+                // S1 task 11: pin the tun to the network it will actually egress over so the
+                // system routes our protected sockets correctly and hands over cleanly.
+                if (activeNetwork != null) {
+                    runCatching { builder.setUnderlyingNetworks(arrayOf(activeNetwork)) }
+                        .onFailure { Log.w(TAG, "setUnderlyingNetworks on builder failed: ${it.message}") }
+                }
 
                 val tun = builder.establish()
                 if (tun == null) {
@@ -222,6 +355,13 @@ class RequestrVpnService : VpnService() {
                     return@launch
                 }
                 tunInterface = tun
+                // Baseline for the handoff coordinator: the *same* fingerprint function the
+                // callbacks use, so a network whose properties never change can never trigger a
+                // re-establish loop. Falls back to what the tun itself advertises when the
+                // active link is unknown.
+                establishedLink = activeLink?.let { fingerprintOf(it, virtualDns) }
+                    ?: VpnNetworkHandoff.LinkFingerprint(dnsServers = dnsServers.sorted(), hasIpv4 = true, hasIpv6 = ipv6Added)
+                registerNetworkCallback(cm, activeNetwork, virtualDns)
 
                 // S0 Task 4: install the process-wide socket protector so every egress
                 // path (LazyUpstreamConnection, RemoteCertificateMirror, HttpProxyShared,
@@ -264,12 +404,20 @@ class RequestrVpnService : VpnService() {
                 // Credentials are fresh per session so no other local app can drive the
                 // gateway's SOCKS side.
                 val gatewayCredentials = com.example.interception.gateway.local.Socks5Credentials.random()
+                // S1 task 7: the bounded relay pool (flag `relayPoolBounded`) is process-wide;
+                // the flag is applied on first creation, which is here for the VPN tier.
+                val relayPool = com.example.interception.relay.RelayPool.shared(
+                    bounded = com.example.data.persistence.InterceptorFlags.get(applicationContext).relayPoolBounded,
+                )
+                startPersistConsumer()
                 val mitmEngine = MitmProxyEngine(
                     onDecryptedTransaction = { entity ->
-                        kotlinx.coroutines.runBlocking(Dispatchers.IO) {
-                            db.capturedTrafficDao().insert(entity)
-                        }
+                        // S1 task 11: never block a relay thread on Room; see [persistQueue].
+                        persist { db.capturedTrafficDao().insert(entity) }
                     },
+                    relayPool = relayPool,
+                    uidAttributor = uidAttributor,
+                    udpAssociationHandler = udpPolicyRouter,
                 )
                 val mitmPort = mitmEngine.start(applicationContext, 0, socks5Credentials = gatewayCredentials)
                 // MitmProxyEngine.start() unconditionally calls
@@ -277,18 +425,49 @@ class RequestrVpnService : VpnService() {
                 // ...) itself before returning -- correct that transient global-state stomp
                 // back to this session's real tier/session id immediately below, regardless
                 // of which branch is taken next.
+                // T1 / S1 task 12: packet export -- started BEFORE the bridge so the very first
+                // teed frame already has a writer, and stopped alongside the tun so its lifetime
+                // matches one capture session exactly. Both packet sources (PacketPump.writeToPcap
+                // on the legacy path, PacketTeeRecorder on the native-bridge path) are no-ops
+                // while PacketCaptureEngine.isActive() is false, so this preference is the only gate.
+                val pcapEnabled = prefs.pcapEnabled.first()
+                val pcapngFlag = com.example.data.persistence.InterceptorFlags.get(applicationContext).pcapng
+                val pcapFormat = when {
+                    !pcapngFlag -> com.example.interception.packet.PacketCaptureEngine.Format.PCAP
+                    prefs.pcapFormat.first() == SettingsDataStore.PCAP_FORMAT_PCAP ->
+                        com.example.interception.packet.PacketCaptureEngine.Format.PCAP
+                    else -> com.example.interception.packet.PacketCaptureEngine.Format.PCAPNG
+                }
+                if (pcapEnabled) {
+                    val started = com.example.interception.packet.PacketCaptureEngine.start(applicationContext, format = pcapFormat)
+                    Log.i(TAG, if (started) "${pcapFormat.name} export enabled for session=$newId" else "${pcapFormat.name} export failed to start")
+                }
+                // The tee is what makes packets exist at all in native-bridge mode; with the
+                // `pcapng` flag off the pre-S1 behaviour (rollout flag only) is restored.
+                val teeForExport = pcapngFlag && pcapEnabled && com.example.interception.packet.PacketCaptureEngine.isActive()
+
                 val bridgeResult = Tun2ProxyBridge.start(
                     Tun2ProxyConfig.forLocalGateway(
                         gatewayPort = mitmPort,
                         credentials = gatewayCredentials,
                         sessionTag = newId.toString(),
-                        teeEnabled = com.example.data.persistence.TeeRolloutFlag.get(applicationContext).isEnabled,
+                        teeEnabled = com.example.data.persistence.TeeRolloutFlag.get(applicationContext).isEnabled || teeForExport,
                     ),
                     tun.fd,
                 )
                 when (bridgeResult) {
                     is Tun2ProxyBridge.StartResult.Started -> {
                         usingNativeBridge = true
+                        // S1 task 10: the attributor tracks src->dst per bridge session so the
+                        // gateway's +info source tuple can be attributed via the real 4-tuple.
+                        Tun2ProxyBridge.addEventListener(uidAttributor)
+                        if (teeForExport) {
+                            // S1 task 12: registered AFTER the attributor so a frame's session_start
+                            // is tracked before the frame itself is annotated.
+                            val recorder = com.example.interception.packet.PacketTeeRecorder(annotator = ::annotateTeeFlow)
+                            Tun2ProxyBridge.addEventListener(recorder)
+                            teeRecorder = recorder
+                        }
                         activeMitmEngine = mitmEngine
                         InterceptionStateRepository.markActive(
                             sessionId = newId,
@@ -364,16 +543,6 @@ class RequestrVpnService : VpnService() {
                 // of gating nothing but a debug Log.i() line.
                 val enhancedMode = prefs.enhancedMode.first()
 
-                // T1: PCAP export — started/stopped alongside the VPN tun so its lifetime
-                // matches one capture session exactly. PacketPump.writeToPcap() is a no-op
-                // when PacketCaptureEngine.isActive() is false, so this preference read is the
-                // only gate; nothing needs to be threaded into PacketPump itself.
-                val pcapEnabled = prefs.pcapEnabled.first()
-                if (pcapEnabled) {
-                    val started = com.example.interception.packet.PacketCaptureEngine.start(applicationContext)
-                    Log.i(TAG, if (started) "PCAP export enabled for session=$newId" else "PCAP export failed to start")
-                }
-
                 pumpJob = scope.launch {
                     val pump = PacketPump(
                         context = applicationContext,
@@ -406,7 +575,8 @@ class RequestrVpnService : VpnService() {
                     pump.run(this)
                 }
 
-                Log.i(TAG, "Capture started on tun, session=$newId port=$port")
+                Log.i(TAG, "Capture started on tun, session=$newId port=$port dns=$dnsServers virtualDns=$virtualDns")
+                startHealthUpdates(port)
 
                 // Hot-reload app filter. VpnService.Builder doesn't support dynamic app list
                 // changes after establish(), so we tear down and re-establish the tun when the
@@ -448,8 +618,8 @@ class RequestrVpnService : VpnService() {
      * IP instead of by connectionId.
      *
      * Called from [PacketPump]'s tun-read loop (a plain callback, not a suspend context), so the
-     * Room write uses `runBlocking` on [Dispatchers.IO] -- the same pattern already used by
-     * [PacketPump.persistUdpFlow]/`persistQuicConnection` for the same reason.
+     * Room write goes through the bounded [persistQueue] (S1 task 11) instead of blocking the
+     * read loop.
      */
     private fun onDnsObserved(
         sessionId: Long,
@@ -460,22 +630,19 @@ class RequestrVpnService : VpnService() {
         dPort: Int,
     ) {
         if (dns.hostname.isEmpty()) return
-        try {
-            kotlinx.coroutines.runBlocking(Dispatchers.IO) {
-                RequestrDatabase.get(applicationContext).dnsQueryDao().insert(
-                    com.example.data.local.DnsQueryEntity(
-                        sessionId = sessionId,
-                        transactionId = dns.transactionId,
-                        hostname = dns.hostname,
-                        queryType = dns.qtypeName,
-                        isResponse = dns.isResponse,
-                        resolvedIps = dns.resolvedIps,
-                        resolver = "UDP:53",
-                    )
+        // S1 task 11: queued instead of runBlocking on the tun-read thread; see [persistQueue].
+        persist {
+            RequestrDatabase.get(applicationContext).dnsQueryDao().insert(
+                com.example.data.local.DnsQueryEntity(
+                    sessionId = sessionId,
+                    transactionId = dns.transactionId,
+                    hostname = dns.hostname,
+                    queryType = dns.qtypeName,
+                    isResponse = dns.isResponse,
+                    resolvedIps = dns.resolvedIps,
+                    resolver = "UDP:53",
                 )
-            }
-        } catch (t: Throwable) {
-            Log.w(TAG, "Failed to persist DNS query: ${t.message}")
+            )
         }
 
         com.example.correlation.CorrelationEngine.ingest(
@@ -536,6 +703,11 @@ class RequestrVpnService : VpnService() {
         startJob = null
         filterObserverJob?.cancel()
         filterObserverJob = null
+        // S1 task 11: stop reacting to network handovers before the tun goes away, so a
+        // callback racing this teardown cannot schedule a re-establish of a closed tun.
+        unregisterNetworkCallback()
+        healthJob?.cancel()
+        healthJob = null
         pumpJob?.cancel()
         pumpJob = null
         // Task 4: stop the relay's selector loop and close every open upstream socket
@@ -563,6 +735,12 @@ class RequestrVpnService : VpnService() {
         // out from under it -- stop() itself is cooperative/async (fire-and-forget), not a
         // blocking join, so this ordering is the mitigation for "protect native sockets/fd".
         if (usingNativeBridge) {
+            teeRecorder?.let { recorder ->
+                runCatching { Tun2ProxyBridge.removeEventListener(recorder) }
+                Log.i(TAG, "PCAPng tee: ${recorder.frameCount} frames, ${recorder.annotatedCount} attributed to a bridge session, ${recorder.unparsedCount} unparsed")
+            }
+            teeRecorder = null
+            runCatching { Tun2ProxyBridge.removeEventListener(uidAttributor) }
             runCatching { Tun2ProxyBridge.stop() }
             var awaitRc = Tun2ProxyBridge.awaitStoppedOrTimeout()
             var attempt = 1
@@ -616,8 +794,167 @@ class RequestrVpnService : VpnService() {
         runCatching { com.example.interception.packet.PacketCaptureEngine.stop() }
         // Task 5: secrets are in-memory only and must not outlive a capture session.
         runCatching { TlsKeyLogRegistry.clear() }
+        // S1 task 11: let queued Room writes drain on their own consumer; only stop accepting
+        // new ones. (The consumer is cancelled with [scope] in onDestroy.)
+        persistJob = null
         releaseWakeLock()
         stopForegroundCompat()
+    }
+
+    /**
+     * S1 task 12: resolves a teed frame's client-side tuple to its bridge session and UID via
+     * [uidAttributor] (bridge `+info` -> connection owner -> `/proc/net` -> selection inference).
+     * Null when the bridge has not reported a session for the tuple -- the frame is still
+     * written, just without a flow comment; [PacketTeeRecorder] retries unknown tuples.
+     */
+    private fun annotateTeeFlow(
+        client: java.net.InetSocketAddress,
+        @Suppress("UNUSED_PARAMETER") isTcp: Boolean,
+    ): com.example.interception.packet.PcapNgWriter.FlowAnnotation? {
+        val (session, attribution) = uidAttributor.attributeTracked(client) ?: return null
+        val uid = attribution.uidOrNull
+        val pkg = uid?.let { runCatching { packageManager.getPackagesForUid(it)?.firstOrNull() }.getOrNull() }
+        return com.example.interception.packet.PcapNgWriter.FlowAnnotation(
+            flowId = session.sessionId,
+            uid = uid,
+            packageName = pkg,
+            attribution = when (attribution) {
+                is com.example.interception.uid.UidAttributor.Attribution.Resolved -> attribution.source.name
+                is com.example.interception.uid.UidAttributor.Attribution.Unattributed -> "UNATTRIBUTED(${attribution.reason})"
+            },
+            destination = session.destination,
+            isTcp = session.isTcp,
+        )
+    }
+
+    // ---- S1 task 11: foreground/notification, persistence sink, network handoff -------------
+
+    /** Enqueue a Room write off the calling (relay / tun-read) thread. Drops oldest when full. */
+    private fun persist(write: suspend () -> Unit) {
+        val result = persistQueue.trySend(write)
+        if (result.isFailure) persistDropped.incrementAndGet()
+    }
+
+    private fun startPersistConsumer() {
+        if (persistJob?.isActive == true) return
+        persistJob = scope.launch {
+            for (write in persistQueue) {
+                try {
+                    write()
+                } catch (t: Throwable) {
+                    if (t is kotlinx.coroutines.CancellationException) throw t
+                    Log.w(TAG, "Persist failed: ${t.message}")
+                }
+            }
+        }
+    }
+
+    /** Health counters shown in the notification (S1 task 11), refreshed every [HEALTH_REFRESH_MS]. */
+    internal fun healthLine(relay: com.example.interception.relay.RelayMetrics.Snapshot?): String {
+        val parts = mutableListOf<String>()
+        val snap = relay ?: runCatching { com.example.interception.relay.RelayMetrics.global.snapshot() }.getOrNull()
+        if (snap != null) {
+            parts += "${snap.active} active"
+            if (snap.queued > 0) parts += "${snap.queued} queued"
+            parts += "up ${formatBytes(snap.bytesToUpstream)} / down ${formatBytes(snap.bytesToClient)}"
+            if (snap.rejected > 0 || snap.evicted > 0) parts += "${snap.rejected + snap.evicted} shed"
+        }
+        val dropped = persistDropped.get()
+        if (dropped > 0) parts += "$dropped writes dropped"
+        if (networkHandoff?.isDegraded == true) parts += "no network -- waiting"
+        return parts.joinToString(" \u00b7 ").ifEmpty { "VPN active" }
+    }
+
+    private fun startHealthUpdates(port: Int) {
+        healthJob?.cancel()
+        healthJob = scope.launch {
+            while (isActive) {
+                delay(HEALTH_REFRESH_MS)
+                runCatching { updateNotification(port, healthLine(null)) }
+            }
+        }
+    }
+
+    private fun registerNetworkCallback(cm: ConnectivityManager?, activeNetwork: Network?, virtualDns: Boolean) {
+        if (cm == null) return
+        unregisterNetworkCallback()
+        val handoff = VpnNetworkHandoff(
+            scope = scope,
+            onUnderlyingNetwork = { network ->
+                if (network is Network) {
+                    runCatching { setUnderlyingNetworks(arrayOf(network)) }
+                        .onFailure { Log.w(TAG, "setUnderlyingNetworks failed: ${it.message}") }
+                }
+            },
+            onReestablish = { reason ->
+                Log.i(TAG, "$reason; re-establishing VPN tunnel")
+                stopCapture("$reason -- restarting")
+                delay(500)
+                startCapture()
+            },
+            onDegraded = { degraded ->
+                if (degraded) {
+                    InterceptionStateRepository.setWatcherStatus(WatcherStatus.DEGRADED)
+                } else {
+                    InterceptionStateRepository.setWatcherStatus(WatcherStatus.HEALTHY)
+                }
+            },
+        )
+        handoff.onEstablished(establishedLink ?: return, activeNetwork)
+        networkHandoff = handoff
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                handoff.onNetworkChanged(network, fingerprintOf(cm, network, virtualDns))
+            }
+
+            override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+                handoff.onNetworkChanged(network, fingerprintOf(linkProperties, virtualDns))
+            }
+
+            override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                handoff.onNetworkChanged(network, fingerprintOf(cm, network, virtualDns))
+            }
+
+            override fun onLost(network: Network) {
+                handoff.onNetworkLost(network)
+            }
+        }
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            // Never bind the tun to itself.
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            .build()
+        runCatching { cm.registerNetworkCallback(request, callback) }
+            .onSuccess { networkCallback = callback }
+            .onFailure { Log.w(TAG, "registerNetworkCallback failed: ${it.message}") }
+    }
+
+    private fun unregisterNetworkCallback() {
+        val cb = networkCallback
+        networkCallback = null
+        if (cb != null) {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            runCatching { cm?.unregisterNetworkCallback(cb) }
+        }
+        networkHandoff?.close()
+        networkHandoff = null
+    }
+
+    /**
+     * The tun's dependencies on a network: with virtual DNS the advertised resolver is ours and
+     * never changes, so only the IP families matter; on the legacy path the resolver set does too.
+     */
+    private fun fingerprintOf(cm: ConnectivityManager, network: Network, virtualDns: Boolean): VpnNetworkHandoff.LinkFingerprint? =
+        runCatching { cm.getLinkProperties(network) }.getOrNull()?.let { fingerprintOf(it, virtualDns) }
+
+    private fun fingerprintOf(link: LinkProperties, virtualDns: Boolean): VpnNetworkHandoff.LinkFingerprint {
+        val addresses = link.linkAddresses.map { it.address }
+        val resolvers = VpnDnsPlan.resolvers(virtualDns, link.dnsServers.mapNotNull { it.hostAddress })
+        return VpnNetworkHandoff.LinkFingerprint(
+            dnsServers = resolvers.sorted(),
+            hasIpv4 = addresses.any { it is java.net.Inet4Address },
+            hasIpv6 = addresses.any { it is java.net.Inet6Address && !it.isLinkLocalAddress },
+        )
     }
 
     /**
@@ -639,7 +976,29 @@ class RequestrVpnService : VpnService() {
         wakeLock = null
     }
 
-    private fun startForegroundNotification(port: Int) {
+    /**
+     * S1 task 11: promotes the service to the foreground with a minimal notification. Called
+     * synchronously from [onStartCommand] (before any DataStore read); [updateNotification]
+     * fills in the port and health counters later without re-calling `startForeground`.
+     * Keeps `specialUse` (manifest `PROPERTY_SPECIAL_USE_FGS_SUBTYPE`); never `dataSync`.
+     */
+    private fun startForegroundNotification(port: Int?) {
+        val notification = buildNotification(port, if (port == null) "Starting capture..." else healthLine(null))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+        foregroundStarted = true
+    }
+
+    private fun updateNotification(port: Int, health: String) {
+        if (!foregroundStarted) return
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        runCatching { nm.notify(NOTIFICATION_ID, buildNotification(port, health)) }
+    }
+
+    private fun buildNotification(port: Int?, health: String): Notification {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             nm.createNotificationChannel(
@@ -665,21 +1024,21 @@ class RequestrVpnService : VpnService() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
-        val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
+        return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("requestr is capturing traffic")
-            .setContentText("VPN active — traffic is relayed; HTTPS bodies need proxy mode")
+            .setContentText(if (port != null) "Port $port \u00b7 $health" else health)
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
             .setContentIntent(openApp)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stop)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
-
-        startForeground(NOTIFICATION_ID, notification)
     }
 
     @Suppress("DEPRECATION")
     private fun stopForegroundCompat() {
+        foregroundStarted = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
@@ -716,6 +1075,11 @@ class RequestrVpnService : VpnService() {
          */
         private const val STOP_MAX_ATTEMPTS = 3
 
+        /** S1 task 11: notification health-counter refresh cadence. */
+        private const val HEALTH_REFRESH_MS = 10_000L
+        /** S1 task 11: bounded persistence sink depth; oldest write dropped (and counted) above it. */
+        internal const val PERSIST_QUEUE_CAPACITY = 2_048
+
         private const val MTU = 1500
         private const val TUN_ADDRESS = "10.111.222.1"
         private const val TUN_PREFIX = 32
@@ -733,7 +1097,16 @@ class RequestrVpnService : VpnService() {
         val activePumpState: kotlinx.coroutines.flow.StateFlow<PacketPump?> = activePumpFlow.asStateFlow()
 
         fun start(context: Context) {
-            context.startService(Intent(context, RequestrVpnService::class.java))
+            // S1 task 11: startForegroundService on API 26+; onStartCommand calls
+            // startForeground() synchronously before touching DataStore.
+            ContextCompat.startForegroundService(context, Intent(context, RequestrVpnService::class.java))
+        }
+
+        internal fun formatBytes(n: Long): String = when {
+            n >= 1L shl 30 -> "%.1f GB".format(n / (1L shl 30).toDouble())
+            n >= 1L shl 20 -> "%.1f MB".format(n / (1L shl 20).toDouble())
+            n >= 1L shl 10 -> "%.1f KB".format(n / (1L shl 10).toDouble())
+            else -> "$n B"
         }
 
         fun stop(context: Context) {

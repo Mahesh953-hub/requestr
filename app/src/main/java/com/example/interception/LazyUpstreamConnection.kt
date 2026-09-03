@@ -6,14 +6,14 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.SocketAddress
 import java.security.SecureRandom
-import java.security.cert.X509Certificate
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
-import javax.net.ssl.X509TrustManager
+import javax.net.ssl.KeyManager
 
 import com.example.interception.net.SocketProtector
+import com.example.interception.tls.UpstreamTrustPolicy
 
 /**
  * §1.5 MUST-FIX: lazily dials + TLS-handshakes the real upstream server for a single MITM'd
@@ -60,6 +60,14 @@ internal class LazyUpstreamConnection(
     private val random: kotlin.random.Random = kotlin.random.Random.Default,
     private val sleep: (Long) -> Unit = Thread::sleep,
     private val onFirstConnect: (Connected) -> Unit = {},
+    /**
+     * S1 task 8: client-certificate [KeyManager]s for mutual TLS towards this upstream (from
+     * [com.example.interception.tls.ClientCertStore] via a matching per-domain policy). Null --
+     * the default -- offers no client certificate, exactly as before this parameter existed.
+     */
+    private val keyManagers: Array<KeyManager>? = null,
+    /** S1 task 8: how the upstream chain is judged; default accepts and records the outcome. */
+    private val trustPolicy: UpstreamTrustPolicy = UpstreamTrustPolicy.AcceptAllRecording(),
 ) {
 
     class Connected(
@@ -111,15 +119,17 @@ internal class LazyUpstreamConnection(
                     throw t
                 }
                 val sslSocket = SSLContext.getInstance("TLS").apply {
-                    init(null, arrayOf(AcceptAllTrustManager), SecureRandom())
+                    init(keyManagers, arrayOf(trustPolicy.trustManager(host)), SecureRandom())
                 }.socketFactory.createSocket(socket, host, port, true) as SSLSocket
                 // Offer the same ALPN protocol the client-facing leg negotiated (§4 ALPN
                 // negotiation) -- see the KDoc on [preferredAlpnProtocols]. Best-effort: an
                 // upstream server that doesn't understand ALPN, or a platform too old to expose
                 // SSLParameters.applicationProtocols, just proceeds without it exactly as before
-                // this parameter existed.
+                // this parameter existed. Gated at API 24 (N) to match the client-facing leg:
+                // `SSLParameters.setApplicationProtocols` exists from N, and Android's Conscrypt
+                // negotiates ALPN there even though `getApplicationProtocol()` is API 29.
                 if (preferredAlpnProtocols.isNotEmpty() &&
-                    android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q
+                    android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N
                 ) {
                     runCatching {
                         val params = sslSocket.sslParameters
@@ -150,6 +160,16 @@ internal class LazyUpstreamConnection(
     }
 
     /**
+     * Closes the upstream sockets if a connection was ever established (S1 task 7 drain
+     * deadline: unblocks a relay leg stuck in a read). Never throws; safe when never connected.
+     */
+    fun closeQuietly() {
+        val c = connected ?: return
+        runCatching { c.sslSocket.close() }
+        runCatching { c.socket.close() }
+    }
+
+    /**
      * Blocks (bounded by [timeoutMillis] so a hung client→server side can never wedge this
      * reader forever) until either [connect] has run (successfully or not) or [giveUp] was
      * called first. Returns the connection if [connect] succeeded, `null` otherwise --
@@ -159,16 +179,4 @@ internal class LazyUpstreamConnection(
         readyLatch.await(timeoutMillis, TimeUnit.MILLISECONDS)
         return connected
     }
-}
-
-/**
- * Default trust manager for the upstream leg: the whole point of MITM is that this engine,
- * not the original client, is the one deciding whether to trust the real server's certificate
- * (the client only ever sees requestr's own per-host cert). Matches the trust posture the
- * previous eager call site used.
- */
-private object AcceptAllTrustManager : X509TrustManager {
-    override fun checkClientTrusted(certs: Array<X509Certificate?>?, authType: String?) {}
-    override fun checkServerTrusted(certs: Array<X509Certificate?>?, authType: String?) {}
-    override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
 }

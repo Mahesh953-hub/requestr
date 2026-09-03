@@ -33,5 +33,20 @@ Exported from the platform todo list at handoff time.
     `+info` username encoding fixed to match vendored `socks.rs`; VPN tier routes via
     SOCKS5 `Tun2ProxyConfig.forLocalGateway`. `SO_ORIGINAL_DST` is exposed as the
     `OriginalDstResolver` hook and gets its implementation in task 48.
-  - S1 tasks 7–13 (relay pool/state machine, CertificateEngine, UdpPolicyRouter, UidAttributor,
-    VPN lifecycle, PcapNgWriter, TrustDiagnostics) — pending.
+  - S1 tasks 7–13 — done on `vorflux/interceptor-s1-transport-2` (PR pending merge):
+    - 7 bounded relay pool + `ConnectionStateMachine` + buffer pool + relay metrics
+      (`interception/relay/*`, flag `relayPoolBounded`).
+    - 8 `CertificateEngine` rewrite (`LeafProfile`, `ClientCertStore`, upstream trust policy,
+      `CertificateAuthority.getOrCreate` Mutex race fix).
+    - 9 `quic/UdpPolicyRouter` + SOCKS5 UDP ASSOCIATE (flag `quicTeePolicy`, G25 unit-tested;
+      physical-device QUIC runs still owed).
+    - 10 `uid/UidAttributor` ladder (+ tracked-session API for the tee).
+    - 11 VPN lifecycle hardening (`VpnNetworkHandoff`, `VpnDnsPlan`, service hardening,
+      `FOREGROUND_SERVICE_DATA_SYNC` removed).
+    - 12 `packet/PcapNgWriter` + `PacketTeeRecorder` (flag `pcapng`, `pcap_format` setting).
+      Finding: the vendored tee always reports `session_id == 0`; flow identity is recovered
+      from the IP/transport header and matched to the attributor's client tuple.
+    - 13 `tls/TrustDiagnostics` + `MutualTlsSignals`, `PinningFailureRegistry.snapshot()`,
+      watcher DEGRADED reason, CA-sheet findings card.
+    - Not verifiable in this environment (Redroid has no tun): G9/G10/G14, network handoff,
+      tee/PCAPng on device, real trust-store scan. Unit suites cover the logic.

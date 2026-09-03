@@ -239,10 +239,19 @@ fun InterceptScreen(
             ?: kotlinx.coroutines.flow.MutableStateFlow(com.example.interception.tun.IcmpRelay.LastPathUsed.NONE_YET)
     }.collectAsStateWithLifecycle()
     var showRelayHealthSheet by remember { mutableStateOf(false) }
+    // S1 task 7: the bounded relay pool has no flow of its own (lock-free counters bumped from the
+    // relay legs), so sample RelayMetrics.global once a second while this screen is visible.
+    val relayPoolSnapshot by androidx.compose.runtime.produceState<com.example.interception.relay.RelayMetrics.Snapshot?>(initialValue = null) {
+        while (true) {
+            val snap = com.example.interception.relay.RelayMetrics.global.snapshot()
+            value = if (snap.admitted > 0) snap else null
+            kotlinx.coroutines.delay(1_000)
+        }
+    }
 
     // Task 14 / Lane D: derive the three-state RelayHealthState (healthy / degraded / down) from the
     // live counters so the extracted RelayHealthCard / RelayHealthDetailSheet can switch exhaustively.
-    val relayHealthState by remember(relayHealthStats, activePumpForHealth, icmpUnrelayableCount, icmpLastPathUsed, icmpChecksumFailureCount, icmpUnrelayableIcmpv6Count) {
+    val relayHealthState by remember(relayHealthStats, activePumpForHealth, icmpUnrelayableCount, icmpLastPathUsed, icmpChecksumFailureCount, icmpUnrelayableIcmpv6Count, relayPoolSnapshot) {
         mutableStateOf(
             com.example.data.models.toRelayHealthState(
                 pumpRunning = activePumpForHealth != null,
@@ -251,6 +260,7 @@ fun InterceptScreen(
                 icmpLastPathUsed = icmpLastPathUsed,
                 icmpChecksumFailureCount = icmpChecksumFailureCount,
                 icmpUnrelayableIcmpv6Count = icmpUnrelayableIcmpv6Count,
+                relayPool = relayPoolSnapshot,
             )
         )
     }
@@ -283,6 +293,7 @@ fun InterceptScreen(
     val printUndecoded by settings.printUndecoded.collectAsState(initial = true)
     val dumpToFile by settings.dumpToFile.collectAsState(initial = false)
     val pcapEnabled by settings.pcapEnabled.collectAsState(initial = false)
+    val pcapFormat by settings.pcapFormat.collectAsState(initial = com.example.data.prefs.SettingsDataStore.PCAP_FORMAT_PCAPNG)
 
     // isCapturing is now derived from the real engine status rather than a free-floating boolean.
     val isCapturing = interceptionState.isActive
@@ -759,12 +770,14 @@ fun InterceptScreen(
             printUndecoded = printUndecoded,
             dumpToFile = dumpToFile,
             pcapEnabled = pcapEnabled,
+            pcapFormat = pcapFormat,
             onRecordModeChange = { mode -> screenScope.launch { settings.setCaptureRecordMode(mode) } },
             onEnhancedModeChange = { on -> screenScope.launch { settings.setEnhancedMode(on) } },
             onLoggingChange = { on -> screenScope.launch { settings.setLoggingEnabled(on) } },
             onPrintUndecodedChange = { on -> screenScope.launch { settings.setPrintUndecoded(on) } },
             onDumpToFileChange = { on -> screenScope.launch { settings.setDumpToFile(on) } },
             onPcapEnabledChange = { on -> screenScope.launch { settings.setPcapEnabled(on) } },
+            onPcapFormatChange = { fmt -> screenScope.launch { settings.setPcapFormat(fmt) } },
             onOpenApps = {
                 showCaptureSetupSheet = false
                 showAppFilterSheet = true
@@ -1444,6 +1457,19 @@ fun MitmCertificateBottomSheet(
         }.getOrNull()
     }
 
+    // S1 task 13: the actionable explanation behind the boolean above (per-store presence,
+    // stale installs, pinned/mTLS hosts, QUIC, runtime signals). Built once per sheet open on
+    // IO; the diagnostics object caches it for the watcher's DEGRADED reason.
+    val trustFindings by produceState<List<String>>(initialValue = emptyList(), caState, isProbing) {
+        value = withContext(Dispatchers.IO) {
+            runCatching {
+                val diag = com.example.interception.tls.TrustDiagnostics.get(certContext)
+                diag.invalidate()
+                diag.report().findings
+            }.getOrDefault(emptyList())
+        }
+    }
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -1489,6 +1515,25 @@ fun MitmCertificateBottomSheet(
                 isPositive = caState == CaState.SYSTEM_STORE || caState == CaState.USER_STORE,
                 isNegative = caState == CaState.NOT_INSTALLED
             )
+
+            if (trustFindings.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(10.dp))
+                GlassCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    backgroundColor = MaterialTheme.colorScheme.surfaceVariant
+                ) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Trust diagnostics", fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                        trustFindings.forEach { finding ->
+                            Text(
+                                "- $finding",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
 
             Spacer(modifier = Modifier.height(10.dp))
 
@@ -2108,7 +2153,9 @@ fun ConnectionsBottomSheet(
                                     val decoded = conn.decodeStatus == com.example.data.local.QuicDecodeStatus.FULLY_DECODED
                                     val partiallyDecoded = conn.decodeStatus == com.example.data.local.QuicDecodeStatus.PARTIALLY_DECODED
                                     val keysMissing = conn.decodeStatus == com.example.data.local.QuicDecodeStatus.OBSERVED_NO_KEYS
+                                    val blockedByPolicy = conn.decodeStatus == com.example.data.local.QuicDecodeStatus.BLOCKED_BY_POLICY
                                     val badgeText = when {
+                                        blockedByPolicy -> "BLOCKED"
                                         decoded -> "HTTP/3"
                                         partiallyDecoded -> "HANDSHAKE"
                                         keysMissing -> "NO KEYS"
@@ -2775,12 +2822,14 @@ fun CaptureSetupBottomSheet(
     printUndecoded: Boolean,
     dumpToFile: Boolean,
     pcapEnabled: Boolean,
+    pcapFormat: String,
     onRecordModeChange: (String) -> Unit,
     onEnhancedModeChange: (Boolean) -> Unit,
     onLoggingChange: (Boolean) -> Unit,
     onPrintUndecodedChange: (Boolean) -> Unit,
     onDumpToFileChange: (Boolean) -> Unit,
     onPcapEnabledChange: (Boolean) -> Unit,
+    onPcapFormatChange: (String) -> Unit,
     onOpenApps: () -> Unit,
     onOpenRules: () -> Unit,
     onOpenCert: () -> Unit,
@@ -2924,10 +2973,32 @@ fun CaptureSetupBottomSheet(
             // ── PCAP export ─────────────────────────────────────
             Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("PCAP Export", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
-                    Text("Save raw packets to Downloads/requestr/*.pcap for Wireshark analysis", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Packet Export", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
+                    Text("Save raw packets to Downloads/requestr/ for Wireshark analysis", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Switch(checked = pcapEnabled, onCheckedChange = onPcapEnabledChange)
+            }
+            if (pcapEnabled) {
+                // S1 task 12: container format. PCAPng carries direction flags and a per-packet
+                // UID / package / flow comment (also from the native bridge's tee); classic PCAP
+                // stays selectable for tools that cannot read PCAPng.
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Format", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    FilterChip(
+                        selected = pcapFormat == com.example.data.prefs.SettingsDataStore.PCAP_FORMAT_PCAPNG,
+                        onClick = { onPcapFormatChange(com.example.data.prefs.SettingsDataStore.PCAP_FORMAT_PCAPNG) },
+                        label = { Text("PCAPng (uid, app, flow)", fontSize = 10.sp) },
+                    )
+                    FilterChip(
+                        selected = pcapFormat == com.example.data.prefs.SettingsDataStore.PCAP_FORMAT_PCAP,
+                        onClick = { onPcapFormatChange(com.example.data.prefs.SettingsDataStore.PCAP_FORMAT_PCAP) },
+                        label = { Text("Classic PCAP", fontSize = 10.sp) },
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(14.dp))

@@ -4,6 +4,9 @@ import com.example.data.local.CaptureRowMethod
 import com.example.data.local.CapturedTrafficEntity
 import com.example.interception.http.HttpBodyDecoder
 import com.example.interception.net.SocketProtector
+import com.example.interception.relay.ConnectionStateMachine
+import com.example.interception.relay.RelayPool
+import com.example.interception.relay.StructuredRelay
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
@@ -114,7 +117,7 @@ internal object HttpProxyShared {
      * fails to establish, exactly like a real dial-time failure this function already propagates
      * (e.g. connection refused from [relay]'s own `Socket(host, port)`).
      */
-    fun handleConnectAttempt(
+    suspend fun handleConnectAttempt(
         client: Socket,
         target: String,
         disposition: ConnectControl.Disposition,
@@ -125,7 +128,8 @@ internal object HttpProxyShared {
         socketFactory: () -> Socket = { Socket() },
         socketConnector: (Socket, InetSocketAddress) -> Unit = { socket, address -> socket.connect(address) },
         replies: ConnectReplies = ConnectReplies.http(output),
-        onBytesTransferred: (clientToUpstream: Long, upstreamToClient: Long) -> Unit = { _, _ -> },
+        relayPool: RelayPool = RelayPool.shared(),
+        onBytesTransferred: suspend (clientToUpstream: Long, upstreamToClient: Long) -> Unit = { _, _ -> },
     ) {
         when (disposition) {
             is ConnectControl.Disposition.Block -> replies.blocked()
@@ -133,13 +137,13 @@ internal object HttpProxyShared {
                 val (host, port) = parseHostPort(target, 443)
                 NetworkConditionInjector.apply(networkCondition, random, sleep)
                 replies.established()
-                relay(client, host, port, onBytesTransferred, socketFactory, socketConnector)
+                relay(client, host, port, onBytesTransferred, socketFactory, socketConnector, relayPool)
             }
             is ConnectControl.Disposition.Redirect -> {
                 val (host, port) = parseHostPort(disposition.target, 443)
                 NetworkConditionInjector.apply(networkCondition, random, sleep)
                 replies.established()
-                relay(client, host, port, onBytesTransferred, socketFactory, socketConnector)
+                relay(client, host, port, onBytesTransferred, socketFactory, socketConnector, relayPool)
             }
             is ConnectControl.Disposition.ForceMitm -> {
                 // A plain Socket relay can never terminate TLS -- only MitmProxyEngine can
@@ -186,15 +190,25 @@ internal object HttpProxyShared {
         }
     }
 
-    /** Byte-counted bidirectional relay between [client] and a freshly dialed upstream socket. */
-    private fun relay(
+    /**
+     * Byte-counted bidirectional relay between [client] and a freshly dialed upstream socket.
+     *
+     * S1 task 7: the two copy legs are structured coroutines on the [RelayPool] dispatcher
+     * ([StructuredRelay.run]) driven by a [ConnectionStateMachine]; [onBytesTransferred] fires
+     * only once the connection reached a terminal state, never on a `join` timeout while a leg is
+     * still copying.
+     */
+    private suspend fun relay(
         client: Socket,
         host: String,
         port: Int,
-        onBytesTransferred: (clientToUpstream: Long, upstreamToClient: Long) -> Unit,
+        onBytesTransferred: suspend (clientToUpstream: Long, upstreamToClient: Long) -> Unit,
         socketFactory: () -> Socket,
         socketConnector: (Socket, InetSocketAddress) -> Unit,
+        relayPool: RelayPool,
     ) {
+        val machine = ConnectionStateMachine()
+        machine.transition(ConnectionStateMachine.State.DETECTED)
         val upstream = socketFactory()
         try {
             val protectResult = SocketProtector.protectSocket(upstream)
@@ -204,40 +218,45 @@ internal object HttpProxyShared {
             socketConnector(upstream, InetSocketAddress(host, port))
         } catch (t: Throwable) {
             runCatching { upstream.close() }
+            machine.fail("upstream dial failed: ${t.message}")
             throw t
         }
         upstream.use {
             val sent = AtomicLong(0)
             val received = AtomicLong(0)
-            val t1 = Thread {
-                runCatching {
-                    val input = client.getInputStream()
-                    val out = upstream.getOutputStream()
-                    val buf = ByteArray(BUFFER_SIZE)
-                    var n: Int
-                    while (input.read(buf).also { n = it } != -1) {
-                        out.write(buf, 0, n)
-                        sent.addAndGet(n.toLong())
-                    }
-                }
+            machine.transition(ConnectionStateMachine.State.RELAYING)
+            val metrics = relayPool.metrics
+            val outcome = StructuredRelay.run(
+                machine = machine,
+                dispatcher = relayPool.dispatcher,
+                metrics = metrics,
+                drainTimeoutMs = OPAQUE_DRAIN_TIMEOUT_MS,
+                onDrainTimeout = {
+                    runCatching { client.close() }
+                    runCatching { upstream.close() }
+                },
+                clientToUpstream = {
+                    StructuredRelay.copy(client.getInputStream(), upstream.getOutputStream(), sent, relayPool.buffers) { machine.touch() }
+                },
+                upstreamToClient = {
+                    StructuredRelay.copy(upstream.getInputStream(), client.getOutputStream(), received, relayPool.buffers) { machine.touch() }
+                },
+            )
+            metrics.addBytesToUpstream(sent.get())
+            metrics.addBytesToClient(received.get())
+            if (!outcome.anyLegEndedNormally && sent.get() == 0L && received.get() == 0L && outcome.errors.isNotEmpty()) {
+                machine.fail(outcome.errors.first().message ?: outcome.errors.first().javaClass.simpleName)
+                metrics.onFailed()
+            } else {
+                machine.close()
+                metrics.onCompleted()
             }
-            val t2 = Thread {
-                runCatching {
-                    val input = upstream.getInputStream()
-                    val out = client.getOutputStream()
-                    val buf = ByteArray(BUFFER_SIZE)
-                    var n: Int
-                    while (input.read(buf).also { n = it } != -1) {
-                        out.write(buf, 0, n)
-                        received.addAndGet(n.toLong())
-                    }
-                }
-            }
-            t1.start(); t2.start()
-            t1.join(30_000); t2.join(30_000)
             onBytesTransferred(sent.get(), received.get())
         }
     }
+
+    /** How long the second leg of an opaque tunnel may keep going after the first one ended. */
+    private const val OPAQUE_DRAIN_TIMEOUT_MS = 30_000L
 
     /**
      * Forwards a plain (non-CONNECT) HTTP request to its destination over a **raw [Socket]**

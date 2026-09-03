@@ -143,6 +143,17 @@ fun RelayHealthCard(
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+
+            // S1 task 7: bounded relay pool readout (gateway sessions), fed by RelayMetrics.
+            state.relayPool?.let { pool ->
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = relayPoolLine(pool),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 9.sp,
+                    color = if (pool.hasPressure) InterceptorIdleAmber else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }
@@ -153,6 +164,10 @@ private fun statusPillColor(state: RelayHealthState): Long = when (state) {
     is RelayHealthState.Degraded -> 0xFFF59E0B
     is RelayHealthState.Healthy -> 0xFF10B981
 }
+
+internal fun relayPoolLine(pool: com.example.interception.relay.RelayMetrics.Snapshot): String =
+    "Relay pool ${pool.active} active (peak ${pool.peakActive}) · ${pool.queued} queued · " +
+        "${pool.rejected} rejected · ${pool.evicted} evicted"
 
 private fun summaryLine(state: RelayHealthState, dropped: Int): String = when (state) {
     is RelayHealthState.Down -> "No packets relayed — tun relay is not running"

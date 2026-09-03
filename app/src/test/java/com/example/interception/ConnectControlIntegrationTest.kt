@@ -34,9 +34,9 @@ class ConnectControlIntegrationTest {
         val output = ByteArrayOutputStream()
         var transferredCalled = false
 
-        HttpProxyShared.handleConnectAttempt(
+        kotlinx.coroutines.runBlocking { HttpProxyShared.handleConnectAttempt(
             client, "example.com:443", ConnectControl.Disposition.Block("nope"), output,
-        ) { _, _ -> transferredCalled = true }
+        ) { _, _ -> transferredCalled = true } }
 
         val response = output.toString(Charsets.UTF_8.name())
         assertTrue(response.startsWith("HTTP/1.1 403"))
@@ -50,9 +50,9 @@ class ConnectControlIntegrationTest {
         val output = ByteArrayOutputStream()
         var transferredCalled = false
 
-        HttpProxyShared.handleConnectAttempt(
+        kotlinx.coroutines.runBlocking { HttpProxyShared.handleConnectAttempt(
             client, "example.com:443", ConnectControl.Disposition.ForceMitm, output,
-        ) { _, _ -> transferredCalled = true }
+        ) { _, _ -> transferredCalled = true } }
 
         val response = output.toString(Charsets.UTF_8.name())
         assertTrue(response.startsWith("HTTP/1.1 403"))
@@ -96,14 +96,14 @@ class ConnectControlIntegrationTest {
         val relayDone = CountDownLatch(1)
 
         val relayThread = Thread {
-            HttpProxyShared.handleConnectAttempt(
+            kotlinx.coroutines.runBlocking { HttpProxyShared.handleConnectAttempt(
                 serverSideClient, "127.0.0.1:${upstream.localPort}",
                 ConnectControl.Disposition.AllowOpaque, output,
             ) { sent, recv ->
                 sentBytes = sent
                 recvBytes = recv
                 relayDone.countDown()
-            }
+            } }
         }
         relayThread.start()
 
@@ -153,10 +153,10 @@ class ConnectControlIntegrationTest {
         val output = ByteArrayOutputStream()
         val relayDone = CountDownLatch(1)
         val relayThread = Thread {
-            HttpProxyShared.handleConnectAttempt(
+            kotlinx.coroutines.runBlocking { HttpProxyShared.handleConnectAttempt(
                 serverSideClient, "original.invalid:443",
                 ConnectControl.Disposition.Redirect("127.0.0.1:${redirectUpstream.localPort}"), output,
-            ) { _, _ -> relayDone.countDown() }
+            ) { _, _ -> relayDone.countDown() } }
         }
         relayThread.start()
 

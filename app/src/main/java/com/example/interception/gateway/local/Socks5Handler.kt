@@ -19,10 +19,13 @@ data class Socks5Credentials(val username: String, val password: String) {
 }
 
 /**
- * RFC 1928 SOCKS5 (+ RFC 1929 user/pass) negotiation over blocking streams. Only `CONNECT` is
- * supported: `UDP ASSOCIATE` and `BIND` are answered with `0x07 Command not supported` and
- * surfaced as [Outcome.Rejected] with [GatewayRejectReason.SOCKS_COMMAND_UNSUPPORTED] so the
- * caller records *why* rather than silently dropping. UDP policy routing is S1 task 9.
+ * RFC 1928 SOCKS5 (+ RFC 1929 user/pass) negotiation over blocking streams. `CONNECT` yields
+ * [Outcome.Connect]; `UDP ASSOCIATE` (S1 task 9) yields [Outcome.UdpAssociate] with the reply
+ * deferred to the caller, which either serves the association through
+ * [com.example.interception.quic.UdpPolicyRouter] or answers `0x07`. `BIND` is answered with
+ * `0x07 Command not supported` and surfaced as [Outcome.Rejected] with
+ * [GatewayRejectReason.SOCKS_COMMAND_UNSUPPORTED] so the caller records *why* rather than
+ * silently dropping.
  *
  * The vendored tun2proxy encodes the originating flow into the username as
  * `"<base>|<tcp|udp>|<src_ip>|<src_port>"` when the configured username ends with `+info`; that
@@ -33,6 +36,12 @@ class Socks5Handler(
 ) {
     sealed class Outcome {
         data class Connect(val destination: Destination, val origin: ClientOrigin?) : Outcome()
+        /**
+         * `UDP ASSOCIATE` request (RFC 1928 §7). [requested] is the client's DST.ADDR/DST.PORT hint
+         * (the vendored tun2proxy sends the unspecified address). No reply has been written yet:
+         * the caller must answer with the relay's BND.ADDR/BND.PORT or a failure code.
+         */
+        data class UdpAssociate(val requested: Destination, val origin: ClientOrigin?) : Outcome()
         /** Negotiation failed; the wire reply (if any) has already been written. */
         data class Rejected(val reason: GatewayRejectReason, val detail: String) : Outcome()
     }
@@ -110,9 +119,12 @@ class Socks5Handler(
             }
         }
         val port = din.readUnsignedShort()
+        if (cmd == CMD_UDP_ASSOCIATE) {
+            return Outcome.UdpAssociate(Destination(host, port), origin)
+        }
         if (cmd != CMD_CONNECT) {
             out.write(reply(REP_COMMAND_NOT_SUPPORTED)); out.flush()
-            val name = when (cmd) { CMD_BIND -> "BIND"; CMD_UDP_ASSOCIATE -> "UDP ASSOCIATE"; else -> "0x%02x".format(cmd) }
+            val name = when (cmd) { CMD_BIND -> "BIND"; else -> "0x%02x".format(cmd) }
             return Outcome.Rejected(GatewayRejectReason.SOCKS_COMMAND_UNSUPPORTED, "SOCKS5 $name not supported")
         }
         if (host.isBlank() || port == 0) {
@@ -153,5 +165,13 @@ class Socks5Handler(
         /** `VER REP RSV ATYP=IPv4 BND.ADDR=0.0.0.0 BND.PORT=0` (10 bytes). */
         fun reply(rep: Int): ByteArray =
             byteArrayOf(VERSION.toByte(), rep.toByte(), 0x00, ATYP_IPV4.toByte(), 0, 0, 0, 0, 0, 0)
+
+        /** `VER REP=0 RSV ATYP BND.ADDR BND.PORT` announcing where a UDP relay listens. */
+        fun replyBound(address: InetAddress, port: Int): ByteArray {
+            val raw = address.address
+            val atyp = if (raw.size == 16) ATYP_IPV6 else ATYP_IPV4
+            return byteArrayOf(VERSION.toByte(), REP_SUCCEEDED.toByte(), 0x00, atyp.toByte()) + raw +
+                byteArrayOf((port shr 8).toByte(), (port and 0xFF).toByte())
+        }
     }
 }

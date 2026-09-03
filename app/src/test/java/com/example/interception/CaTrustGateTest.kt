@@ -133,4 +133,41 @@ class CaTrustGateTest {
         assertFalse(shouldDegradeForUntrustedCa(ConnectControl.Disposition.Block(), caTrusted = false))
         assertFalse(shouldDegradeForUntrustedCa(ConnectControl.Disposition.Redirect("x:1"), caTrusted = false))
     }
+
+    // ---- S1 task 13: the fast gate and the full TrustDiagnostics report never disagree ----
+
+    @Test
+    fun `gate boolean equals TrustDiagnostics report caTrusted for every store layout`() {
+        val fp = "ab".repeat(32)
+        fun entry(store: com.example.interception.tls.TrustDiagnostics.Store, sha: String) =
+            com.example.interception.tls.TrustDiagnostics.CaEntry(store, "${store.name.lowercase()}:x.0", "CN=requestr Root CA", sha)
+        val layouts = listOf(
+            emptyList(),
+            listOf(entry(com.example.interception.tls.TrustDiagnostics.Store.USER, "cd".repeat(32))), // stale twin
+            listOf(entry(com.example.interception.tls.TrustDiagnostics.Store.USER, fp)),
+            listOf(entry(com.example.interception.tls.TrustDiagnostics.Store.SYSTEM, fp)),
+        )
+        for (layout in layouts) {
+            val diag = com.example.interception.tls.TrustDiagnostics(
+                ownCaFingerprint = { fp },
+                stores = object : com.example.interception.tls.TrustDiagnostics.TrustStoreScanner {
+                    override fun entries() = layout
+                },
+                appInspector = { null },
+                pinningHistory = { emptyList() },
+                mutualTlsHosts = { emptySet() },
+                quicBranches = { emptyMap() },
+                capabilities = { com.example.data.interception.CapabilityState() },
+                clock = { 0L },
+            )
+            val gate = CaTrustGate(probe = { diag.report().caTrusted }, cacheTtlMs = 1_000L, clock = { 0L })
+            val fromGate = runBlocking { gate.isTrusted() }
+            assertEquals("layout=$layout", diag.report().caTrusted, fromGate)
+            // Degradation decision derived from the gate matches what the report would drive.
+            assertEquals(
+                shouldDegradeForUntrustedCa(ConnectControl.Disposition.ForceMitm, fromGate),
+                shouldDegradeForUntrustedCa(ConnectControl.Disposition.ForceMitm, diag.report().caTrusted),
+            )
+        }
+    }
 }

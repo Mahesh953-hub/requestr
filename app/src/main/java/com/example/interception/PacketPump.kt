@@ -93,7 +93,12 @@ class PacketPump(
      * (the VPN_TUN blackhole recorded in AUDIT_REPORT.md's v5.8-backup addendum). Exposed so the
      * service can stop it and the UI can observe [TunRelay.stats].
      */
-    private val tunWriter = com.example.interception.tun.TunWriter(com.example.interception.tun.TunSink { datagram -> output.write(datagram) })
+    private val tunWriter = com.example.interception.tun.TunWriter(com.example.interception.tun.TunSink { datagram ->
+        output.write(datagram)
+        // S1 task 12: replies the relay writes back into the tun are the inbound half of every
+        // flow; before this only the outbound half (what the pump read) reached the export.
+        writeToPcap(datagram, datagram.size, outbound = false)
+    })
 
     val relay: TunRelay = TunRelay(protectHook, tunWriter)
 
@@ -338,7 +343,7 @@ class PacketPump(
      * guards make this call a no-op when the preference is off, so no flag needs to be threaded
      * through here.
      */
-    private fun writeToPcap(packet: ByteArray, length: Int) {
+    private fun writeToPcap(packet: ByteArray, length: Int, outbound: Boolean = true) {
         if (!com.example.interception.packet.PacketCaptureEngine.isActive()) return
         val nowMs = System.currentTimeMillis()
         com.example.interception.packet.PacketCaptureEngine.writePacket(
@@ -347,6 +352,7 @@ class PacketPump(
             data = packet,
             offset = 0,
             len = length,
+            outbound = outbound,
         )
     }
 
@@ -548,10 +554,16 @@ class PacketPump(
         dst: String,
         dPort: Int,
         isIpv6: Boolean = false,
+        /**
+         * S1 task 9: true when the capture-scoped UDP policy teed this datagram and then dropped
+         * it. The row is written as [QuicDecodeStatus.BLOCKED_BY_POLICY] (sticky) instead of the
+         * decoder's measured state, because no packet of this flow is ever forwarded.
+         */
+        blockedByPolicy: Boolean = false,
     ) {
         val routed = quicDatagramRouter.ingest(datagramPayload, src, sPort, dst, dPort, isIpv6)
         for (packet in routed) {
-            persistQuicConnection(src, sPort, dst, dPort, packet)
+            persistQuicConnection(src, sPort, dst, dPort, packet, blockedByPolicy)
         }
     }
 
@@ -606,6 +618,7 @@ class PacketPump(
         dst: String,
         dPort: Int,
         routed: com.example.interception.quic.QuicDatagramRouter.RoutedPacket,
+        blockedByPolicy: Boolean = false,
     ) {
         val connectionId = routed.connectionId
         val outbound = routed.direction == com.example.interception.quic.QuicDatagramRouter.Direction.OUTBOUND
@@ -672,7 +685,7 @@ class PacketPump(
                         quicVersion = decoder.version,
                         dstConnectionId = connectionId,
                         establishedAt = now,
-                        decodeStatus = decoder.decodeStatus,
+                        decodeStatus = if (blockedByPolicy) QuicDecodeStatus.BLOCKED_BY_POLICY else decoder.decodeStatus,
                         lifecycleState = decoder.lifecycle.name,
                         updatedAt = now,
                         clientRandomHex = decoder.clientRandomHex,
@@ -685,8 +698,12 @@ class PacketPump(
                 // IGNORE-on-conflict, so when a row already exists (an idle connection whose decode state
                 // was released, then resumed) this is what carries the state forward without wiping it.
                 updateState = firstObservation || decode.statusChanged || decode.lifecycleChanged || decode.provenanceChanged,
-                decodeStatus = decoder.decodeStatus,
-                decodeStatusRank = decoder.decodeStatusRank,
+                decodeStatus = if (blockedByPolicy) QuicDecodeStatus.BLOCKED_BY_POLICY else decoder.decodeStatus,
+                decodeStatusRank = if (blockedByPolicy) {
+                    com.example.interception.quic.QuicConnectionDecoder.BLOCKED_BY_POLICY_RANK
+                } else {
+                    decoder.decodeStatusRank
+                },
                 lifecycleState = decoder.lifecycle.name,
                 lifecycleRank = decoder.lifecycleStateRank,
                 clientRandomHex = decoder.clientRandomHex,

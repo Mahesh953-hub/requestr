@@ -147,4 +147,50 @@ class ExpiringLruCertCacheTest {
         val firstCert = results[0]!!.first
         assertTrue(results.all { it!!.first == firstCert })
     }
+
+    @Test
+    fun `concurrent getOrCompute calls for distinct hosts are not serialized on each other`() {
+        // S1 task 8: per-key locks. Eight distinct hosts each "generating" for 200 ms must finish
+        // in well under 8 * 200 ms; the old instance-wide @Synchronized would take >= 1.6 s.
+        val cache = ExpiringLruCertCache(maxSize = 200)
+        val hosts = 8
+        val startLatch = CountDownLatch(1)
+        val doneLatch = CountDownLatch(hosts)
+        val inFlight = AtomicInteger(0)
+        val peakInFlight = AtomicInteger(0)
+        val threads = (0 until hosts).map { i ->
+            Thread {
+                startLatch.await()
+                cache.getOrCompute("host$i.example") {
+                    val now = inFlight.incrementAndGet()
+                    peakInFlight.accumulateAndGet(now) { a, b -> maxOf(a, b) }
+                    Thread.sleep(200)
+                    inFlight.decrementAndGet()
+                    cheapCertFor(it)
+                }
+                doneLatch.countDown()
+            }
+        }
+        threads.forEach { it.start() }
+        val t0 = System.nanoTime()
+        startLatch.countDown()
+        assertTrue(doneLatch.await(10, TimeUnit.SECONDS))
+        val elapsedMs = (System.nanoTime() - t0) / 1_000_000
+        assertTrue("distinct hosts must generate concurrently (peak in-flight = ${peakInFlight.get()})", peakInFlight.get() > 1)
+        assertTrue("8 x 200 ms generations took ${elapsedMs} ms -- they were serialized", elapsedMs < 1_200)
+        assertEquals(hosts, cache.size)
+    }
+
+    @Test
+    fun `invalidate drops the entry and peek honours TTL`() {
+        var now = 1_000L
+        val cache = ExpiringLruCertCache(maxSize = 200, ttlMillis = 500, clock = { now })
+        cache.getOrCompute("a.example") { cheapCertFor(it) }
+        assertTrue(cache.peek("a.example") != null)
+        now += 600
+        assertTrue(cache.peek("a.example") == null)
+        cache.getOrCompute("a.example") { cheapCertFor(it) }
+        cache.invalidate("a.example")
+        assertFalse(cache.containsKey("a.example"))
+    }
 }

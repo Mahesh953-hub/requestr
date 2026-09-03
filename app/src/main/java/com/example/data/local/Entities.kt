@@ -438,7 +438,14 @@ enum class QuicDecodeStatus {
     /** Initial or Handshake was decrypted but full HTTP/3 was not. */
     PARTIALLY_DECODED,
     /** Handshake and 1-RTT application data were fully decrypted. */
-    FULLY_DECODED
+    FULLY_DECODED,
+    /**
+     * S1 task 9 (D6): teed for passive inspection, then dropped by the capture-scoped UDP/QUIC
+     * policy so the client fell back to HTTP/2 over TCP. Terminal and sticky: no later packet can
+     * promote it, because none is forwarded. Full QUIC MITM is not implemented (Chromium never
+     * trusts user-added CAs for QUIC), so "blocked" or "observed" is the honest ceiling.
+     */
+    BLOCKED_BY_POLICY
 }
 
 @Entity(tableName = "quic_connections", indices = [Index("sessionId"), Index("sniHost")])

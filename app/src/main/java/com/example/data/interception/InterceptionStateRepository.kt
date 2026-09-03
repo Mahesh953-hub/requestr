@@ -183,8 +183,18 @@ object InterceptionStateRepository {
 
     // ---- Watcher (engine-owned) ----
 
-    fun setWatcherStatus(status: WatcherStatus) {
-        _state.update { it.copy(watcherStatus = status) }
+    /**
+     * [reason] (S1 task 13) is a short human-readable explanation for DEGRADED/ERROR, e.g.
+     * "no packets for 15s" or the trust-diagnostics headline; cleared when the watcher
+     * returns to HEALTHY/IDLE.
+     */
+    fun setWatcherStatus(status: WatcherStatus, reason: String? = null) {
+        _state.update {
+            it.copy(
+                watcherStatus = status,
+                watcherReason = if (status == WatcherStatus.DEGRADED || status == WatcherStatus.ERROR) reason else null,
+            )
+        }
     }
 
     /** Test/reset hook. Returns everything to genuine defaults. */

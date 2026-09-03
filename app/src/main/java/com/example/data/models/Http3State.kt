@@ -114,7 +114,8 @@ fun toHttp3DetailState(
             keyMaterialMissing = live?.keyMaterialMissing ?: false,
             cipherSuiteUnavailable = live?.cipherSuiteUnavailable ?: false,
         )
-        QuicDecodeStatus.DETECTED_ONLY -> Http3DetailState.QuicOnly(
+        QuicDecodeStatus.DETECTED_ONLY,
+        QuicDecodeStatus.BLOCKED_BY_POLICY -> Http3DetailState.QuicOnly(
             connectionId = entity.connectionId,
             sniHost = entity.sniHost,
             quicVersion = version,

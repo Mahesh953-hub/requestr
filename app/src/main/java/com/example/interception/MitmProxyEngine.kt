@@ -1,7 +1,6 @@
 package com.example.interception
 
 import android.content.Context
-import android.net.ConnectivityManager
 import android.util.Log
 import com.example.data.interception.engineLifecycleOwner
 import com.example.data.interception.engineTier
@@ -26,7 +25,15 @@ import com.example.interception.http.WebSocketParser
 import com.example.interception.http.WsMessageAssembler
 import com.example.interception.gateway.GatewaySessionHandler
 import com.example.interception.gateway.LocalGateway
+import com.example.interception.relay.ConnectionStateMachine
+import com.example.interception.relay.RelayPool
+import com.example.interception.tls.CertificateEngine
+import com.example.interception.tls.ClientCertException
+import com.example.interception.tls.ClientCertStore
+import com.example.interception.uid.UidAttributor
+import com.example.interception.relay.StructuredRelay
 import com.example.interception.gateway.OriginalDstResolver
+import com.example.interception.gateway.local.ClientOrigin
 import com.example.interception.gateway.local.EntryKind
 import com.example.interception.gateway.local.GatewaySession
 import com.example.interception.gateway.local.ProtocolClassifier
@@ -35,25 +42,15 @@ import com.example.interception.tls.ClientHelloCapture
 import com.example.interception.tls.TlsClientHello
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
-import org.bouncycastle.asn1.x500.X500Name
-import org.bouncycastle.asn1.x509.BasicConstraints
-import org.bouncycastle.asn1.x509.Extension
-import org.bouncycastle.asn1.x509.KeyUsage
-import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
-import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
-import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
-import java.math.BigInteger
 import java.net.Socket
-import java.security.KeyPair
-import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
-import java.util.Date
 import java.util.TreeMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
@@ -131,6 +128,18 @@ class MitmProxyEngine(
      * can be asserted without actually waiting five seconds.
      */
     private val chaosSleep: (Long) -> Unit = { millis -> Thread.sleep(millis) },
+    /** S1 task 7: bounded relay pool whose dispatcher runs both copy legs of every tunnel. */
+    private val relayPool: RelayPool = RelayPool.shared(),
+    /**
+     * S1 task 8: the single leaf issuer (SNI-first identity, upstream sniffing, hardened EC
+     * leaves, per-domain overrides, mTLS key managers). Null means "build the default engine
+     * backed by [ClientCertStore.get] on first use"; tests inject one with fake I/O.
+     */
+    certificateEngine: CertificateEngine? = null,
+    /** S1 task 10: UID attribution; null means the process-wide [UidAttributor.shared]. */
+    uidAttributor: UidAttributor? = null,
+    /** S1 task 9: serves SOCKS5 UDP ASSOCIATE through the capture-scoped UDP policy; null refuses it. */
+    private val udpAssociationHandler: com.example.interception.gateway.UdpAssociationHandler? = null,
 ) : GatewaySessionHandler {
     private var gateway: LocalGateway? = null
     private var appContext: Context? = null
@@ -143,12 +152,15 @@ class MitmProxyEngine(
     private val plaintextDelegate: HttpProxyEngine by lazy { HttpProxyEngine(scope) }
     private val packetCount = AtomicLong(0)
     private val sessionId = AtomicLong(System.currentTimeMillis())
+    private val injectedCertificateEngine = certificateEngine
     /**
-     * §3: bounded/expiring LRU (see [ExpiringLruCertCache]) instead of an unbounded map -- a
-     * long-running capture session that MITMs many distinct hosts must not retain every
-     * generated (RSA-2048 keypair + cert) forever.
+     * S1 task 8: one issuer for every leaf (see [CertificateEngine]); its internal
+     * [ExpiringLruCertCache] keeps the §3 bounded/expiring LRU so a long-running capture that
+     * MITMs many distinct hosts never retains every minted leaf forever.
      */
-    private val certCache = ExpiringLruCertCache()
+    private val certificateEngine: CertificateEngine by lazy {
+        injectedCertificateEngine ?: CertificateEngine(policyStore = appContext?.let { ClientCertStore.get(it) })
+    }
 
     val port: Int get() = gateway?.port ?: 0
 
@@ -160,9 +172,11 @@ class MitmProxyEngine(
         private const val TAG = "MitmProxy"
         /** How long a tunnel client may stay silent after the tunnel is established. */
         private const val TUNNEL_FIRST_BYTE_TIMEOUT_MS = 15_000
-        private const val BUFFER_SIZE = 8192
-        /** Bytes buffered without a successful parse before falling back to blind relay. */
-        private const val MAX_UNPARSED_BUFFER = 1024 * 1024
+        /**
+         * Bytes buffered without a successful parse before falling back to blind relay: now the
+         * relay pool's per-flow per-direction cap ([com.example.interception.relay.BufferPool.flowCapBytes],
+         * 512 KiB..2 MiB, default 1 MiB) -- S1 task 7 / gate G3.
+         */
         private val HTTP_METHODS = listOf(
             "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE",
         )
@@ -185,9 +199,11 @@ class MitmProxyEngine(
         appContext = context.applicationContext
         plaintextDelegate.bind(context)
 
-        // Pre-warm cert cache with CA material
-        kotlinx.coroutines.runBlocking {
-            CertificateAuthority.getOrCreate(context)
+        // Pre-warm the CA material off the caller's thread (S1 task 7: no runBlocking on the
+        // start path); the first MITM'd connection awaits the same suspend getOrCreate.
+        scope.launch(Dispatchers.IO) {
+            runCatching { CertificateAuthority.getOrCreate(context) }
+                .onFailure { Log.w(TAG, "CA prewarm failed: ${it.message}") }
         }
 
         val gw = LocalGateway(
@@ -196,6 +212,8 @@ class MitmProxyEngine(
             socks5Credentials = socks5Credentials,
             originalDstResolver = originalDstResolver,
             logTag = TAG,
+            relayPool = relayPool,
+            udpAssociationHandler = udpAssociationHandler,
         )
         val boundPort = gw.start(port)
         gateway = gw
@@ -241,6 +259,10 @@ class MitmProxyEngine(
 
     private suspend fun handleClient(context: Context, session: GatewaySession) {
         var client: Socket = session.socket
+        // S1 task 7: one lifecycle record per tunnel. The gateway already classified the entry
+        // protocol, so the session is DETECTED by the time this handler sees it.
+        val machine = ConnectionStateMachine()
+        machine.transition(ConnectionStateMachine.State.DETECTED)
         try {
             runCatching { client.setTcpNoDelay(true) }
             val output = client.getOutputStream()
@@ -264,7 +286,7 @@ class MitmProxyEngine(
                 is ConnectControl.Disposition.Block -> {
                     Log.i(TAG, "BLOCKED by rule: $host")
                     session.replyBlocked()
-                    persistConnectAttempt(context, client, db, host, port, "BLOCKED", failureReason = disposition.reason)
+                    persistConnectAttempt(context, client, db, host, port, "BLOCKED", failureReason = disposition.reason, origin = session.origin)
                     return
                 }
                 is ConnectControl.Disposition.Redirect -> {
@@ -279,6 +301,7 @@ class MitmProxyEngine(
                         persistConnectAttempt(
                             context, client, db, host, port, "REDIRECTED",
                             redirectTarget = disposition.target, bytesToUpstream = sent, bytesToClient = recv,
+                            origin = session.origin,
                         )
                     }
                     return
@@ -295,6 +318,7 @@ class MitmProxyEngine(
                         persistConnectAttempt(
                             context, client, db, host, port, "ALLOWED_OPAQUE",
                             bytesToUpstream = sent, bytesToClient = recv,
+                            origin = session.origin,
                         )
                     }
                     return
@@ -323,6 +347,7 @@ class MitmProxyEngine(
                                     "on this device (install it in Settings to enable MITM decryption for " +
                                     "this host) -- degraded to raw relay",
                                 bytesToUpstream = sent, bytesToClient = recv,
+                                origin = session.origin,
                             )
                         }
                         return
@@ -343,6 +368,7 @@ class MitmProxyEngine(
                 persistConnectAttempt(
                     context, client, db, host, port, "FAILED",
                     failureReason = "client sent no payload after tunnel establishment",
+                    origin = session.origin,
                 )
                 return
             }
@@ -357,7 +383,7 @@ class MitmProxyEngine(
                     plaintextDelegate.handlePlaintext(
                         GatewaySession(replaying, EntryKind.TRANSPARENT_HTTP, session.destination, session.origin, target),
                     )
-                    persistConnectAttempt(context, replaying, db, host, port, "PLAINTEXT_FORWARDED")
+                    persistConnectAttempt(context, replaying, db, host, port, "PLAINTEXT_FORWARDED", origin = session.origin)
                     return
                 }
                 else -> {
@@ -371,39 +397,77 @@ class MitmProxyEngine(
                             context, replaying, db, host, port, "ALLOWED_OPAQUE",
                             failureReason = "FORCE_MITM rule matched, but the tunnel payload is not TLS -- relayed opaquely",
                             bytesToUpstream = sent, bytesToClient = recv,
+                            origin = session.origin,
                         )
                     }
                     return
                 }
             }
 
-            // Get or create per-host certificate. ExpiringLruCertCache.getOrCompute (§3) keeps
-            // the same "generate at most once per host, even under concurrent callers" semantics
-            // the old computeIfAbsent call site relied on, plus a 200-entry LRU cap + TTL.
-            // §1.10: remote-cert mirroring is a discrete opt-in (default OFF) read fresh per
-            // CONNECT -- see SettingsDataStore.remoteCertMirrorEnabled's KDoc for why this isn't
-            // unconditional (it means an extra real upstream probe on every first-seen
-            // FORCE_MITM host, which a user who leaves the toggle off never pays for).
+            // S1 task 8: upstream-leaf sniffing is CertificateEngine's default for IP-literal
+            // and SNI-less connects; this §1.10 setting additionally requests it for named hosts
+            // (extra fidelity at the cost of one protected upstream probe per first-seen host).
             val mirrorEnabled = SettingsDataStore.get(context).remoteCertMirrorEnabled.first()
             // §3 (C2) -- read fresh per CONNECT, same convention as mirrorEnabled above. Disabled
             // (all-zero/no-op) by default, so a user who never touches this setting pays nothing.
             val networkCondition = SettingsDataStore.get(context).networkCondition.first()
-            val (cert, keyPair) = certCache.getOrCompute(host) { h ->
-                generateHostCertOrMirror(context, h, mirrorEnabled)
-            }
 
             // Real JA3 (M6): peek the raw ClientHello record directly off the accepted socket
             // BEFORE handing it to JSSE -- by the time startHandshake() below returns, JSSE has
             // consumed those bytes and there is no supported way to read them back. peeked.socket
             // replays the exact same bytes to JSSE (see ClientHelloCapture's KDoc), so the
             // handshake itself is completely unaffected by this.
+            //
+            // S1 task 8: the peek now happens BEFORE leaf issuance, so the ClientHello's SNI is
+            // the authoritative identity for the leaf (CONNECT 1.2.3.4:443 with SNI example.com
+            // gets a CN=example.com leaf, not CN=1.2.3.4).
             val peeked = ClientHelloCapture.peekClientHello(client)
             val clientHello: TlsClientHello? = peeked.clientHello
+            client = peeked.socket
 
-            // Upgrade client side to TLS with our per-host cert
-            val sslContext = createSslContext(keyPair, cert)
+            val issuance = try {
+                certificateEngine.issue(
+                    context,
+                    CertificateEngine.Request(
+                        connectAuthority = host, port = port, sni = clientHello?.sni,
+                        preferUpstreamSniff = mirrorEnabled,
+                    ),
+                )
+            } catch (e: ClientCertException) {
+                persistConnectAttempt(
+                    context, client, db, host, port, "FAILED",
+                    failureReason = "certificate policy: ${e.message}",
+                    origin = session.origin,
+                )
+                machine.fail("certificate policy: ${e.message}")
+                return
+            }
+            val leafIdentity = issuance.identity.host
+            val (leafKey, leafChain) = when (issuance) {
+                is CertificateEngine.Outcome.Passthrough -> {
+                    Log.i(TAG, "PASSTHROUGH policy for $leafIdentity ($host:$port) -- relaying TLS opaquely")
+                    HttpProxyShared.handleConnectAttempt(
+                        client, target, ConnectControl.Disposition.AllowOpaque, output,
+                        networkCondition = opaqueNetworkCondition,
+                        replies = HttpProxyShared.ConnectReplies({}, {}, {}),
+                    ) { sent, recv ->
+                        persistConnectAttempt(
+                            context, client, db, host, port, "ALLOWED_OPAQUE",
+                            failureReason = "per-domain PASSTHROUGH policy (${issuance.policy.hostPattern}) -- not decrypted",
+                            bytesToUpstream = sent, bytesToClient = recv,
+                            origin = session.origin,
+                        )
+                    }
+                    return
+                }
+                is CertificateEngine.Outcome.Custom -> issuance.privateKey to issuance.chain
+                is CertificateEngine.Outcome.Issued -> issuance.keyPair.private to arrayOf(issuance.certificate)
+            }
+
+            // Upgrade client side to TLS with the leaf (or imported server cert) for this identity
+            val sslContext = createSslContext(leafKey, leafChain)
             val sslSocket = sslContext.socketFactory
-                .createSocket(peeked.socket, host, port, true) as SSLSocket
+                .createSocket(client, host, port, true) as SSLSocket
             sslSocket.useClientMode = false
             // Client/server ALPN negotiation (§4): offer both h2 and http/1.1, exactly what a
             // real server behind this proxy would offer. The client's choice (read back below,
@@ -422,11 +486,14 @@ class MitmProxyEngine(
                     sslSocket.sslParameters = params
                 }
             }
+            machine.transition(ConnectionStateMachine.State.TLS)
             try {
                 sslSocket.startHandshake()
             } catch (e: javax.net.ssl.SSLException) {
-                ConnectControl.PinningFailureRegistry.recordFailure(host)
+                // S1 task 13: keep the classified reason so TrustDiagnostics can say *why*.
+                ConnectControl.PinningFailureRegistry.recordFailure(host, reason = e.message?.take(160))
                 persistFailedMitmTlsSession(db, host, port, "client-facing handshake", e)
+                machine.fail("client-facing handshake: ${e.message}")
                 return
             }
 
@@ -457,11 +524,23 @@ class MitmProxyEngine(
             // deferred until an upstream socket actually exists. Normal (non-mocked) traffic
             // still gets this on its very first request, so lineage-join behaviour for real
             // traffic is unchanged; a fully-mocked connection simply never triggers it.
+            // S1 task 8: mutual TLS -- a per-domain policy with client material makes the
+            // upstream leg present that client certificate; a misconfigured one fails by name.
+            val upstreamKeyManagers = try {
+                certificateEngine.clientKeyManagersFor(leafIdentity)
+            } catch (e: ClientCertException) {
+                persistFailedMitmTlsSession(db, host, port, "client certificate", e)
+                persistConnectAttempt(context, client, db, host, port, "FAILED", failureReason = "mTLS: ${e.message}", origin = session.origin)
+                machine.fail("mTLS: ${e.message}")
+                runCatching { sslSocket.close() }
+                return
+            }
             val upstream = LazyUpstreamConnection(
                 host, port,
                 preferredAlpnProtocols = negotiatedAlpn?.let { listOf(it) } ?: emptyList(),
                 networkCondition = networkCondition,
-            ) { connected ->
+                keyManagers = upstreamKeyManagers,
+                onFirstConnect = { connected ->
                 // W5: the MITM proxy terminates TLS itself, so tlsSessionId/connectionId have
                 // historically been keyed as "$host:$port" -- a real key, but a different
                 // convention than the 5-tuple ConnectionLineage joins on for the VPN/tun path.
@@ -493,7 +572,8 @@ class MitmProxyEngine(
                     db, host, port, sslSocket, connected.sslSocket, canonicalConnectionId,
                     ja3Hash = clientHello?.ja3Hash(),
                 )
-            }
+            },
+            )
 
             // Inspecting bidirectional relay: parse decrypted HTTP/1.x with
             // HttpParser, enforce rules on the parsed messages, persist each
@@ -511,6 +591,14 @@ class MitmProxyEngine(
             val sent = AtomicLong(0)
             val received = AtomicLong(0)
 
+            // S1 task 7: both directions run as structured coroutines on the relay pool
+            // dispatcher (StructuredRelay.run) instead of two raw Threads joined with a 60 s
+            // timeout. Control only returns here once BOTH legs are done (or the drain deadline
+            // force-closed the stalled one), so the MITM_DECRYPTED row below is written from the
+            // connection's terminal state -- never while bytes are still moving.
+            machine.transition(ConnectionStateMachine.State.RELAYING)
+            val clientToUpstream: () -> Unit
+            val upstreamToClient: () -> Unit
             if (negotiatedAlpn == "h2") {
                 // §3/§5: HTTP/2 is decided once, upfront, from the ALPN result -- this
                 // connection never falls into the HTTP/1.x buffering loop or its blind-relay
@@ -524,14 +612,8 @@ class MitmProxyEngine(
                     },
                     onGrpcMessage = { event -> emitGrpcMessage(event, host, port, logRequests, logResponses) },
                 )
-                val t1 = Thread {
-                    inspectH2ClientToServer(db, decryptedInput, upstream, host, port, h2Session, sent)
-                }
-                val t2 = Thread {
-                    inspectH2ServerToClient(upstream, decryptedOutput, host, port, h2Session, received)
-                }
-                t1.start(); t2.start()
-                t1.join(60_000); t2.join(60_000)
+                clientToUpstream = { inspectH2ClientToServer(db, decryptedInput, upstream, host, port, h2Session, sent) }
+                upstreamToClient = { inspectH2ServerToClient(upstream, decryptedOutput, host, port, h2Session, received) }
             } else {
                 // HTTP/1.x, with an in-place switch to WebSocket framing the moment a 101
                 // upgrade response is observed -- see handleParsedResponse and
@@ -540,30 +622,69 @@ class MitmProxyEngine(
                 val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>()
                 val clientWriteLock = Any()
                 val wsState = ConnectionProtocolState()
-                val t1 = Thread {
+                clientToUpstream = {
                     inspectClientToServer(db, decryptedInput, upstream, decryptedOutput,
                         clientWriteLock, host, port, pending, sent, logRequests, logResponses, wsState)
                 }
-                val t2 = Thread {
+                upstreamToClient = {
                     inspectServerToClient(
                         db, upstream, decryptedOutput, clientWriteLock, pending, host, port, received,
                         logRequests, logResponses, wsState,
                     )
                 }
-                t1.start(); t2.start()
-                t1.join(60_000); t2.join(60_000)
             }
-
-            persistConnectAttempt(
-                context, client, db, host, port, "MITM_DECRYPTED",
-                negotiatedAlpn = negotiatedAlpn,
-                bytesToUpstream = sent.get(), bytesToClient = received.get(),
+            val outcome = StructuredRelay.run(
+                machine = machine,
+                dispatcher = relayPool.dispatcher,
+                metrics = relayPool.metrics,
+                drainTimeoutMs = StructuredRelay.DEFAULT_DRAIN_TIMEOUT_MS,
+                onDrainTimeout = {
+                    runCatching { sslSocket.close() }
+                    runCatching { upstream.giveUp() }
+                    runCatching { upstream.closeQuietly() }
+                },
+                clientToUpstream = clientToUpstream,
+                upstreamToClient = upstreamToClient,
             )
+            relayPool.metrics.addBytesToUpstream(sent.get())
+            relayPool.metrics.addBytesToClient(received.get())
+
+            val relayFailed = !outcome.anyLegEndedNormally && sent.get() == 0L && received.get() == 0L &&
+                outcome.errors.isNotEmpty()
+            if (relayFailed) {
+                val cause = outcome.errors.first()
+                machine.fail(cause.message ?: cause.javaClass.simpleName)
+                relayPool.metrics.onFailed()
+                persistConnectAttempt(
+                    context, client, db, host, port, "FAILED",
+                    negotiatedAlpn = negotiatedAlpn,
+                    failureReason = "relay failed before any byte was exchanged: ${cause.message ?: cause.javaClass.simpleName}",
+                    origin = session.origin,
+                )
+            } else {
+                machine.close()
+                relayPool.metrics.onCompleted()
+                persistConnectAttempt(
+                    context, client, db, host, port, "MITM_DECRYPTED",
+                    negotiatedAlpn = negotiatedAlpn,
+                    bytesToUpstream = sent.get(), bytesToClient = received.get(),
+                    failureReason = if (outcome.drainTimedOut) {
+                        "one leg stalled after the other closed; force-closed at the ${StructuredRelay.DEFAULT_DRAIN_TIMEOUT_MS / 1000}s drain deadline"
+                    } else null,
+                    origin = session.origin,
+                )
+            }
 
             packetCount.addAndGet(1)
             InterceptionStateRepository.updateCounters(packetCount = packetCount.get().toInt())
         } catch (e: Exception) {
             if (running.get()) Log.w(TAG, "Client handler: ${e.message}")
+            machine.fail(e.message ?: e.javaClass.simpleName)
+        } finally {
+            // Every exit that is not an explicit close() above is a failure or an early return
+            // (blocked, redirected, opaque, plaintext...) whose row was already written by its
+            // own branch; the machine just needs a terminal so nothing lingers non-terminal.
+            if (!machine.isTerminal) machine.close()
         }
     }
 
@@ -577,7 +698,7 @@ class MitmProxyEngine(
      * throws overall -- a failed persist must not break the CONNECT it's describing, matching
      * [persistMitmTlsSession]'s existing never-throw contract.
      */
-    private fun persistConnectAttempt(
+    private suspend fun persistConnectAttempt(
         context: Context,
         client: Socket,
         db: RequestrDatabase,
@@ -589,40 +710,39 @@ class MitmProxyEngine(
         negotiatedAlpn: String? = null,
         bytesToUpstream: Long = 0,
         bytesToClient: Long = 0,
+        origin: ClientOrigin? = null,
     ) {
         runCatching {
-            // UID attribution has two independent, never-throw paths: the API 29+
-            // ConnectivityManager owner-UID lookup (works only while requestr is itself the
-            // active VPN), and ConnectControl.resolveClientUid's /proc/net/tcp fallback (covers
-            // pre-29 or non-VPN contexts, subject to Android's per-app socket visibility on
-            // stock N+ devices where it legitimately returns null). Try the former, fall back
-            // to the latter rather than silently recording null when a fallback was available.
-            val clientUid = runCatching {
-                if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) return@runCatching null
-                val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-                    ?: return@runCatching null
-                val local = client.localSocketAddress as? java.net.InetSocketAddress
-                    ?: return@runCatching null
-                val remote = client.remoteSocketAddress as? java.net.InetSocketAddress
-                    ?: return@runCatching null
-                cm.getConnectionOwnerUid(android.system.OsConstants.IPPROTO_TCP, local, remote).takeIf { it != -1 }
-            }.getOrNull() ?: ConnectControl.resolveClientUid(client)
+            // S1 task 10: one attribution path (bridge +info tuple -> getConnectionOwnerUid ->
+            // /proc/net/tcp -> single-app selection inference -> explicit UNATTRIBUTED). The
+            // reasons for an unattributed flow are recorded on the row instead of a silent null.
+            val attribution = uidAttributor(context).attribute(
+                UidAttributor.Flow(origin = origin, clientSocket = client, destination = null),
+            )
+            val attributionNote = when (attribution) {
+                is UidAttributor.Attribution.Resolved ->
+                    if (attribution.isInferred) "uid inferred from single-app capture selection" else null
+                is UidAttributor.Attribution.Unattributed -> "uid unattributed: ${attribution.reason}"
+            }
             val entity = ConnectAttemptEntity(
                 sessionId = sessionId.get(),
                 targetHost = host,
                 targetPort = port,
-                clientUid = clientUid,
+                clientUid = attribution.uidOrNull,
                 negotiatedAlpn = negotiatedAlpn,
                 disposition = disposition,
                 redirectTarget = redirectTarget,
                 bytesToClient = bytesToClient,
                 bytesToUpstream = bytesToUpstream,
-                failureReason = failureReason,
+                failureReason = listOfNotNull(failureReason, attributionNote).joinToString(" | ").ifEmpty { null },
                 finishedAt = System.currentTimeMillis(),
             )
-            kotlinx.coroutines.runBlocking { db.connectAttemptDao().insert(entity) }
+            db.connectAttemptDao().insert(entity)
         }.onFailure { e -> Log.w(TAG, "Failed to persist CONNECT attempt for $host: ${e.message}") }
     }
+
+    private val injectedUidAttributor = uidAttributor
+    private fun uidAttributor(context: Context): UidAttributor = injectedUidAttributor ?: UidAttributor.shared(context)
 
     // ── WebSocket mode switch (§4/§5) ────────────────────────────────────
 
@@ -680,7 +800,7 @@ class MitmProxyEngine(
     ) {
         val buffer = ByteArrayOutputStream()
         val wsBuffer = ByteArrayOutputStream()
-        val chunk = ByteArray(BUFFER_SIZE)
+        val chunk = relayPool.buffers.acquire()
         var blind = false
         try {
             while (true) {
@@ -720,7 +840,7 @@ class MitmProxyEngine(
                 while (!waitingForMore && bytes.isNotEmpty()) {
                     val parsed = HttpParser.tryParseRequest(bytes, host, port, true)
                     if (parsed == null) {
-                        if (!couldBecomeHttpRequest(bytes) || bytes.size > MAX_UNPARSED_BUFFER) {
+                        if (!couldBecomeHttpRequest(bytes) || bytes.size > relayPool.buffers.flowCapBytes) {
                             // Not HTTP/1.x (HTTP/2 preface, WS frames, ...) — relay raw from now
                             // on. Blind-relay bytes are, by definition, never rule-evaluated
                             // (there is no parsed request to check), so they always need
@@ -746,6 +866,7 @@ class MitmProxyEngine(
             }
         } catch (_: Exception) { /* connection closed */
         } finally {
+            relayPool.buffers.release(chunk)
             // §1.5 MUST-FIX: guarantees inspectServerToClient's awaitConnectedOrGiveUp always
             // unblocks, however this loop ends -- normal EOF, an exception (including a
             // failed connectOrThrow above), or falling into blind relay. A no-op if connect()
@@ -771,6 +892,9 @@ class MitmProxyEngine(
         return try {
             upstream.connect().output
         } catch (e: javax.net.ssl.SSLException) {
+            // S1 task 13: a server that demands a client certificate is an mTLS host, not a
+            // pinning or CA problem -- remember it so the trust report can say so.
+            com.example.interception.tls.MutualTlsSignals.recordIfDemand(host, e)
             persistFailedMitmTlsSession(db, host, port, "upstream handshake", e)
             throw e
         }
@@ -804,7 +928,7 @@ class MitmProxyEngine(
 
         val buffer = ByteArrayOutputStream()
         val wsBuffer = ByteArrayOutputStream()
-        val chunk = ByteArray(BUFFER_SIZE)
+        val chunk = relayPool.buffers.acquire()
         var blind = false
         try {
             while (true) {
@@ -847,7 +971,7 @@ class MitmProxyEngine(
                         pending.peek()?.first?.method,
                     )
                     if (response == null) {
-                        if (!couldBecomeHttpResponse(bytes) || bytes.size > MAX_UNPARSED_BUFFER) {
+                        if (!couldBecomeHttpResponse(bytes) || bytes.size > relayPool.buffers.flowCapBytes) {
                             synchronized(clientWriteLock) {
                                 clientOut.write(bytes)
                                 clientOut.flush()
@@ -868,7 +992,10 @@ class MitmProxyEngine(
                     }
                 }
             }
-        } catch (_: Exception) { /* connection closed */ }
+        } catch (_: Exception) { /* connection closed */
+        } finally {
+            relayPool.buffers.release(chunk)
+        }
     }
 
     // ── HTTP/2 relay (§3/§5) ──────────────────────────────────────────────
@@ -897,7 +1024,7 @@ class MitmProxyEngine(
         bytesSentToUpstream: AtomicLong,
     ) {
         val frameBuffer = ByteArrayOutputStream()
-        val chunk = ByteArray(BUFFER_SIZE)
+        val chunk = relayPool.buffers.acquire()
         var prefaceStripped = false
         try {
             while (true) {
@@ -925,6 +1052,7 @@ class MitmProxyEngine(
             }
         } catch (_: Exception) { /* connection closed */
         } finally {
+            relayPool.buffers.release(chunk)
             // Mirrors inspectClientToServer's finally -- guarantees inspectH2ServerToClient's
             // awaitConnectedOrGiveUp always unblocks, however this loop ends.
             upstream.giveUp()
@@ -951,7 +1079,7 @@ class MitmProxyEngine(
     ) {
         val input = upstream.awaitConnectedOrGiveUp()?.input ?: return
         val frameBuffer = ByteArrayOutputStream()
-        val chunk = ByteArray(BUFFER_SIZE)
+        val chunk = relayPool.buffers.acquire()
         try {
             while (true) {
                 val n = input.read(chunk)
@@ -969,6 +1097,7 @@ class MitmProxyEngine(
                 frameBuffer.write(bytes, consumed, bytes.size - consumed)
             }
         } catch (_: Exception) { /* connection closed */ } finally {
+            relayPool.buffers.release(chunk)
             // P1 fix: same cleanup trigger as inspectH2ClientToServer's finally -- whichever
             // direction's loop ends first tears down the shared session's stream state.
             session.close()
@@ -1505,63 +1634,7 @@ class MitmProxyEngine(
         return "HTTP/".startsWith(head)
     }
 
-    // ── Per-host cert generation ────────────────────────────────────────
-
-    /**
-     * §1.10: when remote-cert mirroring is enabled, tries [CertificateAuthority.issueMirroredLeaf]
-     * first (an independent direct probe of the real host, subject/SANs/validity copied into our
-     * self-signed leaf) and falls back to the plain [generateHostCert] leaf whenever mirroring
-     * fails for any reason (unreachable host, handshake failure, timeout -- issueMirroredLeaf
-     * never throws, only returns null). When mirroring is disabled (the default), this is
-     * exactly the pre-existing [generateHostCert] behaviour with zero extra I/O.
-     */
-    internal fun generateHostCertOrMirror(
-        context: Context,
-        host: String,
-        mirrorEnabled: Boolean,
-    ): Pair<X509Certificate, KeyPair> {
-        if (mirrorEnabled) {
-            val mirrored = kotlinx.coroutines.runBlocking {
-                CertificateAuthority.issueMirroredLeaf(context, host)
-            }
-            if (mirrored != null) return mirrored
-        }
-        return generateHostCert(context, host)
-    }
-
-    private fun generateHostCert(context: Context, host: String): Pair<X509Certificate, KeyPair> {
-        val ca = kotlinx.coroutines.runBlocking { CertificateAuthority.getOrCreate(context) }
-        val bcProvider = org.bouncycastle.jce.provider.BouncyCastleProvider()
-        val keyPair = KeyPairGenerator.getInstance("RSA", bcProvider)
-            .apply { initialize(2048, SecureRandom()) }
-            .genKeyPair()
-        val serial = BigInteger.valueOf(System.currentTimeMillis())
-        val now = Date()
-        val expiry = Date(now.time + 365L * 24 * 60 * 60 * 1000)
-
-        // Use the real CA certificate's subject DN as the issuer so the generated
-        // per-host cert chains correctly. Hardcoding "CN=requestr Root CA" breaks
-        // verification when the CA subject includes O/OU components.
-        val issuer = X500Name.getInstance(ca.certificate.subjectX500Principal.encoded)
-        val subject = X500Name("CN=$host")
-
-        val builder = JcaX509v3CertificateBuilder(
-            issuer, serial, now, expiry, subject, keyPair.public
-        ).apply {
-            addExtension(Extension.basicConstraints, true, BasicConstraints(false))
-            addExtension(Extension.keyUsage, true, KeyUsage(KeyUsage.digitalSignature or KeyUsage.keyEncipherment))
-            addExtension(Extension.subjectAlternativeName, false, HostSanGenerator.build(host))
-        }
-
-        val signer = JcaContentSignerBuilder("SHA256withRSA")
-            .setProvider(bcProvider)
-            .build(ca.keyPair.private)
-
-        val cert = JcaX509CertificateConverter()
-            .getCertificate(builder.build(signer))
-
-        return cert to keyPair
-    }
+    // Per-host leaf issuance lives in com.example.interception.tls.CertificateEngine (S1 task 8).
 
     // ── TLS session persistence (M2) ─────────────────────────────────────
 
@@ -1609,7 +1682,8 @@ class MitmProxyEngine(
                 peerCertSubject = peerCert?.subjectX500Principal?.name,
                 peerCertIssuer = peerCert?.issuerX500Principal?.name,
             )
-            kotlinx.coroutines.runBlocking { db.tlsSessionDao().upsert(entity) }
+            // S1 task 7: never block a relay leg on Room -- hand the upsert to the engine scope.
+            scope.launch(Dispatchers.IO) { runCatching { db.tlsSessionDao().upsert(entity) } }
             Log.i(TAG, "TLS session persisted: $host cipher=${entity.cipherSuite} alpn=${entity.negotiatedProtocol}")
         }.onFailure { e -> Log.w(TAG, "Failed to persist MITM TLS session for $host: ${e.message}") }
     }
@@ -1650,20 +1724,22 @@ class MitmProxyEngine(
                 failureReason = "$stage: ${cause.javaClass.simpleName}: ${cause.message}",
                 failedAt = System.currentTimeMillis(),
             )
-            kotlinx.coroutines.runBlocking { db.tlsSessionDao().upsert(entity) }
+            // S1 task 7: never block a relay leg on Room -- hand the upsert to the engine scope.
+            scope.launch(Dispatchers.IO) { runCatching { db.tlsSessionDao().upsert(entity) } }
             Log.w(TAG, "MITM TLS handshake FAILED: $host stage=$stage cause=${cause.message}")
         }.onFailure { e -> Log.w(TAG, "Failed to persist FAILED MITM TLS session for $host: ${e.message}") }
     }
 
     // ── SSL context ─────────────────────────────────────────────────────
 
-    private fun createSslContext(keyPair: KeyPair, cert: X509Certificate): SSLContext {
+    private fun createSslContext(privateKey: java.security.PrivateKey, chain: Array<X509Certificate>): SSLContext {
         val ks = KeyStore.getInstance("PKCS12").apply {
             load(null, null)
-            // The client already has the CA in its trust store; sending just the leaf
-            // is enough and avoids an invalid chain (e.g. a duplicate leaf cert) that
-            // stricter TLS implementations (Conscrypt, some browsers) reject.
-            setKeyEntry("mitm", keyPair.private, "".toCharArray(), arrayOf(cert))
+            // For minted leaves the chain is just the leaf: the client already has the CA in
+            // its trust store, and sending a duplicate/extra cert makes stricter TLS stacks
+            // (Conscrypt, some browsers) reject the chain. An imported CUSTOM_SERVER_CERT is
+            // presented with whatever chain it was imported with.
+            setKeyEntry("mitm", privateKey, "".toCharArray(), chain)
         }
         val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
         kmf.init(ks, "".toCharArray())
