@@ -46,6 +46,10 @@ import kotlinx.coroutines.runBlocking
         ChatConversationEntity::class,
         RecentActivityEntity::class,
         ConnectAttemptEntity::class,
+        // S2 task 14 (v19): persistence spine children of captured_traffic.
+        TransactionHeaderEntity::class,
+        TransactionTimingEntity::class,
+        AppliedRuleEntity::class,
     ],
     // v3.5: bumped 4 -> 5 for FlowNodeEntity + FlowConnectionEntity (Flow persistence).
     // v5.6 (M1): bumped 5 -> 6 to register TcpConnectionEntity/UdpFlowEntity/QuicConnectionEntity,
@@ -103,7 +107,11 @@ import kotlinx.coroutines.runBlocking
     // table records genuine open events (see RecentActivityRepository). Pure CREATE TABLE -- no
     // existing table is touched, and there is deliberately no backfill: nothing has been "opened"
     // until the user opens it, so an upgraded install starts with an honest empty section.
-    version = 18,
+    // S2 task 14 (interceptor plan §4 v19): bumped 18 -> 19 for the persistence spine --
+    // transaction_headers / transaction_timings / applied_rules child tables, body-reference
+    // columns for the spill store (task 16), and the API-Testr protocol columns reserved for
+    // tasks 58-60. Additive only; see Migration18To19.kt.
+    version = 19,
     exportSchema = true,
 )
 @TypeConverters(RequestrTypeConverters::class)
@@ -129,6 +137,9 @@ abstract class RequestrDatabase : RoomDatabase() {
     abstract fun chatConversationDao(): ChatConversationDao
     abstract fun recentActivityDao(): RecentActivityDao
     abstract fun connectAttemptDao(): ConnectAttemptDao
+    abstract fun transactionHeaderDao(): TransactionHeaderDao
+    abstract fun transactionTimingDao(): TransactionTimingDao
+    abstract fun appliedRuleDao(): AppliedRuleDao
 
     companion object {
         private const val TAG = "RequestrDatabase"
@@ -137,7 +148,7 @@ abstract class RequestrDatabase : RoomDatabase() {
          * The current schema version declared in the [@Database] annotation above.
          * Kept in sync manually; a CI schema-drift check validates the exported JSON.
          */
-        const val SCHEMA_VERSION = 18
+        const val SCHEMA_VERSION = 19
 
         @Volatile
         private var INSTANCE: RequestrDatabase? = null
@@ -635,11 +646,11 @@ abstract class RequestrDatabase : RoomDatabase() {
             }
         }
 
-        /** All ten registered migrations v8→v18, exposed for tests and the builder. */
+        /** All eleven registered migrations v8→v19, exposed for tests and the builder. */
         val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
             MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16,
-            MIGRATION_16_17, MIGRATION_17_18,
+            MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19,
         )
     }
 }

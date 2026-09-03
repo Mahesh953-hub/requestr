@@ -898,3 +898,73 @@ interface ConnectAttemptDao {
     @Query("DELETE FROM connect_attempts WHERE sessionId = :sessionId")
     suspend fun clearSession(sessionId: Long)
 }
+
+// ---- S2 task 14 (v19): persistence-spine child tables ------------------------------------------
+
+/**
+ * Ordered, duplicate-preserving headers. Rows come back in wire order (`ordinal`) within a
+ * [HeaderKind] block; consumers that need the legacy folded map keep reading
+ * `captured_traffic.requestHeaders`/`responseHeaders`, which stay written as a derived cache.
+ */
+@Dao
+interface TransactionHeaderDao {
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertAll(rows: List<TransactionHeaderEntity>)
+
+    @Query("SELECT * FROM transaction_headers WHERE trafficId = :trafficId ORDER BY kind, ordinal")
+    suspend fun forTraffic(trafficId: Long): List<TransactionHeaderEntity>
+
+    @Query("SELECT * FROM transaction_headers WHERE trafficId = :trafficId AND kind = :kind ORDER BY ordinal")
+    suspend fun forTraffic(trafficId: Long, kind: HeaderKind): List<TransactionHeaderEntity>
+
+    @Query("SELECT * FROM transaction_headers WHERE trafficId = :trafficId ORDER BY kind, ordinal")
+    fun observeForTraffic(trafficId: Long): Flow<List<TransactionHeaderEntity>>
+
+    /** Case-insensitive lookup by header name across one transaction (e.g. every `set-cookie`). */
+    @Query(
+        "SELECT * FROM transaction_headers WHERE trafficId = :trafficId AND kind = :kind AND nameLower = :nameLower ORDER BY ordinal"
+    )
+    suspend fun named(trafficId: Long, kind: HeaderKind, nameLower: String): List<TransactionHeaderEntity>
+
+    @Query("DELETE FROM transaction_headers WHERE trafficId = :trafficId AND kind = :kind")
+    suspend fun deleteKind(trafficId: Long, kind: HeaderKind)
+
+    @Query("SELECT COUNT(*) FROM transaction_headers")
+    suspend fun count(): Int
+}
+
+/** Measured phase timings; NULL means "not observed", never `-1`. */
+@Dao
+interface TransactionTimingDao {
+    /** REPLACE: the response-side patch (task 15's two-phase write) overwrites the request-side row. */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(row: TransactionTimingEntity)
+
+    @Query("SELECT * FROM transaction_timings WHERE trafficId = :trafficId")
+    suspend fun forTraffic(trafficId: Long): TransactionTimingEntity?
+
+    @Query("SELECT * FROM transaction_timings WHERE trafficId = :trafficId")
+    fun observeForTraffic(trafficId: Long): Flow<TransactionTimingEntity?>
+
+    @Query("SELECT * FROM transaction_timings WHERE trafficId IN (:trafficIds)")
+    suspend fun forTraffic(trafficIds: List<Long>): List<TransactionTimingEntity>
+
+    @Query("SELECT COUNT(*) FROM transaction_timings")
+    suspend fun count(): Int
+}
+
+/** Rule provenance rows written by the S4 pipeline (`FlowAuditTrail`). */
+@Dao
+interface AppliedRuleDao {
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertAll(rows: List<AppliedRuleEntity>)
+
+    @Query("SELECT * FROM applied_rules WHERE trafficId = :trafficId ORDER BY appliedAt, id")
+    suspend fun forTraffic(trafficId: Long): List<AppliedRuleEntity>
+
+    @Query("SELECT * FROM applied_rules WHERE trafficId = :trafficId ORDER BY appliedAt, id")
+    fun observeForTraffic(trafficId: Long): Flow<List<AppliedRuleEntity>>
+
+    @Query("SELECT COUNT(*) FROM applied_rules")
+    suspend fun count(): Int
+}
