@@ -269,6 +269,7 @@ class HttpProxyEngine(
             protocol = "http-proxy",
             captureMethod = CaptureRowMethod.HTTP_PROXY,
         )
-        RequestrDatabase.get(ctx).capturedTrafficDao().insert(entity)
+        // S2 task 15: queued through the single-writer persistence actor.
+        com.example.data.persistence.PersistenceQueue.get(ctx).insertTransaction(entity)
     }
 }

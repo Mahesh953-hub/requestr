@@ -74,6 +74,12 @@ class CaptureEngine(
      */
     var requestLogging: Boolean = true,
     var responseLogging: Boolean = true,
+    /**
+     * S2 task 15: every `captured_traffic` write goes through the single-writer queue owning
+     * [db]; this class never calls a DAO insert directly and never `runBlocking`s on Room.
+     */
+    private val persistence: com.example.data.persistence.PersistenceQueue =
+        com.example.data.persistence.PersistenceQueue.forDatabase(db),
 ) {
     // Complaint #5 audit fix: this used to build a path via
     // `Environment.getExternalStoragePublicDirectory(DIRECTORY_DOWNLOADS)` and open a raw
@@ -293,9 +299,10 @@ class CaptureEngine(
                         // persists is genuinely VPN_TUN-tier.
                         captureMethod = CaptureRowMethod.VPN_TUN,
                     )
-                    kotlinx.coroutines.runBlocking {
-                        try { db.capturedTrafficDao().insert(entity); transactionCount++; Log.i(TAG, "Undecoded TLS persisted: ${stream.sniHost ?: stream.dstIp}") } catch (_: Exception) {}
-                    }
+                    // S2 task 15: queued, never runBlocking on the pump thread.
+                    persistence.insertTransaction(entity)
+                    transactionCount++
+                    Log.i(TAG, "Undecoded TLS queued: ${stream.sniHost ?: stream.dstIp}")
                 }
                 // Dump to file if enabled
                 if (dumpTarget != null) {
@@ -627,7 +634,8 @@ class CaptureEngine(
         )
 
         runCatching {
-            kotlinx.coroutines.runBlocking { db.capturedTrafficDao().insert(entity) }
+            // S2 task 15: queued, never runBlocking on the pump thread.
+            persistence.insertTransaction(entity)
             transactionCount++
             Log.d(
                 TAG,
@@ -785,9 +793,8 @@ class CaptureEngine(
         )
 
         runCatching {
-            kotlinx.coroutines.runBlocking {
-                db.capturedTrafficDao().insert(entity)
-            }
+            // S2 task 15: queued, never runBlocking on the pump thread.
+            persistence.insertTransaction(entity)
             transactionCount++
             Log.d(TAG, "Captured: ${response.statusCode} ${request.method?.name} ${request.url.take(120)}")
         }.onFailure { e ->
@@ -859,9 +866,8 @@ class CaptureEngine(
             // Item 1: see the class-level VPN_TUN note above.
             captureMethod = CaptureRowMethod.VPN_TUN,
         )
-        runCatching {
-            kotlinx.coroutines.runBlocking { db.capturedTrafficDao().insert(entity) }
-        }.onFailure { Log.w(TAG, "Failed to persist WS frame: ${it.message}") }
+        // S2 task 15: queued, never runBlocking on the pump thread.
+        persistence.insertTransaction(entity)
     }
 
     /** Returns the first matching rule entity (for accessing replacementValue). */

@@ -29,6 +29,9 @@ object HarImporter {
      */
     suspend fun importFromJson(context: Context, harJson: String): ImportResult {
         val db = RequestrDatabase.get(context)
+        // S2 task 15: imports are bulk, non-relay producers -- use the back-pressured path so
+        // they never evict live capture writes, and await each row so `imported` stays honest.
+        val queue = com.example.data.persistence.PersistenceQueue.forDatabase(db)
         val root = JSONObject(harJson)
         val log = root.optJSONObject("log") ?: return ImportResult(0, 0, listOf("Missing 'log' key"))
         val entries = log.optJSONArray("entries") ?: return ImportResult(0, 0, listOf("Missing 'log.entries'"))
@@ -74,9 +77,10 @@ object HarImporter {
                     latencyMs = entry.optLong("time", 0L),
                     timestamp = parseTimestamp(entry.optString("startedDateTime", "")),
                     wasDecrypted = false,
+                    captureMethod = com.example.data.local.CaptureRowMethod.HAR_IMPORT,
                 )
 
-                db.capturedTrafficDao().insert(entity)
+                queue.insertTransactionAndAwait(entity)
                 imported++
             } catch (e: Exception) {
                 skipped++

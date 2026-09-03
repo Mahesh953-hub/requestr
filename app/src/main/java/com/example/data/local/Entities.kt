@@ -179,11 +179,17 @@ data class CapturedTrafficEntity(
  *    starving the traffic list for this tier; the fix mirrors [GATEWAY]'s `persistTransaction`
  *    exactly, including `HttpBodyDecoder.forStorage`'s binary/text/truncation contract).
  *
- * [UNKNOWN] is the default for legacy rows (see [CapturedTrafficEntity.captureMethod]'s doc) and
- * for the persist sites this enum's introduction did not (yet) reach: `RuntimeTrafficSink`,
- * `LocalApiServer`'s SDK-observer ingestion, and `HarImporter`'s file import.
+ *  - [RUNTIME]: `runtime/RuntimeTrafficSink` -- in-process Cronet/WebView/adapter observations
+ *    (S2 task 15; previously written as [UNKNOWN]).
+ *  - [SDK_OBSERVER]: `api/LocalApiServer.receiveObserverEvents` -- rows POSTed by the
+ *    `requestr-sdk` Observer module or the MV3 extension (S2 task 15; previously [UNKNOWN]).
+ *  - [HAR_IMPORT]: `data/import/HarImporter` -- rows reconstructed from a HAR file (S2 task 15;
+ *    previously [UNKNOWN]).
+ *
+ * [UNKNOWN] is now only the default for legacy rows (see [CapturedTrafficEntity.captureMethod]'s
+ * doc) written before the enum existed.
  */
-enum class CaptureRowMethod { UNKNOWN, VPN_TUN, MITM_PROXY, GATEWAY, HTTP_PROXY }
+enum class CaptureRowMethod { UNKNOWN, VPN_TUN, MITM_PROXY, GATEWAY, HTTP_PROXY, RUNTIME, SDK_OBSERVER, HAR_IMPORT }
 
 
 /**

@@ -31,6 +31,14 @@ object InterceptionStateRepository {
     /** Bound by the capability chips. All fields UNKNOWN until a real probe runs. */
     val capabilities: StateFlow<CapabilityState> = _capabilities.asStateFlow()
 
+    /**
+     * S2 tasks 15/17: persistence failure table (dropped/failed writes, spill failures, migration
+     * restore, quota pause). Re-exported from [com.example.data.persistence.PersistenceHealth] so
+     * UI code has one entry point for capture state.
+     */
+    val persistence: StateFlow<com.example.data.persistence.PersistenceHealth.Snapshot>
+        get() = com.example.data.persistence.PersistenceHealth.state
+
     // ---- Lifecycle transitions (engine-owned) ----
 
     /** Marks the install as configured-but-stopped, e.g. after CA install completes. */

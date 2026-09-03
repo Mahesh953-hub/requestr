@@ -56,6 +56,9 @@ class PacketPump(
     /** Task 9: threaded from `SettingsDataStore.requestLogging`/`.responseLogging`. */
     requestLogging: Boolean = true,
     responseLogging: Boolean = true,
+    /** S2 task 15: single-writer queue owning [db]; see [com.example.data.persistence.PersistenceQueue]. */
+    private val persistence: com.example.data.persistence.PersistenceQueue =
+        com.example.data.persistence.PersistenceQueue.forDatabase(db),
     /**
      * `VpnService.protect(...)` hook, threaded in from [RequestrVpnService] so relay upstream
      * sockets don't loop back into our own tun. Defaults to [com.example.interception.tun.NoOpProtectHook]
@@ -207,7 +210,7 @@ class PacketPump(
      * the row this pump already inserted instead of inserting a duplicate -- and so a *different*
      * decoder generation can never update a previous generation's row.
      */
-    private val http3RowIds = LinkedHashMap<String, Long>()
+    private val http3RowIds = LinkedHashMap<String, com.example.data.persistence.RowHandle>()
 
     /**
      * HTTP/3 exchanges whose decoded content has changed and not yet been written, keyed by the same
@@ -933,32 +936,44 @@ class PacketPump(
             val method = exchange.method ?: ""
 
             if (rowId != null) {
-                runCatching {
-                    db.capturedTrafficDao().updateDecodedExchange(
-                        id = rowId,
+                // S2 task 15: phase-2 patch through the single-writer queue. The handle resolves
+                // to the row id inside the actor (the insert that created it is ahead of this op
+                // in the same channel), so this never blocks the pump on Room. A dropped insert
+                // leaves a dead handle and the patch is counted as orphaned, not applied to a
+                // stranger's row.
+                persistence.patchDecodedExchange(
+                    target = rowId,
+                    patch = com.example.data.local.CapturedTrafficEntity(
+                        sessionId = sessionId,
                         method = method,
                         url = "$scheme://$authority$path",
                         host = host,
                         path = path,
-                        hasRequestHeaders = exchange.hasRequestHeaders,
-                        requestHeaders = exchange.requestHeaders,
                         statusCode = exchange.statusCode,
-                        hasResponseHeaders = exchange.hasResponseHeaders,
+                        protocol = HTTP3_PROTOCOL,
+                        requestHeaders = exchange.requestHeaders,
                         responseHeaders = exchange.responseHeaders,
                         requestBody = requestBody,
                         responseBody = responseBody,
                         requestSizeBytes = exchange.requestBodyBytes,
                         responseSizeBytes = exchange.responseBodyBytes,
-                        latencyMs = exchange.latencyMs,
                         isRequestBodyBinary = requestBodyInfo?.isBinary ?: false,
                         isResponseBodyBinary = responseBodyInfo?.isBinary ?: false,
                         requestBodyBytes = requestBodyInfo?.bytes,
                         responseBodyBytes = responseBodyInfo?.bytes,
                         requestBodyBytesTruncated = requestBodyInfo?.truncated ?: false,
                         responseBodyBytesTruncated = responseBodyInfo?.truncated ?: false,
-                    )
-                }.onSuccess { write.writtenRevision = revision }
-                    .onFailure { e -> Log.w(TAG, "Failed to update HTTP/3 exchange: ${e.message}") }
+                        latencyMs = exchange.latencyMs,
+                        timestamp = 0L,
+                        wasDecrypted = true,
+                        isUndecoded = false,
+                        connectionId = write.connectionId,
+                        captureMethod = com.example.data.local.CaptureRowMethod.VPN_TUN,
+                    ),
+                    hasRequestHeaders = exchange.hasRequestHeaders,
+                    hasResponseHeaders = exchange.hasResponseHeaders,
+                )
+                write.writtenRevision = revision
                 continue
             }
 
@@ -992,13 +1007,11 @@ class PacketPump(
                 // genuinely VPN_TUN-tier.
                 captureMethod = com.example.data.local.CaptureRowMethod.VPN_TUN,
             )
-            runCatching { db.capturedTrafficDao().insert(entity) }
-                .onSuccess { newId ->
-                    write.writtenRevision = revision
-                    inserted++
-                    synchronized(quicStateLock) { http3RowIds[write.rowKey] = newId }
-                }
-                .onFailure { e -> Log.w(TAG, "Failed to persist HTTP/3 exchange: ${e.message}") }
+            // S2 task 15: phase-1 insert through the queue; the handle stands in for the row id.
+            val handle = persistence.insertTransaction(entity)
+            write.writtenRevision = revision
+            inserted++
+            synchronized(quicStateLock) { http3RowIds[write.rowKey] = handle }
         }
         if (inserted > 0) {
             synchronized(quicStateLock) {
@@ -1219,7 +1232,11 @@ class PacketPump(
      * [flushNow]; a test that asserts on Room immediately after feeding packets calls this instead of
      * sleeping for a flush interval.
      */
-    internal fun flushHttp3WritesForTest() = runBlocking { flushHttp3Writes() }
+    internal fun flushHttp3WritesForTest() = runBlocking {
+        flushHttp3Writes()
+        // S2 task 15: the writes are queued; wait for the actor so DAO reads see them.
+        persistence.awaitIdle()
+    }
 
     /** Test/inspection hook: the number of HTTP/3 row writes still queued. */
     internal fun pendingHttp3WriteCount(): Int = synchronized(quicStateLock) { pendingHttp3Writes.size }

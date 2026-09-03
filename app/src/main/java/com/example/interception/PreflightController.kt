@@ -157,11 +157,10 @@ object PreflightController {
     private fun mitmProxy(context: Context): MitmProxyEngine =
         mitmProxy ?: MitmProxyEngine(
             onDecryptedTransaction = { entity ->
-                val appContext = context.applicationContext
-                kotlinx.coroutines.runBlocking(kotlinx.coroutines.Dispatchers.IO) {
-                    com.example.data.local.RequestrDatabase.get(appContext)
-                        .capturedTrafficDao().insert(entity)
-                }
+                // S2 task 15: queued; the old runBlocking(Dispatchers.IO) parked the MITM relay
+                // thread on Room for every transaction.
+                com.example.data.persistence.PersistenceQueue.get(context.applicationContext)
+                    .insertTransaction(entity)
             },
         ).also { mitmProxy = it }
 

@@ -49,7 +49,9 @@ class RuntimeTrafficSink(private val context: Context) : RuntimeCaptureSink {
 
     private suspend fun persist(events: List<InstrumentationEvent>) {
         val db = RequestrDatabase.get(context)
-        val dao = db.capturedTrafficDao()
+        // S2 task 15: writes go through the single-writer queue; back-pressured (suspending)
+        // because this sink is a coroutine, not a relay thread.
+        val queue = com.example.data.persistence.PersistenceQueue.forDatabase(db)
         val sessionId = CaptureSessionRegistry.openSessionIdFor(db, CaptureTier.RUNTIME)
         // Fix C: SettingsDataStore, not SettingsRepository.settings.value -- this sink can run
         // before anything in-process has called SettingsRepository.init() (same failure mode
@@ -81,8 +83,10 @@ class RuntimeTrafficSink(private val context: Context) : RuntimeCaptureSink {
                 timestamp = e.timestamp,
                 wasDecrypted = true,
                 connectionId = e.connectionId,
+                // S2 task 15: honest provenance instead of UNKNOWN.
+                captureMethod = com.example.data.local.CaptureRowMethod.RUNTIME,
             )
-            dao.insert(entity)
+            queue.insertTransactionAndAwait(entity)
         }
     }
 }
