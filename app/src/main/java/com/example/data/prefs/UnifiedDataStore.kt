@@ -105,6 +105,11 @@ object AppSettingsKeys {
     // takes effect for the VPN_TUN / ROOT_FRIDA-fallback capture methods, which are the only
     // ones that see raw IP packets through PacketPump -- see PreflightController.
     val PCAP_ENABLED = booleanPreferencesKey("pcap_enabled")
+    // S1 task 12: packet export container -- "pcapng" (default; direction flags + per-packet
+    // UID/package/flow comments, also fed by the native bridge's tee) or "pcap" (classic libpcap,
+    // byte-identical to the pre-S1 output). Only honoured while InterceptorFlags.pcapng is on;
+    // with the flag off every session writes classic PCAP regardless of this key.
+    val PCAP_FORMAT = stringPreferencesKey("pcap_format")
     // T2: Gateway mode — an independent, parallel proxy server (GatewayEngine) that lets
     // OTHER LAN devices point their HTTP proxy at this device and get their traffic captured
     // through the same pipeline as on-device captures. Deliberately NOT gated by

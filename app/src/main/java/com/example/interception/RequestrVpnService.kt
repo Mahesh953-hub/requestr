@@ -135,6 +135,12 @@ class RequestrVpnService : VpnService() {
     private val uidAttributor by lazy { com.example.interception.uid.UidAttributor.shared(applicationContext) }
 
     /**
+     * S1 task 12: tee -> PCAPng consumer, registered on the bridge only while a packet export is
+     * running in native-bridge mode (the legacy pump feeds [PacketCaptureEngine] directly).
+     */
+    @Volatile private var teeRecorder: com.example.interception.packet.PacketTeeRecorder? = null
+
+    /**
      * Defect D/E (S0 gaps audit): set true when [Tun2ProxyBridge.start] returned
      * [Tun2ProxyBridge.StartResult.Indeterminate] -- the native side could not confirm it had
      * quiesced after a start-timeout, so it may still be holding/using the tun fd, the MITM
@@ -419,12 +425,33 @@ class RequestrVpnService : VpnService() {
                 // ...) itself before returning -- correct that transient global-state stomp
                 // back to this session's real tier/session id immediately below, regardless
                 // of which branch is taken next.
+                // T1 / S1 task 12: packet export -- started BEFORE the bridge so the very first
+                // teed frame already has a writer, and stopped alongside the tun so its lifetime
+                // matches one capture session exactly. Both packet sources (PacketPump.writeToPcap
+                // on the legacy path, PacketTeeRecorder on the native-bridge path) are no-ops
+                // while PacketCaptureEngine.isActive() is false, so this preference is the only gate.
+                val pcapEnabled = prefs.pcapEnabled.first()
+                val pcapngFlag = com.example.data.persistence.InterceptorFlags.get(applicationContext).pcapng
+                val pcapFormat = when {
+                    !pcapngFlag -> com.example.interception.packet.PacketCaptureEngine.Format.PCAP
+                    prefs.pcapFormat.first() == SettingsDataStore.PCAP_FORMAT_PCAP ->
+                        com.example.interception.packet.PacketCaptureEngine.Format.PCAP
+                    else -> com.example.interception.packet.PacketCaptureEngine.Format.PCAPNG
+                }
+                if (pcapEnabled) {
+                    val started = com.example.interception.packet.PacketCaptureEngine.start(applicationContext, format = pcapFormat)
+                    Log.i(TAG, if (started) "${pcapFormat.name} export enabled for session=$newId" else "${pcapFormat.name} export failed to start")
+                }
+                // The tee is what makes packets exist at all in native-bridge mode; with the
+                // `pcapng` flag off the pre-S1 behaviour (rollout flag only) is restored.
+                val teeForExport = pcapngFlag && pcapEnabled && com.example.interception.packet.PacketCaptureEngine.isActive()
+
                 val bridgeResult = Tun2ProxyBridge.start(
                     Tun2ProxyConfig.forLocalGateway(
                         gatewayPort = mitmPort,
                         credentials = gatewayCredentials,
                         sessionTag = newId.toString(),
-                        teeEnabled = com.example.data.persistence.TeeRolloutFlag.get(applicationContext).isEnabled,
+                        teeEnabled = com.example.data.persistence.TeeRolloutFlag.get(applicationContext).isEnabled || teeForExport,
                     ),
                     tun.fd,
                 )
@@ -434,6 +461,13 @@ class RequestrVpnService : VpnService() {
                         // S1 task 10: the attributor tracks src->dst per bridge session so the
                         // gateway's +info source tuple can be attributed via the real 4-tuple.
                         Tun2ProxyBridge.addEventListener(uidAttributor)
+                        if (teeForExport) {
+                            // S1 task 12: registered AFTER the attributor so a frame's session_start
+                            // is tracked before the frame itself is annotated.
+                            val recorder = com.example.interception.packet.PacketTeeRecorder(annotator = ::annotateTeeFlow)
+                            Tun2ProxyBridge.addEventListener(recorder)
+                            teeRecorder = recorder
+                        }
                         activeMitmEngine = mitmEngine
                         InterceptionStateRepository.markActive(
                             sessionId = newId,
@@ -508,16 +542,6 @@ class RequestrVpnService : VpnService() {
                 // ProtocolDetector analysis pass (see CaptureEngine.enhancedDiagnostics) instead
                 // of gating nothing but a debug Log.i() line.
                 val enhancedMode = prefs.enhancedMode.first()
-
-                // T1: PCAP export — started/stopped alongside the VPN tun so its lifetime
-                // matches one capture session exactly. PacketPump.writeToPcap() is a no-op
-                // when PacketCaptureEngine.isActive() is false, so this preference read is the
-                // only gate; nothing needs to be threaded into PacketPump itself.
-                val pcapEnabled = prefs.pcapEnabled.first()
-                if (pcapEnabled) {
-                    val started = com.example.interception.packet.PacketCaptureEngine.start(applicationContext)
-                    Log.i(TAG, if (started) "PCAP export enabled for session=$newId" else "PCAP export failed to start")
-                }
 
                 pumpJob = scope.launch {
                     val pump = PacketPump(
@@ -711,6 +735,11 @@ class RequestrVpnService : VpnService() {
         // out from under it -- stop() itself is cooperative/async (fire-and-forget), not a
         // blocking join, so this ordering is the mitigation for "protect native sockets/fd".
         if (usingNativeBridge) {
+            teeRecorder?.let { recorder ->
+                runCatching { Tun2ProxyBridge.removeEventListener(recorder) }
+                Log.i(TAG, "PCAPng tee: ${recorder.frameCount} frames, ${recorder.annotatedCount} attributed to a bridge session, ${recorder.unparsedCount} unparsed")
+            }
+            teeRecorder = null
             runCatching { Tun2ProxyBridge.removeEventListener(uidAttributor) }
             runCatching { Tun2ProxyBridge.stop() }
             var awaitRc = Tun2ProxyBridge.awaitStoppedOrTimeout()
@@ -770,6 +799,32 @@ class RequestrVpnService : VpnService() {
         persistJob = null
         releaseWakeLock()
         stopForegroundCompat()
+    }
+
+    /**
+     * S1 task 12: resolves a teed frame's client-side tuple to its bridge session and UID via
+     * [uidAttributor] (bridge `+info` -> connection owner -> `/proc/net` -> selection inference).
+     * Null when the bridge has not reported a session for the tuple -- the frame is still
+     * written, just without a flow comment; [PacketTeeRecorder] retries unknown tuples.
+     */
+    private fun annotateTeeFlow(
+        client: java.net.InetSocketAddress,
+        @Suppress("UNUSED_PARAMETER") isTcp: Boolean,
+    ): com.example.interception.packet.PcapNgWriter.FlowAnnotation? {
+        val (session, attribution) = uidAttributor.attributeTracked(client) ?: return null
+        val uid = attribution.uidOrNull
+        val pkg = uid?.let { runCatching { packageManager.getPackagesForUid(it)?.firstOrNull() }.getOrNull() }
+        return com.example.interception.packet.PcapNgWriter.FlowAnnotation(
+            flowId = session.sessionId,
+            uid = uid,
+            packageName = pkg,
+            attribution = when (attribution) {
+                is com.example.interception.uid.UidAttributor.Attribution.Resolved -> attribution.source.name
+                is com.example.interception.uid.UidAttributor.Attribution.Unattributed -> "UNATTRIBUTED(${attribution.reason})"
+            },
+            destination = session.destination,
+            isTcp = session.isTcp,
+        )
     }
 
     // ---- S1 task 11: foreground/notification, persistence sink, network handoff -------------

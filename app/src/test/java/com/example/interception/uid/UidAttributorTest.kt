@@ -226,4 +226,29 @@ class UidAttributorTest {
         attributor.onBridgeEvent(sessionStart(s = "10.0.0.7:51000", d = "nowhere"))
         assertEquals(0, attributor.trackedSessions)
     }
+
+    @Test
+    fun `tracked sessions are attributable by client tuple for the PCAPng tee and vanish on session_end`() {
+        val attributor = UidAttributor(
+            ownerUidLookup = { proto, l, r ->
+                if (proto == android.system.OsConstants.IPPROTO_UDP && l.port == 40000 && r.port == 53) 10077 else null
+            },
+            procNetLookup = { _, _ -> null },
+            ownerLookupSupported = true,
+        )
+        val src = InetSocketAddress("10.0.0.7", 40000)
+        assertNull("untracked tuple must not be guessed", attributor.attributeTracked(src))
+        attributor.onBridgeEvent(BridgeEvent.SessionStart(sessionId = 5L, src = "10.0.0.7:40000", dst = "8.8.8.8:53", hostname = null, isTcp = false))
+
+        val tracked = attributor.trackedSession(src)
+        assertEquals(UidAttributor.TrackedSession(5L, InetSocketAddress("8.8.8.8", 53), isTcp = false), tracked)
+        val (session, attribution) = attributor.attributeTracked(src)!!
+        assertEquals(5L, session.sessionId)
+        // Resolved on the bridge rung: the owner lookup ran with the bridge's real 4-tuple.
+        assertEquals(UidAttributor.Attribution.Resolved(10077, UidAttributor.Source.BRIDGE_INFO), attribution)
+
+        attributor.onBridgeEvent(BridgeEvent.SessionEnd(sessionId = 5L, txBytes = 1, rxBytes = 1, reason = "eof"))
+        assertNull(attributor.trackedSession(src))
+        assertNull(attributor.attributeTracked(src))
+    }
 }

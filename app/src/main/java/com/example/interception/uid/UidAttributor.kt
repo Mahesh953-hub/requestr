@@ -78,7 +78,10 @@ class UidAttributor(
         val isTcp: Boolean = true,
     )
 
-    private data class Tracked(val sessionId: Long, val dst: InetSocketAddress)
+    private data class Tracked(val sessionId: Long, val dst: InetSocketAddress, val isTcp: Boolean)
+
+    /** A bridge session currently tracked for a client-side tuple (S1 task 12 tee annotation). */
+    data class TrackedSession(val sessionId: Long, val destination: InetSocketAddress, val isTcp: Boolean)
 
     private val lock = Any()
     private val bySource = object : LinkedHashMap<InetSocketAddress, Tracked>(64, 0.75f, true) {
@@ -97,7 +100,7 @@ class UidAttributor(
                 val src = parseSocketAddress(event.src) ?: return
                 val dst = parseSocketAddress(event.dst) ?: return
                 synchronized(lock) {
-                    bySource[src] = Tracked(event.sessionId, dst)
+                    bySource[src] = Tracked(event.sessionId, dst, event.isTcp)
                     sessionToSource[event.sessionId] = src
                 }
             }
@@ -114,6 +117,29 @@ class UidAttributor(
     fun trackedDestination(origin: ClientOrigin): InetSocketAddress? {
         val src = toSocketAddress(origin) ?: return null
         return synchronized(lock) { bySource[src]?.dst }
+    }
+
+    /**
+     * The bridge session whose client-side tuple is [source], if still tracked. Used by the
+     * PCAPng tee consumer, whose frames arrive without a session id (the tee sits below the
+     * bridge's session table) and are matched back to a session by their transport tuple.
+     */
+    fun trackedSession(source: InetSocketAddress): TrackedSession? =
+        synchronized(lock) { bySource[source]?.let { TrackedSession(it.sessionId, it.dst, it.isTcp) } }
+
+    /**
+     * Attributes a tracked bridge session by its client-side tuple: the same ordered strategy as
+     * [attribute], driven by the `+info`-shaped origin the tuple implies. Null when no session is
+     * tracked for [source] (the caller must not guess).
+     */
+    fun attributeTracked(source: InetSocketAddress): Pair<TrackedSession, Attribution>? {
+        val tracked = trackedSession(source) ?: return null
+        val origin = ClientOrigin(
+            ip = source.address?.hostAddress ?: source.hostString,
+            port = source.port,
+            transport = if (tracked.isTcp) "tcp" else "udp",
+        )
+        return tracked to attribute(Flow(origin = origin, destination = tracked.destination, isTcp = tracked.isTcp))
     }
 
     fun attribute(flow: Flow): Attribution {

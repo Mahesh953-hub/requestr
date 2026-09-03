@@ -293,6 +293,7 @@ fun InterceptScreen(
     val printUndecoded by settings.printUndecoded.collectAsState(initial = true)
     val dumpToFile by settings.dumpToFile.collectAsState(initial = false)
     val pcapEnabled by settings.pcapEnabled.collectAsState(initial = false)
+    val pcapFormat by settings.pcapFormat.collectAsState(initial = com.example.data.prefs.SettingsDataStore.PCAP_FORMAT_PCAPNG)
 
     // isCapturing is now derived from the real engine status rather than a free-floating boolean.
     val isCapturing = interceptionState.isActive
@@ -769,12 +770,14 @@ fun InterceptScreen(
             printUndecoded = printUndecoded,
             dumpToFile = dumpToFile,
             pcapEnabled = pcapEnabled,
+            pcapFormat = pcapFormat,
             onRecordModeChange = { mode -> screenScope.launch { settings.setCaptureRecordMode(mode) } },
             onEnhancedModeChange = { on -> screenScope.launch { settings.setEnhancedMode(on) } },
             onLoggingChange = { on -> screenScope.launch { settings.setLoggingEnabled(on) } },
             onPrintUndecodedChange = { on -> screenScope.launch { settings.setPrintUndecoded(on) } },
             onDumpToFileChange = { on -> screenScope.launch { settings.setDumpToFile(on) } },
             onPcapEnabledChange = { on -> screenScope.launch { settings.setPcapEnabled(on) } },
+            onPcapFormatChange = { fmt -> screenScope.launch { settings.setPcapFormat(fmt) } },
             onOpenApps = {
                 showCaptureSetupSheet = false
                 showAppFilterSheet = true
@@ -2787,12 +2790,14 @@ fun CaptureSetupBottomSheet(
     printUndecoded: Boolean,
     dumpToFile: Boolean,
     pcapEnabled: Boolean,
+    pcapFormat: String,
     onRecordModeChange: (String) -> Unit,
     onEnhancedModeChange: (Boolean) -> Unit,
     onLoggingChange: (Boolean) -> Unit,
     onPrintUndecodedChange: (Boolean) -> Unit,
     onDumpToFileChange: (Boolean) -> Unit,
     onPcapEnabledChange: (Boolean) -> Unit,
+    onPcapFormatChange: (String) -> Unit,
     onOpenApps: () -> Unit,
     onOpenRules: () -> Unit,
     onOpenCert: () -> Unit,
@@ -2936,10 +2941,32 @@ fun CaptureSetupBottomSheet(
             // ── PCAP export ─────────────────────────────────────
             Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("PCAP Export", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
-                    Text("Save raw packets to Downloads/requestr/*.pcap for Wireshark analysis", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Packet Export", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
+                    Text("Save raw packets to Downloads/requestr/ for Wireshark analysis", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Switch(checked = pcapEnabled, onCheckedChange = onPcapEnabledChange)
+            }
+            if (pcapEnabled) {
+                // S1 task 12: container format. PCAPng carries direction flags and a per-packet
+                // UID / package / flow comment (also from the native bridge's tee); classic PCAP
+                // stays selectable for tools that cannot read PCAPng.
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Format", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    FilterChip(
+                        selected = pcapFormat == com.example.data.prefs.SettingsDataStore.PCAP_FORMAT_PCAPNG,
+                        onClick = { onPcapFormatChange(com.example.data.prefs.SettingsDataStore.PCAP_FORMAT_PCAPNG) },
+                        label = { Text("PCAPng (uid, app, flow)", fontSize = 10.sp) },
+                    )
+                    FilterChip(
+                        selected = pcapFormat == com.example.data.prefs.SettingsDataStore.PCAP_FORMAT_PCAP,
+                        onClick = { onPcapFormatChange(com.example.data.prefs.SettingsDataStore.PCAP_FORMAT_PCAP) },
+                        label = { Text("Classic PCAP", fontSize = 10.sp) },
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(14.dp))

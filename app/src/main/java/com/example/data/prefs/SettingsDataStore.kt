@@ -73,6 +73,11 @@ class SettingsDataStore(private val context: Context) {
     val dumpToFile: Flow<Boolean> = prefs.map { it[AppSettingsKeys.DUMP_TO_FILE] ?: false }
     val pcapEnabled: Flow<Boolean> = prefs.map { it[AppSettingsKeys.PCAP_ENABLED] ?: false }
 
+    /** S1 task 12: [PCAP_FORMAT_PCAPNG] (default) or [PCAP_FORMAT_PCAP]; anything else reads as PCAPng. */
+    val pcapFormat: Flow<String> = prefs.map { p ->
+        (p[AppSettingsKeys.PCAP_FORMAT] ?: PCAP_FORMAT_PCAPNG).let { if (it == PCAP_FORMAT_PCAP) it else PCAP_FORMAT_PCAPNG }
+    }
+
     /** T2: whether GatewayEngine (LAN proxy for remote devices) is enabled. */
     val gatewayModeEnabled: Flow<Boolean> = prefs.map { it[AppSettingsKeys.GATEWAY_MODE_ENABLED] ?: false }
 
@@ -176,6 +181,9 @@ class SettingsDataStore(private val context: Context) {
     suspend fun setPcapEnabled(value: Boolean) {
         store.edit { it[AppSettingsKeys.PCAP_ENABLED] = value }
     }
+    suspend fun setPcapFormat(value: String) {
+        store.edit { it[AppSettingsKeys.PCAP_FORMAT] = if (value == PCAP_FORMAT_PCAP) PCAP_FORMAT_PCAP else PCAP_FORMAT_PCAPNG }
+    }
 
     suspend fun setGatewayModeEnabled(value: Boolean) {
         store.edit { it[AppSettingsKeys.GATEWAY_MODE_ENABLED] = value }
@@ -229,6 +237,9 @@ class SettingsDataStore(private val context: Context) {
     }
 
     companion object {
+        /** S1 task 12: values of [AppSettingsKeys.PCAP_FORMAT]. */
+        const val PCAP_FORMAT_PCAP = "pcap"
+        const val PCAP_FORMAT_PCAPNG = "pcapng"
         const val DEFAULT_PROXY_PORT = 9000
         const val DEFAULT_GATEWAY_PORT = 8888
         const val PAIRING_REVEAL_DURATION_MS = 5 * 60 * 1000L

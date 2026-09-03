@@ -93,7 +93,12 @@ class PacketPump(
      * (the VPN_TUN blackhole recorded in AUDIT_REPORT.md's v5.8-backup addendum). Exposed so the
      * service can stop it and the UI can observe [TunRelay.stats].
      */
-    private val tunWriter = com.example.interception.tun.TunWriter(com.example.interception.tun.TunSink { datagram -> output.write(datagram) })
+    private val tunWriter = com.example.interception.tun.TunWriter(com.example.interception.tun.TunSink { datagram ->
+        output.write(datagram)
+        // S1 task 12: replies the relay writes back into the tun are the inbound half of every
+        // flow; before this only the outbound half (what the pump read) reached the export.
+        writeToPcap(datagram, datagram.size, outbound = false)
+    })
 
     val relay: TunRelay = TunRelay(protectHook, tunWriter)
 
@@ -338,7 +343,7 @@ class PacketPump(
      * guards make this call a no-op when the preference is off, so no flag needs to be threaded
      * through here.
      */
-    private fun writeToPcap(packet: ByteArray, length: Int) {
+    private fun writeToPcap(packet: ByteArray, length: Int, outbound: Boolean = true) {
         if (!com.example.interception.packet.PacketCaptureEngine.isActive()) return
         val nowMs = System.currentTimeMillis()
         com.example.interception.packet.PacketCaptureEngine.writePacket(
@@ -347,6 +352,7 @@ class PacketPump(
             data = packet,
             offset = 0,
             len = length,
+            outbound = outbound,
         )
     }
 
