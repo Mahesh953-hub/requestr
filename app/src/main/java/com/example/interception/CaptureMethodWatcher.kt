@@ -29,6 +29,13 @@ import java.io.File
  */
 class CaptureMethodWatcher(
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
+    /**
+     * S1 task 13: optional supplier of the trust-diagnostics headline (e.g.
+     * `TrustDiagnostics.get(ctx).cachedReport()?.takeIf { !it.caTrusted }?.headline`). When it
+     * returns non-null, the DEGRADED/ERROR reason names the likely trust cause instead of just
+     * the symptom. Must be cheap and non-blocking; it is called on the watcher loop.
+     */
+    private val trustHeadline: () -> String? = { null },
 ) {
     private var watcherJob: Job? = null
     private var lastPacketCount = 0L
@@ -89,7 +96,10 @@ class CaptureMethodWatcher(
                         // Transport-level failure: port dead, tun closed, etc.
                         silenceStreak++
                         if (silenceStreak >= 2) {
-                            InterceptionStateRepository.setWatcherStatus(WatcherStatus.DEGRADED)
+                            InterceptionStateRepository.setWatcherStatus(
+                                WatcherStatus.DEGRADED,
+                                degradedReason("$method transport health check failed ${silenceStreak}x"),
+                            )
                             Log.w(TAG, "Method $method health check failed (silence streak=$silenceStreak)")
                         }
                     }
@@ -97,10 +107,16 @@ class CaptureMethodWatcher(
                         // No new packets but method seems ok
                         silenceStreak++
                         if (silenceStreak >= SILENCE_THRESHOLD) {
-                            InterceptionStateRepository.setWatcherStatus(WatcherStatus.ERROR)
+                            InterceptionStateRepository.setWatcherStatus(
+                                WatcherStatus.ERROR,
+                                degradedReason("no packets for ${silenceStreak * 5}s"),
+                            )
                             Log.e(TAG, "Method $method silent for ${silenceStreak * 5}s — reporting ERROR")
                         } else if (silenceStreak >= 3) {
-                            InterceptionStateRepository.setWatcherStatus(WatcherStatus.DEGRADED)
+                            InterceptionStateRepository.setWatcherStatus(
+                                WatcherStatus.DEGRADED,
+                                degradedReason("no packets for ${silenceStreak * 5}s"),
+                            )
                         }
                     }
                 }
@@ -116,6 +132,12 @@ class CaptureMethodWatcher(
     }
 
     // ── per-method health checks ─────────────────────────────────────────
+
+    /** Combines the watcher's own symptom with the trust headline, when one is available. */
+    private fun degradedReason(symptom: String): String {
+        val trust = runCatching { trustHeadline() }.getOrNull()
+        return if (trust.isNullOrBlank()) symptom else "$symptom; $trust"
+    }
 
     private fun checkMethodHealth(method: CaptureMethod, port: Int): Boolean = when (method) {
         CaptureMethod.VPN_TUN -> checkVpnTun()

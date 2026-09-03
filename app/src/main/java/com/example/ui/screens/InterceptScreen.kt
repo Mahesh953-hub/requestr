@@ -1457,6 +1457,19 @@ fun MitmCertificateBottomSheet(
         }.getOrNull()
     }
 
+    // S1 task 13: the actionable explanation behind the boolean above (per-store presence,
+    // stale installs, pinned/mTLS hosts, QUIC, runtime signals). Built once per sheet open on
+    // IO; the diagnostics object caches it for the watcher's DEGRADED reason.
+    val trustFindings by produceState<List<String>>(initialValue = emptyList(), caState, isProbing) {
+        value = withContext(Dispatchers.IO) {
+            runCatching {
+                val diag = com.example.interception.tls.TrustDiagnostics.get(certContext)
+                diag.invalidate()
+                diag.report().findings
+            }.getOrDefault(emptyList())
+        }
+    }
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -1502,6 +1515,25 @@ fun MitmCertificateBottomSheet(
                 isPositive = caState == CaState.SYSTEM_STORE || caState == CaState.USER_STORE,
                 isNegative = caState == CaState.NOT_INSTALLED
             )
+
+            if (trustFindings.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(10.dp))
+                GlassCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    backgroundColor = MaterialTheme.colorScheme.surfaceVariant
+                ) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Trust diagnostics", fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                        trustFindings.forEach { finding ->
+                            Text(
+                                "- $finding",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
 
             Spacer(modifier = Modifier.height(10.dp))
 

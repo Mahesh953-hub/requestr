@@ -222,6 +222,8 @@ data class InterceptionState(
     val startedAt: Long? = null,
     val errorText: String? = null,
     val watcherStatus: WatcherStatus = WatcherStatus.IDLE,
+    /** Why the watcher is DEGRADED/ERROR, when it knows (S1 task 13); null otherwise. */
+    val watcherReason: String? = null,
 ) {
     val isActive: Boolean get() = status == InterceptionStatus.ACTIVE
     val isArmed: Boolean get() = status == InterceptionStatus.ARMED

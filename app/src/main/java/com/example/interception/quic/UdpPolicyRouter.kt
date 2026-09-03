@@ -125,6 +125,11 @@ class UdpPolicyRouter(
     private val ledgerLock = Any()
     private val counters = ConcurrentHashMap<Branch, AtomicLong>()
 
+    init {
+        // S1 task 13: the newest router is the one diagnostics should describe.
+        latest = this
+    }
+
     /** Most recent policy decisions, oldest first (for diagnostics / task 13). */
     fun recent(): List<Record> = synchronized(ledgerLock) { ledger.values.toList() }
 
@@ -376,6 +381,12 @@ class UdpPolicyRouter(
     companion object {
         private const val TAG = "UdpPolicyRouter"
         const val DNS_PORT = 53
+
+        @Volatile private var latest: UdpPolicyRouter? = null
+
+        /** Branch counters of the most recently constructed router (empty when none), for [com.example.interception.tls.TrustDiagnostics]. */
+        fun latestBranchCounts(): Map<Branch, Long> = latest?.branchCounts() ?: emptyMap()
+
         const val QUIC_PORT = 443
         const val DEFAULT_IDLE_TIMEOUT_MS = 60_000L
         private const val POLL_MS = 500

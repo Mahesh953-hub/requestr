@@ -168,6 +168,26 @@ object CertificateAuthority {
      * MITM will start failing until the user re-installs it — the same recovery flow the existing
      * "Regenerate CA" button already documents ("re-export and re-install"), not a new one.
      */
+    /**
+     * S1 task 13: read-only view of the current CA certificate for diagnostics. Never generates
+     * or migrates anything; returns null when no CA exists yet or the keystore cannot be opened
+     * with the per-install password. Cheap enough to call from a diagnostics scan (one PKCS12
+     * open); results are cached by the caller.
+     */
+    fun peekCertificate(context: Context): X509Certificate? {
+        val file = File(context.filesDir, KEYSTORE_FILE)
+        if (!file.exists()) return null
+        val perInstall = runCatching { kotlinx.coroutines.runBlocking { passwordProvider.read(context) } }.getOrNull()
+        val material = perInstall?.let { pw ->
+            try {
+                tryLoadWithPassword(file, pw)
+            } finally {
+                Arrays.fill(pw, '\u0000')
+            }
+        } ?: tryLoadWithPassword(file, legacyInternalKeystorePassword)
+        return material?.certificate
+    }
+
     private suspend fun load(context: Context): CaMaterial? {
         val file = File(context.filesDir, KEYSTORE_FILE)
         if (!file.exists()) return null

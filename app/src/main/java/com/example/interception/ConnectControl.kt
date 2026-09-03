@@ -119,7 +119,26 @@ object ConnectControl {
         const val DEFAULT_WINDOW_MS = 10 * 60 * 1000L // 10 minutes
         const val DEFAULT_BYPASS_DURATION_MS = 60 * 60 * 1000L // 1 hour
 
-        private data class HostState(val failureTimestamps: MutableList<Long>, var bypassUntil: Long? = null)
+        private data class HostState(
+            val failureTimestamps: MutableList<Long>,
+            var bypassUntil: Long? = null,
+            var totalFailures: Int = 0,
+            var lastFailureAt: Long? = null,
+            var lastReason: String? = null,
+        )
+
+        /**
+         * Read-only per-host history for [com.example.interception.tls.TrustDiagnostics] (S1
+         * task 13). [failureCount] is the lifetime count since the last [clear], not just the
+         * trailing window that drives [shouldBypass].
+         */
+        data class HostHistory(
+            val host: String,
+            val failureCount: Int,
+            val lastFailureAt: Long?,
+            val lastReason: String?,
+            val bypassedUntil: Long?,
+        )
 
         private val hosts = java.util.concurrent.ConcurrentHashMap<String, HostState>()
 
@@ -135,11 +154,15 @@ object ConnectControl {
             threshold: Int = DEFAULT_THRESHOLD,
             windowMs: Long = DEFAULT_WINDOW_MS,
             bypassDurationMs: Long = DEFAULT_BYPASS_DURATION_MS,
+            reason: String? = null,
         ): Boolean {
             val key = host.lowercase()
             val state = hosts.computeIfAbsent(key) { HostState(mutableListOf()) }
             synchronized(state) {
                 state.failureTimestamps.add(at)
+                state.totalFailures++
+                state.lastFailureAt = at
+                if (reason != null) state.lastReason = reason
                 state.failureTimestamps.removeAll { at - it > windowMs }
                 val alreadyBypassed = state.bypassUntil?.let { at < it } == true
                 if (!alreadyBypassed && state.failureTimestamps.size >= threshold) {
@@ -159,6 +182,13 @@ object ConnectControl {
                 return false
             }
             return true
+        }
+
+        /** Snapshot of every tracked host, for diagnostics. Never mutates state. */
+        fun snapshot(): List<HostHistory> = hosts.entries.map { (host, state) ->
+            synchronized(state) {
+                HostHistory(host, state.totalFailures, state.lastFailureAt, state.lastReason, state.bypassUntil)
+            }
         }
 
         /** Clears all tracked state for [host] -- e.g. once the user fixes/removes the app. */

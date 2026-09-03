@@ -96,7 +96,15 @@ class CaptureController(
     private val onPrompt: (CaptureStartPrompt?) -> Unit,
 ) {
 
-    private val watcher = CaptureMethodWatcher()
+    // S1 task 13: when the watcher degrades, name the trust cause if a fresh diagnostics report
+    // says the CA is not trusted. `cachedReport()` never scans -- it only reads a report that a
+    // screen (or a previous check) already built, so this stays cheap on the watcher loop.
+    private val watcher = CaptureMethodWatcher(
+        trustHeadline = {
+            com.example.interception.tls.TrustDiagnostics.get(context).cachedReport()
+                ?.takeIf { !it.caTrusted }?.headline
+        },
+    )
     private var methodSwitchObserverJob: Job? = null
 
     init {

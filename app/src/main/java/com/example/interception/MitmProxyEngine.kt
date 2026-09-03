@@ -490,7 +490,8 @@ class MitmProxyEngine(
             try {
                 sslSocket.startHandshake()
             } catch (e: javax.net.ssl.SSLException) {
-                ConnectControl.PinningFailureRegistry.recordFailure(host)
+                // S1 task 13: keep the classified reason so TrustDiagnostics can say *why*.
+                ConnectControl.PinningFailureRegistry.recordFailure(host, reason = e.message?.take(160))
                 persistFailedMitmTlsSession(db, host, port, "client-facing handshake", e)
                 machine.fail("client-facing handshake: ${e.message}")
                 return
@@ -891,6 +892,9 @@ class MitmProxyEngine(
         return try {
             upstream.connect().output
         } catch (e: javax.net.ssl.SSLException) {
+            // S1 task 13: a server that demands a client certificate is an mTLS host, not a
+            // pinning or CA problem -- remember it so the trust report can say so.
+            com.example.interception.tls.MutualTlsSignals.recordIfDemand(host, e)
             persistFailedMitmTlsSession(db, host, port, "upstream handshake", e)
             throw e
         }
