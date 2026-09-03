@@ -8,7 +8,7 @@
 #   kotlin  – unit tests (app + cli + sdk + sdk-noop), lint, assembly,
 #             Room schema drift check
 #   rust    – cargo fmt (maintained code only), cargo check (host + Android),
-#             cargo test, vendor integrity
+#             cargo test, vendor integrity, C ABI header syntax check
 #
 # Does NOT include: Firebase Test Lab, physical-device tests, benchmarks,
 # screenshot tests, fuzz harnesses, or any job requiring secrets not
@@ -189,6 +189,15 @@ jobs:
       - name: Check vendor integrity
         working-directory: .
         run: bash tools/ci/check-vendor-integrity.sh
+
+      # ---- Header syntax (C ABI) ----
+      # Compile the public FFI header in both C and C++ modes with a
+      # syntax-only pass. Catches a header that would break every native
+      # (non-JNI) consumer of the bridge's C ABI -- nothing else in this
+      # pipeline ever parses this header.
+      - name: Check header syntax (C ABI)
+        working-directory: .
+        run: bash tools/ci/check-header-syntax.sh
 
       # ---- Format check (maintained code only) ----
       # Only check formatting on requestr's own bridge source files,
