@@ -33,7 +33,7 @@ Exported from the platform todo list at handoff time.
     `+info` username encoding fixed to match vendored `socks.rs`; VPN tier routes via
     SOCKS5 `Tun2ProxyConfig.forLocalGateway`. `SO_ORIGINAL_DST` is exposed as the
     `OriginalDstResolver` hook and gets its implementation in task 48.
-  - S1 tasks 7–13 — done on `vorflux/interceptor-s1-transport-2` (PR pending merge):
+  - S1 tasks 7–13 — done on `vorflux/interceptor-s1-transport-2` (PR #20, merged):
     - 7 bounded relay pool + `ConnectionStateMachine` + buffer pool + relay metrics
       (`interception/relay/*`, flag `relayPoolBounded`).
     - 8 `CertificateEngine` rewrite (`LeafProfile`, `ClientCertStore`, upstream trust policy,
@@ -50,3 +50,26 @@ Exported from the platform todo list at handoff time.
       watcher DEGRADED reason, CA-sheet findings card.
     - Not verifiable in this environment (Redroid has no tun): G9/G10/G14, network handoff,
       tee/PCAPng on device, real trust-store scan. Unit suites cover the logic.
+  - S2 tasks 14–19 — done on `vorflux/interceptor-s2-persistence` (PR pending review):
+    - 14 Room v19 (`transaction_headers`, `transaction_timings`, `applied_rules`, body-reference
+      columns, `Migration18To19` + test, schema `19.json`).
+    - 15 `data/persistence/PersistenceQueue` single-writer actor (capacity 500, drop-oldest with
+      metric, two-phase write, batch listeners); all eleven direct insert sites routed through it.
+    - 16 `data/persistence/BodyStore` file spill for over-limit bodies (flag `bodySpill`; inline
+      limit 1 MiB, spill ceiling 32 MiB, SHA-256 + preview, orphan sweep).
+    - 17 recovery semantics: `PersistenceHealth` failure table, `DbBackup` recovery log,
+      `PersistenceHealthBanner`, Settings "DATABASE RECOVERY".
+    - 18 measured timings: `interception/relay/PhaseTimings` (relay DNS/connect/TLS/send/wait/
+      receive, h1 + h2), `data/repository/CallPhaseTimings` (OkHttp EventListener for API-Testr);
+      the `latency * 0.15…` fabrications and fake `ApiResponseData` defaults are gone. This is
+      the one plan-mandated edit to the frozen `AppModels.kt` (`ApiResponseData` timing fields
+      are now nullable `Long?`, `receiveTimeMs`/`connectionReused` added).
+    - 19 `data/persistence/SessionPruner`: per-session cap 5,000 oldest-first, 7-day session age
+      cap, 512 MiB spill cap, 1 GiB DB ceiling; single-transaction cascade; quota exhaustion
+      pauses capture (`PersistenceHealth.pauseCapture`, queue refuses transactions) and resumes
+      once under the caps. Quota controls in Settings arrive with task 46 (D10).
+    - Gates: G2 spill threshold unit-tested (`BodySpillThresholdTest`; macrobenchmark heap
+      sample still owed); G15 v18→v19 row preservation, downgrade restore and orphan sweep
+      unit-tested (v20–v24 arrive in S3); G8 (timings within 10 ms of tcpdump) needs the
+      physical lane -- Redroid has no tun, so relay timings were exercised through
+      `MitmProxyEngineTimingTest`/`ConnectionTimingTrackerTest` only.
