@@ -9,10 +9,13 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.example.data.persistence.DbBackup
 import kotlinx.coroutines.runBlocking
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -33,12 +36,32 @@ class BundledSQLiteDriverInstrumentedTest {
 
     private val context: Context = ApplicationProvider.getApplicationContext()
     private val testDbName = "bundled-driver-instrumented-test.db"
-    private val fixtureDbName = "bundled-migration-fixture.db"
+
+    @Before
+    fun setUp() {
+        // The production-path tests below open the REAL production database name, so start
+        // every test from a pristine on-disk state -- state left behind by a previous test
+        // (or a previous run on the same device) must never leak into assertions.
+        wipeProductionDatabaseState()
+    }
 
     @After
     fun tearDown() {
         context.deleteDatabase(testDbName)
-        context.deleteDatabase(fixtureDbName)
+        wipeProductionDatabaseState()
+    }
+
+    /**
+     * Deletes the production database file (plus its `-wal`/`-shm` sidecars via
+     * [Context.deleteDatabase]) and every [DbBackup] artifact next to it (pre-migration `.bak`
+     * snapshots and the backup metadata JSON), so [RequestrDatabase.buildDatabase] sees a true
+     * fresh-install state.
+     */
+    private fun wipeProductionDatabaseState() {
+        context.deleteDatabase(DbBackup.DB_NAME)
+        context.getDatabasePath(DbBackup.DB_NAME).parentFile
+            ?.listFiles { f -> f.name.startsWith("requestr-pre-v") || f.name.startsWith("requestr-backup") }
+            ?.forEach { it.delete() }
     }
 
     /** Builds a fresh database with BundledSQLiteDriver, all migrations, and WAL. */
@@ -194,66 +217,40 @@ class BundledSQLiteDriverInstrumentedTest {
 
     @Test
     fun bundledDriver_productionBuildDatabaseOpensCorrectly() {
+        // Fresh install through the real production builder with the bundled driver requested:
+        // no on-disk DB exists (see setUp), so `needsMigration=false` and the bundled driver is
+        // genuinely selected. Prove it opens, serves DAO queries, and lands on SCHEMA_VERSION.
         val db = RequestrDatabase.buildDatabase(context, useBundledDriver = true)
         val rows = runBlocking { db.capturedTrafficDao().getAll() }
-        assertEquals(0, rows.size)
+        assertEquals("fresh production DB must start empty", 0, rows.size)
         db.close()
+
+        assertProductionDbVersionViaBundledDriver()
     }
 
-    // ── Genuine v8→v18 migration on bundled driver ──────────────────────────
+    // ── Genuine v8→v18 migration through the production build path ──────────
+    //
+    // Room 2.7's pure driver mode (`setDriver` without an openHelperFactory) requires every
+    // `Migration` to override `migrate(SQLiteConnection)`; the ten shipped v8→v18 migrations
+    // only override `migrate(SupportSQLiteDatabase)`, so driving `BundledSQLiteDriver +
+    // ALL_MIGRATIONS` directly throws `NotImplementedError`. Production never does that:
+    // `RequestrDatabase.buildDatabase` detects a pending migration and falls back to the
+    // support driver for that one open, then uses the bundled driver on every later open.
+    // This test exercises exactly that shipped path on a real device.
 
     @Test
     fun bundledDriver_migratesV8ToV18WithDataPreservation() {
-        val dbFile = context.getDatabasePath(fixtureDbName)
+        val dbFile = context.getDatabasePath(DbBackup.DB_NAME)
         dbFile.parentFile?.mkdirs()
 
-        // Create a genuine v8 database with the v8 schema and one row.
+        // Create a genuine v8 database from the *exported* v8 schema (app/schemas/.../8.json,
+        // shipped as a main asset). Deriving the DDL from the export -- instead of hand-writing
+        // it -- guarantees the fixture matches what real v8 installs had on disk (e.g. the
+        // nullable `statusCode`), so a post-migration validation failure means a real bug in a
+        // shipped migration rather than fixture drift.
         SQLiteDatabase.openOrCreateDatabase(dbFile, null).use { raw ->
             raw.version = 8
-            raw.execSQL(
-                "CREATE TABLE IF NOT EXISTS captured_traffic (" +
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
-                    "sessionId INTEGER NOT NULL, method TEXT NOT NULL, url TEXT NOT NULL, " +
-                    "host TEXT NOT NULL, path TEXT NOT NULL, statusCode INTEGER NOT NULL DEFAULT 0, " +
-                    "protocol TEXT NOT NULL, requestHeaders TEXT NOT NULL, " +
-                    "responseHeaders TEXT NOT NULL, requestBody TEXT, responseBody TEXT, " +
-                    "requestSizeBytes INTEGER NOT NULL, responseSizeBytes INTEGER NOT NULL, " +
-                    "latencyMs INTEGER NOT NULL, timestamp INTEGER NOT NULL, " +
-                    "appPackage TEXT, appUid INTEGER, wasDecrypted INTEGER NOT NULL, " +
-                    "isUndecoded INTEGER NOT NULL, sourceIp TEXT)"
-            )
-            raw.execSQL(
-                "CREATE TABLE IF NOT EXISTS capture_sessions (" +
-                    "sessionId INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
-                    "startedAt INTEGER NOT NULL, endedAt INTEGER, " +
-                    "captureTier TEXT NOT NULL, isActive INTEGER NOT NULL)"
-            )
-            raw.execSQL(
-                "CREATE TABLE IF NOT EXISTS intercept_rules (" +
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
-                    "name TEXT NOT NULL, pattern TEXT NOT NULL, domain TEXT NOT NULL, " +
-                    "action TEXT NOT NULL, replacementValue TEXT NOT NULL, " +
-                    "isEnabled INTEGER NOT NULL, createdAt INTEGER NOT NULL)"
-            )
-            raw.execSQL(
-                "CREATE TABLE IF NOT EXISTS saved_api_requests (" +
-                    "id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, folderId TEXT NOT NULL, " +
-                    "method TEXT NOT NULL, url TEXT NOT NULL, queryParams TEXT NOT NULL, " +
-                    "headers TEXT NOT NULL, authType TEXT NOT NULL, bearerToken TEXT NOT NULL, " +
-                    "basicUsername TEXT NOT NULL, basicPassword TEXT NOT NULL, " +
-                    "apiKeyHeader TEXT NOT NULL, apiKeyValue TEXT NOT NULL, " +
-                    "bodyType TEXT NOT NULL, bodyContent TEXT NOT NULL, formData TEXT NOT NULL, " +
-                    "preScript TEXT NOT NULL, postScript TEXT NOT NULL, " +
-                    "isFavorite INTEGER NOT NULL, updatedAt INTEGER NOT NULL, " +
-                    "chainExtractions TEXT NOT NULL, assertions TEXT NOT NULL)"
-            )
-            raw.execSQL("CREATE TABLE IF NOT EXISTS flow_nodes (id TEXT NOT NULL PRIMARY KEY, flowId TEXT NOT NULL, type TEXT NOT NULL, label TEXT NOT NULL, config TEXT NOT NULL, positionX REAL NOT NULL, positionY REAL NOT NULL)")
-            raw.execSQL("CREATE TABLE IF NOT EXISTS flow_connections (id TEXT NOT NULL PRIMARY KEY, flowId TEXT NOT NULL, sourceNodeId TEXT NOT NULL, targetNodeId TEXT NOT NULL, label TEXT NOT NULL)")
-            raw.execSQL("CREATE TABLE IF NOT EXISTS tcp_connections (connectionId TEXT NOT NULL PRIMARY KEY, sessionId INTEGER NOT NULL, srcIp TEXT NOT NULL, destIp TEXT NOT NULL, srcPort INTEGER NOT NULL, destPort INTEGER NOT NULL, state TEXT NOT NULL, bytesIn INTEGER NOT NULL, bytesOut INTEGER NOT NULL, establishedAt INTEGER NOT NULL, closedAt INTEGER, closeReason TEXT)")
-            raw.execSQL("CREATE TABLE IF NOT EXISTS udp_flows (flowId TEXT NOT NULL PRIMARY KEY, sessionId INTEGER NOT NULL, srcIp TEXT NOT NULL, destIp TEXT NOT NULL, srcPort INTEGER NOT NULL, destPort INTEGER NOT NULL, bytesIn INTEGER NOT NULL, bytesOut INTEGER NOT NULL, firstSeenAt INTEGER NOT NULL, lastSeenAt INTEGER NOT NULL, packetCount INTEGER NOT NULL)")
-            raw.execSQL("CREATE TABLE IF NOT EXISTS quic_connections (connectionId TEXT NOT NULL PRIMARY KEY, sessionId INTEGER NOT NULL, srcIp TEXT NOT NULL, destIp TEXT NOT NULL, srcPort INTEGER NOT NULL, destPort INTEGER NOT NULL, sniHost TEXT, alpn TEXT, quicVersion TEXT, dstConnectionId TEXT, establishedAt INTEGER NOT NULL)")
-            raw.execSQL("CREATE TABLE IF NOT EXISTS tls_sessions (tlsSessionId TEXT NOT NULL PRIMARY KEY, sessionId INTEGER NOT NULL, connectionId TEXT NOT NULL, handshakeState TEXT NOT NULL, wasDecrypted INTEGER NOT NULL, establishedAt INTEGER NOT NULL, handshakeDurationMs INTEGER NOT NULL)")
-            raw.execSQL("CREATE TABLE IF NOT EXISTS dns_queries (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, sessionId INTEGER NOT NULL, queryName TEXT NOT NULL, queryType TEXT NOT NULL, responseIps TEXT NOT NULL, responseTtl INTEGER NOT NULL, latencyMs INTEGER NOT NULL, timestamp INTEGER NOT NULL, wasBlocked INTEGER NOT NULL, resolver TEXT NOT NULL)")
+            for (sql in exportedSchemaDdl(version = 8)) raw.execSQL(sql)
 
             raw.execSQL(
                 "INSERT INTO captured_traffic (sessionId, method, url, host, path, protocol, " +
@@ -264,25 +261,29 @@ class BundledSQLiteDriverInstrumentedTest {
             )
         }
 
-        // Open with BundledSQLiteDriver — Room must run all 10 migrations (8→18).
-        val db = buildBundled(dbName = fixtureDbName)
+        // Open #1 through the PRODUCTION builder with the bundled driver requested. Because a
+        // v8→v18 migration is pending, buildDatabase falls back to the support driver for this
+        // open and runs all ten migrations. It must also snapshot the v8 file first (Phase 2).
+        val db = RequestrDatabase.buildDatabase(context, useBundledDriver = true)
+        try {
+            val rows = runBlocking { db.capturedTrafficDao().getAll() }
+            assertTrue("Pre-migration row must survive v8→v18", rows.isNotEmpty())
+            assertEquals("GET", rows[0].method)
+            assertEquals("https://example.com/migrated", rows[0].url)
+        } finally {
+            db.close()
+        }
+        assertTrue(
+            "buildDatabase must snapshot the v8 file before migrating",
+            DbBackup(context).backupFileForVersion(8).exists(),
+        )
 
-        // Verify the v8 row survived via DAO (the correct driver-mode API).
-        val rows = runBlocking { db.capturedTrafficDao().getAll() }
-        assertTrue("Pre-migration row must survive v8→v18", rows.isNotEmpty())
-        assertEquals("GET", rows[0].method)
-        assertEquals("https://example.com/migrated", rows[0].url)
-
-        // Verify final version via driver connection.
+        // Verify the final version + migration-endpoint tables through a raw BundledSQLiteDriver
+        // connection -- proving the migrated file is readable by the bundled native SQLite.
+        assertProductionDbVersionViaBundledDriver()
         val driver = BundledSQLiteDriver()
         val conn = driver.open(dbFile.absolutePath)
         try {
-            val stmt = conn.prepare("PRAGMA user_version")
-            assertTrue(stmt.step())
-            assertEquals(RequestrDatabase.SCHEMA_VERSION, stmt.getInt(0))
-            stmt.close()
-
-            // Spot-check tables from migration endpoints.
             for (table in listOf("notes", "flow_pipelines", "chat_conversations", "recent_activity")) {
                 val check = conn.prepare(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name='$table'"
@@ -292,12 +293,59 @@ class BundledSQLiteDriverInstrumentedTest {
             }
         } finally {
             conn.close()
-            db.close()
+        }
+
+        // Open #2 through the production builder again: the on-disk version now equals
+        // SCHEMA_VERSION, so `needsMigration=false` and Room genuinely opens with
+        // BundledSQLiteDriver on the migrated data. The row must still be served via DAO.
+        val reopened = RequestrDatabase.buildDatabase(context, useBundledDriver = true)
+        try {
+            val rows = runBlocking { reopened.capturedTrafficDao().getAll() }
+            assertEquals("migrated row must be readable via the bundled driver", 1, rows.size)
+            assertEquals("https://example.com/migrated", rows[0].url)
+        } finally {
+            reopened.close()
         }
     }
 
-    // ── Helper to execute SQL on a SQLiteConnection (no return value) ────────
+    // ── Helpers ─────────────────────────────────────────────────────────────
 
+    /** Asserts the production DB file's `PRAGMA user_version` via a raw bundled connection. */
+    private fun assertProductionDbVersionViaBundledDriver() {
+        val conn = BundledSQLiteDriver().open(context.getDatabasePath(DbBackup.DB_NAME).absolutePath)
+        try {
+            val stmt = conn.prepare("PRAGMA user_version")
+            assertTrue(stmt.step())
+            assertEquals(RequestrDatabase.SCHEMA_VERSION, stmt.getInt(0))
+            stmt.close()
+        } finally {
+            conn.close()
+        }
+    }
+
+    /**
+     * Returns every `CREATE TABLE` / `CREATE INDEX` statement from the exported Room schema
+     * `<RequestrDatabase FQCN>/<version>.json` (wired as a main asset in app/build.gradle.kts),
+     * with Room's `${TABLE_NAME}` placeholder resolved.
+     */
+    private fun exportedSchemaDdl(version: Int): List<String> {
+        val path = "${RequestrDatabase::class.java.name}/$version.json"
+        val json = context.assets.open(path).bufferedReader().use { it.readText() }
+        val entities = JSONObject(json).getJSONObject("database").getJSONArray("entities")
+        val ddl = mutableListOf<String>()
+        for (i in 0 until entities.length()) {
+            val entity = entities.getJSONObject(i)
+            val table = entity.getString("tableName")
+            ddl += entity.getString("createSql").replace("\${TABLE_NAME}", table)
+            val indices = entity.optJSONArray("indices") ?: continue
+            for (j in 0 until indices.length()) {
+                ddl += indices.getJSONObject(j).getString("createSql").replace("\${TABLE_NAME}", table)
+            }
+        }
+        return ddl
+    }
+
+    /** Executes SQL on a SQLiteConnection (no return value). */
     private fun SQLiteConnection.execSql(sql: String) {
         val stmt = prepare(sql)
         try { stmt.step() } finally { stmt.close() }
