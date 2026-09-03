@@ -87,6 +87,10 @@ androidx-room-testing = { group = "androidx.room", name = "room-testing", versio
 # version and feature set (FTS5, JSON1, etc.) instead of depending on whatever the OEM
 # pre-installed. Compatible with Room 2.7.0's setDriver(SQLiteDriver) API.
 androidx-sqlite-bundled = { group = "androidx.sqlite", name = "sqlite-bundled", version.ref = "sqliteBundled" }
+# JVM flavour of the same artifact: carries `natives/<host>/libsqliteJni.*` so Robolectric/JVM
+# unit tests can load BundledSQLiteDriver (the -android AAR only ships Android ABIs). Consumed
+# by app/build.gradle.kts `extractSqliteJniForUnitTests`, never by app code.
+androidx-sqlite-bundled-jvm = { group = "androidx.sqlite", name = "sqlite-bundled-jvm", version.ref = "sqliteBundled" }
 kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "kotlinxCoroutinesTest" }
 androidx-core = { group = "androidx.test", name = "core", version.ref = "core" }
 androidx-runner = { group = "androidx.test", name = "runner", version.ref = "runner" }
