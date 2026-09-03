@@ -150,6 +150,16 @@ internal class LazyUpstreamConnection(
     }
 
     /**
+     * Closes the upstream sockets if a connection was ever established (S1 task 7 drain
+     * deadline: unblocks a relay leg stuck in a read). Never throws; safe when never connected.
+     */
+    fun closeQuietly() {
+        val c = connected ?: return
+        runCatching { c.sslSocket.close() }
+        runCatching { c.socket.close() }
+    }
+
+    /**
      * Blocks (bounded by [timeoutMillis] so a hung client→server side can never wedge this
      * reader forever) until either [connect] has run (successfully or not) or [giveUp] was
      * called first. Returns the connection if [connect] succeeded, `null` otherwise --

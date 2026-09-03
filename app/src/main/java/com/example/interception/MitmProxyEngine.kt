@@ -26,6 +26,9 @@ import com.example.interception.http.WebSocketParser
 import com.example.interception.http.WsMessageAssembler
 import com.example.interception.gateway.GatewaySessionHandler
 import com.example.interception.gateway.LocalGateway
+import com.example.interception.relay.ConnectionStateMachine
+import com.example.interception.relay.RelayPool
+import com.example.interception.relay.StructuredRelay
 import com.example.interception.gateway.OriginalDstResolver
 import com.example.interception.gateway.local.EntryKind
 import com.example.interception.gateway.local.GatewaySession
@@ -35,6 +38,7 @@ import com.example.interception.tls.ClientHelloCapture
 import com.example.interception.tls.TlsClientHello
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import org.bouncycastle.asn1.x500.X500Name
 import org.bouncycastle.asn1.x509.BasicConstraints
@@ -131,6 +135,8 @@ class MitmProxyEngine(
      * can be asserted without actually waiting five seconds.
      */
     private val chaosSleep: (Long) -> Unit = { millis -> Thread.sleep(millis) },
+    /** S1 task 7: bounded relay pool whose dispatcher runs both copy legs of every tunnel. */
+    private val relayPool: RelayPool = RelayPool.shared(),
 ) : GatewaySessionHandler {
     private var gateway: LocalGateway? = null
     private var appContext: Context? = null
@@ -160,9 +166,11 @@ class MitmProxyEngine(
         private const val TAG = "MitmProxy"
         /** How long a tunnel client may stay silent after the tunnel is established. */
         private const val TUNNEL_FIRST_BYTE_TIMEOUT_MS = 15_000
-        private const val BUFFER_SIZE = 8192
-        /** Bytes buffered without a successful parse before falling back to blind relay. */
-        private const val MAX_UNPARSED_BUFFER = 1024 * 1024
+        /**
+         * Bytes buffered without a successful parse before falling back to blind relay: now the
+         * relay pool's per-flow per-direction cap ([com.example.interception.relay.BufferPool.flowCapBytes],
+         * 512 KiB..2 MiB, default 1 MiB) -- S1 task 7 / gate G3.
+         */
         private val HTTP_METHODS = listOf(
             "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE",
         )
@@ -185,9 +193,11 @@ class MitmProxyEngine(
         appContext = context.applicationContext
         plaintextDelegate.bind(context)
 
-        // Pre-warm cert cache with CA material
-        kotlinx.coroutines.runBlocking {
-            CertificateAuthority.getOrCreate(context)
+        // Pre-warm the CA material off the caller's thread (S1 task 7: no runBlocking on the
+        // start path); the first MITM'd connection awaits the same suspend getOrCreate.
+        scope.launch(Dispatchers.IO) {
+            runCatching { CertificateAuthority.getOrCreate(context) }
+                .onFailure { Log.w(TAG, "CA prewarm failed: ${it.message}") }
         }
 
         val gw = LocalGateway(
@@ -196,6 +206,7 @@ class MitmProxyEngine(
             socks5Credentials = socks5Credentials,
             originalDstResolver = originalDstResolver,
             logTag = TAG,
+            relayPool = relayPool,
         )
         val boundPort = gw.start(port)
         gateway = gw
@@ -241,6 +252,10 @@ class MitmProxyEngine(
 
     private suspend fun handleClient(context: Context, session: GatewaySession) {
         var client: Socket = session.socket
+        // S1 task 7: one lifecycle record per tunnel. The gateway already classified the entry
+        // protocol, so the session is DETECTED by the time this handler sees it.
+        val machine = ConnectionStateMachine()
+        machine.transition(ConnectionStateMachine.State.DETECTED)
         try {
             runCatching { client.setTcpNoDelay(true) }
             val output = client.getOutputStream()
@@ -422,11 +437,13 @@ class MitmProxyEngine(
                     sslSocket.sslParameters = params
                 }
             }
+            machine.transition(ConnectionStateMachine.State.TLS)
             try {
                 sslSocket.startHandshake()
             } catch (e: javax.net.ssl.SSLException) {
                 ConnectControl.PinningFailureRegistry.recordFailure(host)
                 persistFailedMitmTlsSession(db, host, port, "client-facing handshake", e)
+                machine.fail("client-facing handshake: ${e.message}")
                 return
             }
 
@@ -511,6 +528,14 @@ class MitmProxyEngine(
             val sent = AtomicLong(0)
             val received = AtomicLong(0)
 
+            // S1 task 7: both directions run as structured coroutines on the relay pool
+            // dispatcher (StructuredRelay.run) instead of two raw Threads joined with a 60 s
+            // timeout. Control only returns here once BOTH legs are done (or the drain deadline
+            // force-closed the stalled one), so the MITM_DECRYPTED row below is written from the
+            // connection's terminal state -- never while bytes are still moving.
+            machine.transition(ConnectionStateMachine.State.RELAYING)
+            val clientToUpstream: () -> Unit
+            val upstreamToClient: () -> Unit
             if (negotiatedAlpn == "h2") {
                 // §3/§5: HTTP/2 is decided once, upfront, from the ALPN result -- this
                 // connection never falls into the HTTP/1.x buffering loop or its blind-relay
@@ -524,14 +549,8 @@ class MitmProxyEngine(
                     },
                     onGrpcMessage = { event -> emitGrpcMessage(event, host, port, logRequests, logResponses) },
                 )
-                val t1 = Thread {
-                    inspectH2ClientToServer(db, decryptedInput, upstream, host, port, h2Session, sent)
-                }
-                val t2 = Thread {
-                    inspectH2ServerToClient(upstream, decryptedOutput, host, port, h2Session, received)
-                }
-                t1.start(); t2.start()
-                t1.join(60_000); t2.join(60_000)
+                clientToUpstream = { inspectH2ClientToServer(db, decryptedInput, upstream, host, port, h2Session, sent) }
+                upstreamToClient = { inspectH2ServerToClient(upstream, decryptedOutput, host, port, h2Session, received) }
             } else {
                 // HTTP/1.x, with an in-place switch to WebSocket framing the moment a 101
                 // upgrade response is observed -- see handleParsedResponse and
@@ -540,30 +559,67 @@ class MitmProxyEngine(
                 val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>()
                 val clientWriteLock = Any()
                 val wsState = ConnectionProtocolState()
-                val t1 = Thread {
+                clientToUpstream = {
                     inspectClientToServer(db, decryptedInput, upstream, decryptedOutput,
                         clientWriteLock, host, port, pending, sent, logRequests, logResponses, wsState)
                 }
-                val t2 = Thread {
+                upstreamToClient = {
                     inspectServerToClient(
                         db, upstream, decryptedOutput, clientWriteLock, pending, host, port, received,
                         logRequests, logResponses, wsState,
                     )
                 }
-                t1.start(); t2.start()
-                t1.join(60_000); t2.join(60_000)
             }
-
-            persistConnectAttempt(
-                context, client, db, host, port, "MITM_DECRYPTED",
-                negotiatedAlpn = negotiatedAlpn,
-                bytesToUpstream = sent.get(), bytesToClient = received.get(),
+            val outcome = StructuredRelay.run(
+                machine = machine,
+                dispatcher = relayPool.dispatcher,
+                metrics = relayPool.metrics,
+                drainTimeoutMs = StructuredRelay.DEFAULT_DRAIN_TIMEOUT_MS,
+                onDrainTimeout = {
+                    runCatching { sslSocket.close() }
+                    runCatching { upstream.giveUp() }
+                    runCatching { upstream.closeQuietly() }
+                },
+                clientToUpstream = clientToUpstream,
+                upstreamToClient = upstreamToClient,
             )
+            relayPool.metrics.addBytesToUpstream(sent.get())
+            relayPool.metrics.addBytesToClient(received.get())
+
+            val relayFailed = !outcome.anyLegEndedNormally && sent.get() == 0L && received.get() == 0L &&
+                outcome.errors.isNotEmpty()
+            if (relayFailed) {
+                val cause = outcome.errors.first()
+                machine.fail(cause.message ?: cause.javaClass.simpleName)
+                relayPool.metrics.onFailed()
+                persistConnectAttempt(
+                    context, client, db, host, port, "FAILED",
+                    negotiatedAlpn = negotiatedAlpn,
+                    failureReason = "relay failed before any byte was exchanged: ${cause.message ?: cause.javaClass.simpleName}",
+                )
+            } else {
+                machine.close()
+                relayPool.metrics.onCompleted()
+                persistConnectAttempt(
+                    context, client, db, host, port, "MITM_DECRYPTED",
+                    negotiatedAlpn = negotiatedAlpn,
+                    bytesToUpstream = sent.get(), bytesToClient = received.get(),
+                    failureReason = if (outcome.drainTimedOut) {
+                        "one leg stalled after the other closed; force-closed at the ${StructuredRelay.DEFAULT_DRAIN_TIMEOUT_MS / 1000}s drain deadline"
+                    } else null,
+                )
+            }
 
             packetCount.addAndGet(1)
             InterceptionStateRepository.updateCounters(packetCount = packetCount.get().toInt())
         } catch (e: Exception) {
             if (running.get()) Log.w(TAG, "Client handler: ${e.message}")
+            machine.fail(e.message ?: e.javaClass.simpleName)
+        } finally {
+            // Every exit that is not an explicit close() above is a failure or an early return
+            // (blocked, redirected, opaque, plaintext...) whose row was already written by its
+            // own branch; the machine just needs a terminal so nothing lingers non-terminal.
+            if (!machine.isTerminal) machine.close()
         }
     }
 
@@ -577,7 +633,7 @@ class MitmProxyEngine(
      * throws overall -- a failed persist must not break the CONNECT it's describing, matching
      * [persistMitmTlsSession]'s existing never-throw contract.
      */
-    private fun persistConnectAttempt(
+    private suspend fun persistConnectAttempt(
         context: Context,
         client: Socket,
         db: RequestrDatabase,
@@ -620,7 +676,7 @@ class MitmProxyEngine(
                 failureReason = failureReason,
                 finishedAt = System.currentTimeMillis(),
             )
-            kotlinx.coroutines.runBlocking { db.connectAttemptDao().insert(entity) }
+            db.connectAttemptDao().insert(entity)
         }.onFailure { e -> Log.w(TAG, "Failed to persist CONNECT attempt for $host: ${e.message}") }
     }
 
@@ -680,7 +736,7 @@ class MitmProxyEngine(
     ) {
         val buffer = ByteArrayOutputStream()
         val wsBuffer = ByteArrayOutputStream()
-        val chunk = ByteArray(BUFFER_SIZE)
+        val chunk = relayPool.buffers.acquire()
         var blind = false
         try {
             while (true) {
@@ -720,7 +776,7 @@ class MitmProxyEngine(
                 while (!waitingForMore && bytes.isNotEmpty()) {
                     val parsed = HttpParser.tryParseRequest(bytes, host, port, true)
                     if (parsed == null) {
-                        if (!couldBecomeHttpRequest(bytes) || bytes.size > MAX_UNPARSED_BUFFER) {
+                        if (!couldBecomeHttpRequest(bytes) || bytes.size > relayPool.buffers.flowCapBytes) {
                             // Not HTTP/1.x (HTTP/2 preface, WS frames, ...) — relay raw from now
                             // on. Blind-relay bytes are, by definition, never rule-evaluated
                             // (there is no parsed request to check), so they always need
@@ -746,6 +802,7 @@ class MitmProxyEngine(
             }
         } catch (_: Exception) { /* connection closed */
         } finally {
+            relayPool.buffers.release(chunk)
             // §1.5 MUST-FIX: guarantees inspectServerToClient's awaitConnectedOrGiveUp always
             // unblocks, however this loop ends -- normal EOF, an exception (including a
             // failed connectOrThrow above), or falling into blind relay. A no-op if connect()
@@ -804,7 +861,7 @@ class MitmProxyEngine(
 
         val buffer = ByteArrayOutputStream()
         val wsBuffer = ByteArrayOutputStream()
-        val chunk = ByteArray(BUFFER_SIZE)
+        val chunk = relayPool.buffers.acquire()
         var blind = false
         try {
             while (true) {
@@ -847,7 +904,7 @@ class MitmProxyEngine(
                         pending.peek()?.first?.method,
                     )
                     if (response == null) {
-                        if (!couldBecomeHttpResponse(bytes) || bytes.size > MAX_UNPARSED_BUFFER) {
+                        if (!couldBecomeHttpResponse(bytes) || bytes.size > relayPool.buffers.flowCapBytes) {
                             synchronized(clientWriteLock) {
                                 clientOut.write(bytes)
                                 clientOut.flush()
@@ -868,7 +925,10 @@ class MitmProxyEngine(
                     }
                 }
             }
-        } catch (_: Exception) { /* connection closed */ }
+        } catch (_: Exception) { /* connection closed */
+        } finally {
+            relayPool.buffers.release(chunk)
+        }
     }
 
     // ── HTTP/2 relay (§3/§5) ──────────────────────────────────────────────
@@ -897,7 +957,7 @@ class MitmProxyEngine(
         bytesSentToUpstream: AtomicLong,
     ) {
         val frameBuffer = ByteArrayOutputStream()
-        val chunk = ByteArray(BUFFER_SIZE)
+        val chunk = relayPool.buffers.acquire()
         var prefaceStripped = false
         try {
             while (true) {
@@ -925,6 +985,7 @@ class MitmProxyEngine(
             }
         } catch (_: Exception) { /* connection closed */
         } finally {
+            relayPool.buffers.release(chunk)
             // Mirrors inspectClientToServer's finally -- guarantees inspectH2ServerToClient's
             // awaitConnectedOrGiveUp always unblocks, however this loop ends.
             upstream.giveUp()
@@ -951,7 +1012,7 @@ class MitmProxyEngine(
     ) {
         val input = upstream.awaitConnectedOrGiveUp()?.input ?: return
         val frameBuffer = ByteArrayOutputStream()
-        val chunk = ByteArray(BUFFER_SIZE)
+        val chunk = relayPool.buffers.acquire()
         try {
             while (true) {
                 val n = input.read(chunk)
@@ -969,6 +1030,7 @@ class MitmProxyEngine(
                 frameBuffer.write(bytes, consumed, bytes.size - consumed)
             }
         } catch (_: Exception) { /* connection closed */ } finally {
+            relayPool.buffers.release(chunk)
             // P1 fix: same cleanup trigger as inspectH2ClientToServer's finally -- whichever
             // direction's loop ends first tears down the shared session's stream state.
             session.close()
@@ -1609,7 +1671,8 @@ class MitmProxyEngine(
                 peerCertSubject = peerCert?.subjectX500Principal?.name,
                 peerCertIssuer = peerCert?.issuerX500Principal?.name,
             )
-            kotlinx.coroutines.runBlocking { db.tlsSessionDao().upsert(entity) }
+            // S1 task 7: never block a relay leg on Room -- hand the upsert to the engine scope.
+            scope.launch(Dispatchers.IO) { runCatching { db.tlsSessionDao().upsert(entity) } }
             Log.i(TAG, "TLS session persisted: $host cipher=${entity.cipherSuite} alpn=${entity.negotiatedProtocol}")
         }.onFailure { e -> Log.w(TAG, "Failed to persist MITM TLS session for $host: ${e.message}") }
     }
@@ -1650,7 +1713,8 @@ class MitmProxyEngine(
                 failureReason = "$stage: ${cause.javaClass.simpleName}: ${cause.message}",
                 failedAt = System.currentTimeMillis(),
             )
-            kotlinx.coroutines.runBlocking { db.tlsSessionDao().upsert(entity) }
+            // S1 task 7: never block a relay leg on Room -- hand the upsert to the engine scope.
+            scope.launch(Dispatchers.IO) { runCatching { db.tlsSessionDao().upsert(entity) } }
             Log.w(TAG, "MITM TLS handshake FAILED: $host stage=$stage cause=${cause.message}")
         }.onFailure { e -> Log.w(TAG, "Failed to persist FAILED MITM TLS session for $host: ${e.message}") }
     }

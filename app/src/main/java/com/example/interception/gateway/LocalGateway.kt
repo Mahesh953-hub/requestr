@@ -11,11 +11,13 @@ import com.example.interception.gateway.local.ProtocolClassifier.Classification
 import com.example.interception.gateway.local.Socks4Handler
 import com.example.interception.gateway.local.Socks5Credentials
 import com.example.interception.gateway.local.Socks5Handler
+import com.example.interception.relay.RelayPool
 import com.example.interception.tls.ClientHelloCapture
 import com.example.interception.tls.PeekedSocket
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.IOException
@@ -76,6 +78,12 @@ class LocalGateway(
     private val onRejected: (GatewayRejectReason, String) -> Unit = { _, _ -> },
     private val serverSocketFactory: (Int) -> ServerSocket = { ServerSocket(it, 128, InetAddress.getByName("127.0.0.1")) },
     private val logTag: String = TAG,
+    /**
+     * Bounded relay pool every accepted connection is admitted through (S1 task 7). Sessions run
+     * on [RelayPool.dispatcher]; a connection the pool refuses is closed and counted under
+     * [GatewayRejectReason.RELAY_POOL_SATURATED] instead of being dropped silently.
+     */
+    private val relayPool: RelayPool = RelayPool.shared(),
 ) {
     private var serverSocket: ServerSocket? = null
     private var acceptJob: Job? = null
@@ -97,6 +105,7 @@ class LocalGateway(
         running.set(true)
         Log.i(logTag, "LocalGateway listening on ${server.localPort} (socks5Auth=${socks5Credentials != null})")
         acceptJob = scope.launch {
+            var consecutiveFailures = 0
             while (isActive && running.get()) {
                 val client = try {
                     server.accept()
@@ -104,10 +113,30 @@ class LocalGateway(
                     if (running.get()) Log.w(logTag, "Accept error: ${e.message}")
                     break
                 }
-                launch { dispatch(client) }
+                // Exponential accept backoff (1 ms doubling to 100 ms) while the pool is saturated,
+                // so a burst past the permit bound does not turn the accept loop into a hot spin.
+                val saturated = relayPool.bounded && relayPool.availablePermits == 0 &&
+                    relayPool.queuedCount >= relayPool.maxQueued
+                consecutiveFailures = if (saturated) consecutiveFailures + 1 else 0
+                val backoff = RelayPool.acceptBackoffMs(consecutiveFailures)
+                if (backoff > 0) delay(backoff)
+                launch(relayPool.dispatcher) { admitAndDispatch(client) }
             }
         }
         return server.localPort
+    }
+
+    /** Runs [dispatch] under one relay permit, rejecting the connection if the pool refuses. */
+    internal suspend fun admitAndDispatch(client: Socket) {
+        when (val admission = relayPool.admit()) {
+            is RelayPool.Admission.Rejected ->
+                reject(client, GatewayRejectReason.RELAY_POOL_SATURATED, admission.reason.name)
+            is RelayPool.Admission.Admitted -> try {
+                dispatch(client)
+            } finally {
+                admission.release()
+            }
+        }
     }
 
     fun stop() {

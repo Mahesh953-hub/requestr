@@ -18,7 +18,6 @@ import com.example.interception.gateway.local.HttpPrelude
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.runBlocking
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -139,15 +138,13 @@ class HttpProxyEngine(
                     networkCondition = networkCondition,
                     onBytesTransferred = { sentBytes, recvBytes ->
                         runCatching {
-                            runBlocking {
-                                db.connectAttemptDao().insert(
-                                    entity.copy(
-                                        bytesToUpstream = sentBytes,
-                                        bytesToClient = recvBytes,
-                                        finishedAt = System.currentTimeMillis(),
-                                    )
+                            db.connectAttemptDao().insert(
+                                entity.copy(
+                                    bytesToUpstream = sentBytes,
+                                    bytesToClient = recvBytes,
+                                    finishedAt = System.currentTimeMillis(),
                                 )
-                            }
+                            )
                         }.onFailure { Log.w(TAG, "Failed to persist CONNECT attempt: ${it.message}") }
                     },
                     replies = HttpProxyShared.ConnectReplies.forSession(session),

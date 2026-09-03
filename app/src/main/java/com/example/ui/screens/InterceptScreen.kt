@@ -239,10 +239,19 @@ fun InterceptScreen(
             ?: kotlinx.coroutines.flow.MutableStateFlow(com.example.interception.tun.IcmpRelay.LastPathUsed.NONE_YET)
     }.collectAsStateWithLifecycle()
     var showRelayHealthSheet by remember { mutableStateOf(false) }
+    // S1 task 7: the bounded relay pool has no flow of its own (lock-free counters bumped from the
+    // relay legs), so sample RelayMetrics.global once a second while this screen is visible.
+    val relayPoolSnapshot by androidx.compose.runtime.produceState<com.example.interception.relay.RelayMetrics.Snapshot?>(initialValue = null) {
+        while (true) {
+            val snap = com.example.interception.relay.RelayMetrics.global.snapshot()
+            value = if (snap.admitted > 0) snap else null
+            kotlinx.coroutines.delay(1_000)
+        }
+    }
 
     // Task 14 / Lane D: derive the three-state RelayHealthState (healthy / degraded / down) from the
     // live counters so the extracted RelayHealthCard / RelayHealthDetailSheet can switch exhaustively.
-    val relayHealthState by remember(relayHealthStats, activePumpForHealth, icmpUnrelayableCount, icmpLastPathUsed, icmpChecksumFailureCount, icmpUnrelayableIcmpv6Count) {
+    val relayHealthState by remember(relayHealthStats, activePumpForHealth, icmpUnrelayableCount, icmpLastPathUsed, icmpChecksumFailureCount, icmpUnrelayableIcmpv6Count, relayPoolSnapshot) {
         mutableStateOf(
             com.example.data.models.toRelayHealthState(
                 pumpRunning = activePumpForHealth != null,
@@ -251,6 +260,7 @@ fun InterceptScreen(
                 icmpLastPathUsed = icmpLastPathUsed,
                 icmpChecksumFailureCount = icmpChecksumFailureCount,
                 icmpUnrelayableIcmpv6Count = icmpUnrelayableIcmpv6Count,
+                relayPool = relayPoolSnapshot,
             )
         )
     }

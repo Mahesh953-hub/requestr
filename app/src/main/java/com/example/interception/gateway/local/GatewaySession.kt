@@ -84,6 +84,8 @@ enum class GatewayRejectReason {
     TRANSPARENT_NO_DESTINATION,
     /** The gateway is shutting down / the client disconnected mid-handshake. */
     CLIENT_CLOSED,
+    /** The bounded relay pool refused a permit (wait queue full or wait timed out) -- S1 task 7. */
+    RELAY_POOL_SATURATED,
 }
 
 /**

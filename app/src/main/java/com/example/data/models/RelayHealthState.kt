@@ -1,5 +1,6 @@
 package com.example.data.models
 
+import com.example.interception.relay.RelayMetrics
 import com.example.interception.tun.IcmpRelay
 import com.example.interception.tun.TunRelay
 
@@ -31,6 +32,11 @@ sealed class RelayHealthState {
     abstract val icmpLastPathUsed: IcmpRelay.LastPathUsed
     abstract val icmpChecksumFailureCount: Int
     abstract val icmpUnrelayableIcmpv6Count: Int
+    /**
+     * S1 task 7: bounded relay-pool counters (active / queued / rejected / evicted) for the
+     * gateway sessions. Null when no pool has admitted anything yet.
+     */
+    abstract val relayPool: RelayMetrics.Snapshot?
 
     /** Relay is up and no drop/error counters are non-zero. */
     data class Healthy(
@@ -40,6 +46,7 @@ sealed class RelayHealthState {
         override val icmpLastPathUsed: IcmpRelay.LastPathUsed,
         override val icmpChecksumFailureCount: Int = 0,
         override val icmpUnrelayableIcmpv6Count: Int = 0,
+        override val relayPool: RelayMetrics.Snapshot? = null,
     ) : RelayHealthState()
 
     /** Relay is up but at least one drop/error counter is non-zero (real packet loss). */
@@ -50,6 +57,7 @@ sealed class RelayHealthState {
         override val icmpLastPathUsed: IcmpRelay.LastPathUsed,
         override val icmpChecksumFailureCount: Int = 0,
         override val icmpUnrelayableIcmpv6Count: Int = 0,
+        override val relayPool: RelayMetrics.Snapshot? = null,
     ) : RelayHealthState()
 
     /** No PacketPump instance — nothing is capturing, so nothing is being relayed. */
@@ -60,6 +68,7 @@ sealed class RelayHealthState {
         override val icmpLastPathUsed: IcmpRelay.LastPathUsed,
         override val icmpChecksumFailureCount: Int = 0,
         override val icmpUnrelayableIcmpv6Count: Int = 0,
+        override val relayPool: RelayMetrics.Snapshot? = null,
     ) : RelayHealthState()
 }
 
@@ -96,7 +105,21 @@ fun TunRelay.RelayStats.dropReasons(): List<RelayDropReason> = listOfNotNull(
 fun RelayHealthState.dropReasons(): List<RelayDropReason> = stats.dropReasons() + listOfNotNull(
     RelayDropReason("ICMP echo checksum invalid", icmpChecksumFailureCount).takeIf { it.count > 0 },
     RelayDropReason("ICMPv6 not relayable", icmpUnrelayableIcmpv6Count).takeIf { it.count > 0 },
-)
+) + relayPoolDropReasons()
+
+/** S1 task 7: relay-pool refusals and evictions, labelled by [RelayPool.RejectReason]. */
+fun RelayHealthState.relayPoolDropReasons(): List<RelayDropReason> {
+    val pool = relayPool ?: return emptyList()
+    return listOfNotNull(
+        pool.rejectReasons[com.example.interception.relay.RelayPool.RejectReason.QUEUE_FULL]?.let {
+            RelayDropReason("Relay pool wait queue full", it.toInt()).takeIf { r -> r.count > 0 }
+        },
+        pool.rejectReasons[com.example.interception.relay.RelayPool.RejectReason.QUEUE_TIMEOUT]?.let {
+            RelayDropReason("Relay pool wait timed out", it.toInt()).takeIf { r -> r.count > 0 }
+        },
+        RelayDropReason("Relay leg stalled past drain deadline (force-closed)", pool.evicted.toInt()).takeIf { it.count > 0 },
+    )
+}
 
 /** Active flow count across every transport/family — the "N flows" compact-card figure. */
 fun TunRelay.RelayStats.activeFlowCount(): Int =
@@ -117,14 +140,18 @@ fun toRelayHealthState(
     icmpLastPathUsed: IcmpRelay.LastPathUsed,
     icmpChecksumFailureCount: Int = 0,
     icmpUnrelayableIcmpv6Count: Int = 0,
+    relayPool: RelayMetrics.Snapshot? = null,
 ): RelayHealthState {
     if (!pumpRunning) {
-        return RelayHealthState.Down(pumpRunning, stats, icmpUnrelayableCount, icmpLastPathUsed, icmpChecksumFailureCount, icmpUnrelayableIcmpv6Count)
+        return RelayHealthState.Down(pumpRunning, stats, icmpUnrelayableCount, icmpLastPathUsed, icmpChecksumFailureCount, icmpUnrelayableIcmpv6Count, relayPool)
     }
-    val hasIssues = stats.relayErrors > 0 || stats.unrelayableCount > 0 || icmpUnrelayableCount > 0
+    // A pool that is rejecting or evicting connections is a degraded relay even if the tun
+    // counters are clean: those are connections the user asked for that did not get through.
+    val poolPressure = relayPool != null && (relayPool.rejected > 0 || relayPool.evicted > 0)
+    val hasIssues = stats.relayErrors > 0 || stats.unrelayableCount > 0 || icmpUnrelayableCount > 0 || poolPressure
     return if (hasIssues) {
-        RelayHealthState.Degraded(pumpRunning, stats, icmpUnrelayableCount, icmpLastPathUsed, icmpChecksumFailureCount, icmpUnrelayableIcmpv6Count)
+        RelayHealthState.Degraded(pumpRunning, stats, icmpUnrelayableCount, icmpLastPathUsed, icmpChecksumFailureCount, icmpUnrelayableIcmpv6Count, relayPool)
     } else {
-        RelayHealthState.Healthy(pumpRunning, stats, icmpUnrelayableCount, icmpLastPathUsed, icmpChecksumFailureCount, icmpUnrelayableIcmpv6Count)
+        RelayHealthState.Healthy(pumpRunning, stats, icmpUnrelayableCount, icmpLastPathUsed, icmpChecksumFailureCount, icmpUnrelayableIcmpv6Count, relayPool)
     }
 }

@@ -264,12 +264,18 @@ class RequestrVpnService : VpnService() {
                 // Credentials are fresh per session so no other local app can drive the
                 // gateway's SOCKS side.
                 val gatewayCredentials = com.example.interception.gateway.local.Socks5Credentials.random()
+                // S1 task 7: the bounded relay pool (flag `relayPoolBounded`) is process-wide;
+                // the flag is applied on first creation, which is here for the VPN tier.
+                val relayPool = com.example.interception.relay.RelayPool.shared(
+                    bounded = com.example.data.persistence.InterceptorFlags.get(applicationContext).relayPoolBounded,
+                )
                 val mitmEngine = MitmProxyEngine(
                     onDecryptedTransaction = { entity ->
                         kotlinx.coroutines.runBlocking(Dispatchers.IO) {
                             db.capturedTrafficDao().insert(entity)
                         }
                     },
+                    relayPool = relayPool,
                 )
                 val mitmPort = mitmEngine.start(applicationContext, 0, socks5Credentials = gatewayCredentials)
                 // MitmProxyEngine.start() unconditionally calls

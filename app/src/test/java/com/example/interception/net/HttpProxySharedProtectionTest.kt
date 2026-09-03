@@ -101,14 +101,14 @@ class HttpProxySharedProtectionTest {
         val output = ByteArrayOutputStream()
 
         val failure = runCatching {
-            HttpProxyShared.handleConnectAttempt(
+            kotlinx.coroutines.runBlocking { HttpProxyShared.handleConnectAttempt(
                 client = ScriptedSocket(),
                 target = "upstream.test:443",
                 disposition = ConnectControl.Disposition.AllowOpaque,
                 output = output,
                 socketFactory = { events += "create"; upstream },
                 socketConnector = { _, _ -> events += "connect" },
-            )
+            ) }
         }.exceptionOrNull()
 
         assertTrue(failure is java.io.IOException)
