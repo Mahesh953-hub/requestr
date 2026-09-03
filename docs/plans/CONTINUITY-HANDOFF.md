@@ -265,8 +265,8 @@ bump the Compose BOM to "fix" a missing-API error.
 
 - `/code/.plans/dossiers/master-plan-remaining.md` — Task 1 recon (⚠ contains 3
   INVENTED file names: `TransactionDetailScreen.kt`, `TransactionListScreen.kt`,
-  `AppPickerScreen.kt`; real equivalents are `ResponseInspectorView.kt` +
-  `InterceptScreen.kt` detail sheets, the traffic list in `InterceptScreen.kt` +
+  `AppPickerScreen.kt`; real equivalents are `CapturedDetailBottomSheet` in
+  `InterceptScreen.kt`, the traffic list in `InterceptScreen.kt` +
   `CapturedTrafficHelpers.kt`, and app-picker logic in `TrafficInterceptorRepository.kt`)
 - `/code/.plans/dossiers/phase-a-verification.md` — Phase A recon; §4 has the
   per-screen header-compliance table (HomeScreen = NON-COMPLIANT, 7 others NEEDS
@@ -923,10 +923,12 @@ are load-bearing for concurrent safety.
 >   mockup implies it, but the deliberate decision is to keep the user toggle
 >   `settings.gestureNavigationEnabled` (around `AppNavigationDrawer.kt:90`), which
 >   matches `docs/DESIGN-SYSTEM.md` §10.4.
-> - The **"Environments" row must remain honestly disabled.** There is genuinely no
->   Environments screen in this codebase. Do not wire it to something unrelated and do
->   not silently delete it — a disabled row with a clear reason is the intended
->   behaviour. Other drawer cross-links (Home, Collections, Flows) already navigate for
+> - The **"Environments" row must remain honestly disabled.** It lives in the
+>   **Reqy Assistant's own side drawer** (`ChatScreen.kt:1476`, KDoc 1364–1376),
+>   *not* `AppNavigationDrawer.kt`. There is genuinely no Environments screen in
+>   this codebase. Do not wire it to something unrelated and do not silently
+>   delete it — a disabled row with a clear reason is the intended behaviour.
+>   Other drawer cross-links (Home, Collections, Flows) already navigate for
 >   real; keep them working.
 >
 > #### 6. Three deprecation fixes — strictly scoped
@@ -1060,15 +1062,16 @@ SHOULD-FIX S1-S7 were ALL closed in `71bdc23`, each with an empirical red/green 
 A separate `pa-simplify` pass removed ~140 net production lines and consolidated
 duplicated helpers. Details in `71bdc23`'s commit body and §4 table.
 
-### Deferred / surfaced finding (for the PR's Out-of-Scope Feedback section)
+### Resolved surfaced finding
 
-- **`ResponseInspectorView.kt` is dead in production** (~1300 lines: `RichResponseInspector`,
-  `parseCookiesFromHeaders`, `generateHexRows`, `UniversalSyntaxHighlighter`,
-  `ParsedCookie`/`HexRow`) — no production callers. Was surfaced to the user via
-  `session scope-feedback surface` with **finding_id `62e5a42a-3f2f-478c-adce-eb505ca64826`**,
-  idempotency-key `requestr-dead-response-inspector`, status **PENDING**. The PR
-  description must list it under `## Out-of-Scope Feedback` with status `Pending`. Do not
-  delete it without the user's call.
+- **`ResponseInspectorView.kt` dead-code finding — RESOLVED.** The user approved
+  HARVEST-then-REMOVE. Hex view, in-body search/highlighting, parsed Set-Cookies,
+  per-header/copy-all, and export/share were ported into ApiTestr's inline response viewer;
+  tested pure helpers moved to `ResponseInspectorHelpers.kt`; the dead inspector was deleted.
+  Original finding: `62e5a42a-3f2f-478c-adce-eb505ca64826`, idempotency key
+  `requestr-dead-response-inspector`. Follow-up status-sync finding:
+  `b4777c7c-264e-4428-9933-7581b4338860`. The repo status is Resolved; the original platform
+  entry may remain Pending because the current tooling cannot mutate an existing finding status.
 
 ---
 
@@ -1108,13 +1111,15 @@ duplicated helpers. Details in `71bdc23`'s commit body and §4 table.
 - The omitted "N environments" count on Saved APIs collection cards (cannot be sourced
   honestly — `ApiFolderItem` has no environment field; `EnvironmentRepository` models
   one global list).
-- The honestly-disabled "Environments" drawer row (no such screen exists).
-- The onboarding reconciliation decision (keep Identity/Theme/Diagnostics).
+- The honestly-disabled "Environments" drawer row in the Reqy Assistant drawer
+  (`ChatScreen.kt:1476`) — not `AppNavigationDrawer.kt` (no such screen exists).
+- The onboarding reconciliation decision (keep Identity/Permissions/Appearance;
+  VPN/CA setup remains outside onboarding, in InterceptScreen/Settings).
 - cURL importer behaviour changes: unknown short flags refused by name; `-F`/`-T`
   consumed and discarded; unknown long flags fall through backstopped by absolute-URL.
 - A `## Testing` section (a PR without one is not review-ready).
-- An `## Out-of-Scope Feedback` section (the `ResponseInspectorView.kt` dead-code
-  finding, status `Pending`).
+- An `## Out-of-Scope Feedback` section recording the resolved `ResponseInspectorView.kt`
+  finding when this work is described in a PR.
 
 ---
 
@@ -1169,7 +1174,7 @@ duplicated helpers. Details in `71bdc23`'s commit body and §4 table.
 - Screens in `app/src/main/java/com/example/ui/screens/`: `ApiTestrScreen.kt`,
   `CaptureController.kt`, `CapturedTrafficHelpers.kt`, `ChatScreen.kt`, `FlowScreen.kt`,
   `HomeScreen.kt`, `InterceptScreen.kt`, `MusicScreen.kt`, `NotesScreen.kt`,
-  `OnboardingScreen.kt`, `ResponseInspectorView.kt`, `SavedApisScreen.kt`,
+  `OnboardingScreen.kt`, `SavedApisScreen.kt`,
   `SettingsScreen.kt`, `ToolWorkspaceScreen.kt`, `ToolsScreen.kt`, plus
   `ImageGalleryScreen.kt`, `StatsDashboardScreen.kt`, `NetworkConditionUiHelpers.kt`,
   `ReplacementValueUiHelpers.kt`, `RuleTemplateUiHelpers.kt`, `SavedApisGrouping.kt`,
@@ -1179,7 +1184,8 @@ duplicated helpers. Details in `71bdc23`'s commit body and §4 table.
   `CollapsibleNavPill.kt:76-83`; 11-route screen enum `MainActivity.kt:291-309`;
   `CollapsibleNavPill` hosted ~`MainActivity.kt:430-445`.
 - Drawer cross-links navigate for real (Home, Collections, Flows); **Environments row is
-  honestly disabled** (no Environments screen exists).
+  honestly disabled** in the Reqy Assistant drawer (`ChatScreen.kt:1476`), not
+  `AppNavigationDrawer.kt` (no Environments screen exists).
 
 ---
 

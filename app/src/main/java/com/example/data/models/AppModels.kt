@@ -229,6 +229,12 @@ data class ApiResponseData(
         "server" to "requestr-proxy/2.0",
         "x-request-id" to UUID.randomUUID().toString().take(8)
     ),
+    /**
+     * Duplicate-capable wire header lines. [headers] remains the convenient single-value view for
+     * scripts, assertions, polling, and existing callers; this list preserves repeated fields
+     * such as Set-Cookie without illegal comma folding (Expires itself contains a comma).
+     */
+    val headerLines: List<Pair<String, String>> = headers.entries.map { it.key to it.value },
     val body: String = "",
     val timestamp: Long = System.currentTimeMillis(),
     val isSuccess: Boolean = true,
@@ -287,6 +293,17 @@ enum class ProtocolHint(val label: String, val shortLabel: String) {
     SSE("SSE", "sse"),
     QUIC("QUIC", "quic"),
     UNKNOWN("Unknown", "?"),
+}
+
+
+fun ApiResponseData.headerValues(name: String): List<String> {
+    val values = headerLines
+        .filter { (headerName, _) -> headerName.equals(name, ignoreCase = true) }
+        .map { it.second }
+    if (values.isNotEmpty()) return values
+    return headers.entries
+        .filter { it.key.equals(name, ignoreCase = true) }
+        .map { it.value }
 }
 
 data class CapturedTrafficItem(

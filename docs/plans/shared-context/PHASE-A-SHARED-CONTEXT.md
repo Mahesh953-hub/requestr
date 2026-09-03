@@ -44,10 +44,10 @@ Read the ones relevant to your assignment:
    `AppNavigationDrawer.kt:90` uses `settings.gestureNavigationEnabled`, matching
    `DESIGN-SYSTEM.md` §10.4's explicit decision to reject the hardcoded approach. **Keep the user
    toggle.** Do not change it. The divergence is being documented in the PR.
-6. **Onboarding stays as-is.** `OnboardingScreen.kt`'s Identity / Theme / Diagnostics steps are
+6. **Onboarding stays as-is.** `OnboardingScreen.kt`'s Identity / Permissions / Appearance steps are
    correct and are NOT being replaced by the mockup's VPN-permission / CA-install steps. VPN consent
    lives in `CaptureController.kt` and CA install in `InterceptScreen.kt`, where the user has
-   immediate context for why they are needed. Do not touch onboarding.
+   immediate context for why they are needed. VPN/CA setup remains outside onboarding. Do not touch onboarding.
 
 ## Product decisions made by the user for this pass
 
@@ -88,20 +88,16 @@ and report it as a cross-agent dependency in your final message — do not make 
 
 ## Code conventions
 
-- 15 real screen files live in `app/src/main/java/com/example/ui/screens/`: `ApiTestrScreen.kt`,
-  `CaptureController.kt`, `CapturedTrafficHelpers.kt`, `ChatScreen.kt`, `FlowScreen.kt`,
-  `HomeScreen.kt`, `InterceptScreen.kt`, `MusicScreen.kt`, `NotesScreen.kt`, `OnboardingScreen.kt`,
-  `ResponseInspectorView.kt`, `SavedApisScreen.kt`, `SettingsScreen.kt`, `ToolWorkspaceScreen.kt`,
-  `ToolsScreen.kt`, plus `ImageGalleryScreen.kt`, `NetworkConditionUiHelpers.kt`,
-  `ReplacementValueUiHelpers.kt`, `RuleTemplateUiHelpers.kt`, `StatsDashboardScreen.kt`.
-  **Beware: an earlier dossier invented three file names that do not exist** —
-  `TransactionDetailScreen.kt`, `TransactionListScreen.kt`, `AppPickerScreen.kt`. The real
-  equivalents are `ResponseInspectorView.kt` plus the detail sheets inside `InterceptScreen.kt`, the
-  traffic list inside `InterceptScreen.kt` plus `CapturedTrafficHelpers.kt`, and the app-picker logic
-  in `data/repository/TrafficInterceptorRepository.kt`.
-- `ResponseInspectorView.kt`'s `RichResponseInspector` is **dead code scoped to ApiTestr**, not the
-  capture-log renderer. Capture-log body/header rendering lives in `InterceptScreen.kt`'s detail
-  sheets and `CapturedTrafficHelpers.kt`.
+- Real screen and screen-helper files live in `app/src/main/java/com/example/ui/screens/`; inspect
+  the current directory instead of relying on a frozen count. **Beware: an earlier dossier invented
+  three file names that do not exist** — `TransactionDetailScreen.kt`,
+  `TransactionListScreen.kt`, `AppPickerScreen.kt`. The real equivalents are
+  `CapturedDetailBottomSheet` plus the traffic/detail sheets inside `InterceptScreen.kt`,
+  `CapturedTrafficHelpers.kt`, and the app-picker logic in
+  `data/repository/TrafficInterceptorRepository.kt`.
+- ApiTestr response inspection lives inline in `ApiTestrScreen.kt`, with pure tested logic in
+  `ResponseInspectorHelpers.kt`. Capture-log rendering remains in `InterceptScreen.kt` and
+  `CapturedTrafficHelpers.kt`.
 - Extract non-trivial logic into **pure functions** and unit-test them. `CapturedTrafficHelpers.kt`
   is the established home for pure helpers used by the intercept screens; add a new small file for a
   new concern rather than bloating a screen file.

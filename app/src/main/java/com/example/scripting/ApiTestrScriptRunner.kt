@@ -5,6 +5,7 @@ import com.example.data.models.ApiRequestItem
 import com.example.data.models.ApiResponseData
 import com.example.data.models.HttpMethod
 import com.example.data.models.KeyValueItem
+import java.util.Locale
 
 /**
  * Outcome of [ApiTestrScriptRunner.runPreRequestScript]. [request] is either the original
@@ -130,6 +131,7 @@ object ApiTestrScriptRunner {
         var statusCode = response.statusCode
         var body = response.body
         val headers = response.headers.toMutableMap()
+        val changedHeaderNames = mutableSetOf<String>()
 
         val bridge = object : PmBridgeBase(env.variables) {
             // The request already went out -- pm.request is read-only history here, and its
@@ -154,10 +156,12 @@ object ApiTestrScriptRunner {
             override fun responseGetHeader(name: String): String? =
                 headers.entries.lastOrNull { it.key.equals(name, ignoreCase = true) }?.value
             override fun responseSetHeader(name: String, value: String) {
+                changedHeaderNames += name.lowercase(Locale.ROOT)
                 val existingKey = headers.keys.firstOrNull { it.equals(name, ignoreCase = true) }
                 if (existingKey != null) headers[existingKey] = value else headers[name] = value
             }
             override fun responseRemoveHeader(name: String) {
+                changedHeaderNames += name.lowercase(Locale.ROOT)
                 headers.keys.removeAll { it.equals(name, ignoreCase = true) }
             }
             override fun responseHeaderNames(): Array<String> = headers.keys.toTypedArray()
@@ -167,7 +171,22 @@ object ApiTestrScriptRunner {
         }
 
         val result = JsScriptEngine.eval(script, PmPrelude.SOURCE, bridge)
-        val mutatedResponse = response.copy(statusCode = statusCode, body = body, headers = headers)
+        val mutatedHeaderLines = response.headerLines
+            .filterNot { (name, _) -> name.lowercase(Locale.ROOT) in changedHeaderNames }
+            .toMutableList()
+        headers.forEach { (name, value) ->
+            if (name.lowercase(Locale.ROOT) in changedHeaderNames ||
+                mutatedHeaderLines.none { it.first.equals(name, ignoreCase = true) }
+            ) {
+                mutatedHeaderLines += name to value
+            }
+        }
+        val mutatedResponse = response.copy(
+            statusCode = statusCode,
+            body = body,
+            headers = headers,
+            headerLines = mutatedHeaderLines,
+        )
         return PostScriptOutcome(
             response = mutatedResponse,
             envUpdates = bridge.finalEnvVars,

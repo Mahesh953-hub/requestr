@@ -25,11 +25,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
@@ -45,6 +47,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Lock
@@ -52,6 +55,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RocketLaunch
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Warning
@@ -109,6 +113,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -120,7 +125,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
@@ -135,6 +139,7 @@ import com.example.data.models.AssertionTarget
 import com.example.data.models.AuthType
 import com.example.data.models.ChainExtractionRule
 import com.example.data.models.HttpMethod
+import com.example.data.models.headerValues
 import com.example.data.models.KeyValueItem
 import com.example.data.models.RequestBodyType
 import com.example.data.repository.ApiCollectionsRepository
@@ -179,7 +184,7 @@ fun ApiTestrScreen(
     onSendToIntercept: (ApiRequestItem) -> Unit = {}
 ) {
     val coroutineScope = rememberCoroutineScope()
-    val appContext = androidx.compose.ui.platform.LocalContext.current
+    val appContext = LocalContext.current
     val currentRequest by ApiCollectionsRepository.currentActiveRequest.collectAsState()
     val allRequests by ApiCollectionsRepository.requests.collectAsState()
     val folders by ApiCollectionsRepository.folders.collectAsState()
@@ -234,7 +239,10 @@ fun ApiTestrScreen(
     // functions and rationale.
     var redirectFollowState by remember { mutableStateOf(RedirectFollowState()) }
     var requestTab by remember { mutableIntStateOf(0) } // 0: Query, 1: Headers, 2: Body, 3: Auth, 4: Scripts, 5: Chain, 6: Tests
-    var responseTab by remember { mutableIntStateOf(0) } // 0: Body, 1: Headers, 2: Metrics, 3: Test Results
+    var responseTab by remember { mutableIntStateOf(0) } // 0: Body, 1: Headers, 2: Set-Cookies, 3: Metrics, 4: Test Results
+    var responseBodyViewMode by remember { mutableStateOf("Text") }
+    var showResponseBodySearch by remember { mutableStateOf(false) }
+    var responseBodySearchQuery by remember { mutableStateOf("") }
 
     var showMethodDropdown by remember { mutableStateOf(false) }
     var showMoreMenu by remember { mutableStateOf(false) }
@@ -778,7 +786,7 @@ fun ApiTestrScreen(
                             Button(
                                 onClick = {
                                     testResults = AssertionRunner.run(reqState.assertions, resp)
-                                    responseTab = 3
+                                    responseTab = 4
                                 },
                                 shape = RoundedCornerShape(8.dp),
                                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary)
@@ -798,13 +806,26 @@ fun ApiTestrScreen(
                     // the declarative AssertionResult list -- either one alone is enough to show
                     // the tab, and both render inside its content below.
                     val hasScriptTests = !scriptTestResults.isNullOrEmpty()
-                    val responseTabTitles = if (reqState.assertions.any { it.enabled } || hasScriptTests) {
-                        val passed = (testResults?.count { it.passed } ?: 0) + (scriptTestResults?.count { it.passed } ?: 0)
-                        val total = (testResults?.size ?: 0) + (scriptTestResults?.size ?: 0)
-                        val suffix = if (testResults != null || scriptTestResults != null) " ($passed/$total)" else ""
-                        listOf("Body", "Headers (${resp.headers.size})", "Timeline Metrics", "Tests$suffix")
-                    } else {
-                        listOf("Body", "Headers (${resp.headers.size})", "Timeline Metrics")
+                    val responseHeaderLines = remember(resp.headerLines, resp.headers) {
+                        resp.headerLines.ifEmpty { resp.headers.entries.map { it.key to it.value } }
+                    }
+                    val responseCookieHeaderValues = remember(resp.headerLines, resp.headers) {
+                        resp.headerValues("Set-Cookie")
+                    }
+                    val parsedResponseCookies = remember(responseCookieHeaderValues) {
+                        parseCookiesFromHeaderValues(responseCookieHeaderValues)
+                    }
+                    val responseTabTitles = buildList {
+                        add("Body")
+                        add("Headers (${responseHeaderLines.size})")
+                        add("Set-Cookies (${parsedResponseCookies.size})")
+                        add("Timeline Metrics")
+                        if (reqState.assertions.any { it.enabled } || hasScriptTests) {
+                            val passed = (testResults?.count { it.passed } ?: 0) + (scriptTestResults?.count { it.passed } ?: 0)
+                            val total = (testResults?.size ?: 0) + (scriptTestResults?.size ?: 0)
+                            val suffix = if (testResults != null || scriptTestResults != null) " ($passed/$total)" else ""
+                            add("Tests$suffix")
+                        }
                     }
                     // Defensive clamp: if the request's assertions changed since responseTab was
                     // last set (e.g. navigated to a different saved request), avoid indexing past
@@ -829,22 +850,237 @@ fun ApiTestrScreen(
                     Box(modifier = Modifier.weight(1f)) {
                         when (responseTab) {
                             0 -> {
-                                // Response Body
+                                // Response Body — harvested from the retired RichResponseInspector.
+                                val contentType = resp.headers.entries
+                                    .firstOrNull { it.key.equals("content-type", ignoreCase = true) }
+                                    ?.value
+                                    .orEmpty()
+                                val clipboardManager = LocalClipboardManager.current
+                                // ApiResponseData currently stores a decoded String body, so this
+                                // diagnostic hex view represents its UTF-8 bytes, not untouched wire bytes.
+                                val responseBodyBytes = remember(resp.body) { resp.body.toByteArray() }
+                                val hexRows = remember(responseBodyBytes) { generateHexRows(responseBodyBytes) }
+                                val highlightedLines = remember(
+                                    resp.body,
+                                    contentType,
+                                    responseBodySearchQuery,
+                                    responseBodyViewMode,
+                                ) {
+                                    if (responseBodyViewMode == "Text") {
+                                        UniversalSyntaxHighlighter.highlight(
+                                            text = resp.body,
+                                            contentType = contentType,
+                                            searchQuery = responseBodySearchQuery,
+                                        )
+                                    } else {
+                                        emptyList()
+                                    }
+                                }
+                                val matchCount = remember(resp.body, responseBodySearchQuery, responseBodyViewMode) {
+                                    if (responseBodyViewMode != "Text" || responseBodySearchQuery.isBlank()) 0
+                                    else Regex(Regex.escape(responseBodySearchQuery), RegexOption.IGNORE_CASE)
+                                        .findAll(resp.body)
+                                        .count()
+                                }
+
                                 Column(modifier = Modifier.fillMaxSize()) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .horizontalScroll(rememberScrollState()),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        listOf("Text", "Hex").forEach { mode ->
+                                            TextButton(
+                                                onClick = { responseBodyViewMode = mode },
+                                                colors = ButtonDefaults.textButtonColors(
+                                                    containerColor = if (responseBodyViewMode == mode) {
+                                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                                                    } else {
+                                                        Color.Transparent
+                                                    },
+                                                ),
+                                            ) {
+                                                Text(
+                                                    mode,
+                                                    color = if (responseBodyViewMode == mode) MaterialTheme.colorScheme.primary else TextSecondary,
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                )
+                                            }
+                                        }
+                                        if (responseBodyViewMode == "Text") {
+                                            IconButton(
+                                                onClick = {
+                                                    showResponseBodySearch = !showResponseBodySearch
+                                                    if (!showResponseBodySearch) responseBodySearchQuery = ""
+                                                },
+                                                modifier = Modifier.size(36.dp),
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.Search,
+                                                    contentDescription = "Search response body",
+                                                    tint = if (showResponseBodySearch) MaterialTheme.colorScheme.primary else TextSecondary,
+                                                    modifier = Modifier.size(18.dp),
+                                                )
+                                            }
+                                        }
+                                        IconButton(
+                                            onClick = {
+                                                val visibleBody = if (responseBodyViewMode == "Hex") {
+                                                    formatHexDump(hexRows)
+                                                } else {
+                                                    resp.body
+                                                }
+                                                clipboardManager.setText(AnnotatedString(visibleBody))
+                                                performHaptic(HapticFeedbackType.TextHandleMove)
+                                                showSavedSnackbar("Response body copied")
+                                            },
+                                            modifier = Modifier.size(36.dp),
+                                        ) {
+                                            Icon(Icons.Default.ContentCopy, contentDescription = "Copy response body", tint = TextSecondary, modifier = Modifier.size(18.dp))
+                                        }
+                                        IconButton(
+                                            onClick = {
+                                                coroutineScope.launch {
+                                                    val isHex = responseBodyViewMode == "Hex"
+                                                    val exportBody = if (isHex) formatHexDump(hexRows) else resp.body
+                                                    val result = com.example.data.export.MediaStoreExporter.writeResponseBody(
+                                                        context = appContext,
+                                                        body = exportBody,
+                                                        contentType = contentType,
+                                                        url = reqState.url,
+                                                        isHex = isHex,
+                                                    )
+                                                    if (result == null) {
+                                                        showSavedSnackbar("Response export failed")
+                                                    } else {
+                                                        val (target, mimeType) = result
+                                                        runCatching {
+                                                            com.example.data.export.FileExporter.shareFile(
+                                                                appContext,
+                                                                target,
+                                                                mimeType,
+                                                                "Exported response",
+                                                            )
+                                                        }.onFailure {
+                                                            showSavedSnackbar("Response saved; share sheet unavailable")
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            modifier = Modifier.size(36.dp),
+                                        ) {
+                                            Icon(Icons.Default.FileDownload, contentDescription = "Export and share response", tint = TextSecondary, modifier = Modifier.size(18.dp))
+                                        }
+                                    }
+
+                                    AnimatedVisibility(visible = showResponseBodySearch && responseBodyViewMode == "Text") {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(vertical = 6.dp)
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                                .padding(horizontal = 10.dp, vertical = 7.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            BasicTextField(
+                                                value = responseBodySearchQuery,
+                                                onValueChange = { responseBodySearchQuery = it },
+                                                modifier = Modifier.weight(1f),
+                                                singleLine = true,
+                                                textStyle = TextStyle(
+                                                    color = TextPrimary,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    fontSize = 11.sp,
+                                                ),
+                                                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                                                decorationBox = { inner ->
+                                                    if (responseBodySearchQuery.isBlank()) {
+                                                        Text("Search in response body", color = TextMuted, fontSize = 11.sp)
+                                                    }
+                                                    inner()
+                                                },
+                                            )
+                                            if (responseBodySearchQuery.isNotBlank()) {
+                                                Text("$matchCount matches", color = TextMuted, fontSize = 10.sp)
+                                                IconButton(
+                                                    onClick = { responseBodySearchQuery = "" },
+                                                    modifier = Modifier.size(26.dp),
+                                                ) {
+                                                    Icon(Icons.Default.Close, contentDescription = "Clear response search", modifier = Modifier.size(14.dp))
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     GlassCard(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .weight(1f),
-                                        backgroundColor = MaterialTheme.colorScheme.surface
+                                        backgroundColor = MaterialTheme.colorScheme.surface,
                                     ) {
-                                        LazyColumn(modifier = Modifier.padding(12.dp)) {
-                                            item {
-                                                Text(
-                                                    text = resp.body,
-                                                    color = if (resp.isSuccess) MaterialTheme.colorScheme.secondary else Color(0xFFEF4444),
-                                                    fontFamily = FontFamily.Monospace,
-                                                    fontSize = 11.sp
-                                                )
+                                        if (responseBodyViewMode == "Hex") {
+                                            LazyColumn(
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .horizontalScroll(rememberScrollState()),
+                                                contentPadding = PaddingValues(
+                                                    start = 12.dp,
+                                                    top = 12.dp,
+                                                    end = 12.dp,
+                                                    bottom = (settings.fabBottomSpacingDp + SEND_BAR_CLEARANCE_DP + 12).dp,
+                                                ),
+                                            ) {
+                                                items(hexRows) { row ->
+                                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                                        Text(
+                                                            row.offset,
+                                                            color = TextMuted,
+                                                            fontFamily = FontFamily.Monospace,
+                                                            fontSize = 10.sp,
+                                                            modifier = Modifier.width(44.dp),
+                                                        )
+                                                        Text(
+                                                            row.hexString,
+                                                            color = MaterialTheme.colorScheme.primary,
+                                                            fontFamily = FontFamily.Monospace,
+                                                            fontSize = 10.sp,
+                                                            modifier = Modifier.width(300.dp),
+                                                        )
+                                                        Text(row.asciiString, color = TextSecondary, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                                                    }
+                                                }
+                                                if (responseBodyBytes.size > 16384) {
+                                                    item {
+                                                        Text(
+                                                            "Hex view truncated at 16 KiB",
+                                                            color = TextMuted,
+                                                            fontSize = 10.sp,
+                                                            modifier = Modifier.padding(top = 8.dp),
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            LazyColumn(
+                                                contentPadding = PaddingValues(
+                                                    start = 12.dp,
+                                                    top = 12.dp,
+                                                    end = 12.dp,
+                                                    bottom = (settings.fabBottomSpacingDp + SEND_BAR_CLEARANCE_DP + 12).dp,
+                                                ),
+                                            ) {
+                                                items(highlightedLines) { line ->
+                                                    Text(
+                                                        text = line,
+                                                        color = if (resp.isSuccess) MaterialTheme.colorScheme.secondary else Color(0xFFEF4444),
+                                                        fontFamily = FontFamily.Monospace,
+                                                        fontSize = 11.sp,
+                                                    )
+                                                }
                                             }
                                         }
                                     }
@@ -853,17 +1089,15 @@ fun ApiTestrScreen(
 
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.End
+                                        horizontalArrangement = Arrangement.End,
                                     ) {
-                                        // Opens the "Compare runs" sheet: this response's body vs
-                                        // the previous send of the same request (DiffView). Shown
-                                        // whenever a response exists so the "only one run so far"
-                                        // state is reachable and explained, not hidden.
+                                        // Preserve compare-runs and beautify while adding the
+                                        // inspector features above.
                                         if (currentRun != null) {
                                             Button(
                                                 onClick = { showCompareRunsSheet = true },
                                                 shape = RoundedCornerShape(8.dp),
-                                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                                             ) {
                                                 Text("⇄ Compare runs", color = TextPrimary, fontSize = 11.sp)
                                             }
@@ -874,7 +1108,7 @@ fun ApiTestrScreen(
                                                 responseData = resp.copy(body = ToolsRepository.formatJson(resp.body))
                                             },
                                             shape = RoundedCornerShape(8.dp),
-                                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                                         ) {
                                             Text("✨ Beautify", color = TextPrimary, fontSize = 11.sp)
                                         }
@@ -882,39 +1116,157 @@ fun ApiTestrScreen(
                                 }
                             }
                             1 -> {
-                                // Response Headers
-                                LazyColumn(
-                                    modifier = Modifier.fillMaxSize(),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    items(resp.headers.entries.toList()) { (k, v) ->
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .background(MaterialTheme.colorScheme.surface)
-                                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                                // Response Headers — copy-all and per-row copy harvested before
+                                // retiring RichResponseInspector.
+                                val clipboardManager = LocalClipboardManager.current
+                                Column(modifier = Modifier.fillMaxSize()) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text("RESPONSE HEADERS", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                        TextButton(
+                                            onClick = {
+                                                clipboardManager.setText(AnnotatedString(formatHeadersForCopy(responseHeaderLines)))
+                                                performHaptic(HapticFeedbackType.TextHandleMove)
+                                                showSavedSnackbar("All response headers copied")
+                                            },
                                         ) {
-                                            Text("$k: ", color = MaterialTheme.colorScheme.primary, fontSize = 11.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
-                                            Text(v, color = TextSecondary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                                            Icon(Icons.Default.ContentCopy, contentDescription = "Copy all response headers", modifier = Modifier.size(14.dp))
+                                            Spacer(Modifier.width(4.dp))
+                                            Text("Copy all", fontSize = 10.sp)
+                                        }
+                                    }
+                                    LazyColumn(
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentPadding = sendBarContentPadding(settings.fabBottomSpacingDp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                                    ) {
+                                        items(responseHeaderLines) { (k, v) ->
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .background(MaterialTheme.colorScheme.surface)
+                                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                            ) {
+                                                Text("$k: ", color = MaterialTheme.colorScheme.primary, fontSize = 11.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                                                Text(v, color = TextSecondary, fontSize = 11.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.weight(1f))
+                                                IconButton(
+                                                    onClick = {
+                                                        clipboardManager.setText(AnnotatedString("$k: $v"))
+                                                        performHaptic(HapticFeedbackType.TextHandleMove)
+                                                        showSavedSnackbar("$k copied")
+                                                    },
+                                                    modifier = Modifier.size(28.dp),
+                                                ) {
+                                                    Icon(Icons.Default.ContentCopy, contentDescription = "Copy $k header", tint = TextMuted, modifier = Modifier.size(14.dp))
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
                             2 -> {
-                                // Timeline Metrics
-                                Column(
-                                    modifier = Modifier.fillMaxSize(),
-                                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    TimelineMetricBar("DNS Resolution", "${resp.dnsTimeMs} ms", 0.15f, Color(0xFF3B82F6))
-                                    TimelineMetricBar("TCP Connect", "${resp.connectTimeMs} ms", 0.25f, Color(0xFF06B6D4))
-                                    TimelineMetricBar("TLS Handshake", "${resp.tlsTimeMs} ms", 0.40f, Color(0xFF8B5CF6))
-                                    TimelineMetricBar("Request Sent", "${resp.requestTimeMs} ms", 0.10f, Color(0xFFF59E0B))
-                                    TimelineMetricBar("Server Response", "${resp.responseTimeMs} ms", 0.60f, Color(0xFF22C55E))
+                                // Parsed Set-Cookie inspection harvested before retiring
+                                // RichResponseInspector.
+                                val clipboardManager = LocalClipboardManager.current
+                                Column(modifier = Modifier.fillMaxSize()) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text("SET-COOKIES PARSED", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                        if (parsedResponseCookies.isNotEmpty()) {
+                                            TextButton(
+                                                onClick = {
+                                                    clipboardManager.setText(AnnotatedString(formatCookiesForCopy(parsedResponseCookies)))
+                                                    performHaptic(HapticFeedbackType.TextHandleMove)
+                                                    showSavedSnackbar("All Set-Cookies copied")
+                                                },
+                                            ) {
+                                                Icon(Icons.Default.ContentCopy, contentDescription = "Copy all Set-Cookies", modifier = Modifier.size(14.dp))
+                                                Spacer(Modifier.width(4.dp))
+                                                Text("Copy all", fontSize = 10.sp)
+                                            }
+                                        }
+                                    }
+                                    if (parsedResponseCookies.isEmpty()) {
+                                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                            Text("No Set-Cookie headers", color = TextMuted, fontSize = 11.sp)
+                                        }
+                                    } else {
+                                        LazyColumn(
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentPadding = sendBarContentPadding(settings.fabBottomSpacingDp),
+                                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                                        ) {
+                                            items(parsedResponseCookies) { cookie ->
+                                                Surface(
+                                                    shape = RoundedCornerShape(10.dp),
+                                                    color = MaterialTheme.colorScheme.surface,
+                                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                                ) {
+                                                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                        Row(
+                                                            modifier = Modifier.fillMaxWidth(),
+                                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                                            verticalAlignment = Alignment.CenterVertically,
+                                                        ) {
+                                                            Text(cookie.name, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                                                            IconButton(
+                                                                onClick = {
+                                                                    clipboardManager.setText(AnnotatedString(formatCookieForCopy(cookie)))
+                                                                    performHaptic(HapticFeedbackType.TextHandleMove)
+                                                                    showSavedSnackbar("${cookie.name} copied")
+                                                                },
+                                                                modifier = Modifier.size(28.dp),
+                                                            ) {
+                                                                Icon(Icons.Default.ContentCopy, contentDescription = "Copy ${cookie.name} cookie", tint = TextMuted, modifier = Modifier.size(14.dp))
+                                                            }
+                                                        }
+                                                        Text(cookie.value, color = TextSecondary, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                                                        DetailValue("Domain", cookie.domain.ifBlank { "—" })
+                                                        DetailValue("Path", cookie.path.ifBlank { "—" })
+                                                        DetailValue("Expires", cookie.expires.ifBlank { "Session" })
+                                                        Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                                                            if (cookie.secure) CookieFlagBadge("Secure", Color(0xFF22C55E))
+                                                            if (cookie.httpOnly) CookieFlagBadge("HttpOnly", Color(0xFF3B82F6))
+                                                            if (cookie.sameSite.isNotBlank()) CookieFlagBadge("SameSite=${cookie.sameSite}", Color(0xFF8B5CF6))
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             3 -> {
+                                // Timeline Metrics. Widths reflect the phase values carried by
+                                // ApiResponseData; the current OkHttp path estimates those values from latency.
+                                val total = listOf(
+                                    resp.dnsTimeMs,
+                                    resp.connectTimeMs,
+                                    resp.tlsTimeMs,
+                                    resp.requestTimeMs,
+                                    resp.responseTimeMs,
+                                ).sum().coerceAtLeast(1L)
+                                fun fraction(value: Long): Float = (value.toFloat() / total).coerceIn(0.05f, 1f)
+                                Column(
+                                    modifier = Modifier.fillMaxSize(),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    TimelineMetricBar("DNS Resolution", "${resp.dnsTimeMs} ms", fraction(resp.dnsTimeMs), Color(0xFF3B82F6))
+                                    TimelineMetricBar("TCP Connect", "${resp.connectTimeMs} ms", fraction(resp.connectTimeMs), Color(0xFF06B6D4))
+                                    TimelineMetricBar("TLS Handshake", "${resp.tlsTimeMs} ms", fraction(resp.tlsTimeMs), Color(0xFF8B5CF6))
+                                    TimelineMetricBar("Request Sent", "${resp.requestTimeMs} ms", fraction(resp.requestTimeMs), Color(0xFFF59E0B))
+                                    TimelineMetricBar("Server Response", "${resp.responseTimeMs} ms", fraction(resp.responseTimeMs), Color(0xFF22C55E))
+                                }
+                            }
+                            4 -> {
                                 // v3.4 Part C — C3: pass/fail per assertion, actual vs expected.
                                 // Master plan §1.10/§1.11: also renders pm.test() results from the
                                 // pre-/post-request scripts (scriptTestResults), plus any script
@@ -926,13 +1278,13 @@ fun ApiTestrScreen(
                                         Text(
                                             "Tap \"Run Tests\" above to evaluate this request's assertions against this response.",
                                             color = TextMuted,
-                                            fontSize = 12.sp
+                                            fontSize = 12.sp,
                                         )
                                     }
                                 } else {
                                     LazyColumn(
                                         modifier = Modifier.fillMaxSize(),
-                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                        verticalArrangement = Arrangement.spacedBy(6.dp),
                                     ) {
                                         if (results != null) {
                                             item {
@@ -941,7 +1293,7 @@ fun ApiTestrScreen(
                                                     "$passedCount / ${results.size} assertions passed",
                                                     fontWeight = FontWeight.Bold,
                                                     color = if (passedCount == results.size) Color(0xFF22C55E) else Color(0xFFEF4444),
-                                                    fontSize = 13.sp
+                                                    fontSize = 13.sp,
                                                 )
                                                 Spacer(modifier = Modifier.height(4.dp))
                                             }
@@ -955,7 +1307,7 @@ fun ApiTestrScreen(
                                                     "$passedCount / ${scriptResults.size} pm.test() checks passed",
                                                     fontWeight = FontWeight.Bold,
                                                     color = if (passedCount == scriptResults.size) Color(0xFF22C55E) else Color(0xFFEF4444),
-                                                    fontSize = 13.sp
+                                                    fontSize = 13.sp,
                                                 )
                                                 Spacer(modifier = Modifier.height(4.dp))
                                             }
@@ -968,7 +1320,7 @@ fun ApiTestrScreen(
                                                     "Script error: $scriptError",
                                                     color = Color(0xFFEF4444),
                                                     fontSize = 11.sp,
-                                                    fontFamily = FontFamily.Monospace
+                                                    fontFamily = FontFamily.Monospace,
                                                 )
                                             }
                                         }
@@ -2274,177 +2626,6 @@ private fun SendFloatingBar(
 }
 
 // ====================================================================
-// v6.0 transplant (manifest §5.5): Enhanced key-value row with animated
-// checkbox, colored monospace fields, zero-lag local state, delete button.
-// ====================================================================
-
-@Composable
-private fun KeyValueTableRow(
-    item: KeyValueItem,
-    isDark: Boolean,
-    onToggle: (Boolean) -> Unit,
-    onKeyChange: (String) -> Unit,
-    onValueChange: (String) -> Unit,
-    onDelete: () -> Unit
-) {
-    val primaryColor = MaterialTheme.colorScheme.primary
-    val valueColor = if (isDark) Color(0xFF4ADE80) else Color(0xFF16A34A)
-
-    var localKey by remember(item.id) { mutableStateOf(item.key) }
-    var localValue by remember(item.id) { mutableStateOf(item.value) }
-
-    LaunchedEffect(item.key) {
-        if (localKey != item.key) localKey = item.key
-    }
-    LaunchedEffect(item.value) {
-        if (localValue != item.value) localValue = item.value
-    }
-
-    val checkboxScale by animateFloatAsState(
-        targetValue = if (item.isEnabled) 1.0f else 0.92f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessMedium
-        ),
-        label = "checkboxScale"
-    )
-
-    // Enabled state animates on a gated tween; the theme colour resolves instantly.
-    val checkboxBg by animateStateColor(
-        active = item.isEnabled,
-        activeColor = primaryColor,
-        inactiveColor = Color.Transparent,
-        animationSpec = scaledTween(200),
-        label = "checkboxBg"
-    )
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 10.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        // Custom Animated Checkbox
-        Box(
-            modifier = Modifier
-                .size(20.dp)
-                .graphicsLayer {
-                    scaleX = checkboxScale
-                    scaleY = checkboxScale
-                }
-                .clip(RoundedCornerShape(6.dp))
-                .background(checkboxBg)
-                .border(
-                    1.5.dp,
-                    if (item.isEnabled) primaryColor else MaterialTheme.colorScheme.outlineVariant,
-                    RoundedCornerShape(6.dp)
-                )
-                .clickable { onToggle(!item.isEnabled) },
-            contentAlignment = Alignment.Center
-        ) {
-            if (item.isEnabled) {
-                Icon(
-                    imageVector = Icons.Default.Check,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onPrimary,
-                    modifier = Modifier.size(13.dp)
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.width(8.dp))
-
-        // Key Input with zero lag
-        BasicTextField(
-            value = localKey,
-            onValueChange = {
-                localKey = it
-                onKeyChange(it)
-            },
-            textStyle = TextStyle(
-                fontFamily = FontFamily.Monospace,
-                fontSize = 11.5.sp,
-                color = if (item.isEnabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                textDecoration = if (!item.isEnabled) TextDecoration.LineThrough else TextDecoration.None
-            ),
-            singleLine = true,
-            cursorBrush = SolidColor(primaryColor),
-            decorationBox = { innerTextField ->
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant)
-                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
-                        .padding(horizontal = 8.dp, vertical = 7.dp),
-                    contentAlignment = Alignment.CenterStart
-                ) {
-                    if (localKey.isEmpty()) {
-                        Text("Key", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-                    }
-                    innerTextField()
-                }
-            },
-            modifier = Modifier.weight(1f)
-        )
-
-        Spacer(modifier = Modifier.width(6.dp))
-
-        // Value Input with zero lag
-        BasicTextField(
-            value = localValue,
-            onValueChange = {
-                localValue = it
-                onValueChange(it)
-            },
-            textStyle = TextStyle(
-                fontFamily = FontFamily.Monospace,
-                fontSize = 11.5.sp,
-                color = if (item.isEnabled) valueColor else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                textDecoration = if (!item.isEnabled) TextDecoration.LineThrough else TextDecoration.None
-            ),
-            singleLine = true,
-            cursorBrush = SolidColor(primaryColor),
-            decorationBox = { innerTextField ->
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant)
-                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
-                        .padding(horizontal = 8.dp, vertical = 7.dp),
-                    contentAlignment = Alignment.CenterStart
-                ) {
-                    if (localValue.isEmpty()) {
-                        Text("Value", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-                    }
-                    innerTextField()
-                }
-            },
-            modifier = Modifier.weight(1f)
-        )
-
-        Spacer(modifier = Modifier.width(4.dp))
-
-        // Delete Row Action
-        Box(
-            modifier = Modifier
-                .size(28.dp)
-                .clip(RoundedCornerShape(7.dp))
-                .clickable { onDelete() },
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = Icons.Default.Delete,
-                contentDescription = "Delete row",
-                tint = Color(0xFFEF4444).copy(alpha = 0.7f),
-                modifier = Modifier.size(15.dp)
-            )
-        }
-    }
-}
-
-// ====================================================================
 // v6.0 transplant (manifest §5.5): HTTP Request Body tab with Surface
 // styling, content-type selector pills, beautify button.
 // ====================================================================
@@ -3646,5 +3827,51 @@ private fun WsMessageRow(
             color = bodyColor,
             fontStyle = if (bodyItalic) FontStyle.Italic else FontStyle.Normal
         )
+    }
+}
+
+private const val SEND_BAR_CLEARANCE_DP = 62
+
+private fun sendBarContentPadding(bottomSpacingDp: Int): PaddingValues =
+    PaddingValues(bottom = (bottomSpacingDp + SEND_BAR_CLEARANCE_DP).dp)
+
+private fun formatHexDump(rows: List<HexRow>): String = rows.joinToString("\n") { row ->
+    "${row.offset}  ${row.hexString.padEnd(47)}  ${row.asciiString}"
+}
+
+private fun formatHeadersForCopy(headers: List<Pair<String, String>>): String =
+    headers.joinToString("\n") { (name, value) -> "$name: $value" }
+
+private fun formatCookieForCopy(cookie: ParsedCookie): String = buildString {
+    append(cookie.name).append('=').append(cookie.value)
+    if (cookie.domain.isNotBlank()) append("; Domain=").append(cookie.domain)
+    if (cookie.path.isNotBlank()) append("; Path=").append(cookie.path)
+    if (cookie.expires.isNotBlank()) append("; Expires=").append(cookie.expires)
+    if (cookie.secure) append("; Secure")
+    if (cookie.httpOnly) append("; HttpOnly")
+    if (cookie.sameSite.isNotBlank()) append("; SameSite=").append(cookie.sameSite)
+}
+
+private fun formatCookiesForCopy(cookies: List<ParsedCookie>): String =
+    cookies.joinToString("\n") { formatCookieForCopy(it) }
+
+@Composable
+private fun DetailValue(label: String, value: String) {
+    Row {
+        Text("$label: ", color = TextMuted, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+        Text(value, color = TextSecondary, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+    }
+}
+
+@Composable
+private fun CookieFlagBadge(label: String, color: Color) {
+    Box(
+        modifier = Modifier
+            .clip(CircleShape)
+            .background(color.copy(alpha = 0.14f))
+            .border(1.dp, color.copy(alpha = 0.35f), CircleShape)
+            .padding(horizontal = 7.dp, vertical = 2.dp),
+    ) {
+        Text(label, color = color, fontSize = 9.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
     }
 }

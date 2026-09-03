@@ -38,7 +38,7 @@ belong to the shared-shell lane after this PR merges.
 |---|---|---|
 | **Integration/data owner** (frozen) | `data/repository/AppRepositories.kt`, `data/models/AppModels.kt`, `data/prefs/UnifiedDataStore.kt` | — |
 | **Lane A — shared shell / runtime** | `ui/theme/**`, `ui/components/CommonComponents.kt` (incl. `BadgePill`), `ui/components/CollapsibleNavPill.kt`, `ui/components/AppNavigationDrawer.kt`, `MainActivity.kt`, `ui/screens/HomeScreen.kt`, `ui/screens/OnboardingScreen.kt`, `ui/screens/SettingsScreen.kt`, runtime/CDP UI/state files | frozen data files, `BadgePill` |
-| **Lane B — API / Tools** | `ui/screens/ApiTestrScreen.kt`, `ui/screens/ResponseInspectorView.kt` (new), `ui/screens/ToolsScreen.kt`, `ui/screens/ToolWorkspaceScreen.kt`, `data/repository/ApiTestrRepository.kt` (WS client), lane-local tests/files | frozen data files, `BadgePill`, shared glass components |
+| **Lane B — API / Tools** | `ui/screens/ApiTestrScreen.kt`, `ui/screens/ResponseInspectorHelpers.kt`, `ui/screens/ToolsScreen.kt`, `ui/screens/ToolWorkspaceScreen.kt`, `data/repository/ApiTestrRepository.kt` (WS client), lane-local tests/files | frozen data files, `BadgePill`, shared glass components |
 | **Lane C — Flow / Music / Reqy** | `ui/screens/FlowScreen.kt`, `ui/screens/MusicScreen.kt`, `ui/components/TrackArtworkView.kt` (new), `ui/screens/ChatScreen.kt` (rename/redesign only), lane-local tests/files | frozen data files, `BadgePill`, shared glass components |
 | **Lane D — interception** | `ui/screens/InterceptScreen.kt`, extracted HTTP/3/TLS/relay UI components, lane-local UI models/tests, approved relay-counter additions | frozen data files, `BadgePill`, core QUIC interfaces (read-only) |
 
@@ -450,7 +450,6 @@ the single shared pill; lane-specific badges consume it or the variants above.
 | DynamicGlassSwitch | thumb spring(0.7, 500) | LongPress on toggle |
 | RequestrSegmentedTabs | bg/fg/shape tween(200) | TextHandleMove |
 | RequestrFilterChip | instant colors | TextHandleMove |
-| DynamicIconPress | scale 1.08 `spring(MediumBouncy, Medium)`; border 0.5; bg 0.12; radius `6→12.dp`; padding `0→2.dp` | component-defined |
 
 All haptics go through `rememberAppHapticFeedback()` (gated once behind
 `hapticFeedbackEnabled`).
@@ -512,7 +511,7 @@ Keep backup `MainSectionCard`/`QuickActionChip`/search row as base.
 | Component | Tokens |
 |---|---|
 | `DynamicIslandProgressPill` | radius `22.dp`; shadow `12.dp` spot `Black@0.3`; bg `0xFF0F172A@0.92`; border `0.8.dp accent@0.45`; pulse dot `8.dp`, `tween(900, FastOutSlowInEasing)` alpha `0.4→1.0` (gated); text `"Setup Phase 0$currentStep"` `12.sp`; outer step pill `accent.bright@0.6` border `1.2.dp` |
-| Steps | Identity / Theme / Diagnostics; accent picker consumes backup `AppAccent` axis |
+| Steps | Identity / Permissions / Appearance; accent picker consumes backup `AppAccent` axis |
 | Keep | backup permission rows and appearance-step semantics |
 
 ### 12.7 Settings — `NavigationAndHeaderModifiersCard` (Lane A — `SettingsScreen.kt`)

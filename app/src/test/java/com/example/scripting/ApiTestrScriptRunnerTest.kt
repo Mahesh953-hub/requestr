@@ -5,6 +5,7 @@ import com.example.data.models.ApiRequestItem
 import com.example.data.models.ApiResponseData
 import com.example.data.models.HttpMethod
 import com.example.data.models.KeyValueItem
+import com.example.data.models.headerValues
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -246,4 +247,69 @@ class ApiTestrScriptRunnerTest {
         assertNull(outcome.error)
         assertEquals(listOf("hello world"), outcome.consoleOutput)
     }
+
+    @Test
+    fun `post-script changing unrelated header preserves repeated Set-Cookie lines`() {
+        val cookies = listOf(
+            "Set-Cookie" to "session=abc; Path=/; HttpOnly",
+            "Set-Cookie" to "prefs=dark; Expires=Wed, 21 Oct 2030 07:28:00 GMT; Secure",
+        )
+        val response = ApiResponseData(
+            headers = mapOf("Set-Cookie" to cookies.last().second, "X-Trace" to "before"),
+            headerLines = cookies + ("X-Trace" to "before"),
+        )
+
+        val outcome = ApiTestrScriptRunner.runPostResponseScript(
+            "pm.response.headers.set('X-Trace', 'after');",
+            ApiRequestItem(),
+            response,
+            env(),
+        )
+
+        assertNull(outcome.error)
+        assertEquals(cookies.map { it.second }, outcome.response.headerValues("Set-Cookie"))
+        assertEquals(listOf("after"), outcome.response.headerValues("X-Trace"))
+    }
+
+    @Test
+    fun `post-script replacing Set-Cookie collapses repeated lines to one replacement`() {
+        val response = responseWithRepeatedCookies()
+
+        val outcome = ApiTestrScriptRunner.runPostResponseScript(
+            "pm.response.headers.set('Set-Cookie', 'replacement=1; Path=/');",
+            ApiRequestItem(),
+            response,
+            env(),
+        )
+
+        assertNull(outcome.error)
+        assertEquals(listOf("replacement=1; Path=/"), outcome.response.headerValues("Set-Cookie"))
+    }
+
+    @Test
+    fun `post-script removing Set-Cookie removes every repeated line`() {
+        val response = responseWithRepeatedCookies()
+
+        val outcome = ApiTestrScriptRunner.runPostResponseScript(
+            "pm.response.headers.remove('Set-Cookie');",
+            ApiRequestItem(),
+            response,
+            env(),
+        )
+
+        assertNull(outcome.error)
+        assertTrue(outcome.response.headerValues("Set-Cookie").isEmpty())
+    }
+
+    private fun responseWithRepeatedCookies(): ApiResponseData {
+        val cookies = listOf(
+            "Set-Cookie" to "session=abc; Path=/; HttpOnly",
+            "Set-Cookie" to "prefs=dark; Expires=Wed, 21 Oct 2030 07:28:00 GMT; Secure",
+        )
+        return ApiResponseData(
+            headers = mapOf("Set-Cookie" to cookies.last().second),
+            headerLines = cookies,
+        )
+    }
+
 }

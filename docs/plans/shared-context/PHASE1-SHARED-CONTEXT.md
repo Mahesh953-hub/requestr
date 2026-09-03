@@ -27,19 +27,15 @@ The real equivalents are:
 
 | Dossier's invented name | Real file(s) |
 |---|---|
-| `TransactionDetailScreen.kt` | `app/src/main/java/com/example/ui/screens/ResponseInspectorView.kt` (1303 lines) and the detail sheets inside `InterceptScreen.kt` |
+| `TransactionDetailScreen.kt` | `CapturedDetailBottomSheet` and the detail sheets inside `InterceptScreen.kt` |
 | `TransactionListScreen.kt` | the traffic list inside `app/src/main/java/com/example/ui/screens/InterceptScreen.kt`, plus `CapturedTrafficHelpers.kt` |
 | `AppPickerScreen.kt` | app-picker logic lives ONLY in `app/src/main/java/com/example/data/repository/TrafficInterceptorRepository.kt` (`queryIntentActivities` / `getInstalledApplications` / `loadLabel`) |
 
-**Treat every file path in that dossier as a hypothesis.** Locate the real code
-with `grep`/`rg` before editing, and **never create a new screen that duplicates
-an existing one**. The complete real screen list is exactly these 15 files in
-`app/src/main/java/com/example/ui/screens/`:
-`ApiTestrScreen.kt`, `CaptureController.kt`, `CapturedTrafficHelpers.kt`,
-`ChatScreen.kt`, `FlowScreen.kt`, `HomeScreen.kt`, `InterceptScreen.kt`,
-`MusicScreen.kt`, `NotesScreen.kt`, `OnboardingScreen.kt`,
-`ResponseInspectorView.kt`, `SavedApisScreen.kt`, `SettingsScreen.kt`,
-`ToolWorkspaceScreen.kt`, `ToolsScreen.kt`.
+**Treat every file path in that dossier as a hypothesis.** Locate the real code with
+`grep`/`rg` before editing, and **never create a new screen that duplicates an existing one**.
+Inspect the current `app/src/main/java/com/example/ui/screens/` directory rather than relying on a
+frozen count. ApiTestr response inspection is inline in `ApiTestrScreen.kt`, with pure helpers in
+`ResponseInspectorHelpers.kt`; capture response inspection is in `InterceptScreen.kt`.
 
 ## ⚠️ Do NOT run full Gradle builds
 

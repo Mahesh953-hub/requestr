@@ -3,6 +3,7 @@ package com.example.data.repository
 import com.example.data.models.ApiRequestItem
 import com.example.data.models.HttpMethod
 import com.example.data.models.KeyValueItem
+import com.example.data.models.headerValues
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
@@ -107,4 +108,46 @@ class ApiTestrRepositoryMockModeTest {
 
         assertEquals("OK", resp.statusMessage)
     }
+
+    @Test
+    fun `mock mode preserves repeated Set-Cookie rows`() = runBlocking {
+        val item = ApiRequestItem(
+            mockEnabled = true,
+            mockHeaders = listOf(
+                KeyValueItem(key = "Set-Cookie", value = "session=abc; Path=/; HttpOnly"),
+                KeyValueItem(key = "Set-Cookie", value = "prefs=dark; Expires=Wed, 21 Oct 2030 07:28:00 GMT"),
+            ),
+        )
+
+        val resp = ApiTestrRepository.executeRequest(item, followRedirects = true, reqClient = client)
+
+        assertEquals(2, resp.headerValues("Set-Cookie").size)
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test
+    fun `live response preserves repeated Set-Cookie lines including Expires comma`() = runBlocking {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .addHeader("Set-Cookie", "session=abc; Path=/; HttpOnly")
+                .addHeader("Set-Cookie", "prefs=dark; Expires=Wed, 21 Oct 2030 07:28:00 GMT; Secure")
+                .setBody("ok")
+        )
+        val item = ApiRequestItem(
+            method = HttpMethod.GET,
+            url = server.url("/").toString(),
+        )
+
+        val resp = ApiTestrRepository.executeRequest(item, followRedirects = true, reqClient = client)
+
+        assertEquals(
+            listOf(
+                "session=abc; Path=/; HttpOnly",
+                "prefs=dark; Expires=Wed, 21 Oct 2030 07:28:00 GMT; Secure",
+            ),
+            resp.headerValues("Set-Cookie"),
+        )
+    }
+
 }

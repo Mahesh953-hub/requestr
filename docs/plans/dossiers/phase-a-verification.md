@@ -186,7 +186,7 @@ Audit's §5 claimed the following state-model work was needed (none of it curren
 | Line 2145 | ✅ Yes | `Http3DetailSheet(...)` when connection has HTTP/3 state |
 | Merge commit | ✅ Yes | Confirmed in git log; Domain A merged before audit |
 
-**Known backbone gap (documented in audit, non-blocking):** `TunRelay.RelayStats` lacks per-reason drop counters (EAGAIN, no-route, checksum, MTU, flow-cap, ICMPv6). This is a Lane D (interception) owner issue, not a Phase A UI gap. Defer to relay-stats expansion work.
+**Relay counter status (reconciled):** `TunRelay.RelayStats` now exposes the shipped per-reason counters (`evictionCount`, `dropProtectFail`, `dropUpstreamOpen`, `dropUpstreamWrite`, `dropUnrelayableProto`, `dropTcpUpstreamWriteFail`). The mockup-only MTU/EAGAIN taxonomy remains deliberately absent, as documented in `TunRelay.kt`; this is not a Phase A UI blocker.
 
 ---
 
@@ -472,9 +472,10 @@ Audit's §5 claimed the following state-model work was needed (none of it curren
 
 **Current code (per DESIGN-SYSTEM.md §12.6):**
 - Step 1: Identity (user preferences)
-- Step 2: Theme (light/dark + accent selection)
-- Step 3: Diagnostics (device capability display)
+- Step 2: Permissions (storage/notification/music permissions)
+- Step 3: Appearance (theme mode + accent selection)
 - **Flow:** `DynamicIslandProgressPill` with "Setup Phase 0$currentStep" label
+- VPN permission and CA installation remain deliberately outside onboarding in Intercept's capture-start flow.
 
 **Mockup specifies (`onboarding/` HTML files):**
 - Step 1: VPN Service Permission (user grant)
@@ -490,11 +491,11 @@ Audit's §5 claimed the following state-model work was needed (none of it curren
 
 **Why the mismatch:** The audit's mockup designer intended onboarding to cover VPN+CA setup because they are critical for MITM interception. The shipped code instead puts VPN+CA installation in **InterceptScreen** (during actual capture setup), where the user **sees immediate context** ("Install CA to decrypt HTTPS"). Onboarding instead focuses on **app personalization** (theme/accent) + **device diagnostics**.
 
-**Recommendation:** **KEEP CURRENT IMPLEMENTATION** (Identity/Theme/Diagnostics in Onboarding).
+**Recommendation:** **KEEP CURRENT IMPLEMENTATION** (Identity/Permissions/Appearance in Onboarding).
 
 **Rationale:**
 1. VPN+CA setup in InterceptScreen is **more contextually appropriate** — users understand why they need CA when they're about to capture traffic, not during first-app-launch onboarding.
-2. Onboarding's Identity/Theme/Diagnostics is **lower-friction** — users can skip or delay these without blocking app usage; forcing VPN+CA in onboarding creates friction for non-interception use cases (Flow, Music, Reqy, Notes).
+2. Onboarding's Identity/Permissions/Appearance is **lower-friction** — users can skip or delay these without blocking app usage; forcing VPN+CA in onboarding creates friction for non-interception use cases (Flow, Music, Reqy, Notes).
 3. **No duplication:** An existing, functional VPN+CA flow already exists in InterceptScreen (line 1836+). Repeating it in Onboarding would confuse users and create redundant permission prompts.
 
 **Status:** ✅ **NO ACTION REQUIRED** — Keep current Onboarding steps. The mockup's intent (ensure user can capture) is already satisfied by the InterceptScreen flow.
@@ -711,7 +712,7 @@ Audit's §5 claimed the following state-model work was needed (none of it curren
 - [ ] Header glass-pill compliance check
 
 **onboarding:**
-- [ ] Keep current steps: Identity / Theme / Diagnostics (no action; current implementation preferred per Q8 analysis)
+- [ ] Keep current steps: Identity / Permissions / Appearance (no action; current implementation preferred per Q8 analysis)
 - [ ] Header glass-pill compliance check
 
 **nav_header_pill / navigation:**
@@ -749,9 +750,9 @@ Audit's §5 claimed the following state-model work was needed (none of it curren
 | **music** | Mostly ✅ | Mostly ✅ (see Q5) | MusicScreen.kt no Import MP3; TrackArtworkView implementation confirmed | Verify layout + header compliance |
 | **flow** | Partial ✅ | Partial ✅ (see Q1) | FlowScreen.kt allFlows picker + viewMode toggle both present | Verify picker/toggle UI rendering + header compliance |
 | **ai-chat** | Partial ✅ | Partial ✅ (see Q6) | ChatScreen.kt provider config exists; provider chip list/attachment/lock panel need full-file read | Verify all 4 provider chips + 5-action attachment + lock panel + header compliance |
-| **interceptr** | Partial ✅ | Partial ⚠️ (see Q2) | InterceptScreen.kt; VPN relay icon blocked without row model addition | **ADD `routedViaVpnRelay` field FIRST**, then wire icon + header compliance |
+| **interceptr** | Partial ✅ | Implemented ✅ (Q2 resolved) | `CapturedTrafficItem.routedViaVpnRelay` is populated by `CaptureLogRepository` and rendered by `InterceptScreen.kt` | Header/visual spot-check only |
 | **saved_apis** | Partial ✅ | Flat list only (see Q3) | SavedApisScreen.kt; collections Room entity exists but UI flat | Restructure UI to group by collection + header compliance |
-| **onboarding** | Partial ✅ | Content mismatch (see Q8) | OnboardingScreen.kt Identity/Theme/Diagnostics vs mockup VPN/CA; recommend keeping current | Keep current steps (no action needed) + header compliance |
+| **onboarding** | Partial ✅ | Content mismatch (see Q8) | OnboardingScreen.kt Identity/Permissions/Appearance vs mockup VPN/CA; recommend keeping current | Keep current steps (no action needed) + header compliance |
 | **nav_header_pill / navigation** | Implemented ✅ | Implemented ✅ (+ 1 gap) | CollapsibleNavPill.kt correct; Home header flagged non-compliant (Phase B) | Verify nav pill + per-screen headers + HomeScreen header fix (Phase B) |
 
 ---

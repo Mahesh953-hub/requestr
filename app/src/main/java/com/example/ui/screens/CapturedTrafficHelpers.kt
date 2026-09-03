@@ -12,10 +12,9 @@ import kotlin.random.Random
  * captures list: content-type-gated rendering, JSON pretty-print with fallback, a >100KB render
  * gate, multi-key sort, aggregate stats, and image-response detection for a gallery view.
  *
- * Kept out of `ResponseInspectorView.kt` deliberately -- that file's `RichResponseInspector` is
- * ApiTestr-scoped (`Assertions`/`onRunTests`/`onBeautifyBody` params, currently unused anywhere
- * in the codebase) and out of scope for capture-log rendering. These are plain functions so they
- * follow the existing `ResponseInspectorHelpersTest`-style "pure logic -> plain JUnit" convention.
+ * Kept separate from ApiTestr's response-inspection helpers because captured traffic carries
+ * request/response pairs, sensitive-header masking rules, and persisted binary-body metadata.
+ * These are plain functions and follow the same pure-logic-to-plain-JUnit convention.
  */
 
 /** How [CapturedDetailBottomSheet]'s Body tab should render a given body. */

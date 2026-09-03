@@ -271,14 +271,15 @@ Nothing on the master plan is unbuilt. These are the honest residual caveats:
    root/Shizuku/Frida capture tiers are code-complete and unit-tested, but this sandbox reports
    `RootState.UNAVAILABLE`, Shizuku not installed and Frida not running, so only their
    non-privileged branches were driven on-device.
-3. **`TunRelay.RelayStats` has no per-reason drop counters** (EAGAIN, no-route, checksum, MTU,
-   flow-cap, ICMPv6). Not a master-plan item — it is a prerequisite for the *design* plan's
-   degraded-detail mockup and is tracked there.
-4. **`ChaosInjector`'s KDoc is stale.** It describes itself as unwired, but it is in fact wired:
-   `RuleEnforcer.applyChaos` (line ~450) drives it for `RuleAction.CHAOS`, consumed by
-   `CaptureEngine.kt:706`. Only the comment is wrong. C2's `NetworkConditionInjector` is the
-   separate, connection-level sibling that covers the master plan's weak-network requirement —
-   `CHAOS` is per-matched-response fault injection, which is a different feature.
+3. ~~**`TunRelay.RelayStats` has no per-reason drop counters**~~ **SHIPPED.** Per-reason
+   counters now live in `TunRelay.kt:72–92` (`evictionCount`, `dropProtectFail`,
+   `dropUpstreamOpen`, `dropUpstreamWrite`, `dropUnrelayableProto`,
+   `dropTcpUpstreamWriteFail`) — an honest partition of `relayErrors`/`unrelayableCount`.
+   The fifth mockup category (tun-MTU over-length) and TCP EAGAIN are deliberately absent
+   (documented, lines 75–80).
+4. ~~**`ChaosInjector`'s KDoc is stale.**~~ **RESOLVED.** KDoc at `ChaosInjector.kt:5–27`
+   now correctly documents the full live wiring (`RuleEnforcer.parseChaosConfig`,
+   `applyChaosToRequest`, `applyChaosToResponse`, `CHAOS_ATTRIBUTION_HEADER`).
 
 ### Reference
 - Full plan: `docs/plans/MASTER-FEATURE-ADDITION-PLAN.md`
