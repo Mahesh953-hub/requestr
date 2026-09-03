@@ -147,37 +147,46 @@ class RemoteCertificateMirrorTest {
         assertEquals(null, RemoteCertificateMirror.extractSubjectAltNames(cert))
     }
 
-    // ── CertificateAuthority.issueLeafFromProfile ─────────────────────
+    // ── LeafProfile.fromRemote + CertificateEngine.mintLeaf (S1 task 8) ──────────────────
+    // (replaces the deleted CertificateAuthority.issueLeafFromProfile path)
 
     @Test
-    fun `issueLeafFromProfile issues a leaf signed by our own CA carrying the mirrored subject and SANs`() = runBlocking {
+    fun `a leaf minted from a remote profile is signed by our own CA and carries the mirrored subject and SANs`() = runBlocking {
         val remote = selfSignedLeaf(cn = "mirrored.example", sanHosts = listOf("mirrored.example"))
-        val profile = RemoteCertificateMirror.profileFrom(remote)
+        val profile = com.example.interception.tls.LeafProfile.fromRemote(remote, "mirrored.example")
 
         val ca = CertificateAuthority.getOrCreate(context)
-        val (leaf, _) = CertificateAuthority.issueLeafFromProfile(context, "mirrored.example", profile)
+        val engine = com.example.interception.tls.CertificateEngine()
+        val leaf = engine.mintLeaf(ca, profile, engine.sessionKeyPair)
 
         // Signed by requestr's own CA, not the "remote" self-signed key.
         leaf.verify(ca.certificate.publicKey)
         assertEquals(ca.certificate.subjectX500Principal, leaf.issuerX500Principal)
         assertEquals(remote.subjectX500Principal, leaf.subjectX500Principal)
-
-        val basicConstraints = leaf.basicConstraints
-        assertEquals(-1, basicConstraints) // -1 == not a CA, matches BasicConstraints(false)
+        assertEquals(-1, leaf.basicConstraints) // -1 == not a CA, matches BasicConstraints(false)
+        assertEquals(
+            RemoteCertificateMirror.extractSubjectAltNames(remote).toString(),
+            RemoteCertificateMirror.extractSubjectAltNames(leaf).toString(),
+        )
     }
 
     @Test
-    fun `issueLeafFromProfile falls back to HostSanGenerator when the profile has no SANs`() = runBlocking {
-        val profile = RemoteCertificateMirror.MirroredProfile(
-            subject = X500Name("CN=nosans.example"),
-            subjectAltNames = null,
-            notBefore = Date(System.currentTimeMillis() - 1000),
-            notAfter = Date(System.currentTimeMillis() + 100_000_000),
+    fun `fromRemote falls back to HostSanGenerator when the remote has no SANs`() = runBlocking {
+        val keyPair = KeyPairGenerator.getInstance("RSA").apply { initialize(2048, SecureRandom()) }.genKeyPair()
+        val subject = X500Name("CN=nosans.example")
+        val builder = JcaX509v3CertificateBuilder(
+            subject, BigInteger.valueOf(1), Date(), Date(System.currentTimeMillis() + 100_000_000), subject, keyPair.public,
         )
-        CertificateAuthority.getOrCreate(context)
-        val (leaf, _) = CertificateAuthority.issueLeafFromProfile(context, "nosans.example", profile)
+        val remote = JcaX509CertificateConverter().getCertificate(
+            builder.build(JcaContentSignerBuilder("SHA256withRSA").build(keyPair.private)),
+        )
+        val profile = com.example.interception.tls.LeafProfile.fromRemote(remote, "nosans.example")
+        val ca = CertificateAuthority.getOrCreate(context)
+        val engine = com.example.interception.tls.CertificateEngine()
+        val leaf = engine.mintLeaf(ca, profile, engine.sessionKeyPair)
         assertNotNull(leaf)
         // SAN extension must still be present (from the HostSanGenerator fallback), not omitted.
         assertNotNull(leaf.getExtensionValue(Extension.subjectAlternativeName.id))
+        assertTrue(leaf.subjectAlternativeNames.any { it[1] == "nosans.example" })
     }
 }

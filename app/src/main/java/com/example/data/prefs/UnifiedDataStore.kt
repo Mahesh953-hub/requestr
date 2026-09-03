@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.first
 
@@ -120,6 +121,15 @@ object AppSettingsKeys {
     // never dials the real endpoint" guarantee if it ran unconditionally -- see
     // CertificateAuthority.issueMirroredLeaf's KDoc and MitmProxyEngine's cert-cache call site.
     val REMOTE_CERT_MIRROR_ENABLED = booleanPreferencesKey("remote_cert_mirror_enabled")
+
+    // S1 task 9 (D6) -- capture-scoped UDP/QUIC policy. Default policy for an in-scope app is
+    // "tee then drop UDP/443" so the client deterministically falls back to HTTP/2; this override
+    // switches in-scope flows to "tee then pass" (observed, decoded only when keys exist). Out-of-
+    // scope and bypassed apps are never touched regardless of these values. Full QUIC MITM is not
+    // implemented and Chromium never trusts user-added CAs for QUIC, so block-or-observe plus
+    // passive decode is the honest ceiling (see com.example.interception.quic.UdpPolicyRouter).
+    val QUIC_OBSERVE_OVERRIDE = booleanPreferencesKey("quic_observe_override")
+    val QUIC_BYPASS_PACKAGES = stringSetPreferencesKey("quic_bypass_packages")
 
     // §3 (C2) — weak-network simulation (added latency/jitter/packet-loss) applied at the proxy
     // relay tier (HttpProxyShared -- the only tier that runs on this emulator; see

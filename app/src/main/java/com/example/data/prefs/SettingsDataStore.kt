@@ -86,6 +86,12 @@ class SettingsDataStore(private val context: Context) {
     val remoteCertMirrorEnabled: Flow<Boolean> =
         prefs.map { it[AppSettingsKeys.REMOTE_CERT_MIRROR_ENABLED] ?: false }
 
+    /** S1 task 9 (D6): Observe-QUIC override -- in-scope UDP/443 is teed then passed instead of dropped. */
+    val quicObserveOverride: Flow<Boolean> = prefs.map { it[AppSettingsKeys.QUIC_OBSERVE_OVERRIDE] ?: false }
+
+    /** S1 task 9 (D6): packages whose UDP always passes untouched even when in the capture selection. */
+    val quicBypassPackages: Flow<Set<String>> = prefs.map { it[AppSettingsKeys.QUIC_BYPASS_PACKAGES] ?: emptySet() }
+
     /**
      * §3 (C2) -- persisted weak-network simulation config, consumed by
      * [com.example.interception.NetworkConditionInjector] via
@@ -182,6 +188,14 @@ class SettingsDataStore(private val context: Context) {
 
     suspend fun setRemoteCertMirrorEnabled(value: Boolean) {
         store.edit { it[AppSettingsKeys.REMOTE_CERT_MIRROR_ENABLED] = value }
+    }
+
+    suspend fun setQuicObserveOverride(value: Boolean) {
+        store.edit { it[AppSettingsKeys.QUIC_OBSERVE_OVERRIDE] = value }
+    }
+
+    suspend fun setQuicBypassPackages(packages: Set<String>) {
+        store.edit { it[AppSettingsKeys.QUIC_BYPASS_PACKAGES] = packages }
     }
 
     /**

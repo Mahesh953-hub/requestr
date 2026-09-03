@@ -93,13 +93,47 @@ class Socks5HandlerTest {
     }
 
     @Test
-    fun `udp associate is answered with command-not-supported and recorded`() {
+    fun `udp associate is surfaced with the reply deferred to the caller`() {
         val wire = greeting(0x00) + bytes(0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0)
+        val (outcome, replied) = run(Socks5Handler(), wire)
+        val assoc = outcome as Socks5Handler.Outcome.UdpAssociate
+        assertEquals("0.0.0.0", assoc.requested.host)
+        assertEquals(0, assoc.requested.port)
+        assertNull(assoc.origin)
+        // Only the method-selection reply has been written; the caller answers the request.
+        assertArrayEquals(bytes(0x05, 0x00), replied)
+    }
+
+    @Test
+    fun `udp associate carries the plus-info udp origin`() {
+        val wire = greeting(0x02) + userPass("sess-7|udp|10.0.0.9|41000", "") + bytes(0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0)
+        val (outcome, _) = run(Socks5Handler(credentials = null), wire)
+        val assoc = outcome as Socks5Handler.Outcome.UdpAssociate
+        assertEquals("10.0.0.9", assoc.origin?.ip)
+        assertEquals(41000, assoc.origin?.port)
+        assertEquals("udp", assoc.origin?.transport)
+    }
+
+    @Test
+    fun `bind is answered with command-not-supported and recorded`() {
+        val wire = greeting(0x00) + bytes(0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0)
         val (outcome, replied) = run(Socks5Handler(), wire)
         val rejected = outcome as Socks5Handler.Outcome.Rejected
         assertEquals(GatewayRejectReason.SOCKS_COMMAND_UNSUPPORTED, rejected.reason)
-        assertTrue(rejected.detail.contains("UDP ASSOCIATE"))
+        assertTrue(rejected.detail.contains("BIND"))
         assertArrayEquals(bytes(0x05, 0x00) + Socks5Handler.reply(0x07), replied)
+    }
+
+    @Test
+    fun `replyBound encodes IPv4 and IPv6 relay addresses`() {
+        assertArrayEquals(
+            bytes(0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0x1F, 0x90),
+            Socks5Handler.replyBound(java.net.InetAddress.getByName("127.0.0.1"), 8080),
+        )
+        val v6 = Socks5Handler.replyBound(java.net.InetAddress.getByName("::1"), 53)
+        assertEquals(22, v6.size)
+        assertEquals(0x04, v6[3].toInt())
+        assertEquals(53, ((v6[20].toInt() and 0xFF) shl 8) or (v6[21].toInt() and 0xFF))
     }
 
     @Test

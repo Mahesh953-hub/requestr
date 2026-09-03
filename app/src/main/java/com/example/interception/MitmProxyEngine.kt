@@ -1,7 +1,6 @@
 package com.example.interception
 
 import android.content.Context
-import android.net.ConnectivityManager
 import android.util.Log
 import com.example.data.interception.engineLifecycleOwner
 import com.example.data.interception.engineTier
@@ -28,8 +27,13 @@ import com.example.interception.gateway.GatewaySessionHandler
 import com.example.interception.gateway.LocalGateway
 import com.example.interception.relay.ConnectionStateMachine
 import com.example.interception.relay.RelayPool
+import com.example.interception.tls.CertificateEngine
+import com.example.interception.tls.ClientCertException
+import com.example.interception.tls.ClientCertStore
+import com.example.interception.uid.UidAttributor
 import com.example.interception.relay.StructuredRelay
 import com.example.interception.gateway.OriginalDstResolver
+import com.example.interception.gateway.local.ClientOrigin
 import com.example.interception.gateway.local.EntryKind
 import com.example.interception.gateway.local.GatewaySession
 import com.example.interception.gateway.local.ProtocolClassifier
@@ -40,24 +44,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
-import org.bouncycastle.asn1.x500.X500Name
-import org.bouncycastle.asn1.x509.BasicConstraints
-import org.bouncycastle.asn1.x509.Extension
-import org.bouncycastle.asn1.x509.KeyUsage
-import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
-import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
-import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
-import java.math.BigInteger
 import java.net.Socket
-import java.security.KeyPair
-import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
-import java.util.Date
 import java.util.TreeMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
@@ -137,6 +130,16 @@ class MitmProxyEngine(
     private val chaosSleep: (Long) -> Unit = { millis -> Thread.sleep(millis) },
     /** S1 task 7: bounded relay pool whose dispatcher runs both copy legs of every tunnel. */
     private val relayPool: RelayPool = RelayPool.shared(),
+    /**
+     * S1 task 8: the single leaf issuer (SNI-first identity, upstream sniffing, hardened EC
+     * leaves, per-domain overrides, mTLS key managers). Null means "build the default engine
+     * backed by [ClientCertStore.get] on first use"; tests inject one with fake I/O.
+     */
+    certificateEngine: CertificateEngine? = null,
+    /** S1 task 10: UID attribution; null means the process-wide [UidAttributor.shared]. */
+    uidAttributor: UidAttributor? = null,
+    /** S1 task 9: serves SOCKS5 UDP ASSOCIATE through the capture-scoped UDP policy; null refuses it. */
+    private val udpAssociationHandler: com.example.interception.gateway.UdpAssociationHandler? = null,
 ) : GatewaySessionHandler {
     private var gateway: LocalGateway? = null
     private var appContext: Context? = null
@@ -149,12 +152,15 @@ class MitmProxyEngine(
     private val plaintextDelegate: HttpProxyEngine by lazy { HttpProxyEngine(scope) }
     private val packetCount = AtomicLong(0)
     private val sessionId = AtomicLong(System.currentTimeMillis())
+    private val injectedCertificateEngine = certificateEngine
     /**
-     * §3: bounded/expiring LRU (see [ExpiringLruCertCache]) instead of an unbounded map -- a
-     * long-running capture session that MITMs many distinct hosts must not retain every
-     * generated (RSA-2048 keypair + cert) forever.
+     * S1 task 8: one issuer for every leaf (see [CertificateEngine]); its internal
+     * [ExpiringLruCertCache] keeps the §3 bounded/expiring LRU so a long-running capture that
+     * MITMs many distinct hosts never retains every minted leaf forever.
      */
-    private val certCache = ExpiringLruCertCache()
+    private val certificateEngine: CertificateEngine by lazy {
+        injectedCertificateEngine ?: CertificateEngine(policyStore = appContext?.let { ClientCertStore.get(it) })
+    }
 
     val port: Int get() = gateway?.port ?: 0
 
@@ -207,6 +213,7 @@ class MitmProxyEngine(
             originalDstResolver = originalDstResolver,
             logTag = TAG,
             relayPool = relayPool,
+            udpAssociationHandler = udpAssociationHandler,
         )
         val boundPort = gw.start(port)
         gateway = gw
@@ -279,7 +286,7 @@ class MitmProxyEngine(
                 is ConnectControl.Disposition.Block -> {
                     Log.i(TAG, "BLOCKED by rule: $host")
                     session.replyBlocked()
-                    persistConnectAttempt(context, client, db, host, port, "BLOCKED", failureReason = disposition.reason)
+                    persistConnectAttempt(context, client, db, host, port, "BLOCKED", failureReason = disposition.reason, origin = session.origin)
                     return
                 }
                 is ConnectControl.Disposition.Redirect -> {
@@ -294,6 +301,7 @@ class MitmProxyEngine(
                         persistConnectAttempt(
                             context, client, db, host, port, "REDIRECTED",
                             redirectTarget = disposition.target, bytesToUpstream = sent, bytesToClient = recv,
+                            origin = session.origin,
                         )
                     }
                     return
@@ -310,6 +318,7 @@ class MitmProxyEngine(
                         persistConnectAttempt(
                             context, client, db, host, port, "ALLOWED_OPAQUE",
                             bytesToUpstream = sent, bytesToClient = recv,
+                            origin = session.origin,
                         )
                     }
                     return
@@ -338,6 +347,7 @@ class MitmProxyEngine(
                                     "on this device (install it in Settings to enable MITM decryption for " +
                                     "this host) -- degraded to raw relay",
                                 bytesToUpstream = sent, bytesToClient = recv,
+                                origin = session.origin,
                             )
                         }
                         return
@@ -358,6 +368,7 @@ class MitmProxyEngine(
                 persistConnectAttempt(
                     context, client, db, host, port, "FAILED",
                     failureReason = "client sent no payload after tunnel establishment",
+                    origin = session.origin,
                 )
                 return
             }
@@ -372,7 +383,7 @@ class MitmProxyEngine(
                     plaintextDelegate.handlePlaintext(
                         GatewaySession(replaying, EntryKind.TRANSPARENT_HTTP, session.destination, session.origin, target),
                     )
-                    persistConnectAttempt(context, replaying, db, host, port, "PLAINTEXT_FORWARDED")
+                    persistConnectAttempt(context, replaying, db, host, port, "PLAINTEXT_FORWARDED", origin = session.origin)
                     return
                 }
                 else -> {
@@ -386,39 +397,77 @@ class MitmProxyEngine(
                             context, replaying, db, host, port, "ALLOWED_OPAQUE",
                             failureReason = "FORCE_MITM rule matched, but the tunnel payload is not TLS -- relayed opaquely",
                             bytesToUpstream = sent, bytesToClient = recv,
+                            origin = session.origin,
                         )
                     }
                     return
                 }
             }
 
-            // Get or create per-host certificate. ExpiringLruCertCache.getOrCompute (§3) keeps
-            // the same "generate at most once per host, even under concurrent callers" semantics
-            // the old computeIfAbsent call site relied on, plus a 200-entry LRU cap + TTL.
-            // §1.10: remote-cert mirroring is a discrete opt-in (default OFF) read fresh per
-            // CONNECT -- see SettingsDataStore.remoteCertMirrorEnabled's KDoc for why this isn't
-            // unconditional (it means an extra real upstream probe on every first-seen
-            // FORCE_MITM host, which a user who leaves the toggle off never pays for).
+            // S1 task 8: upstream-leaf sniffing is CertificateEngine's default for IP-literal
+            // and SNI-less connects; this §1.10 setting additionally requests it for named hosts
+            // (extra fidelity at the cost of one protected upstream probe per first-seen host).
             val mirrorEnabled = SettingsDataStore.get(context).remoteCertMirrorEnabled.first()
             // §3 (C2) -- read fresh per CONNECT, same convention as mirrorEnabled above. Disabled
             // (all-zero/no-op) by default, so a user who never touches this setting pays nothing.
             val networkCondition = SettingsDataStore.get(context).networkCondition.first()
-            val (cert, keyPair) = certCache.getOrCompute(host) { h ->
-                generateHostCertOrMirror(context, h, mirrorEnabled)
-            }
 
             // Real JA3 (M6): peek the raw ClientHello record directly off the accepted socket
             // BEFORE handing it to JSSE -- by the time startHandshake() below returns, JSSE has
             // consumed those bytes and there is no supported way to read them back. peeked.socket
             // replays the exact same bytes to JSSE (see ClientHelloCapture's KDoc), so the
             // handshake itself is completely unaffected by this.
+            //
+            // S1 task 8: the peek now happens BEFORE leaf issuance, so the ClientHello's SNI is
+            // the authoritative identity for the leaf (CONNECT 1.2.3.4:443 with SNI example.com
+            // gets a CN=example.com leaf, not CN=1.2.3.4).
             val peeked = ClientHelloCapture.peekClientHello(client)
             val clientHello: TlsClientHello? = peeked.clientHello
+            client = peeked.socket
 
-            // Upgrade client side to TLS with our per-host cert
-            val sslContext = createSslContext(keyPair, cert)
+            val issuance = try {
+                certificateEngine.issue(
+                    context,
+                    CertificateEngine.Request(
+                        connectAuthority = host, port = port, sni = clientHello?.sni,
+                        preferUpstreamSniff = mirrorEnabled,
+                    ),
+                )
+            } catch (e: ClientCertException) {
+                persistConnectAttempt(
+                    context, client, db, host, port, "FAILED",
+                    failureReason = "certificate policy: ${e.message}",
+                    origin = session.origin,
+                )
+                machine.fail("certificate policy: ${e.message}")
+                return
+            }
+            val leafIdentity = issuance.identity.host
+            val (leafKey, leafChain) = when (issuance) {
+                is CertificateEngine.Outcome.Passthrough -> {
+                    Log.i(TAG, "PASSTHROUGH policy for $leafIdentity ($host:$port) -- relaying TLS opaquely")
+                    HttpProxyShared.handleConnectAttempt(
+                        client, target, ConnectControl.Disposition.AllowOpaque, output,
+                        networkCondition = opaqueNetworkCondition,
+                        replies = HttpProxyShared.ConnectReplies({}, {}, {}),
+                    ) { sent, recv ->
+                        persistConnectAttempt(
+                            context, client, db, host, port, "ALLOWED_OPAQUE",
+                            failureReason = "per-domain PASSTHROUGH policy (${issuance.policy.hostPattern}) -- not decrypted",
+                            bytesToUpstream = sent, bytesToClient = recv,
+                            origin = session.origin,
+                        )
+                    }
+                    return
+                }
+                is CertificateEngine.Outcome.Custom -> issuance.privateKey to issuance.chain
+                is CertificateEngine.Outcome.Issued -> issuance.keyPair.private to arrayOf(issuance.certificate)
+            }
+
+            // Upgrade client side to TLS with the leaf (or imported server cert) for this identity
+            val sslContext = createSslContext(leafKey, leafChain)
             val sslSocket = sslContext.socketFactory
-                .createSocket(peeked.socket, host, port, true) as SSLSocket
+                .createSocket(client, host, port, true) as SSLSocket
             sslSocket.useClientMode = false
             // Client/server ALPN negotiation (§4): offer both h2 and http/1.1, exactly what a
             // real server behind this proxy would offer. The client's choice (read back below,
@@ -474,11 +523,23 @@ class MitmProxyEngine(
             // deferred until an upstream socket actually exists. Normal (non-mocked) traffic
             // still gets this on its very first request, so lineage-join behaviour for real
             // traffic is unchanged; a fully-mocked connection simply never triggers it.
+            // S1 task 8: mutual TLS -- a per-domain policy with client material makes the
+            // upstream leg present that client certificate; a misconfigured one fails by name.
+            val upstreamKeyManagers = try {
+                certificateEngine.clientKeyManagersFor(leafIdentity)
+            } catch (e: ClientCertException) {
+                persistFailedMitmTlsSession(db, host, port, "client certificate", e)
+                persistConnectAttempt(context, client, db, host, port, "FAILED", failureReason = "mTLS: ${e.message}", origin = session.origin)
+                machine.fail("mTLS: ${e.message}")
+                runCatching { sslSocket.close() }
+                return
+            }
             val upstream = LazyUpstreamConnection(
                 host, port,
                 preferredAlpnProtocols = negotiatedAlpn?.let { listOf(it) } ?: emptyList(),
                 networkCondition = networkCondition,
-            ) { connected ->
+                keyManagers = upstreamKeyManagers,
+                onFirstConnect = { connected ->
                 // W5: the MITM proxy terminates TLS itself, so tlsSessionId/connectionId have
                 // historically been keyed as "$host:$port" -- a real key, but a different
                 // convention than the 5-tuple ConnectionLineage joins on for the VPN/tun path.
@@ -510,7 +571,8 @@ class MitmProxyEngine(
                     db, host, port, sslSocket, connected.sslSocket, canonicalConnectionId,
                     ja3Hash = clientHello?.ja3Hash(),
                 )
-            }
+            },
+            )
 
             // Inspecting bidirectional relay: parse decrypted HTTP/1.x with
             // HttpParser, enforce rules on the parsed messages, persist each
@@ -596,6 +658,7 @@ class MitmProxyEngine(
                     context, client, db, host, port, "FAILED",
                     negotiatedAlpn = negotiatedAlpn,
                     failureReason = "relay failed before any byte was exchanged: ${cause.message ?: cause.javaClass.simpleName}",
+                    origin = session.origin,
                 )
             } else {
                 machine.close()
@@ -607,6 +670,7 @@ class MitmProxyEngine(
                     failureReason = if (outcome.drainTimedOut) {
                         "one leg stalled after the other closed; force-closed at the ${StructuredRelay.DEFAULT_DRAIN_TIMEOUT_MS / 1000}s drain deadline"
                     } else null,
+                    origin = session.origin,
                 )
             }
 
@@ -645,40 +709,39 @@ class MitmProxyEngine(
         negotiatedAlpn: String? = null,
         bytesToUpstream: Long = 0,
         bytesToClient: Long = 0,
+        origin: ClientOrigin? = null,
     ) {
         runCatching {
-            // UID attribution has two independent, never-throw paths: the API 29+
-            // ConnectivityManager owner-UID lookup (works only while requestr is itself the
-            // active VPN), and ConnectControl.resolveClientUid's /proc/net/tcp fallback (covers
-            // pre-29 or non-VPN contexts, subject to Android's per-app socket visibility on
-            // stock N+ devices where it legitimately returns null). Try the former, fall back
-            // to the latter rather than silently recording null when a fallback was available.
-            val clientUid = runCatching {
-                if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) return@runCatching null
-                val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-                    ?: return@runCatching null
-                val local = client.localSocketAddress as? java.net.InetSocketAddress
-                    ?: return@runCatching null
-                val remote = client.remoteSocketAddress as? java.net.InetSocketAddress
-                    ?: return@runCatching null
-                cm.getConnectionOwnerUid(android.system.OsConstants.IPPROTO_TCP, local, remote).takeIf { it != -1 }
-            }.getOrNull() ?: ConnectControl.resolveClientUid(client)
+            // S1 task 10: one attribution path (bridge +info tuple -> getConnectionOwnerUid ->
+            // /proc/net/tcp -> single-app selection inference -> explicit UNATTRIBUTED). The
+            // reasons for an unattributed flow are recorded on the row instead of a silent null.
+            val attribution = uidAttributor(context).attribute(
+                UidAttributor.Flow(origin = origin, clientSocket = client, destination = null),
+            )
+            val attributionNote = when (attribution) {
+                is UidAttributor.Attribution.Resolved ->
+                    if (attribution.isInferred) "uid inferred from single-app capture selection" else null
+                is UidAttributor.Attribution.Unattributed -> "uid unattributed: ${attribution.reason}"
+            }
             val entity = ConnectAttemptEntity(
                 sessionId = sessionId.get(),
                 targetHost = host,
                 targetPort = port,
-                clientUid = clientUid,
+                clientUid = attribution.uidOrNull,
                 negotiatedAlpn = negotiatedAlpn,
                 disposition = disposition,
                 redirectTarget = redirectTarget,
                 bytesToClient = bytesToClient,
                 bytesToUpstream = bytesToUpstream,
-                failureReason = failureReason,
+                failureReason = listOfNotNull(failureReason, attributionNote).joinToString(" | ").ifEmpty { null },
                 finishedAt = System.currentTimeMillis(),
             )
             db.connectAttemptDao().insert(entity)
         }.onFailure { e -> Log.w(TAG, "Failed to persist CONNECT attempt for $host: ${e.message}") }
     }
+
+    private val injectedUidAttributor = uidAttributor
+    private fun uidAttributor(context: Context): UidAttributor = injectedUidAttributor ?: UidAttributor.shared(context)
 
     // ── WebSocket mode switch (§4/§5) ────────────────────────────────────
 
@@ -1567,63 +1630,7 @@ class MitmProxyEngine(
         return "HTTP/".startsWith(head)
     }
 
-    // ── Per-host cert generation ────────────────────────────────────────
-
-    /**
-     * §1.10: when remote-cert mirroring is enabled, tries [CertificateAuthority.issueMirroredLeaf]
-     * first (an independent direct probe of the real host, subject/SANs/validity copied into our
-     * self-signed leaf) and falls back to the plain [generateHostCert] leaf whenever mirroring
-     * fails for any reason (unreachable host, handshake failure, timeout -- issueMirroredLeaf
-     * never throws, only returns null). When mirroring is disabled (the default), this is
-     * exactly the pre-existing [generateHostCert] behaviour with zero extra I/O.
-     */
-    internal fun generateHostCertOrMirror(
-        context: Context,
-        host: String,
-        mirrorEnabled: Boolean,
-    ): Pair<X509Certificate, KeyPair> {
-        if (mirrorEnabled) {
-            val mirrored = kotlinx.coroutines.runBlocking {
-                CertificateAuthority.issueMirroredLeaf(context, host)
-            }
-            if (mirrored != null) return mirrored
-        }
-        return generateHostCert(context, host)
-    }
-
-    private fun generateHostCert(context: Context, host: String): Pair<X509Certificate, KeyPair> {
-        val ca = kotlinx.coroutines.runBlocking { CertificateAuthority.getOrCreate(context) }
-        val bcProvider = org.bouncycastle.jce.provider.BouncyCastleProvider()
-        val keyPair = KeyPairGenerator.getInstance("RSA", bcProvider)
-            .apply { initialize(2048, SecureRandom()) }
-            .genKeyPair()
-        val serial = BigInteger.valueOf(System.currentTimeMillis())
-        val now = Date()
-        val expiry = Date(now.time + 365L * 24 * 60 * 60 * 1000)
-
-        // Use the real CA certificate's subject DN as the issuer so the generated
-        // per-host cert chains correctly. Hardcoding "CN=requestr Root CA" breaks
-        // verification when the CA subject includes O/OU components.
-        val issuer = X500Name.getInstance(ca.certificate.subjectX500Principal.encoded)
-        val subject = X500Name("CN=$host")
-
-        val builder = JcaX509v3CertificateBuilder(
-            issuer, serial, now, expiry, subject, keyPair.public
-        ).apply {
-            addExtension(Extension.basicConstraints, true, BasicConstraints(false))
-            addExtension(Extension.keyUsage, true, KeyUsage(KeyUsage.digitalSignature or KeyUsage.keyEncipherment))
-            addExtension(Extension.subjectAlternativeName, false, HostSanGenerator.build(host))
-        }
-
-        val signer = JcaContentSignerBuilder("SHA256withRSA")
-            .setProvider(bcProvider)
-            .build(ca.keyPair.private)
-
-        val cert = JcaX509CertificateConverter()
-            .getCertificate(builder.build(signer))
-
-        return cert to keyPair
-    }
+    // Per-host leaf issuance lives in com.example.interception.tls.CertificateEngine (S1 task 8).
 
     // ── TLS session persistence (M2) ─────────────────────────────────────
 
@@ -1721,13 +1728,14 @@ class MitmProxyEngine(
 
     // ── SSL context ─────────────────────────────────────────────────────
 
-    private fun createSslContext(keyPair: KeyPair, cert: X509Certificate): SSLContext {
+    private fun createSslContext(privateKey: java.security.PrivateKey, chain: Array<X509Certificate>): SSLContext {
         val ks = KeyStore.getInstance("PKCS12").apply {
             load(null, null)
-            // The client already has the CA in its trust store; sending just the leaf
-            // is enough and avoids an invalid chain (e.g. a duplicate leaf cert) that
-            // stricter TLS implementations (Conscrypt, some browsers) reject.
-            setKeyEntry("mitm", keyPair.private, "".toCharArray(), arrayOf(cert))
+            // For minted leaves the chain is just the leaf: the client already has the CA in
+            // its trust store, and sending a duplicate/extra cert makes stricter TLS stacks
+            // (Conscrypt, some browsers) reject the chain. An imported CUSTOM_SERVER_CERT is
+            // presented with whatever chain it was imported with.
+            setKeyEntry("mitm", privateKey, "".toCharArray(), chain)
         }
         val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
         kmf.init(ks, "".toCharArray())

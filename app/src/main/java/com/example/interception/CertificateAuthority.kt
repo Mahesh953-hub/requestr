@@ -15,6 +15,8 @@ import java.security.cert.X509Certificate
 import java.util.Arrays
 import java.util.Date
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.bouncycastle.asn1.x500.X500Name
 import org.bouncycastle.asn1.x509.BasicConstraints
@@ -136,9 +138,19 @@ object CertificateAuthority {
     private val passwordProvider: CaKeystorePasswordProvider
         get() = passwordProviderForTest ?: SecureKeyStoreCaPasswordProvider
 
-    /** Returns the existing CA, generating one on first use. */
+    /**
+     * Serialises [getOrCreate]: the S1 task 7 pre-warm in `MitmProxyEngine.start` and the first
+     * MITM'd connection (or a caller building a trust store) race for the CA on a fresh install.
+     * Without this lock both see "no keystore yet", both generate a CA and both rotate the
+     * per-install password, so the loser holds a CA that never reaches disk while the file on
+     * disk may be sealed under a password nobody remembers -- every later load then regenerates
+     * yet another CA and no leaf chains to the one the user installed.
+     */
+    private val materialLock = Mutex()
+
+    /** Returns the existing CA, generating one on first use. Concurrent callers serialise. */
     suspend fun getOrCreate(context: Context): CaMaterial = withContext(Dispatchers.IO) {
-        load(context) ?: generate(context)
+        materialLock.withLock { load(context) ?: generate(context) }
     }
 
     /**
@@ -241,6 +253,14 @@ object CertificateAuthority {
             Extension.subjectKeyIdentifier,
             false,
             JcaX509ExtensionUtils().createSubjectKeyIdentifier(keyPair.public),
+        )
+        // S1 task 8: AKI on the root for symmetry with the leaves CertificateEngine mints (whose
+        // AKI is derived from this same public key) -- makes chain building unambiguous for
+        // validators that key on AKI/SKI matching.
+        builder.addExtension(
+            Extension.authorityKeyIdentifier,
+            false,
+            JcaX509ExtensionUtils().createAuthorityKeyIdentifier(keyPair.public),
         )
 
         val signer = JcaContentSignerBuilder("SHA256withRSA")
@@ -413,67 +433,6 @@ REOF
         getOrCreate(context).also { CaTrustGate.invalidateAll() }
     }
 
-    // ── Remote-certificate mirroring ────────────────────────────────────
-
-    /**
-     * Issues a per-host MITM leaf signed by this CA whose subject/SANs/validity mirror [host]'s
-     * REAL certificate (fetched via an independent direct handshake -- see
-     * [RemoteCertificateMirror.fetchRemoteLeaf]) instead of the plain `CN=<host>` +
-     * exact/wildcard-SAN leaf [MitmProxyEngine.generateHostCert] issues today.
-     *
-     * Returns null -- never throws -- when the remote cert can't be fetched (host unreachable,
-     * handshake failure, timeout), so a caller can fall back to its existing plain per-host leaf
-     * generation exactly as before. This function does not touch [MitmProxyEngine] itself.
-     *
-     * Surfacing note: this is intentionally NOT wired into [MitmProxyEngine.generateHostCert]
-     * today. Doing so would fetch the real upstream cert at CONNECT time, before the engine has
-     * decided whether the request will be mock-short-circuited — re-opening a real upstream
-     * connection for every first-seen `FORCE_MITM` host, including all-mock/offline connections,
-     * which is the exact "mock-only connections must never dial the real endpoint" regression
-     * [MitmProxyEngine]'s lazy-upstream path (§1.5) fixes (and which `MitmProxyEngineLazyUpstreamTest`
-     * guards with `acceptCount` assertions). Surfacing it is a discrete opt-in feature, not a
-     * default-path change.
-     */
-    suspend fun issueMirroredLeaf(
-        context: Context,
-        host: String,
-        port: Int = 443,
-    ): Pair<X509Certificate, KeyPair>? = withContext(Dispatchers.IO) {
-        val remote = RemoteCertificateMirror.fetchRemoteLeaf(host, port) ?: return@withContext null
-        val profile = RemoteCertificateMirror.profileFrom(remote)
-        issueLeafFromProfile(context, host, profile)
-    }
-
-    /**
-     * Pure(r) half of [issueMirroredLeaf], split out so the cert-building logic is unit-testable
-     * against an in-test [RemoteCertificateMirror.MirroredProfile] without a real network fetch.
-     */
-    internal suspend fun issueLeafFromProfile(
-        context: Context,
-        host: String,
-        profile: RemoteCertificateMirror.MirroredProfile,
-    ): Pair<X509Certificate, KeyPair> {
-        val ca = getOrCreate(context)
-        val bcProvider = org.bouncycastle.jce.provider.BouncyCastleProvider()
-        val keyPair = KeyPairGenerator.getInstance("RSA", bcProvider)
-            .apply { initialize(2048, SecureRandom()) }
-            .genKeyPair()
-        val serial = BigInteger(64, SecureRandom())
-        val issuer = X500Name.getInstance(ca.certificate.subjectX500Principal.encoded)
-        // A mirrored subject with no CN at all (unusual, but some leaves rely purely on SAN) is
-        // still a valid X500Name -- BouncyCastle's builder doesn't require a CN RDN.
-        val san = profile.subjectAltNames ?: HostSanGenerator.build(host)
-
-        val builder = JcaX509v3CertificateBuilder(
-            issuer, serial, profile.notBefore, profile.notAfter, profile.subject, keyPair.public,
-        ).apply {
-            addExtension(Extension.basicConstraints, true, BasicConstraints(false))
-            addExtension(Extension.keyUsage, true, KeyUsage(KeyUsage.digitalSignature or KeyUsage.keyEncipherment))
-            addExtension(Extension.subjectAlternativeName, false, san)
-        }
-
-        val signer = JcaContentSignerBuilder("SHA256withRSA").setProvider(bcProvider).build(ca.keyPair.private)
-        val cert = JcaX509CertificateConverter().getCertificate(builder.build(signer))
-        return cert to keyPair
-    }
+    // Remote-certificate mirroring / per-host leaf issuance lives in
+    // com.example.interception.tls.CertificateEngine (S1 task 8) -- this object only owns the CA.
 }

@@ -1123,6 +1123,7 @@ class QuicConnectionDecoder(
         QuicDecodeStatus.OBSERVED_NO_KEYS -> 1
         QuicDecodeStatus.PARTIALLY_DECODED -> 2
         QuicDecodeStatus.FULLY_DECODED -> 3
+        QuicDecodeStatus.BLOCKED_BY_POLICY -> BLOCKED_BY_POLICY_RANK
     }
 
     /** Lifecycle only advances (INITIALIZING → … → CLOSED); a late packet never rewinds it. */
@@ -1182,6 +1183,12 @@ class QuicConnectionDecoder(
     }
 
     companion object {
+        /**
+         * S1 task 9: rank of [QuicDecodeStatus.BLOCKED_BY_POLICY] -- above every decode state so a
+         * policy block is sticky in Room (mirrors the CASE ladder in `QuicConnectionDao`).
+         */
+        const val BLOCKED_BY_POLICY_RANK = 9
+
         private const val CLIENT_RANDOM_LEN = 32
 
         /** Synthetic stream id for a CRYPTO stream, which is not a QUIC stream and has no real id. */

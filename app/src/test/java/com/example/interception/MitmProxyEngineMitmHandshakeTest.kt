@@ -43,6 +43,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.ConscryptMode
 
 /**
  * Regression coverage for the MITM proxy CONNECT/header-draining and per-host certificate fixes.
@@ -54,6 +55,7 @@ import org.robolectric.annotation.Config
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [Build.VERSION_CODES.Q])
+@ConscryptMode(ConscryptMode.Mode.OFF)
 class MitmProxyEngineMitmHandshakeTest {
 
     private val context get() = ApplicationProvider.getApplicationContext<Context>()
@@ -80,7 +82,10 @@ class MitmProxyEngineMitmHandshakeTest {
             // build does not support TLS over a plain socket after HTTP CONNECT data has been
             // exchanged (startHandshake() hangs). It also conflicts with SunJSSE's EC named
             // group initialisation. Remove it so the MITM handshake test uses SunJSSE, which
-            // handles the STARTTLS-over-CONNECT upgrade correctly.
+            // handles the STARTTLS-over-CONNECT upgrade correctly. Robolectric's ConscryptMode
+            // (ON by default) re-installs Conscrypt before EVERY test method, so this one-shot
+            // removal only protects the first method to run -- the class-level
+            // @ConscryptMode(OFF) above is what keeps the second method on SunJSSE too.
             java.security.Security.removeProvider("Conscrypt")
         }
     }
@@ -257,6 +262,57 @@ class MitmProxyEngineMitmHandshakeTest {
         assertEquals(200, entity.statusCode)
         assertTrue("transaction must be marked as decrypted", entity.wasDecrypted)
         assertTrue("response body must be decrypted", entity.responseBody?.contains("Hello MITM!") == true)
+
+        sslSocket.close()
+        upstreamServer.close()
+        upstreamThread.join(5000)
+    }
+
+    /**
+     * S1 task 8 regression: the ClientHello is peeked BEFORE the leaf is issued, so the SNI --
+     * not the CONNECT authority -- decides the leaf identity. `CONNECT 127.0.0.1:port` with SNI
+     * `localhost` must present a `CN=localhost` leaf (the old order produced `CN=127.0.0.1`).
+     */
+    @Test
+    fun `ClientHello peek precedes issuance so SNI beats an IP CONNECT authority`() {
+        val (upstreamServer, upstreamThread) = startUpstreamTlsServer()
+        val upstreamPort = upstreamServer.localPort
+        runBlocking {
+            RequestrDatabase.get(context).interceptRuleDao().insert(
+                InterceptRuleEntity(name = "mitm ip", domain = "127.0.0.1", action = RuleAction.FORCE_MITM)
+            )
+        }
+        engine = MitmProxyEngine(caTrustGate = CaTrustGate(probe = { true }))
+        val proxyPort = engine.start(context, 0)
+
+        val socket = Socket("127.0.0.1", proxyPort)
+        socket.soTimeout = 30000
+        socket.getOutputStream().apply {
+            write(("CONNECT 127.0.0.1:$upstreamPort HTTP/1.1\r\nHost: 127.0.0.1:$upstreamPort\r\n\r\n").toByteArray())
+            flush()
+        }
+        val rawIn = socket.getInputStream()
+        var lastFour = 0L
+        val status = java.io.ByteArrayOutputStream()
+        while (true) {
+            val b = rawIn.read()
+            if (b == -1) break
+            status.write(b)
+            lastFour = ((lastFour shl 8) and 0xFFFFFFFF) or b.toLong()
+            if (lastFour == 0x0D0A0D0AL) break
+        }
+        assertTrue(status.toString(Charsets.ISO_8859_1.name()).contains("200"))
+
+        val sslSocket = caTrustingSslContext().socketFactory
+            .createSocket(socket, "localhost", upstreamPort, true) as SSLSocket
+        sslSocket.startHandshake()
+        val presented = sslSocket.session.peerCertificates.first() as X509Certificate
+        assertEquals("CN=localhost", presented.subjectX500Principal.name)
+        assertTrue(presented.subjectAlternativeNames.any { it[1] == "localhost" })
+        // S1 task 8 leaf hardening is visible end-to-end: EC key, serverAuth EKU, <= 90 days.
+        assertEquals("EC", presented.publicKey.algorithm)
+        assertEquals(listOf("1.3.6.1.5.5.7.3.1"), presented.extendedKeyUsage)
+        assertTrue(presented.notAfter.time - System.currentTimeMillis() <= 90L * 24 * 60 * 60 * 1000)
 
         sslSocket.close()
         upstreamServer.close()

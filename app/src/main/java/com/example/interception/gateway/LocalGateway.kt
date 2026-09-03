@@ -1,6 +1,7 @@
 package com.example.interception.gateway
 
 import android.util.Log
+import com.example.interception.gateway.local.ClientOrigin
 import com.example.interception.gateway.local.Destination
 import com.example.interception.gateway.local.EntryKind
 import com.example.interception.gateway.local.GatewayRejectReason
@@ -10,6 +11,7 @@ import com.example.interception.gateway.local.ProtocolClassifier
 import com.example.interception.gateway.local.ProtocolClassifier.Classification
 import com.example.interception.gateway.local.Socks4Handler
 import com.example.interception.gateway.local.Socks5Credentials
+
 import com.example.interception.gateway.local.Socks5Handler
 import com.example.interception.relay.RelayPool
 import com.example.interception.tls.ClientHelloCapture
@@ -49,6 +51,15 @@ interface GatewaySessionHandler {
     suspend fun handlePlaintext(session: GatewaySession)
 }
 
+/**
+ * Serves a SOCKS5 `UDP ASSOCIATE` control connection (S1 task 9). The implementation owns
+ * [control] from here on, must write the RFC 1928 reply itself and close the socket when the
+ * association ends.
+ */
+fun interface UdpAssociationHandler {
+    suspend fun handleUdpAssociate(control: Socket, requested: Destination, origin: ClientOrigin?)
+}
+
 /** Optional `SO_ORIGINAL_DST`-style lookup for transparent sessions that carry no SNI/Host. */
 fun interface OriginalDstResolver {
     fun resolve(client: Socket): Destination?
@@ -84,6 +95,11 @@ class LocalGateway(
      * [GatewayRejectReason.RELAY_POOL_SATURATED] instead of being dropped silently.
      */
     private val relayPool: RelayPool = RelayPool.shared(),
+    /**
+     * S1 task 9: when non-null, SOCKS5 `UDP ASSOCIATE` is served through it; when null the
+     * command is refused with `0x07` and counted as [GatewayRejectReason.SOCKS_COMMAND_UNSUPPORTED].
+     */
+    private val udpAssociationHandler: UdpAssociationHandler? = null,
 ) {
     private var serverSocket: ServerSocket? = null
     private var acceptJob: Job? = null
@@ -194,6 +210,18 @@ class LocalGateway(
             is Socks5Handler.Outcome.Connect -> handler.handleTunnel(
                 GatewaySession(replay, EntryKind.SOCKS5, outcome.destination, outcome.origin),
             )
+            is Socks5Handler.Outcome.UdpAssociate -> {
+                val udp = udpAssociationHandler
+                if (udp == null) {
+                    runCatching {
+                        replay.getOutputStream().write(Socks5Handler.reply(Socks5Handler.REP_COMMAND_NOT_SUPPORTED))
+                        replay.getOutputStream().flush()
+                    }
+                    reject(client, GatewayRejectReason.SOCKS_COMMAND_UNSUPPORTED, "SOCKS5 UDP ASSOCIATE not supported (no UDP policy router)")
+                } else {
+                    udp.handleUdpAssociate(replay, outcome.requested, outcome.origin)
+                }
+            }
         }
     }
 

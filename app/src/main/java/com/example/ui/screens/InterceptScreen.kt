@@ -2118,7 +2118,9 @@ fun ConnectionsBottomSheet(
                                     val decoded = conn.decodeStatus == com.example.data.local.QuicDecodeStatus.FULLY_DECODED
                                     val partiallyDecoded = conn.decodeStatus == com.example.data.local.QuicDecodeStatus.PARTIALLY_DECODED
                                     val keysMissing = conn.decodeStatus == com.example.data.local.QuicDecodeStatus.OBSERVED_NO_KEYS
+                                    val blockedByPolicy = conn.decodeStatus == com.example.data.local.QuicDecodeStatus.BLOCKED_BY_POLICY
                                     val badgeText = when {
+                                        blockedByPolicy -> "BLOCKED"
                                         decoded -> "HTTP/3"
                                         partiallyDecoded -> "HANDSHAKE"
                                         keysMissing -> "NO KEYS"

@@ -14,7 +14,7 @@ data class Tun2ProxyConfig(
     val proxy: ProxyTarget,
     val dnsMode: DnsMode = DnsMode.DIRECT,
     val dnsAddr: String = "8.8.8.8",
-    val virtualDnsPool: String = "198.18.0.0/15",
+    val virtualDnsPool: String = VIRTUAL_DNS_POOL,
     val udpGw: UdpGw? = null,
     val bypassCidrs: List<String> = emptyList(),
     val mtu: Int = 1500,
@@ -156,6 +156,14 @@ data class Tun2ProxyConfig(
     }
 
     companion object {
+        /**
+         * S1 task 11: the virtual-DNS pool the bridge answers from. Shared with the VPN service,
+         * which advertises a resolver *inside* this pool (`VpnDnsPlan.VIRTUAL_DNS_RESOLVER`) so
+         * every app query terminates in tun2proxy's virtual resolver instead of leaking to a
+         * public one.
+         */
+        const val VIRTUAL_DNS_POOL = "198.18.0.0/15"
+
         /**
          * Legacy Approach-A wiring: HTTP CONNECT target pointed at the local proxy on
          * `127.0.0.1:mitmPort`. Production (`RequestrVpnService`) has moved to [forLocalGateway]
