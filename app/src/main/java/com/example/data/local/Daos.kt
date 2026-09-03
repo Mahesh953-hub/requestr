@@ -243,6 +243,39 @@ interface CapturedTrafficDao {
         responseBodyBytesTruncated: Boolean = false,
     )
 
+    /** Whole-row update; used by the persistence actor after a body spill re-homes the body columns. */
+    @Update
+    suspend fun update(item: CapturedTrafficEntity)
+
+    /** S2 task 16: rows that reference a spilled body file (orphan sweep / delete cleanup). */
+    @Query(
+        "SELECT id, requestBodyFilePath, responseBodyFilePath FROM captured_traffic " +
+            "WHERE requestBodyFilePath IS NOT NULL OR responseBodyFilePath IS NOT NULL",
+    )
+    suspend fun getSpilledBodyRefs(): List<SpilledBodyRef>
+
+    @Query("SELECT id, requestBodyFilePath, responseBodyFilePath FROM captured_traffic WHERE id = :id")
+    suspend fun getSpilledBodyRef(id: Long): SpilledBodyRef?
+
+    /**
+     * Clears a body-file reference whose file is gone; the truncated flag is raised for the
+     * evicted direction so the UI renders "not stored" instead of an empty body.
+     */
+    @Query(
+        "UPDATE captured_traffic SET requestBodyFilePath = :requestBodyFilePath, " +
+            "responseBodyFilePath = :responseBodyFilePath, " +
+            "requestBodyBytesTruncated = CASE WHEN :requestEvicted THEN 1 ELSE requestBodyBytesTruncated END, " +
+            "responseBodyBytesTruncated = CASE WHEN :responseEvicted THEN 1 ELSE responseBodyBytesTruncated END " +
+            "WHERE id = :id",
+    )
+    suspend fun clearEvictedBodyRefs(
+        id: Long,
+        requestBodyFilePath: String?,
+        responseBodyFilePath: String?,
+        requestEvicted: Boolean,
+        responseEvicted: Boolean,
+    )
+
     @Delete
     suspend fun delete(item: CapturedTrafficEntity)
 
@@ -252,6 +285,13 @@ interface CapturedTrafficDao {
     @Query("DELETE FROM captured_traffic")
     suspend fun clearAll()
 }
+
+/** Projection of the body-file reference columns of one `captured_traffic` row. */
+data class SpilledBodyRef(
+    val id: Long,
+    val requestBodyFilePath: String?,
+    val responseBodyFilePath: String?,
+)
 
 @Dao
 interface CaptureSessionDao {

@@ -199,7 +199,30 @@ class PersistenceQueue internal constructor(
     @Volatile
     private var closed = false
 
+    /**
+     * S2 task 16: where over-limit bodies go. Null means "no spilling" (flag off, or a bare
+     * [forDatabase] queue in tests) -- bodies are then persisted inline exactly as before, which
+     * is safe because `HttpBodyDecoder.clampForStorage` only lets >2 MiB through when the flag
+     * is on. Set once by [get]; [attachBodyStore] exists for tests and for the flag flip.
+     */
+    @Volatile
+    var bodyStore: BodyStore? = null
+        private set
+
+    private val sweepStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+
     private val actor: Job = scope.launch { drainLoop() }
+
+    /**
+     * Installs [store] (or removes it with null) and, the first time a store is attached, queues
+     * the startup orphan sweep as a regular op so it serialises with live inserts.
+     */
+    fun attachBodyStore(store: BodyStore?) {
+        bodyStore = store
+        if (store != null && sweepStarted.compareAndSet(false, true)) {
+            execute("body-store orphan sweep") { database -> store.sweepOrphans(database) }
+        }
+    }
 
     // -- producer API (never suspends, never touches Room) ----------------------------------------
 
@@ -388,8 +411,24 @@ class PersistenceQueue internal constructor(
     private suspend fun apply(op: PersistenceOp, sessions: MutableSet<Long>): Boolean {
         when (op) {
             is PersistenceOp.InsertTransaction -> {
+                val store = bodyStore?.takeIf { it.needsSpill(op.entity) }
                 val id = db.write {
-                    val id = db.capturedTrafficDao().insert(op.entity)
+                    val id = if (store == null) {
+                        db.capturedTrafficDao().insert(op.entity)
+                    } else {
+                        // Insert the row without its over-limit bodies (so the BLOB/text columns
+                        // never see them), then spill each body to <id>.<req|res>.bin and re-home
+                        // the body columns in the same transaction. A spill failure keeps the row
+                        // with the truncated flag raised (BodyStore.place).
+                        val stripped = op.entity.copy(
+                            requestBody = null, responseBody = null,
+                            requestBodyBytes = null, responseBodyBytes = null,
+                        )
+                        val id = db.capturedTrafficDao().insert(stripped)
+                        val placed = store.place(op.entity, id)
+                        db.capturedTrafficDao().update(placed.copy(id = id))
+                        id
+                    }
                     if (op.headers.isNotEmpty()) {
                         db.transactionHeaderDao().insertAll(op.headers.map { it.copy(trafficId = id) })
                     }
@@ -517,8 +556,23 @@ class PersistenceQueue internal constructor(
          */
         private val registry = java.util.WeakHashMap<RequestrDatabase, PersistenceQueue>()
 
-        /** The process-wide queue over [RequestrDatabase.get]. */
-        fun get(context: Context): PersistenceQueue = forDatabase(RequestrDatabase.get(context.applicationContext))
+        /**
+         * The process-wide queue over [RequestrDatabase.get]. Also applies the `bodySpill`
+         * rollout flag: installs the [BodyStore] (queuing the startup orphan sweep) and mirrors
+         * the flag into `HttpBodyDecoder.spillEnabled` so engines and actor agree on the cap.
+         */
+        fun get(context: Context): PersistenceQueue {
+            val app = context.applicationContext
+            val queue = forDatabase(RequestrDatabase.get(app))
+            val enabled = InterceptorFlags.get(app).bodySpill
+            com.example.interception.http.HttpBodyDecoder.spillEnabled = enabled
+            if (enabled) {
+                if (queue.bodyStore == null) queue.attachBodyStore(BodyStore.get(app))
+            } else if (queue.bodyStore != null) {
+                queue.attachBodyStore(null)
+            }
+            return queue
+        }
 
         /**
          * The queue owning writes to [db]. Engines that are handed a database instance

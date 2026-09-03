@@ -39,13 +39,26 @@ object CaptureLogRepository {
             .map { it.toUiModel() }
     }
 
+    /**
+     * Clears every captured row and (S2 task 16) every spilled body file. Rows go first so a
+     * crash in between leaves orphan files (swept at next start), never rows pointing at nothing.
+     */
     suspend fun clearAll(context: Context) = withContext(Dispatchers.IO) {
         RequestrDatabase.get(context).capturedTrafficDao().clearAll()
+        com.example.data.persistence.BodyStore.get(context).deleteAll()
+        Unit
     }
 
     suspend fun deleteEntry(context: Context, uiId: String) = withContext(Dispatchers.IO) {
-        uiId.toLongOrNull()?.let {
-            RequestrDatabase.get(context).capturedTrafficDao().deleteById(it)
+        uiId.toLongOrNull()?.let { id ->
+            val dao = RequestrDatabase.get(context).capturedTrafficDao()
+            val refs = dao.getSpilledBodyRef(id)
+            dao.deleteById(id)
+            if (refs != null) {
+                val store = com.example.data.persistence.BodyStore.get(context)
+                store.deleteBody(refs.requestBodyFilePath)
+                store.deleteBody(refs.responseBodyFilePath)
+            }
         }
         Unit
     }
@@ -180,8 +193,10 @@ internal fun CapturedTrafficEntity.toUiModel(): CapturedTrafficItem = CapturedTr
     responseSize = responseSizeBytes,
     requestHeaders = requestHeaders,
     responseHeaders = responseHeaders,
-    requestBody = requestBody ?: "",
-    responseBody = responseBody ?: "",
+    // S2 task 16: a spilled text body leaves only its UTF-8 preview on the row; surface that so
+    // the list/detail views are not blank for it (the full body lives in the BodyStore file).
+    requestBody = requestBody ?: requestBodyPreview ?: "",
+    responseBody = responseBody ?: responseBodyPreview ?: "",
     timestamp = timestamp,
     appPackage = appPackage ?: "",
     appName = appPackage ?: "",

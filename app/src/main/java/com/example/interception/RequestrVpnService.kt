@@ -283,6 +283,11 @@ class RequestrVpnService : VpnService() {
                 // UnsupportedOperationException at establish() time, which is exactly why
                 // SELECTED_APPS mode never worked before this fix (see resolveFilterPlan doc).
                 val plan = resolveFilterPlan(filterMode, selected, packageName)
+                // S2 task 16: resolve the shared persistence queue before any engine (PacketPump,
+                // relay pool, gateway) is built so the `bodySpill` flag is applied -- BodyStore
+                // attached (with its startup orphan sweep queued) and the decoder cap mirrored --
+                // ahead of the first insert of this session.
+                persistence
                 // S1 task 10: the allow-list is the only legitimate input to the attributor's
                 // single-app inference step; everything else is attributed from the kernel.
                 com.example.interception.uid.UidAttributor.captureSelectionSnapshot =

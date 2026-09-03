@@ -114,9 +114,29 @@ object HttpBodyDecoder {
     fun clampForStorage(bytes: ByteArray): ClampedBody =
         if (bytes.size <= MAX_STORED_BODY_BYTES) {
             ClampedBody(bytes = bytes, truncated = false)
+        } else if (spillEnabled && bytes.size <= MAX_SPILLABLE_BODY_BYTES) {
+            // S2 task 16: above the inline cap but within the spill ceiling -- hand the bytes on
+            // untruncated; the persistence actor moves them to the BodyStore file before the
+            // row is written, so the BLOB column never sees them.
+            ClampedBody(bytes = bytes, truncated = false)
         } else {
             ClampedBody(bytes = null, truncated = true)
         }
+
+    /**
+     * S2 task 16: ceiling for a body that [clampForStorage] passes through for file spilling
+     * (see [com.example.data.persistence.BodyStore.MAX_SPILLABLE_BYTES]). Beyond it the
+     * pre-S2 drop applies -- the pre-S3 parsers hold the body in memory, so this is the hard
+     * per-direction memory bound.
+     */
+    const val MAX_SPILLABLE_BODY_BYTES: Int = com.example.data.persistence.BodyStore.MAX_SPILLABLE_BYTES
+
+    /**
+     * Mirrors `InterceptorFlags.bodySpill`; set by the capture service at session start (see
+     * [com.example.data.persistence.PersistenceQueue.get]). Off restores the 2 MiB drop.
+     */
+    @Volatile
+    var spillEnabled: Boolean = true
 
     /**
      * Everything a [com.example.data.local.CapturedTrafficEntity] persist call needs for one

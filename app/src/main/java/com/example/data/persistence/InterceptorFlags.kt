@@ -4,7 +4,8 @@ import android.content.Context
 import android.content.SharedPreferences
 
 /**
- * S1 rollout flags from master plan §6: `relayPoolBounded`, `quicTeePolicy`, `pcapng`.
+ * S1/S2 rollout flags from master plan §6: `relayPoolBounded`, `quicTeePolicy`, `pcapng`,
+ * `bodySpill`.
  *
  * One `SharedPreferences` file, one boolean per flag, modeled on [TeeRolloutFlag]/[DbDriverFlag]
  * so every flag is readable synchronously from [com.example.interception.RequestrVpnService]
@@ -33,15 +34,25 @@ class InterceptorFlags private constructor(private val prefs: SharedPreferences)
     /** Task 12: when `true` the tee feeds the PCAPng writer (and classic PCAP) in native-bridge mode. */
     val pcapng: Boolean get() = prefs.getBoolean(KEY_PCAPNG, true)
 
+    /**
+     * S2 task 16: when `true` bodies above [BodyStore.INLINE_LIMIT_BYTES] are spilled to
+     * `filesDir/captures/` by the persistence actor and engines hand up to
+     * [BodyStore.MAX_SPILLABLE_BYTES] to it; when `false` the pre-S2 behaviour applies (bodies
+     * above `HttpBodyDecoder.MAX_STORED_BODY_BYTES` are dropped, only their size is kept).
+     */
+    val bodySpill: Boolean get() = prefs.getBoolean(KEY_BODY_SPILL, true)
+
     fun setRelayPoolBounded(enabled: Boolean) = prefs.edit().putBoolean(KEY_RELAY_POOL_BOUNDED, enabled).apply()
     fun setQuicTeePolicy(enabled: Boolean) = prefs.edit().putBoolean(KEY_QUIC_TEE_POLICY, enabled).apply()
     fun setPcapng(enabled: Boolean) = prefs.edit().putBoolean(KEY_PCAPNG, enabled).apply()
+    fun setBodySpill(enabled: Boolean) = prefs.edit().putBoolean(KEY_BODY_SPILL, enabled).apply()
 
     companion object {
         private const val PREFS_NAME = "requestr_interceptor_flags"
         internal const val KEY_RELAY_POOL_BOUNDED = "relay_pool_bounded"
         internal const val KEY_QUIC_TEE_POLICY = "quic_tee_policy"
         internal const val KEY_PCAPNG = "pcapng"
+        internal const val KEY_BODY_SPILL = "body_spill"
 
         @Volatile
         private var INSTANCE: InterceptorFlags? = null
