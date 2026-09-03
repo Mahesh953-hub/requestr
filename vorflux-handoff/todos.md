@@ -24,8 +24,8 @@ Exported from the platform todo list at handoff time.
 
 ## S1–S8 (approved interceptor architecture slices)
 - cbaea — Execute S1–S8 approved interceptor architecture slices — in_progress
-  - S0 closed on branch `vorflux/interceptor-s0-runtime` (PR #18; ci.yml header-check
-    wiring still needs a `workflow`-scoped push, diff is in the PR body).
+  - S0 closed on branch `vorflux/interceptor-s0-runtime` (PR #18, incl. the ci.yml
+    header-check wiring `d37adf8`).
   - S1 task 6 (`LocalGateway` multi-protocol listener) — done on
     `vorflux/interceptor-s1-transport`: SOCKS5 (+info) / SOCKS4(a) / HTTP CONNECT /
     absolute-form / transparent TLS-by-SNI / transparent HTTP-by-Host entries;
