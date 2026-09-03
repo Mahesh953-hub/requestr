@@ -19,13 +19,17 @@ import com.example.interception.http.GrpcEvent
 import com.example.interception.http.HttpBodyDecoder
 import com.example.interception.http.Http2Parser
 import com.example.interception.http.Http2Session
+import com.example.interception.http.Http2Transaction
 import com.example.interception.http.HttpParser
 import com.example.interception.http.ParsedHttpMessage
 import com.example.interception.http.WebSocketParser
 import com.example.interception.http.WsMessageAssembler
 import com.example.interception.gateway.GatewaySessionHandler
 import com.example.interception.gateway.LocalGateway
+import com.example.data.local.TransactionTimingEntity
+import com.example.data.persistence.PersistenceHealth
 import com.example.interception.relay.ConnectionStateMachine
+import com.example.interception.relay.ConnectionTimingTracker
 import com.example.interception.relay.RelayPool
 import com.example.interception.tls.CertificateEngine
 import com.example.interception.tls.ClientCertException
@@ -101,6 +105,13 @@ class MitmProxyEngine(
      * by the callback are caught and logged so they can never kill a relay.
      */
     private val onDecryptedTransaction: ((CapturedTrafficEntity) -> Unit)? = null,
+    /**
+     * S2 task 18: like [onDecryptedTransaction] but also receives the measured phase timings
+     * for the transaction (null when nothing could be observed, e.g. a mocked or blocked
+     * exchange). When set it takes precedence over [onDecryptedTransaction]; the plain callback
+     * stays for callers and tests that do not care about timings.
+     */
+    private val onDecryptedTransactionTimed: ((CapturedTrafficEntity, TransactionTimingEntity?) -> Unit)? = null,
     /**
      * Optional JSSE provider name for the client-facing TLS context (e.g. "SunJSSE").
      * Defaults to null so the platform's default provider (Conscrypt on Android) is used.
@@ -263,6 +274,8 @@ class MitmProxyEngine(
         // protocol, so the session is DETECTED by the time this handler sees it.
         val machine = ConnectionStateMachine()
         machine.transition(ConnectionStateMachine.State.DETECTED)
+        // S2 task 18: measured phases for every transaction relayed on this connection.
+        val timing = ConnectionTimingTracker()
         try {
             runCatching { client.setTcpNoDelay(true) }
             val output = client.getOutputStream()
@@ -541,6 +554,9 @@ class MitmProxyEngine(
                 networkCondition = networkCondition,
                 keyManagers = upstreamKeyManagers,
                 onFirstConnect = { connected ->
+                // S2 task 18: the upstream leg's DNS/connect/TLS phases belong to the first
+                // transaction on this connection.
+                timing.attachSetup(connected.setupTimings)
                 // W5: the MITM proxy terminates TLS itself, so tlsSessionId/connectionId have
                 // historically been keyed as "$host:$port" -- a real key, but a different
                 // convention than the 5-tuple ConnectionLineage joins on for the VPN/tun path.
@@ -608,7 +624,10 @@ class MitmProxyEngine(
                 // means (HPACK decode, per-stream pairing, gRPC message framing).
                 val h2Session = Http2Session(
                     onTransaction = { tx ->
-                        emitTransaction(tx.request, tx.response, tx.latencyMs, "$host:$port", logRequests, logResponses)
+                        emitTransaction(
+                            tx.request, tx.response, tx.latencyMs, "$host:$port", logRequests, logResponses,
+                            timings = h2Timings(tx, timing),
+                        )
                     },
                     onGrpcMessage = { event -> emitGrpcMessage(event, host, port, logRequests, logResponses) },
                 )
@@ -624,12 +643,12 @@ class MitmProxyEngine(
                 val wsState = ConnectionProtocolState()
                 clientToUpstream = {
                     inspectClientToServer(db, decryptedInput, upstream, decryptedOutput,
-                        clientWriteLock, host, port, pending, sent, logRequests, logResponses, wsState)
+                        clientWriteLock, host, port, pending, sent, logRequests, logResponses, wsState, timing)
                 }
                 upstreamToClient = {
                     inspectServerToClient(
                         db, upstream, decryptedOutput, clientWriteLock, pending, host, port, received,
-                        logRequests, logResponses, wsState,
+                        logRequests, logResponses, wsState, timing,
                     )
                 }
             }
@@ -797,6 +816,7 @@ class MitmProxyEngine(
         logRequests: Boolean,
         logResponses: Boolean,
         wsState: ConnectionProtocolState,
+        timing: ConnectionTimingTracker? = null,
     ) {
         val buffer = ByteArrayOutputStream()
         val wsBuffer = ByteArrayOutputStream()
@@ -857,7 +877,7 @@ class MitmProxyEngine(
                         bytes = bytes.copyOfRange(parsed.consumedBytes, bytes.size)
                         handleParsedRequest(
                             db, parsed, raw, upstream, clientOut, clientWriteLock, pending,
-                            host, port, logRequests, logResponses,
+                            host, port, logRequests, logResponses, timing,
                         )
                         buffer.reset()
                         buffer.write(bytes)
@@ -918,6 +938,7 @@ class MitmProxyEngine(
         logRequests: Boolean,
         logResponses: Boolean,
         wsState: ConnectionProtocolState,
+        timing: ConnectionTimingTracker? = null,
     ) {
         // §1.5 MUST-FIX: mirrors inspectClientToServer's lazy connect -- this reader has
         // nothing to read until the upstream connection actually exists. If the whole
@@ -961,6 +982,9 @@ class MitmProxyEngine(
                     }
                     continue
                 }
+                // S2 task 18: an empty parse buffer means these are the first bytes of a new
+                // response -- the TTFB instant for the request at the head of `pending`.
+                if (buffer.size() == 0) timing?.markFirstResponseByte()
                 buffer.write(chunk, 0, n)
                 var bytes = buffer.toByteArray()
                 var waitingForMore = false
@@ -985,10 +1009,12 @@ class MitmProxyEngine(
                         bytes = bytes.copyOfRange(response.consumedBytes, bytes.size)
                         handleParsedResponse(
                             db, response, raw, clientOut, clientWriteLock, pending, host, port,
-                            logRequests, logResponses, wsState,
+                            logRequests, logResponses, wsState, timing,
                         )
                         buffer.reset()
                         buffer.write(bytes)
+                        // Leftover bytes already belong to the next pipelined response.
+                        if (bytes.isNotEmpty()) timing?.markFirstResponseByte()
                     }
                 }
             }
@@ -1125,6 +1151,7 @@ class MitmProxyEngine(
         port: Int,
         logRequests: Boolean,
         logResponses: Boolean,
+        timing: ConnectionTimingTracker? = null,
     ) {
         val rule = RuleEnforcer.getMatchingRule(db, request.url, request.host)
         val bytesToForward: ByteArray = when (rule?.action ?: RuleAction.LOG_ONLY) {
@@ -1241,9 +1268,12 @@ class MitmProxyEngine(
         // this shared tail -- they are the real exceptions to it, not just two more branches
         // that happen to look similar.
         val upstreamOut = connectOrThrow(db, upstream, host, port)
-        pending.add(request to System.currentTimeMillis())
+        val sendStartedAt = System.currentTimeMillis()
+        pending.add(request to sendStartedAt)
         upstreamOut.write(bytesToForward)
         upstreamOut.flush()
+        // S2 task 18: sendMs is exactly the write+flush above; the response leg measures the rest.
+        timing?.onRequestSent(request, sendStartedAt)
     }
 
     /**
@@ -1264,6 +1294,7 @@ class MitmProxyEngine(
         logRequests: Boolean,
         logResponses: Boolean,
         wsState: ConnectionProtocolState,
+        timing: ConnectionTimingTracker? = null,
     ) {
         // Interim 1xx responses (e.g. 100 Continue) precede the final response:
         // forward them without consuming the request pairing. 101 is terminal
@@ -1277,6 +1308,9 @@ class MitmProxyEngine(
         }
         val pair = pending.poll()
         val request = pair?.first
+        // S2 task 18: the response is complete at this instant -- before any CHAOS delay below,
+        // which is requestr's own doing and belongs in latencyMs, not in the measured phases.
+        val measured = if (request != null) timing?.completeResponse(request) else null
         var out = raw
         // Security audit fix (fail-open AES crypto): what actually gets persisted/shown in the
         // UI for this transaction. Defaults to the real [response]; overridden below to a
@@ -1342,7 +1376,7 @@ class MitmProxyEngine(
         }
         if (request != null) {
             val latencyMs = System.currentTimeMillis() - pair!!.second
-            emitTransaction(request, responseToEmit, latencyMs, "$host:$port", logRequests, logResponses)
+            emitTransaction(request, responseToEmit, latencyMs, "$host:$port", logRequests, logResponses, timings = measured)
             // §4/§5: a successful WebSocket upgrade handshake is terminal for HTTP/1.x framing
             // on this connection -- everything from here on is WS frames, in both directions.
             // Switching modes here (rather than, say, only in inspectClientToServer) means both
@@ -1375,6 +1409,8 @@ class MitmProxyEngine(
         connectionId: String,
         logRequests: Boolean,
         logResponses: Boolean,
+        /** S2 task 18: measured phases, or null when nothing was observed for this exchange. */
+        timings: TransactionTimingEntity? = null,
     ) {
         // Binary-body persistence (image gallery / hex viewer support): [HttpBodyDecoder.forStorage]
         // is the single source of truth for what to write to the *BodyBytes/isXBodyBinary/
@@ -1425,7 +1461,33 @@ class MitmProxyEngine(
             // MITM_PROXY-tier.
             captureMethod = CaptureRowMethod.MITM_PROXY,
         )
-        deliverEntity(entity)
+        deliverEntity(entity, timings)
+    }
+
+    /**
+     * S2 task 18: HTTP/2 phases from the instants [Http2Session] stamped on the stream. `send`
+     * is first request frame -> END_STREAM on the request; `wait` is request end -> first
+     * response HEADERS; `receive` is response HEADERS -> END_STREAM on the response. The
+     * upstream setup phases go to the first stream that completes on the connection.
+     */
+    private fun h2Timings(tx: Http2Transaction, timing: ConnectionTimingTracker): TransactionTimingEntity? {
+        val setup = timing.takeSetup()
+        val startedAt = tx.startedAt
+        val phase = ConnectionTimingTracker::phaseOrNull
+        if (startedAt == null && setup == null) return null
+        return TransactionTimingEntity(
+            trafficId = 0L,
+            dnsMs = setup?.dnsMs,
+            connectMs = setup?.connectMs,
+            tlsMs = setup?.tlsMs,
+            sendMs = phase(startedAt, tx.requestEndedAt, PersistenceHealth),
+            waitMs = phase(tx.requestEndedAt, tx.responseHeadersAt, PersistenceHealth),
+            receiveMs = phase(tx.responseHeadersAt, tx.responseEndedAt, PersistenceHealth),
+            totalMs = phase(startedAt, tx.responseEndedAt, PersistenceHealth),
+            queuedAt = startedAt,
+            firstByteAt = tx.responseHeadersAt,
+            lastByteAt = tx.responseEndedAt,
+        )
     }
 
     /**
@@ -1523,9 +1585,11 @@ class MitmProxyEngine(
      * [onDecryptedTransaction], bumping [packetCount] on success. Never throws -- a failed
      * callback must not break the relay that already forwarded the underlying bytes.
      */
-    private fun deliverEntity(entity: CapturedTrafficEntity) {
-        val callback = onDecryptedTransaction ?: return
-        runCatching { callback(entity) }
+    private fun deliverEntity(entity: CapturedTrafficEntity, timings: TransactionTimingEntity? = null) {
+        val timed = onDecryptedTransactionTimed
+        val callback = onDecryptedTransaction
+        if (timed == null && callback == null) return
+        runCatching { if (timed != null) timed(entity, timings) else callback!!(entity) }
             .onSuccess {
                 packetCount.incrementAndGet()
                 InterceptionStateRepository.updateCounters(packetCount = packetCount.get().toInt())

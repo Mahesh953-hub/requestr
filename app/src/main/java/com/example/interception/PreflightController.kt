@@ -156,11 +156,11 @@ object PreflightController {
     @Synchronized
     private fun mitmProxy(context: Context): MitmProxyEngine =
         mitmProxy ?: MitmProxyEngine(
-            onDecryptedTransaction = { entity ->
+            onDecryptedTransactionTimed = { entity, timings ->
                 // S2 task 15: queued; the old runBlocking(Dispatchers.IO) parked the MITM relay
-                // thread on Room for every transaction.
+                // thread on Room for every transaction. S2 task 18: measured phases ride along.
                 com.example.data.persistence.PersistenceQueue.get(context.applicationContext)
-                    .insertTransaction(entity)
+                    .insertTransaction(entity, timings = timings)
             },
         ).also { mitmProxy = it }
 

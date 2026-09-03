@@ -104,13 +104,20 @@ class PacketPumpHttp3BodyForPersistTest {
 
     @Test
     fun `a binary body exceeding the 2 MiB storage cap is dropped but flagged truncated`() {
-        val pump = newPump()
-        val oversized = ByteArray(HttpBodyDecoder.MAX_STORED_BODY_BYTES + 1) { 0xFF.toByte() }
-        val result = pump.bodyForPersist(oversized, decoderTruncated = false)
+        // S2 task 16: with `bodySpill` on the cap becomes a spill decision; this asserts the
+        // flag-off contract, so the flag is forced off for the duration of the test.
+        HttpBodyDecoder.spillEnabled = false
+        try {
+            val pump = newPump()
+            val oversized = ByteArray(HttpBodyDecoder.MAX_STORED_BODY_BYTES + 1) { 0xFF.toByte() }
+            val result = pump.bodyForPersist(oversized, decoderTruncated = false)
 
-        assertTrue(result.isBinary)
-        assertNull(result.bytes)
-        assertTrue(result.truncated)
+            assertTrue(result.isBinary)
+            assertNull(result.bytes)
+            assertTrue(result.truncated)
+        } finally {
+            HttpBodyDecoder.spillEnabled = true
+        }
     }
 
     @Test

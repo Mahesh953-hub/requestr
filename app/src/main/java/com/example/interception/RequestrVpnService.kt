@@ -409,9 +409,10 @@ class RequestrVpnService : VpnService() {
                     bounded = com.example.data.persistence.InterceptorFlags.get(applicationContext).relayPoolBounded,
                 )
                 val mitmEngine = MitmProxyEngine(
-                    onDecryptedTransaction = { entity ->
+                    onDecryptedTransactionTimed = { entity, timings ->
                         // S2 task 15: never block a relay thread on Room; see [persistence].
-                        persistence.insertTransaction(entity)
+                        // S2 task 18: the measured phases ride along in the same queued op.
+                        persistence.insertTransaction(entity, timings = timings)
                     },
                     relayPool = relayPool,
                     uidAttributor = uidAttributor,

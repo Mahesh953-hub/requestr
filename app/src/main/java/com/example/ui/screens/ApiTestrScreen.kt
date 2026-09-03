@@ -770,9 +770,11 @@ fun ApiTestrScreen(
                             .padding(top = 10.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        TimingTile("DNS", if (isTimeout || isNetworkError) "—" else "${resp.dnsTimeMs}", isTimeout || isNetworkError, Modifier.weight(1f))
-                        TimingTile("TCP", if (isTimeout || isNetworkError) "—" else "${resp.connectTimeMs}", isTimeout || isNetworkError, Modifier.weight(1f))
-                        TimingTile("TLS", if (isTimeout || isNetworkError) "—" else "${resp.tlsTimeMs}", isTimeout || isNetworkError, Modifier.weight(1f))
+                        // S2 task 18: a null phase was not measured on this call (reused
+                        // connection, plain http, mock) and reads "—" rather than a number.
+                        TimingTile("DNS", if (isTimeout || isNetworkError) "—" else resp.dnsTimeMs?.toString() ?: "—", isTimeout || isNetworkError, Modifier.weight(1f))
+                        TimingTile("TCP", if (isTimeout || isNetworkError) "—" else resp.connectTimeMs?.toString() ?: "—", isTimeout || isNetworkError, Modifier.weight(1f))
+                        TimingTile("TLS", if (isTimeout || isNetworkError) "—" else resp.tlsTimeMs?.toString() ?: "—", isTimeout || isNetworkError, Modifier.weight(1f))
                         TimingTile("Total", if (isTimeout || isNetworkError) "—" else "${resp.latencyMs}", isTimeout || isNetworkError, Modifier.weight(1f))
                     }
 
@@ -1245,25 +1247,40 @@ fun ApiTestrScreen(
                                 }
                             }
                             3 -> {
-                                // Timeline Metrics. Widths reflect the phase values carried by
-                                // ApiResponseData; the current OkHttp path estimates those values from latency.
-                                val total = listOf(
-                                    resp.dnsTimeMs,
-                                    resp.connectTimeMs,
-                                    resp.tlsTimeMs,
-                                    resp.requestTimeMs,
-                                    resp.responseTimeMs,
-                                ).sum().coerceAtLeast(1L)
-                                fun fraction(value: Long): Float = (value.toFloat() / total).coerceIn(0.05f, 1f)
+                                // Timeline Metrics. S2 task 18: widths reflect the phases OkHttp's
+                                // EventListener actually measured for this call (CallPhaseTimings);
+                                // a phase that did not happen (reused connection, plain http,
+                                // mock) is drawn as "not measured" with a hairline bar.
+                                val phases = listOf(
+                                    Triple("DNS Resolution", resp.dnsTimeMs, Color(0xFF3B82F6)),
+                                    Triple("TCP Connect", resp.connectTimeMs, Color(0xFF06B6D4)),
+                                    Triple("TLS Handshake", resp.tlsTimeMs, Color(0xFF8B5CF6)),
+                                    Triple("Request Sent", resp.requestTimeMs, Color(0xFFF59E0B)),
+                                    Triple("Wait (TTFB)", resp.responseTimeMs, Color(0xFF22C55E)),
+                                    Triple("Receive", resp.receiveTimeMs, Color(0xFF10B981)),
+                                )
+                                val total = phases.mapNotNull { it.second }.sum().coerceAtLeast(1L)
+                                fun fraction(value: Long?): Float =
+                                    if (value == null) 0.02f else (value.toFloat() / total).coerceIn(0.05f, 1f)
                                 Column(
                                     modifier = Modifier.fillMaxSize(),
                                     verticalArrangement = Arrangement.spacedBy(8.dp),
                                 ) {
-                                    TimelineMetricBar("DNS Resolution", "${resp.dnsTimeMs} ms", fraction(resp.dnsTimeMs), Color(0xFF3B82F6))
-                                    TimelineMetricBar("TCP Connect", "${resp.connectTimeMs} ms", fraction(resp.connectTimeMs), Color(0xFF06B6D4))
-                                    TimelineMetricBar("TLS Handshake", "${resp.tlsTimeMs} ms", fraction(resp.tlsTimeMs), Color(0xFF8B5CF6))
-                                    TimelineMetricBar("Request Sent", "${resp.requestTimeMs} ms", fraction(resp.requestTimeMs), Color(0xFFF59E0B))
-                                    TimelineMetricBar("Server Response", "${resp.responseTimeMs} ms", fraction(resp.responseTimeMs), Color(0xFF22C55E))
+                                    for ((label, value, color) in phases) {
+                                        TimelineMetricBar(
+                                            label,
+                                            value?.let { "$it ms" } ?: "not measured",
+                                            fraction(value),
+                                            color,
+                                        )
+                                    }
+                                    if (resp.connectionReused) {
+                                        Text(
+                                            "Connection reused: DNS, TCP and TLS did not run for this call.",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
                                 }
                             }
                             4 -> {

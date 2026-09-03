@@ -989,6 +989,13 @@ interface TransactionTimingDao {
     @Query("SELECT * FROM transaction_timings WHERE trafficId IN (:trafficIds)")
     suspend fun forTraffic(trafficIds: List<Long>): List<TransactionTimingEntity>
 
+    /** S2 task 18: joined into the traffic list read model by [com.example.data.interception.CaptureLogRepository]. */
+    @Query("SELECT * FROM transaction_timings")
+    fun observeAll(): Flow<List<TransactionTimingEntity>>
+
+    @Query("SELECT * FROM transaction_timings")
+    suspend fun getAll(): List<TransactionTimingEntity>
+
     @Query("SELECT COUNT(*) FROM transaction_timings")
     suspend fun count(): Int
 }
