@@ -157,13 +157,14 @@ data class Tun2ProxyConfig(
 
     companion object {
         /**
-         * Builds the config for the standard Approach-A wiring: HTTP CONNECT target pointed
-         * at the locally-started MitmProxyEngine on `127.0.0.1:mitmPort`.
+         * Legacy Approach-A wiring: HTTP CONNECT target pointed at the local proxy on
+         * `127.0.0.1:mitmPort`. Production (`RequestrVpnService`) has moved to [forLocalGateway]
+         * (SOCKS5 + `+info`, S1 task 6); this stays for the HTTP-CONNECT entry, which the
+         * gateway still accepts, and for existing bridge tests.
          *
          * Uses VIRTUAL DNS so tun2proxy preserves hostnames. Protection is required by default
          * when used from VPN service (caller should set protectAvailable=true when
-         * SocketProtector is installed). SOCKS5 +info attribution activates in S1 when
-         * LocalGateway replaces MitmProxyEngine as the local proxy.
+         * SocketProtector is installed).
          *
          * Defect G (S0 gaps audit): [teeEnabled] defaults to `true` here (the call-site
          * default), NOT via [Tun2ProxyConfig]'s own `teeEnabled` data-class default (which stays
@@ -186,6 +187,39 @@ data class Tun2ProxyConfig(
             mtu = mtu,
             protectAvailable = protectAvailable,
             teeEnabled = teeEnabled,
+        )
+
+        /**
+         * S1 task 6 wiring: SOCKS5 target pointed at the [com.example.interception.gateway.LocalGateway]
+         * on `127.0.0.1:gatewayPort`, authenticated with per-session [credentials] and opted into
+         * the bridge's `+info` protocol via [Socks5InfoMetadata] so every flow's real source
+         * tuple reaches the gateway (`"<username>|tcp|<src_ip>|<src_port>"`; decoded by
+         * `Socks5Handler`). Same VIRTUAL DNS / tee / protect conventions as [forMitmProxyEngine].
+         *
+         * [udpPolicy] defaults to PASS_ALL until S1 task 9 (UdpPolicyRouter, D6) lands.
+         */
+        fun forLocalGateway(
+            gatewayPort: Int,
+            credentials: com.example.interception.gateway.local.Socks5Credentials,
+            sessionTag: String? = null,
+            mtu: Int = 1500,
+            ipv6Enabled: Boolean = false,
+            udpPolicy: UdpPolicyMode = UdpPolicyMode.PASS_ALL,
+            protectAvailable: Boolean = true,
+            teeEnabled: Boolean = true,
+        ): Tun2ProxyConfig = Tun2ProxyConfig(
+            proxy = ProxyTarget(
+                proxyType = ProxyType.SOCKS5,
+                address = "127.0.0.1:$gatewayPort",
+                auth = ProxyAuth(credentials.username, credentials.password),
+            ),
+            dnsMode = DnsMode.VIRTUAL,
+            mtu = mtu,
+            ipv6Enabled = ipv6Enabled,
+            udpPolicy = udpPolicy,
+            protectAvailable = protectAvailable,
+            teeEnabled = teeEnabled,
+            socks5Info = Socks5InfoMetadata(sessionTag = sessionTag),
         )
 
         /** Minimal JSON string escaping. */

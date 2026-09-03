@@ -2477,6 +2477,7 @@ private fun EmptyConnectionsState(message: String) {
 /** Disposition -> badge color, mirroring BadgePill's ESTABLISHED/CLOSED green/red convention. */
 private fun connectDispositionColor(disposition: String): Long = when (disposition) {
     "MITM_DECRYPTED" -> 0xFF10B981
+    "PLAINTEXT_FORWARDED" -> 0xFF06B6D4
     "ALLOWED_OPAQUE" -> 0xFFF59E0B
     "BLOCKED" -> 0xFFEF4444
     "REDIRECTED" -> 0xFF8B5CF6

@@ -31,6 +31,31 @@ class Tun2ProxyConfigTest {
     }
 
     @Test
+    fun `forLocalGateway builds an authenticated socks5 target with plus-info metadata`() {
+        val creds = com.example.interception.gateway.local.Socks5Credentials("requestr", "pw-123")
+        val config = Tun2ProxyConfig.forLocalGateway(
+            gatewayPort = 41000, credentials = creds, sessionTag = "77", teeEnabled = false,
+        )
+
+        assertEquals(Tun2ProxyConfig.ProxyType.SOCKS5, config.proxy.proxyType)
+        assertEquals("127.0.0.1:41000", config.proxy.address)
+        assertEquals(Tun2ProxyConfig.ProxyAuth("requestr", "pw-123"), config.proxy.auth)
+        assertEquals(Tun2ProxyConfig.DnsMode.VIRTUAL, config.dnsMode)
+        assertEquals(Tun2ProxyConfig.UdpPolicyMode.PASS_ALL, config.udpPolicy)
+        assertTrue(config.protectAvailable)
+        assertFalse(config.teeEnabled)
+        assertEquals("77", config.socks5Info?.sessionTag)
+
+        // Wire shape config.rs consumes: explicit auth + socks5_info => username "requestr+info"
+        // is built on the Rust side; here we only need both inputs present in the JSON.
+        val json = config.toJson()
+        assertTrue(json.contains("\"proxy_type\":\"socks5\""))
+        assertTrue(json.contains("\"auth\":{\"username\":\"requestr\",\"password\":\"pw-123\"}"))
+        assertTrue(json.contains("\"socks5_info\":{"))
+        assertTrue(json.contains("\"session_tag\":\"77\""))
+    }
+
+    @Test
     fun `toJson emits every field name the rust side expects`() {
         val json = Tun2ProxyConfig.forMitmProxyEngine(mitmPort = 8443).toJson()
 

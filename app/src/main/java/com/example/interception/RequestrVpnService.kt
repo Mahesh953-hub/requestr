@@ -252,13 +252,18 @@ class RequestrVpnService : VpnService() {
                     lifecycleOwner = CaptureMethod.VPN_TUN.engineLifecycleOwner(),
                 )
 
-                // Gap #1 Approach A: attempt to hand the tun fd to the native tun2proxy
-                // bridge, which issues literal CONNECT host:port to this service's own
-                // MitmProxyEngine instance -- feeding VPN-captured TCP flows into the same
-                // MITM decrypt pipeline the PROXY/ROOT/SHIZUKU tiers already use, instead of
-                // the hand-rolled TunRelay selector loop. Never pretends success: on any
-                // unavailable/failed native attempt this falls back to the pre-existing
+                // Gap #1 Approach A / S1 task 6: hand the tun fd to the native tun2proxy
+                // bridge, which dials this service's own MitmProxyEngine -- now behind a
+                // LocalGateway -- over authenticated SOCKS5 with the `+info` username suffix,
+                // so every flow arrives with its real source tuple (`|tcp|src_ip|src_port`)
+                // for UID attribution instead of a bare `CONNECT host:port`. VPN-captured TCP
+                // flows feed the same MITM decrypt pipeline the PROXY/ROOT/SHIZUKU tiers use,
+                // instead of the hand-rolled TunRelay selector loop. Never pretends success: on
+                // any unavailable/failed native attempt this falls back to the pre-existing
                 // TunRelay-based pipeline for the whole session (see [usingNativeBridge]).
+                // Credentials are fresh per session so no other local app can drive the
+                // gateway's SOCKS side.
+                val gatewayCredentials = com.example.interception.gateway.local.Socks5Credentials.random()
                 val mitmEngine = MitmProxyEngine(
                     onDecryptedTransaction = { entity ->
                         kotlinx.coroutines.runBlocking(Dispatchers.IO) {
@@ -266,15 +271,17 @@ class RequestrVpnService : VpnService() {
                         }
                     },
                 )
-                val mitmPort = mitmEngine.start(applicationContext, 0)
+                val mitmPort = mitmEngine.start(applicationContext, 0, socks5Credentials = gatewayCredentials)
                 // MitmProxyEngine.start() unconditionally calls
                 // InterceptionStateRepository.markActive(tier = PROXY, method = MITM_PROXY,
                 // ...) itself before returning -- correct that transient global-state stomp
                 // back to this session's real tier/session id immediately below, regardless
                 // of which branch is taken next.
                 val bridgeResult = Tun2ProxyBridge.start(
-                    Tun2ProxyConfig.forMitmProxyEngine(
-                        mitmPort,
+                    Tun2ProxyConfig.forLocalGateway(
+                        gatewayPort = mitmPort,
+                        credentials = gatewayCredentials,
+                        sessionTag = newId.toString(),
                         teeEnabled = com.example.data.persistence.TeeRolloutFlag.get(applicationContext).isEnabled,
                     ),
                     tun.fd,
@@ -299,7 +306,7 @@ class RequestrVpnService : VpnService() {
                             // lifecycle. See CaptureLifecycleOwner's KDoc.
                             lifecycleOwner = CaptureLifecycleOwner.VPN_SERVICE,
                         )
-                        Log.i(TAG, "Native tun2proxy bridge started; VPN traffic now routed through MitmProxyEngine on port $mitmPort")
+                        Log.i(TAG, "Native tun2proxy bridge started; VPN traffic now routed via SOCKS5 +info into LocalGateway/MitmProxyEngine on port $mitmPort")
                     }
                     is Tun2ProxyBridge.StartResult.Unavailable, is Tun2ProxyBridge.StartResult.Failed -> {
                         usingNativeBridge = false

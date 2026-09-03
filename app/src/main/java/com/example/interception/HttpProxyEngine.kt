@@ -10,59 +10,62 @@ import com.example.data.local.CaptureRowMethod
 import com.example.data.local.ConnectAttemptEntity
 import com.example.data.local.RequestrDatabase
 import com.example.data.prefs.SettingsDataStore
-import com.example.interception.HttpProxyShared.copyToStream
+import com.example.interception.gateway.GatewaySessionHandler
+import com.example.interception.gateway.LocalGateway
+import com.example.interception.gateway.local.EntryKind
+import com.example.interception.gateway.local.GatewaySession
+import com.example.interception.gateway.local.HttpPrelude
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.first
-import java.net.ServerSocket
-import java.net.Socket
+import kotlinx.coroutines.runBlocking
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Real HTTP forward proxy engine.
+ * HTTP_PROXY-tier forward proxy: forwards plaintext HTTP requests to their destination and
+ * relays `CONNECT` tunnels opaquely, logging every request/response pair.
  *
- * Listens on a local port and transparently forwards HTTP requests to their
- * destination, logging every request/response pair to CaptureLogRepository.
+ * Since S1 task 6 this engine no longer owns a listener or parses request lines: it is a
+ * [GatewaySessionHandler] behind a [LocalGateway], which classifies each accepted connection
+ * (SOCKS5/4, HTTP `CONNECT`, absolute-form HTTP, transparent) and hands over a resolved
+ * [GatewaySession]. [start] keeps its old shape (`start(context, port): Int`) by constructing a
+ * gateway routed to `this`, so existing callers and tests are unaffected.
  *
- * CONNECT tunnels are rule-driven via [ConnectControl] -- see [handleClient] -- rather than an
- * unconditional opaque relay. This engine cannot terminate TLS itself, so a FORCE_MITM rule is
- * honestly answered as unavailable rather than silently falling back to plaintext passthrough;
- * only [MitmProxyEngine] can act on FORCE_MITM.
+ * CONNECT tunnels are rule-driven via [ConnectControl]. This engine cannot terminate TLS itself,
+ * so a FORCE_MITM rule is honestly answered as unavailable rather than silently falling back to
+ * plaintext passthrough; only [MitmProxyEngine] can act on FORCE_MITM.
  *
- * Request parsing / CONNECT tunneling / upstream forwarding is shared with
- * [com.example.interception.gateway.GatewayEngine] (T2) via [HttpProxyShared] rather than
- * duplicated — that engine reuses this same plumbing but binds to 0.0.0.0 and additionally
+ * Upstream forwarding is shared with [com.example.interception.gateway.GatewayEngine] (T2) via
+ * [HttpProxyShared] rather than duplicated -- that engine binds to 0.0.0.0 and additionally
  * accepts connections from OTHER LAN devices.
  */
 class HttpProxyEngine(
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
-) {
-    private var serverSocket: ServerSocket? = null
-    private var acceptJob: Job? = null
+) : GatewaySessionHandler {
+    private var gateway: LocalGateway? = null
     private val running = AtomicBoolean(false)
+    private val boundAsDelegate = AtomicBoolean(false)
     private var appContext: Context? = null
-    val port: Int get() = serverSocket?.localPort ?: 0
+    val port: Int get() = gateway?.port ?: 0
 
     private val sessionId = AtomicLong(System.currentTimeMillis())
     private var packetCount = AtomicLong(0)
 
     companion object {
         private const val TAG = "HttpProxy"
+        private const val CLIENT_SO_TIMEOUT_MS = 30_000
     }
 
     fun start(context: Context, port: Int = 0): Int {
         if (running.get()) return this.port
         appContext = context.applicationContext
 
-        serverSocket = ServerSocket(port).also {
-            Log.i(TAG, "Proxy listening on port ${it.localPort}")
-        }
+        val gw = LocalGateway(handler = this, scope = scope, logTag = TAG)
+        val boundPort = gw.start(port)
+        gateway = gw
         running.set(true)
+        Log.i(TAG, "Proxy listening on port $boundPort")
 
         InterceptionStateRepository.markActive(
             sessionId = sessionId.get(),
@@ -71,99 +74,70 @@ class HttpProxyEngine(
             // CaptureMethod.engineTier()'s KDoc. Derived, not restated, so it cannot silently
             // diverge from what PreflightController resolved for this same method again.
             tier = CaptureMethod.HTTP_PROXY.engineTier(),
-            port = serverSocket!!.localPort,
+            port = boundPort,
             method = CaptureMethod.HTTP_PROXY,
             lifecycleOwner = CaptureMethod.HTTP_PROXY.engineLifecycleOwner(),
         )
+        return boundPort
+    }
 
-        acceptJob = scope.launch {
-            while (isActive && running.get()) {
-                try {
-                    val client = serverSocket?.accept() ?: break
-                    launch { handleClient(client) }
-                } catch (e: Exception) {
-                    if (running.get()) Log.w(TAG, "Accept error: ${e.message}")
-                }
-            }
-        }
-
-        return serverSocket!!.localPort
+    /**
+     * Makes this engine usable as a plaintext handler without owning a listener -- used by
+     * [MitmProxyEngine], which routes its own gateway's plaintext sessions here.
+     */
+    internal fun bind(context: Context) {
+        appContext = context.applicationContext
+        boundAsDelegate.set(true)
     }
 
     fun stop() {
         running.set(false)
-        acceptJob?.cancel()
-        runCatching { serverSocket?.close() }
-        serverSocket = null
+        gateway?.stop()
+        gateway = null
         Log.i(TAG, "Proxy stopped")
     }
 
-    private suspend fun handleClient(client: Socket) {
+    // ── GatewaySessionHandler ──────────────────────────────────────────────
+
+    /** Opaque, rule-evaluated tunnel (HTTP CONNECT / SOCKS / transparent TLS). */
+    override suspend fun handleTunnel(session: GatewaySession) {
         try {
-            client.use { sock ->
-                sock.soTimeout = 30_000
-                val input = sock.getInputStream()
+            session.socket.use { sock ->
+                sock.soTimeout = CLIENT_SO_TIMEOUT_MS
                 val output = sock.getOutputStream()
-
-                val requestLine = HttpProxyShared.readLine(input) ?: return
-                val parts = requestLine.split(" ")
-                if (parts.size < 2) return
-
-                val method = parts[0]
-                val rawUrl = parts[1]
-                val httpVersion = parts.getOrElse(2) { "HTTP/1.1" }
-
-                // Parse headers
-                val headers = mutableMapOf<String, String>()
-                while (true) {
-                    val line = HttpProxyShared.readLine(input) ?: break
-                    if (line.isEmpty()) break
-                    val colon = line.indexOf(':')
-                    if (colon > 0) {
-                        headers[line.substring(0, colon).trim()] = line.substring(colon + 1).trim()
-                    }
+                val host = session.destination.host
+                val connectPort = session.destination.port
+                val ctx = appContext
+                if (ctx == null) {
+                    // Should never happen in practice (start() always sets appContext before
+                    // the accept loop begins) -- fail closed rather than tunnel un-evaluated.
+                    session.replyUnreachable()
+                    return
                 }
-
-                val isConnect = method.equals("CONNECT", ignoreCase = true)
-
-                // §3 (C2) -- read fresh per connection. Disabled (NONE) by default, and also if
-                // appContext isn't set yet (shouldn't happen -- see the CONNECT branch's own
-                // null-check below), so this never blocks a connection on a missing context.
-                val networkCondition = appContext?.let {
-                    SettingsDataStore.get(it).networkCondition.first()
-                } ?: NetworkConditionInjector.NetworkCondition.NONE
-
-                if (isConnect) {
-                    val (host, connectPort) = HttpProxyShared.parseHostPort(rawUrl, 443)
-                    val ctx = appContext
-                    if (ctx == null) {
-                        // Should never happen in practice (start() always sets appContext before
-                        // the accept loop begins) -- fail closed rather than tunnel un-evaluated.
-                        output.write("HTTP/1.1 500 Proxy not initialized\r\n\r\n".toByteArray())
-                        return
-                    }
-                    val db = RequestrDatabase.get(ctx)
-                    val disposition = ConnectControl.evaluate(db, host, connectPort)
-                    val dispositionName = when (disposition) {
-                        is ConnectControl.Disposition.AllowOpaque -> "ALLOWED_OPAQUE"
-                        is ConnectControl.Disposition.Block -> "BLOCKED"
-                        is ConnectControl.Disposition.Redirect -> "REDIRECTED"
-                        is ConnectControl.Disposition.ForceMitm -> "BLOCKED"
-                    }
-                    val entity = ConnectAttemptEntity(
-                        sessionId = sessionId.get(),
-                        targetHost = host,
-                        targetPort = connectPort,
-                        disposition = dispositionName,
-                        redirectTarget = (disposition as? ConnectControl.Disposition.Redirect)?.target,
-                        failureReason = if (disposition is ConnectControl.Disposition.ForceMitm) {
-                            "MITM not available in HTTP_PROXY tier"
-                        } else null,
-                    )
-                    HttpProxyShared.handleConnectAttempt(
-                        sock, rawUrl, disposition, output,
-                        networkCondition = networkCondition,
-                    ) { sentBytes, recvBytes ->
+                // §3 (C2) -- read fresh per connection. Disabled (NONE) by default.
+                val networkCondition = SettingsDataStore.get(ctx).networkCondition.first()
+                val db = RequestrDatabase.get(ctx)
+                val disposition = ConnectControl.evaluate(db, host, connectPort)
+                val dispositionName = when (disposition) {
+                    is ConnectControl.Disposition.AllowOpaque -> "ALLOWED_OPAQUE"
+                    is ConnectControl.Disposition.Block -> "BLOCKED"
+                    is ConnectControl.Disposition.Redirect -> "REDIRECTED"
+                    is ConnectControl.Disposition.ForceMitm -> "BLOCKED"
+                }
+                val entity = ConnectAttemptEntity(
+                    sessionId = sessionId.get(),
+                    targetHost = host,
+                    targetPort = connectPort,
+                    disposition = dispositionName,
+                    redirectTarget = (disposition as? ConnectControl.Disposition.Redirect)?.target,
+                    failureReason = if (disposition is ConnectControl.Disposition.ForceMitm) {
+                        "MITM not available in HTTP_PROXY tier"
+                    } else null,
+                )
+                HttpProxyShared.handleConnectAttempt(
+                    sock, session.destination.toString(), disposition, output,
+                    networkCondition = networkCondition,
+                    onBytesTransferred = { sentBytes, recvBytes ->
                         runCatching {
                             runBlocking {
                                 db.connectAttemptDao().insert(
@@ -175,19 +149,63 @@ class HttpProxyEngine(
                                 )
                             }
                         }.onFailure { Log.w(TAG, "Failed to persist CONNECT attempt: ${it.message}") }
+                    },
+                    replies = HttpProxyShared.ConnectReplies.forSession(session),
+                )
+                if (disposition is ConnectControl.Disposition.Block || disposition is ConnectControl.Disposition.ForceMitm) {
+                    // Blocked/unavailable dispositions never invoke onBytesTransferred (no
+                    // relay ran) -- persist the record directly so it's not silently dropped.
+                    runCatching {
+                        db.connectAttemptDao().insert(entity.copy(finishedAt = System.currentTimeMillis()))
+                    }.onFailure { Log.w(TAG, "Failed to persist CONNECT attempt: ${it.message}") }
+                }
+            }
+        } catch (e: Exception) {
+            if (running.get() || boundAsDelegate.get()) Log.w(TAG, "Client handler error: ${e.message}")
+        }
+    }
+
+    /**
+     * Plaintext HTTP/1.x forward proxy. Serves requests until the client closes, sends
+     * `Connection: close`, or speaks HTTP/1.0 without keep-alive -- the old engine served exactly
+     * one request per connection, which broke every keep-alive client on the second request.
+     *
+     * Absolute-form requests ([EntryKind.HTTP_ABSOLUTE]) forward to the URL as written.
+     * Origin-form requests (transparent capture, or plaintext inside a CONNECT tunnel) are turned
+     * back into absolute URLs from the session's destination.
+     */
+    override suspend fun handlePlaintext(session: GatewaySession) {
+        try {
+            session.socket.use { sock ->
+                sock.soTimeout = CLIENT_SO_TIMEOUT_MS
+                val input = sock.getInputStream()
+                val output = sock.getOutputStream()
+                val networkCondition = appContext?.let {
+                    SettingsDataStore.get(it).networkCondition.first()
+                } ?: NetworkConditionInjector.NetworkCondition.NONE
+
+                while (true) {
+                    val head = when (val r = HttpPrelude.read(input)) {
+                        is HttpPrelude.Result.Parsed -> r.head
+                        is HttpPrelude.Result.Malformed -> {
+                            output.write("HTTP/1.1 400 Bad Request\r\n\r\n".toByteArray()); output.flush()
+                            return
+                        }
+                        HttpPrelude.Result.Eof -> return
                     }
-                    if (disposition is ConnectControl.Disposition.Block || disposition is ConnectControl.Disposition.ForceMitm) {
-                        // Blocked/unavailable dispositions never invoke onBytesTransferred (no
-                        // relay ran) -- persist the record directly so it's not silently dropped.
-                        runCatching {
-                            db.connectAttemptDao().insert(entity.copy(finishedAt = System.currentTimeMillis()))
-                        }.onFailure { Log.w(TAG, "Failed to persist CONNECT attempt: ${it.message}") }
+                    val method = head.method
+                    val httpVersion = head.version
+                    val headers = head.headers
+                    val rawUrl = if (head.target.startsWith("http://", true) || head.target.startsWith("https://", true)) {
+                        head.target
+                    } else {
+                        val scheme = if (session.destination.port == 443) "https" else "http"
+                        HttpPrelude.absoluteUrlFor(session.destination, head.target, scheme)
                     }
-                } else {
-                    val bodyLen = headers["Content-Length"]?.toIntOrNull() ?: 0
+
+                    val bodyLen = headers.entries.firstOrNull { it.key.equals("Content-Length", true) }?.value?.toIntOrNull() ?: 0
                     val bodyBytes = if (bodyLen > 0) HttpProxyShared.readExactBytes(input, bodyLen) else ByteArray(0)
 
-                    // Forward to upstream
                     val t0 = System.currentTimeMillis()
                     val (status, respHeaders, respBody) = HttpProxyShared.forwardRequest(
                         rawUrl, method, headers, bodyBytes,
@@ -201,20 +219,28 @@ class HttpProxyEngine(
                     InterceptionStateRepository.updateCounters(packetCount = packetCount.get().toInt())
                     Log.d(TAG, "$method $rawUrl → $status (${latency}ms)")
 
-                    // Item: the HTTP_PROXY tier's plain-HTTP relay forwarded and logged every
-                    // request (see the Log.d above and the packetCount increment) but never
-                    // persisted a CapturedTrafficEntity, so the Intercept traffic list stayed
-                    // permanently empty for this tier ("No HTTP transaction decoded yet.") even
-                    // though the relay itself worked -- GatewayEngine.persistTransaction is the
-                    // proven pattern for this exact same HttpProxyShared.forwardRequest shape;
-                    // mirrored here rather than duplicated ad hoc.
+                    // The HTTP_PROXY tier's plain-HTTP relay must persist a CapturedTrafficEntity
+                    // or the Intercept traffic list stays permanently empty for this tier.
                     runCatching {
                         persistTransaction(rawUrl, method, status, latency, headers, respHeaders, bodyBytes, respBody)
                     }.onFailure { Log.w(TAG, "Failed to persist HTTP proxy transaction: ${it.message}") }
+
+                    if (!keepAlive(httpVersion, headers)) return
                 }
             }
         } catch (e: Exception) {
-            if (running.get()) Log.w(TAG, "Client handler error: ${e.message}")
+            if (running.get() || boundAsDelegate.get()) Log.w(TAG, "Client handler error: ${e.message}")
+        }
+    }
+
+    private fun keepAlive(version: String, headers: Map<String, String>): Boolean {
+        val connection = headers.entries.firstOrNull {
+            it.key.equals("Connection", true) || it.key.equals("Proxy-Connection", true)
+        }?.value?.lowercase()
+        return when {
+            connection?.contains("close") == true -> false
+            version == "HTTP/1.0" -> connection?.contains("keep-alive") == true
+            else -> true
         }
     }
 

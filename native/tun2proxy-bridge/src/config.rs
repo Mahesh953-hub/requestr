@@ -93,9 +93,16 @@ pub struct WireUdpGw {
     pub keepalive_secs: Option<u64>,
 }
 
-/// Metadata encoded in the SOCKS5 username for `+info` session attribution.
-/// When present, the bridge encodes this into the SOCKS5 auth username so the
-/// local proxy (`LocalGateway` in S1) can attribute the session to a specific app.
+/// Suffix the vendored `tun2proxy::socks` recognises on the SOCKS5 username to
+/// enable per-flow source attribution (`"<base>|<proto>|<src_ip>|<src_port>"`).
+pub const SOCKS5_INFO_MARKER: &str = "+info";
+
+/// Metadata that opts a SOCKS5 session into `+info` source attribution.
+/// When present, the bridge suffixes the SOCKS5 auth username with
+/// [`SOCKS5_INFO_MARKER`] so the vendored client appends the originating flow's
+/// source tuple, which the local proxy (`LocalGateway` in S1) decodes.
+/// `app_package`/`uid` are retained for Kotlin-side bookkeeping; they are not
+/// carried on the wire (the gateway attributes per flow via the source port).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
 pub struct Socks5InfoMetadata {
     /// Android package name of the originating app.
@@ -236,15 +243,35 @@ pub fn build_args(config: &BridgeConfig, tun_fd: i32) -> Result<Args, ConfigErro
         .filter(|a| !a.username.is_empty() || !a.password.is_empty())
         .map(|a| UserKey::new(a.username.clone(), a.password.clone()));
 
-    // requestr: when socks5_info is set for a SOCKS5 proxy, encode the +info
-    // metadata as a JSON string in the SOCKS5 username field. This carries the
-    // source tuple (app_package, uid, session_tag) through the authenticated
-    // SOCKS5 handshake to the local proxy (LocalGateway in S1) for session
-    // attribution. If explicit auth is also set, socks5_info takes precedence.
+    // requestr: when socks5_info is set for a SOCKS5 proxy, opt the session into
+    // the vendored tun2proxy `+info` username protocol. `socks.rs::send_auth_data`
+    // only recognises a username that *ends with* the literal `+info` marker; it
+    // then strips the marker and sends `"<base>|<tcp|udp>|<src_ip>|<src_port>"`
+    // as the RFC 1929 username, which is how the per-flow source tuple reaches
+    // the LocalGateway. (A previous revision sent `+info:{json}` as a prefix,
+    // which the vendored code never matched -- the JSON went over the wire
+    // verbatim and no source tuple was ever appended.)
+    //
+    // `<base>` is the explicit auth username when configured (so the gateway can
+    // verify it), else the session tag, else "requestr". The password is the
+    // explicit auth password (empty when none) -- the gateway authenticates on
+    // `<base>` + password after decoding the tuple.
     let credentials = if config.proxy.proxy_type == WireProxyType::Socks5 {
         if let Some(ref info) = config.socks5_info {
-            let info_json = serde_json::to_string(info).unwrap_or_default();
-            Some(UserKey::new(format!("+info:{info_json}"), String::new()))
+            let (base, password) = match credentials {
+                Some(ref explicit) => (explicit.username.clone(), explicit.password.clone()),
+                None => (
+                    info.session_tag
+                        .clone()
+                        .filter(|t| !t.is_empty())
+                        .unwrap_or_else(|| "requestr".to_string()),
+                    String::new(),
+                ),
+            };
+            Some(UserKey::new(
+                format!("{base}{SOCKS5_INFO_MARKER}"),
+                password,
+            ))
         } else {
             credentials
         }
@@ -517,19 +544,40 @@ mod tests {
         let args = build_args(&cfg, 10).unwrap();
         assert_eq!(args.proxy.proxy_type, ProxyType::Socks5);
         assert!(args.proxy.credentials.is_some());
-        // Verify +info is encoded in the SOCKS5 username
+        // Verify the username opts into the vendored `+info` protocol: explicit
+        // auth base + marker suffix, password preserved for gateway verification.
         let creds = args.proxy.credentials.as_ref().unwrap();
-        assert!(
-            creds.username.starts_with("+info:"),
-            "SOCKS5 +info not encoded: got '{}'",
-            creds.username
-        );
-        assert!(creds.username.contains("com.test"));
-        assert!(creds.username.contains("99"));
+        assert_eq!(creds.username, "u+info");
+        assert_eq!(creds.password, "p");
     }
 
     #[test]
-    fn socks5_info_overrides_explicit_auth() {
+    fn socks5_info_without_auth_uses_session_tag_as_base() {
+        let json = r#"{
+            "proxy": {"proxy_type":"socks5","address":"127.0.0.1:1080"},
+            "socks5_info": {"session_tag": "sess-7"}
+        }"#;
+        let cfg = parse_config(json).unwrap();
+        let args = build_args(&cfg, 1).unwrap();
+        let creds = args.proxy.credentials.unwrap();
+        assert_eq!(creds.username, "sess-7+info");
+        assert_eq!(creds.password, "");
+    }
+
+    #[test]
+    fn socks5_info_without_auth_or_tag_uses_default_base() {
+        let json = r#"{
+            "proxy": {"proxy_type":"socks5","address":"127.0.0.1:1080"},
+            "socks5_info": {"uid": 42}
+        }"#;
+        let cfg = parse_config(json).unwrap();
+        let args = build_args(&cfg, 1).unwrap();
+        let creds = args.proxy.credentials.unwrap();
+        assert_eq!(creds.username, "requestr+info");
+    }
+
+    #[test]
+    fn socks5_info_keeps_explicit_auth_and_appends_marker() {
         let json = r#"{
             "proxy": {"proxy_type":"socks5","address":"127.0.0.1:1080","auth":{"username":"manual","password":"pw"}},
             "socks5_info": {"uid": 42}
@@ -538,10 +586,23 @@ mod tests {
         let args = build_args(&cfg, 1).unwrap();
         let creds = args.proxy.credentials.unwrap();
         assert!(
-            creds.username.starts_with("+info:"),
-            "socks5_info should override explicit auth, got '{}'",
+            creds.username.ends_with(SOCKS5_INFO_MARKER),
+            "username must end with the +info marker the vendored client matches, got '{}'",
             creds.username
         );
+        assert_eq!(creds.username, "manual+info");
+        assert_eq!(creds.password, "pw");
+    }
+
+    #[test]
+    fn socks5_without_info_leaves_plain_credentials() {
+        let json = r#"{
+            "proxy": {"proxy_type":"socks5","address":"127.0.0.1:1080","auth":{"username":"manual","password":"pw"}}
+        }"#;
+        let cfg = parse_config(json).unwrap();
+        let args = build_args(&cfg, 1).unwrap();
+        let creds = args.proxy.credentials.unwrap();
+        assert_eq!(creds.username, "manual");
     }
 
     #[test]
