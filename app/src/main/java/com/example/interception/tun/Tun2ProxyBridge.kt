@@ -22,6 +22,18 @@ object Tun2ProxyBridge {
         object Started : StartResult()
         data class Unavailable(val reason: String) : StartResult()
         data class Failed(val code: Int, val message: String) : StartResult()
+
+        /**
+         * The native `start()` call returned `ERR_TIMEOUT` and a subsequent [stop] +
+         * [awaitStoppedOrTimeout]-style confirmation attempt made from inside [start] itself
+         * ALSO could not confirm the native thread has quiesced. The tun fd, MITM engine, and
+         * every registered callback (event listener + protect callback) are deliberately left
+         * untouched and still registered -- the native side may still be mid-transition and
+         * could call back into them at any moment. The caller must NOT close/reuse the tun fd
+         * and must NOT fall back to starting a second capture path (e.g. legacy TunRelay) while
+         * indeterminate; it should fail the capture attempt for safety and let the user retry.
+         */
+        data class Indeterminate(val message: String) : StartResult()
     }
 
     /**
@@ -42,6 +54,7 @@ object Tun2ProxyBridge {
         // Register event listener — check return code
         val eventRc = NativeTun2Proxy.registerEventListener(sup)
         if (eventRc != NativeTun2Proxy.OK) {
+            sup.close()
             supervisor = null
             return StartResult.Failed(eventRc, "Failed to register native event listener")
         }
@@ -51,6 +64,7 @@ object Tun2ProxyBridge {
             val protectRc = NativeTun2Proxy.registerProtectCallback(NativeFdProtector)
             if (protectRc != NativeTun2Proxy.OK) {
                 NativeTun2Proxy.unregisterEventListener()
+                sup.close()
                 supervisor = null
                 return StartResult.Failed(protectRc, "Failed to register native protect callback — required by config")
             }
@@ -61,18 +75,45 @@ object Tun2ProxyBridge {
             return StartResult.Started
         }
 
+        if (rc == NativeTun2Proxy.ERR_TIMEOUT) {
+            // Ambiguous: the native thread may still be transitioning to RUNNING (or may
+            // never have started at all). Unregistering callbacks now would be unsafe if it
+            // is still running -- a late native callback into a GC'd/cleared listener/protector
+            // is worse than a leaked registration. Attempt to confirm quiescence first.
+            NativeTun2Proxy.stop()
+            val awaitRc = NativeTun2Proxy.awaitStopped(STOP_QUIESCENCE_TIMEOUT_MS)
+            if (awaitRc == NativeTun2Proxy.OK || awaitRc == NativeTun2Proxy.ERR_NOT_RUNNING) {
+                // Confirmed stopped -- safe to unregister and report a normal failure so the
+                // caller can fall back (e.g. to the legacy TunRelay path).
+                NativeTun2Proxy.unregisterEventListener()
+                if (config.protectAvailable) {
+                    NativeTun2Proxy.unregisterProtectCallback()
+                }
+                sup.close()
+                supervisor = null
+                val message = "bridge readiness timed out; confirmed stopped, safe to fall back"
+                Log.w(TAG, "Native tun2proxy bridge failed to start: code=$rc message=$message")
+                return StartResult.Failed(rc, message)
+            }
+
+            // Still indeterminate -- do NOT touch any registration or the supervisor. The
+            // caller must not reuse/close the tun fd nor start a second capture path.
+            val message = "bridge readiness timed out; unable to confirm shutdown"
+            Log.e(TAG, "Native tun2proxy bridge indeterminate after start timeout: $message")
+            return StartResult.Indeterminate(message)
+        }
+
         // Start failed — clean up registrations
         NativeTun2Proxy.unregisterEventListener()
         if (config.protectAvailable) {
             NativeTun2Proxy.unregisterProtectCallback()
         }
+        sup.close()
         supervisor = null
 
         val message = when (rc) {
             NativeTun2Proxy.ERR_RUNTIME_FAILED ->
                 NativeTun2Proxy.lastError() ?: "tun2proxy runtime rejected the bridge before reaching RUNNING"
-            NativeTun2Proxy.ERR_TIMEOUT ->
-                "bridge readiness timed out (ambiguous: thread may still be starting)"
             else -> NativeTun2Proxy.lastError() ?: "unknown native tun2proxy error (code $rc)"
         }
         Log.w(TAG, "Native tun2proxy bridge failed to start: code=$rc message=$message")
@@ -100,10 +141,11 @@ object Tun2ProxyBridge {
         return rc
     }
 
-    /** Unconditionally unregister all callbacks and clear supervisor. */
+    /** Unconditionally unregister all callbacks, stop the dispatch worker, and clear supervisor. */
     fun finalize() {
         NativeTun2Proxy.unregisterEventListener()
         NativeTun2Proxy.unregisterProtectCallback()
+        supervisor?.close()
         supervisor?.clearListeners()
         supervisor = null
     }
