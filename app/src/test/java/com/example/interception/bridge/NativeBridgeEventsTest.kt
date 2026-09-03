@@ -88,12 +88,15 @@ class NativeBridgeEventsTest {
 
     @Test
     fun `packet_tee round-trips`() {
+        val rawBytes = byteArrayOf(0x01, 0x02, 0x03, 0x04)
+        val b64 = android.util.Base64.encodeToString(rawBytes, android.util.Base64.NO_WRAP)
         val e = assertParses<BridgeEvent.PacketTee>(
-            """{"type":"packet_tee","session_id":5,"packet_len":1500,"is_outbound":true}"""
+            """{"type":"packet_tee","session_id":5,"packet_len":4,"data_base64":"$b64","is_outbound":true}"""
         )
         assertEquals(5L, e.sessionId)
-        assertEquals(1500, e.packetLen)
+        assertEquals(4, e.packetLen)
         assertTrue(e.isOutbound)
+        assertTrue("exact bytes must match", rawBytes.contentEquals(e.rawFrame))
     }
 
     @Test
@@ -142,24 +145,52 @@ class NativeBridgeEventsTest {
         val e = assertParses<BridgeEvent.PacketTee>(json)
         assertEquals(8, e.packetLen)
         assertTrue(e.isOutbound)
-        assertTrue("rawFrame must not be null", e.rawFrame != null)
-        assertTrue("exact bytes must match", rawBytes.contentEquals(e.rawFrame!!))
+        assertTrue("exact bytes must match", rawBytes.contentEquals(e.rawFrame))
     }
 
     @Test
     fun `packet_tee rejects length-mismatched data`() {
         // data_base64 decodes to 3 bytes but packet_len claims 8
         val json = """{"type":"packet_tee","session_id":0,"data_base64":"AQID","packet_len":8,"is_outbound":false}"""
-        val e = assertParses<BridgeEvent.PacketTee>(json)
-        assertNull("Length-mismatched data must be rejected", e.rawFrame)
-        assertEquals(8, e.packetLen)
+        val e = BridgeEvent.parse(json)
+        assertTrue("Length-mismatched data must be rejected as Unknown", e is BridgeEvent.Unknown)
     }
 
     @Test
-    fun `packet_tee with missing data has null rawFrame`() {
+    fun `packet_tee rejects missing data`() {
         val json = """{"type":"packet_tee","session_id":5,"packet_len":1500,"is_outbound":true}"""
-        val e = assertParses<BridgeEvent.PacketTee>(json)
-        assertNull(e.rawFrame)
-        assertEquals(1500, e.packetLen)
+        val e = BridgeEvent.parse(json)
+        assertTrue("Missing data_base64 must be rejected as Unknown", e is BridgeEvent.Unknown)
+    }
+
+    @Test
+    fun `packet_tee rejects empty data_base64`() {
+        val json = """{"type":"packet_tee","session_id":5,"packet_len":4,"data_base64":"","is_outbound":true}"""
+        val e = BridgeEvent.parse(json)
+        assertTrue("Empty data_base64 must be rejected as Unknown", e is BridgeEvent.Unknown)
+    }
+
+    @Test
+    fun `packet_tee rejects zero or negative packet_len`() {
+        val json = """{"type":"packet_tee","session_id":5,"packet_len":0,"data_base64":"AQID","is_outbound":true}"""
+        val e = BridgeEvent.parse(json)
+        assertTrue("packet_len<=0 must be rejected as Unknown", e is BridgeEvent.Unknown)
+    }
+
+    @Test
+    fun `packet_tee rejects packet_len over 9000`() {
+        val json = """{"type":"packet_tee","session_id":5,"packet_len":9001,"data_base64":"AQID","is_outbound":true}"""
+        val e = BridgeEvent.parse(json)
+        assertTrue("packet_len over MAX_TEE_FRAME_BYTES must be rejected as Unknown", e is BridgeEvent.Unknown)
+    }
+
+    @Test
+    fun `packet_tee rejects oversized data_base64 before decoding`() {
+        // A tiny declared packet_len with a huge base64 string must be rejected purely on the
+        // length-cap check, without ever attempting to decode the (junk) payload.
+        val oversized = "A".repeat(20000)
+        val json = """{"type":"packet_tee","session_id":5,"packet_len":4,"data_base64":"$oversized","is_outbound":true}"""
+        val e = BridgeEvent.parse(json)
+        assertTrue("Oversized data_base64 must be rejected as Unknown", e is BridgeEvent.Unknown)
     }
 }

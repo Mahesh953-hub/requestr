@@ -58,8 +58,13 @@ sealed class BridgeEvent {
         val sessionId: Long,
         val packetLen: Int,
         val isOutbound: Boolean,
-        /** Decoded raw IP frame bytes (up to MTU). Null if data was missing/malformed. */
-        val rawFrame: ByteArray?,
+        /**
+         * Decoded raw IP frame bytes. Defect B (S0 gaps audit): guaranteed non-null and exactly
+         * [packetLen] bytes long -- any malformed/oversized/missing tee payload is rejected at
+         * the whole-event level as [Unknown] instead of surfacing a half-valid [PacketTee] with
+         * a null frame.
+         */
+        val rawFrame: ByteArray,
     ) : BridgeEvent() {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
@@ -80,6 +85,22 @@ sealed class BridgeEvent {
     data class Unknown(val rawJson: String, val reason: String) : BridgeEvent()
 
     companion object {
+        /**
+         * Mirrors `native/tun2proxy-bridge/src/events.rs`'s `MAX_TEE_FRAME_BYTES` exactly. A
+         * `packet_tee` event whose declared `packet_len` falls outside `(0, MAX_TEE_FRAME_BYTES]`
+         * is rejected as [Unknown] -- it can never be a genuine frame the native side would emit.
+         */
+        private const val MAX_TEE_FRAME_BYTES = 9000
+
+        /**
+         * The largest base64-encoded length any genuine `packet_tee` payload can have:
+         * `ceil(MAX_TEE_FRAME_BYTES / 3) * 4` = 12000 chars (standard base64, no line wrapping,
+         * matching the Rust `base64` crate's `STANDARD` engine). Checked BEFORE attempting to
+         * decode `data_base64`, so an attacker-controlled oversized string can never reach the
+         * decoder even if it claims a small `packet_len`.
+         */
+        private const val MAX_TEE_BASE64_CHARS = 12000
+
         /**
          * Parse a JSON event string emitted by the native bridge into a typed [BridgeEvent].
          * Returns [Unknown] for malformed JSON or unrecognized types — never throws.
@@ -142,18 +163,44 @@ sealed class BridgeEvent {
                 }
                 "packet_tee" -> {
                     val packetLen = obj.safeInt("packet_len")
+                    if (packetLen <= 0 || packetLen > MAX_TEE_FRAME_BYTES) {
+                        return Unknown(
+                            json,
+                            "packet_tee: packet_len $packetLen out of bounds (0, $MAX_TEE_FRAME_BYTES]"
+                        )
+                    }
+                    if (!obj.has("data_base64") || obj.isNull("data_base64")) {
+                        return Unknown(json, "packet_tee: missing data_base64")
+                    }
                     val dataB64 = obj.safeString("data_base64")
-                    val rawFrame = if (dataB64.isNotEmpty()) {
-                        try {
-                            val decoded = android.util.Base64.decode(dataB64, android.util.Base64.DEFAULT)
-                            if (decoded.size != packetLen) null else decoded // length mismatch → reject
-                        } catch (_: Exception) { null }
-                    } else null
+                    if (dataB64.isEmpty()) {
+                        return Unknown(json, "packet_tee: empty data_base64")
+                    }
+                    // Validate the declared length BEFORE attempting to decode -- an oversized
+                    // base64 string must never reach the decoder, regardless of what packet_len
+                    // claims.
+                    if (dataB64.length > MAX_TEE_BASE64_CHARS) {
+                        return Unknown(
+                            json,
+                            "packet_tee: data_base64 length ${dataB64.length} exceeds cap $MAX_TEE_BASE64_CHARS"
+                        )
+                    }
+                    val decoded = try {
+                        android.util.Base64.decode(dataB64, android.util.Base64.DEFAULT)
+                    } catch (e: Exception) {
+                        return Unknown(json, "packet_tee: base64 decode failed: ${e.message}")
+                    }
+                    if (decoded.size != packetLen) {
+                        return Unknown(
+                            json,
+                            "packet_tee: decoded length ${decoded.size} != declared packet_len $packetLen"
+                        )
+                    }
                     PacketTee(
                         sessionId = obj.safeLong("session_id"),
                         packetLen = packetLen,
                         isOutbound = obj.safeBool("is_outbound", true),
-                        rawFrame = rawFrame,
+                        rawFrame = decoded,
                     )
                 }
                 "error" -> Error(
