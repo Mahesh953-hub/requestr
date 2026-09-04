@@ -76,9 +76,9 @@ Re-running the gate: `HTTP2_FUZZ_ITERATIONS=4000000 tools/harness/fuzz/run.sh`.
 
 ## Known limits / follow-ups
 
-- HPACK *encoder* conformance is not tested here; task 57 introduces the encoder for the
-  downstream leg and must add the round-trip (`encode -> nghttp2-style decode`) check to the same
-  harness.
+- HPACK *encoder* conformance: covered since task 57 by `HpackEncoderTest` -- every block of the
+  `nghttp2` and `nghttp2-change-table-size` corpus profiles is re-encoded with `HpackEncoder`
+  and decoded back byte-exact (6,651 blocks), plus an all-256-octet Huffman round-trip.
 - WS / SSE / gRPC *conformance* corpora (autobahn-style) are task 55; this gate only covers crash
   and recovery behaviour of those parsers.
 - mitmproxy comparator pending the device lane.

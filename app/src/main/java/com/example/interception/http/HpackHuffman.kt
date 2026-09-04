@@ -91,6 +91,39 @@ internal object HpackHuffman {
     }
 
     /**
+     * S3 task 57: RFC 7541 §5.2 Huffman encode of raw octets, padded to the octet boundary with
+     * the most significant bits of the EOS symbol (all ones). The terminating endpoint uses it
+     * for every string literal whose Huffman form is shorter than the raw form.
+     */
+    fun encode(octets: ByteArray): ByteArray {
+        val out = java.io.ByteArrayOutputStream(octets.size)
+        var acc = 0L
+        var accBits = 0
+        for (b in octets) {
+            val sym = b.toInt() and 0xFF
+            acc = (acc shl BITS[sym]) or (CODES[sym].toLong() and 0xFFFFFFFFL)
+            accBits += BITS[sym]
+            while (accBits >= 8) {
+                accBits -= 8
+                out.write(((acc ushr accBits) and 0xFF).toInt())
+            }
+        }
+        if (accBits > 0) {
+            // EOS prefix padding: fill the remaining low bits with ones.
+            val pad = 8 - accBits
+            out.write((((acc shl pad) or ((1L shl pad) - 1)) and 0xFF).toInt())
+        }
+        return out.toByteArray()
+    }
+
+    /** Number of octets [encode] would produce for [octets] (no allocation). */
+    fun encodedLength(octets: ByteArray): Int {
+        var bits = 0L
+        for (b in octets) bits += BITS[b.toInt() and 0xFF]
+        return ((bits + 7) / 8).toInt()
+    }
+
+    /**
      * Decode a Huffman-coded byte range (RFC 7541 §5.2 / RFC 9204 §4.1.2). Padding of up to 7
      * trailing one-bits (an EOS prefix) is tolerated; a walk that hits an undefined path stops
      * decoding and returns what was decoded so far (best effort — capture must not crash on

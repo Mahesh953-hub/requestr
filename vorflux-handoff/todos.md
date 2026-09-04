@@ -176,3 +176,47 @@ Exported from the platform todo list at handoff time.
       crashes on a 64-bit length with the reserved MSB set.
     - Not covered: mitmproxy side-by-side comparator (device lane, with G27); HPACK encoder
       round-trip (task 57); WS/SSE/gRPC conformance corpora (task 55).
+  - S3 task 57 — done on `vorflux/interceptor-s3-protocol` (gate G27):
+    - The MITM proxy now TERMINATES HTTP/2 instead of forwarding decrypted h2 bytes. Flag
+      `InterceptorFlags.h2Terminate` (default on): on -> the client-side TLS offers ALPN
+      `h2, http/1.1` and an h2 client is served by `Http2ProxyConnection`; off -> only
+      `http/1.1` is offered so apps fall back to HTTP/1.1 through the proxy. The observe-only
+      byte-forwarding path (`inspectH2ClientToServer` / `inspectH2ServerToClient`) is deleted, not
+      kept as a fallback (`MitmProxyEngineH2TerminationCutoverTest` asserts on the source).
+    - New (all `com.example.interception.http`): `Http2Endpoint` (server- or client-role RFC 9113
+      connection: preface, SETTINGS handshake + ACK, PING, GOAWAY, RST_STREAM, PRIORITY ignored,
+      PUSH_PROMISE -> PROTOCOL_ERROR, CONTINUATION assembly with PADDED/PRIORITY stripped,
+      MAX_CONCURRENT_STREAMS -> REFUSED_STREAM, header-list-size bound, per-connection and
+      per-stream error mapping); `HpackEncoder` (dynamic table, never-indexed `authorization` /
+      `proxy-authorization` / short `cookie`, Huffman when shorter, size-update emission;
+      `HpackHuffman.encode`); `Http2FlowControl` (send windows with a 30 s wait timeout ->
+      `FlowControlException` -> RST FLOW_CONTROL_ERROR; receive side re-credits in half-window
+      batches); `Http2Translator` (header validation, h2 request -> HTTP/1.1 head incl. cookie
+      folding + `Host` from `:authority`, HTTP/1.1 response -> h2 headers/trailers, chunked
+      framing, bounded `Http1ResponseReader`); `Http2ProxyConnection` (client leg + upstream leg;
+      upstream dialled once at the first HEADERS with ALPN preference `h2, http/1.1`; negotiated
+      `h2` -> client-role `Http2Endpoint` re-encodes every stream on a new connection, ordered
+      headers preserved; `http/1.1` -> `Http1UpstreamBridge` serialises streams onto one
+      keep-alive connection in arrival order; dial failure -> `:status 502` per stream).
+    - `LazyUpstreamConnection.Connected.alpn` carries the negotiated upstream protocol
+      (`handshakeApplicationProtocol`, API 24+).
+    - Persistence unchanged: `Http2Session` is fed the frames read from / written to the CLIENT
+      endpoint (`onFrameRead` / `onFrameWritten` hooks), so transactions, gRPC messages, timings
+      and the v20 children rows are written exactly as before.
+    - Tests: `Http2EndpointTest` (24: handshake, settings validation, flow control both sides,
+      CONTINUATION, padded/priority, trailers, RST/GOAWAY, concurrency limit, malformed
+      requests -> per-stream vs connection errors), `HpackEncoderTest` (7: round-trip, dynamic
+      table, sensitive fields, size updates, Huffman all octets, nghttp2 corpus re-encode 6,651
+      blocks), `Http2FlowControlTest` (8), `Http2TranslatorTest` (16), `Http2ProxyConnectionTest`
+      (11: h1 and h2 upstreams, gRPC end-to-end, 502, RST/GOAWAY relay, large bodies, trailers),
+      `MitmProxyEngineH2TerminationCutoverTest` (3).
+    - Known limits: HTTP/1.1 client -> h2 upstream translation exists in `Http2Translator`
+      (`requestToH2` / `responseToHttp1`) but is NOT wired (h1 clients still get an h1-only
+      upstream); a request body destined for an HTTP/1.1 upstream is buffered (FlowBuffer) until
+      END_STREAM rather than streamed; a client read thread blocked in upstream `writeData` while
+      the upstream read thread blocks in client `writeData` is broken only by the 30 s flow-control
+      timeout; the receive side never reports a peer overrun (it re-credits as it consumes), so
+      overrun detection is unit-level only; interception rules on translated h2 = task 35;
+      mitmproxy side-by-side comparator still pending the device lane; `Http2Session` merges
+      CONTINUATION after HEADERS padding (pre-existing, endpoint strips padding first so the
+      observer is unaffected on the terminated path).

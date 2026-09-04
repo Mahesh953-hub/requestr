@@ -59,12 +59,24 @@ class InterceptorFlags private constructor(private val prefs: SharedPreferences)
      */
     val ftsSearch: Boolean get() = prefs.getBoolean(KEY_FTS_SEARCH, true)
 
+    /**
+     * S3 task 57 (D7, gate G27): when `true` the MITM proxy offers `h2` to the intercepted app
+     * and terminates HTTP/2 itself ([com.example.interception.http.Http2ProxyConnection]:
+     * SETTINGS/flow control/streams are ours, headers are decoded and re-encoded, and the
+     * upstream leg is h2 or HTTP/1.1 by ALPN). When `false` the client-facing ALPN offer is
+     * `http/1.1` only, so apps negotiate HTTP/1.1 and go through the existing rule-evaluated
+     * HTTP/1.x relay -- the observe-only h2 byte forwarding was removed at this cutover and is
+     * not a fallback.
+     */
+    val h2Terminate: Boolean get() = prefs.getBoolean(KEY_H2_TERMINATE, true)
+
     fun setRelayPoolBounded(enabled: Boolean) = prefs.edit().putBoolean(KEY_RELAY_POOL_BOUNDED, enabled).apply()
     fun setQuicTeePolicy(enabled: Boolean) = prefs.edit().putBoolean(KEY_QUIC_TEE_POLICY, enabled).apply()
     fun setPcapng(enabled: Boolean) = prefs.edit().putBoolean(KEY_PCAPNG, enabled).apply()
     fun setBodySpill(enabled: Boolean) = prefs.edit().putBoolean(KEY_BODY_SPILL, enabled).apply()
     fun setProtocolChildren(enabled: Boolean) = prefs.edit().putBoolean(KEY_PROTOCOL_CHILDREN, enabled).apply()
     fun setFtsSearch(enabled: Boolean) = prefs.edit().putBoolean(KEY_FTS_SEARCH, enabled).apply()
+    fun setH2Terminate(enabled: Boolean) = prefs.edit().putBoolean(KEY_H2_TERMINATE, enabled).apply()
 
     companion object {
         private const val PREFS_NAME = "requestr_interceptor_flags"
@@ -74,6 +86,7 @@ class InterceptorFlags private constructor(private val prefs: SharedPreferences)
         internal const val KEY_BODY_SPILL = "body_spill"
         internal const val KEY_PROTOCOL_CHILDREN = "protocol_children"
         internal const val KEY_FTS_SEARCH = "fts_search"
+        internal const val KEY_H2_TERMINATE = "h2_terminate"
 
         @Volatile
         private var INSTANCE: InterceptorFlags? = null

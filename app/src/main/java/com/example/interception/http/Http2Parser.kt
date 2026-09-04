@@ -523,7 +523,10 @@ object Http2Parser {
     // RFC 9204 §4.1.2 mandates for QPACK, instead of duplicating ~180 lines of code tables.
 
     /** Full RFC 7541 Appendix A static table (61 entries). */
-    private const val STATIC_TABLE_SIZE = 61
+    internal const val STATIC_TABLE_SIZE = 61
+
+    /** S3 task 57: static table as an indexable list (element 0 == HPACK index 1) for [HpackEncoder]. */
+    internal val STATIC_TABLE: List<Pair<String, String>> = (1..STATIC_TABLE_SIZE).map { getStaticEntry(it) }
 
     private fun getStaticEntry(index: Int): Pair<String, String> = when (index) {
         1 -> ":authority" to ""

@@ -17,7 +17,7 @@ import com.example.interception.grpc.GrpcDetector
 import com.example.interception.grpc.ProtobufDecoder
 import com.example.interception.http.GrpcEvent
 import com.example.interception.http.HttpBodyDecoder
-import com.example.interception.http.Http2Parser
+import com.example.interception.http.Http2ProxyConnection
 import com.example.interception.http.Http2Session
 import com.example.interception.http.Http2Transaction
 import com.example.interception.http.HttpParser
@@ -185,6 +185,13 @@ class MitmProxyEngine(
      * Only consulted when a [sink] is present -- the callback seam is always flat.
      */
     @Volatile internal var protocolChildren: Boolean = true
+    /**
+     * S3 task 57: `InterceptorFlags.h2Terminate`, sampled at [start]. `true` offers `h2` to the
+     * app and terminates it in [Http2ProxyConnection]; `false` offers `http/1.1` only so the app
+     * negotiates HTTP/1.1 and takes the rule-evaluated HTTP/1.x relay. There is no observe-only
+     * h2 path any more (D7 cutover).
+     */
+    @Volatile internal var h2Terminate: Boolean = true
     private val injectedCertificateEngine = certificateEngine
     /**
      * S1 task 8: one issuer for every leaf (see [CertificateEngine]); its internal
@@ -231,7 +238,10 @@ class MitmProxyEngine(
         if (running.get()) return this.port
         appContext = context.applicationContext
         plaintextDelegate.bind(context)
-        protocolChildren = InterceptorFlags.get(context).protocolChildren
+        InterceptorFlags.get(context).let { flags ->
+            protocolChildren = flags.protocolChildren
+            h2Terminate = flags.h2Terminate
+        }
 
         // Pre-warm the CA material off the caller's thread (S1 task 7: no runBlocking on the
         // start path); the first MITM'd connection awaits the same suspend getOrCreate.
@@ -508,7 +518,8 @@ class MitmProxyEngine(
             // Client/server ALPN negotiation (§4): offer both h2 and http/1.1, exactly what a
             // real server behind this proxy would offer. The client's choice (read back below,
             // once the handshake completes) decides which relay mode this whole connection uses
-            // -- see the h2-vs-HTTP/1.x dispatch further down.
+            // -- see the h2-vs-HTTP/1.x dispatch further down. S3 task 57: with `h2Terminate`
+            // off only `http/1.1` is offered, so the app never negotiates h2 with us.
             //
             // `SSLParameters.setApplicationProtocols` is API 24 (N), and the negotiated result is
             // read back via `SSLSocket.getHandshakeApplicationProtocol()` -- also API 24 -- rather
@@ -518,7 +529,7 @@ class MitmProxyEngine(
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
                 runCatching {
                     val params = sslSocket.sslParameters
-                    params.applicationProtocols = arrayOf("h2", "http/1.1")
+                    params.applicationProtocols = if (h2Terminate) arrayOf("h2", "http/1.1") else arrayOf("http/1.1")
                     sslSocket.sslParameters = params
                 }
             }
@@ -571,9 +582,17 @@ class MitmProxyEngine(
                 runCatching { sslSocket.close() }
                 return
             }
+            // S3 task 57: an h2 client is terminated here, so the upstream leg is free to be
+            // whatever the server prefers -- offer h2 first and translate to HTTP/1.1 when the
+            // server picks that (Http2ProxyConnection). An HTTP/1.x client keeps the mirrored
+            // single offer so both legs of the HTTP/1.x relay agree on framing.
             val upstream = LazyUpstreamConnection(
                 host, port,
-                preferredAlpnProtocols = negotiatedAlpn?.let { listOf(it) } ?: emptyList(),
+                preferredAlpnProtocols = when (negotiatedAlpn) {
+                    "h2" -> listOf("h2", "http/1.1")
+                    null -> emptyList()
+                    else -> listOf(negotiatedAlpn)
+                },
                 networkCondition = networkCondition,
                 keyManagers = upstreamKeyManagers,
                 onFirstConnect = { connected ->
@@ -639,12 +658,13 @@ class MitmProxyEngine(
             val clientToUpstream: () -> Unit
             val upstreamToClient: () -> Unit
             if (negotiatedAlpn == "h2") {
-                // §3/§5: HTTP/2 is decided once, upfront, from the ALPN result -- this
-                // connection never falls into the HTTP/1.x buffering loop or its blind-relay
-                // fallback at all. Every byte is forwarded immediately in both directions (h2
-                // frames are never rule-evaluated -- that only applies to the HTTP/1.x path);
-                // Http2Session is handed a copy of each parsed frame purely to explain what it
-                // means (HPACK decode, per-stream pairing, gRPC message framing).
+                // §3/§5 + S3 task 57 (D7 cutover): HTTP/2 is decided once, upfront, from the ALPN
+                // result, and this connection is *terminated* -- requestr is the app's h2 peer
+                // (Http2Endpoint: preface, SETTINGS, flow control, stream lifecycle) and speaks h2
+                // or HTTP/1.1 upstream by that leg's ALPN (Http2ProxyConnection). Every frame on
+                // the client connection, read or written, is replayed into Http2Session so the
+                // rows, gRPC events and timings are produced exactly as before; nothing is
+                // forwarded verbatim any more. Rules on translated h2 messages are task 35.
                 val grpcCalls = GrpcCallTable()
                 val h2Session = Http2Session(
                     onTransaction = { tx ->
@@ -666,8 +686,31 @@ class MitmProxyEngine(
                     onGrpcCallStarted = { start -> emitGrpcCallStart(start, host, port, logRequests, grpcCalls) },
                     onGrpcCallEnded = { end -> emitGrpcCallEnd(end, host, port, logRequests, logResponses, grpcCalls) },
                 )
-                clientToUpstream = { inspectH2ClientToServer(db, decryptedInput, upstream, host, port, h2Session, sent) }
-                upstreamToClient = { inspectH2ServerToClient(upstream, decryptedOutput, host, port, h2Session, received) }
+                val h2 = Http2ProxyConnection(
+                    clientInput = decryptedInput,
+                    clientOutput = decryptedOutput,
+                    connectUpstream = {
+                        val connected = try {
+                            upstream.connect()
+                        } catch (e: javax.net.ssl.SSLException) {
+                            com.example.interception.tls.MutualTlsSignals.recordIfDemand(host, e)
+                            persistFailedMitmTlsSession(db, host, port, "upstream handshake", e)
+                            throw e
+                        }
+                        Http2ProxyConnection.UpstreamLeg(connected.input, connected.output, connected.alpn)
+                    },
+                    observer = h2Session,
+                    bufferPool = relayPool.buffers,
+                    bytesFromClient = sent,
+                    bytesFromUpstream = received,
+                    name = "h2 $host:$port",
+                )
+                clientToUpstream = {
+                    try { h2.runClientLeg() } finally { upstream.giveUp(); h2Session.close() }
+                }
+                upstreamToClient = {
+                    try { h2.runUpstreamLeg() } finally { h2Session.close() }
+                }
             } else {
                 // HTTP/1.x, with an in-place switch to WebSocket framing the moment a 101
                 // upgrade response is observed -- see handleParsedResponse and
@@ -1072,112 +1115,6 @@ class MitmProxyEngine(
         } catch (_: Exception) { /* connection closed */
         } finally {
             relayPool.buffers.release(chunk)
-        }
-    }
-
-    // ── HTTP/2 relay (§3/§5) ──────────────────────────────────────────────
-
-    /**
-     * Client→server HTTP/2 relay. Unlike [inspectClientToServer]'s HTTP/1.x path, every byte is
-     * forwarded upstream immediately, unmodified -- h2 frames are never rule-evaluated here (a
-     * deliberate scope decision: BLOCK/REDIRECT/MODIFY_REQUEST/MODIFY_RESPONSE/MOCK_RESPONSE for
-     * h2 traffic is not part of this task). [session] is handed a *copy* of each parsed frame
-     * purely so it can emit [Http2Transaction]/[GrpcEvent]s for display -- it never influences
-     * what is sent on the wire.
-     *
-     * The client connection preface (RFC 7540 §3.5, `Http2Parser.PREFACE_LENGTH` bytes) is
-     * stripped from the frame-parsing side-buffer exactly once before the first
-     * [Http2Parser.parseFrames] call; buffering (rather than checking as soon as any bytes
-     * arrive) avoids misinterpreting a preface that arrived split across TCP segments as a
-     * bogus frame header.
-     */
-    private fun inspectH2ClientToServer(
-        db: RequestrDatabase,
-        input: InputStream,
-        upstream: LazyUpstreamConnection,
-        host: String,
-        port: Int,
-        session: Http2Session,
-        bytesSentToUpstream: AtomicLong,
-    ) {
-        val frameBuffer = ByteArrayOutputStream()
-        val chunk = relayPool.buffers.acquire()
-        var prefaceStripped = false
-        try {
-            while (true) {
-                val n = input.read(chunk)
-                if (n == -1) break
-                bytesSentToUpstream.addAndGet(n.toLong())
-                val upstreamOut = connectOrThrow(db, upstream, host, port)
-                upstreamOut.write(chunk, 0, n)
-                upstreamOut.flush()
-
-                frameBuffer.write(chunk, 0, n)
-                var bytes = frameBuffer.toByteArray()
-                if (!prefaceStripped) {
-                    if (bytes.size < Http2Parser.PREFACE_LENGTH) continue // wait for the full preface
-                    if (Http2Parser.isPreface(bytes)) {
-                        bytes = bytes.copyOfRange(Http2Parser.PREFACE_LENGTH, bytes.size)
-                    }
-                    prefaceStripped = true
-                }
-                val frames = Http2Parser.parseFrames(bytes)
-                session.onClientFrames(frames)
-                val consumed = frames.sumOf { 9 + it.length }
-                frameBuffer.reset()
-                frameBuffer.write(bytes, consumed, bytes.size - consumed)
-            }
-        } catch (_: Exception) { /* connection closed */
-        } finally {
-            relayPool.buffers.release(chunk)
-            // Mirrors inspectClientToServer's finally -- guarantees inspectH2ServerToClient's
-            // awaitConnectedOrGiveUp always unblocks, however this loop ends.
-            upstream.giveUp()
-            // P1 fix: whichever h2 relay direction ends first, this connection is over --
-            // discard every still-tracked stream (session.close() is idempotent/thread-safe,
-            // see its KDoc) instead of relying solely on GOAWAY, which a client/server that
-            // simply drops the TCP connection may never send.
-            session.close()
-        }
-    }
-
-    /**
-     * Server→client HTTP/2 relay. No preface handling (a server never sends the client
-     * connection preface) and no `clientWriteLock` (unlike the HTTP/1.x path, h2 has no
-     * BLOCK/MOCK_RESPONSE short-circuit that writes to the client from the other thread).
-     */
-    private fun inspectH2ServerToClient(
-        upstream: LazyUpstreamConnection,
-        clientOut: OutputStream,
-        host: String,
-        port: Int,
-        session: Http2Session,
-        bytesReceivedFromUpstream: AtomicLong,
-    ) {
-        val input = upstream.awaitConnectedOrGiveUp()?.input ?: return
-        val frameBuffer = ByteArrayOutputStream()
-        val chunk = relayPool.buffers.acquire()
-        try {
-            while (true) {
-                val n = input.read(chunk)
-                if (n == -1) break
-                bytesReceivedFromUpstream.addAndGet(n.toLong())
-                clientOut.write(chunk, 0, n)
-                clientOut.flush()
-
-                frameBuffer.write(chunk, 0, n)
-                val bytes = frameBuffer.toByteArray()
-                val frames = Http2Parser.parseFrames(bytes)
-                session.onServerFrames(frames)
-                val consumed = frames.sumOf { 9 + it.length }
-                frameBuffer.reset()
-                frameBuffer.write(bytes, consumed, bytes.size - consumed)
-            }
-        } catch (_: Exception) { /* connection closed */ } finally {
-            relayPool.buffers.release(chunk)
-            // P1 fix: same cleanup trigger as inspectH2ClientToServer's finally -- whichever
-            // direction's loop ends first tears down the shared session's stream state.
-            session.close()
         }
     }
 
