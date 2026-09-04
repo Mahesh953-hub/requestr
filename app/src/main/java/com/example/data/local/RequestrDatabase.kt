@@ -123,7 +123,12 @@ import kotlinx.coroutines.runBlocking
     // websocket_messages / sse_events / grpc_calls / grpc_messages / http2_stream_events, all
     // CASCADE children of captured_traffic. Additive only; see Migration19To20.kt. The legacy
     // flattened WS→/WS← and x-grpc-* rows are folded into them by v21 (task 21).
-    version = 20,
+    // S3 task 21 (interceptor plan §4 v21): bumped 20 -> 21 for the one-time legacy backfill --
+    // captured_traffic.legacyBackfill stamp column, then the flattened WS→/WS← rows become
+    // websocket_messages children of one synthesized 101 parent per connection and the
+    // x-grpc-* rows become grpc_messages + grpc_calls under one synthesized parent per call.
+    // See Migration20To21.kt.
+    version = 21,
     exportSchema = true,
 )
 @TypeConverters(RequestrTypeConverters::class)
@@ -165,7 +170,7 @@ abstract class RequestrDatabase : RoomDatabase() {
          * The current schema version declared in the [@Database] annotation above.
          * Kept in sync manually; a CI schema-drift check validates the exported JSON.
          */
-        const val SCHEMA_VERSION = 20
+        const val SCHEMA_VERSION = 21
 
         @Volatile
         private var INSTANCE: RequestrDatabase? = null
@@ -711,11 +716,11 @@ abstract class RequestrDatabase : RoomDatabase() {
             }
         }
 
-        /** All eleven registered migrations v8→v19, exposed for tests and the builder. */
+        /** All thirteen registered migrations v8→v21, exposed for tests and the builder. */
         val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
             MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16,
-            MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20,
+            MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21,
         )
     }
 }

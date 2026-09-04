@@ -101,3 +101,24 @@ Exported from the platform todo list at handoff time.
       client-side bytes unless the return path is mirrored into the reassembler.
     - UI: with `protocolChildren` on, WS/gRPC per-message rows disappear from the traffic list
       (the parent row stays); the viewers arrive with UI tasks 11–13.
+  - S3 task 21 — done on `vorflux/interceptor-s3-protocol`:
+    - Room v21 (`Migration20To21` + test, schema `21.json`, `SCHEMA_VERSION = 21`, 13 migrations):
+      one new nullable column `captured_traffic.legacyBackfill` (`"v21-ws"` / `"v21-grpc"`)
+      stamped on the parents the backfill synthesizes.
+    - Backfill runs inside the migration transaction: flat `WS→`/`WS←` rows are grouped by
+      `(sessionId, connectionId, wsUrl)` into ONE synthesized 101 parent (`GET`, `WEBSOCKET`,
+      timestamp = first frame, sizes = sums) with `websocket_messages` children (opcode from the
+      `" (OPCODE)"` URL suffix, `frameIndex` in timestamp/id order); flat `x-grpc-*` rows are
+      grouped by `(sessionId, connectionId, url, x-grpc-stream-id)` into one parent per call
+      (`statusCode` stays NULL -- never recorded) with `grpc_messages` children (payload re-parsed
+      from the hex dump, `payloadTruncated` when the dump was cut, `decodedText` from
+      `x-protobuf-decoded`) and a `grpc_calls` row (last `x-grpc-status` seen). Converted flat
+      rows are deleted; nothing is invented.
+    - Idempotent: `Migration20To21.backfill(db)` re-run is a no-op (test proves it); live v20
+      parents (no synthetic headers) are never touched or stamped.
+    - Fixture built from the real legacy writers (`MitmProxyEngine(protocolChildren = false)`
+      for WS, `Http2Session` harness for gRPC) inserted through the real type converters.
+    - Known limits: MITM-relay flat rows carried `connectionId = "host:port"`, so several legacy
+      WS connections to one endpoint in a session fold into one parent (tun rows keep their
+      5-tuple key and stay separate); a spilled legacy body imports its stored preview with
+      `payloadTruncated = 1`.

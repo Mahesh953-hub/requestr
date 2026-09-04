@@ -194,15 +194,15 @@ class RequestrDatabaseBuilderTest {
     }
 
     @Test
-    fun `ALL_MIGRATIONS array contains exactly 12 migrations`() {
-        assertEquals(12, RequestrDatabase.ALL_MIGRATIONS.size)
+    fun `ALL_MIGRATIONS array contains exactly 13 migrations`() {
+        assertEquals(13, RequestrDatabase.ALL_MIGRATIONS.size)
         assertEquals(8, RequestrDatabase.ALL_MIGRATIONS.first().startVersion)
         assertEquals(9, RequestrDatabase.ALL_MIGRATIONS.first().endVersion)
-        assertEquals(19, RequestrDatabase.ALL_MIGRATIONS.last().startVersion)
-        assertEquals(20, RequestrDatabase.ALL_MIGRATIONS.last().endVersion)
+        assertEquals(20, RequestrDatabase.ALL_MIGRATIONS.last().startVersion)
+        assertEquals(21, RequestrDatabase.ALL_MIGRATIONS.last().endVersion)
     }
 
-    // ── MigrationTestHelper: all 12 migrations on support path ──────────────
+    // ── MigrationTestHelper: all 13 migrations on support path ──────────────
 
     @get:Rule
     val helper: MigrationTestHelper = MigrationTestHelper(
