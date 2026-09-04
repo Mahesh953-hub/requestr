@@ -43,6 +43,24 @@ object CaptureLogRepository {
         }
     }
 
+    /**
+     * S3 task 22: database-side search in the [com.example.data.search.TrafficSearchCompiler]
+     * grammar (`status:5xx host:api OR body:"error"`, `NOT`, parentheses). Free text goes through
+     * the FTS5 index when this runtime has it ([com.example.data.search.FtsSchema.available]) and
+     * through `LIKE` otherwise, so the result set is the same either way. Newest first, capped at
+     * [limit]. Blank queries return the newest [limit] rows.
+     */
+    suspend fun searchTraffic(context: Context, raw: String, sessionId: Long? = null, limit: Int = 500): List<CapturedTrafficItem> =
+        withContext(Dispatchers.IO) {
+            val db = RequestrDatabase.get(context)
+            val compiled = com.example.data.search.TrafficSearchCompiler(useFts = com.example.data.search.FtsSchema.available.get())
+                .compile(raw, sessionId, limit)
+            val rows = db.trafficFtsDao().search(androidx.sqlite.db.SimpleSQLiteQuery(compiled.sql, compiled.args.toTypedArray()))
+            if (rows.isEmpty()) return@withContext emptyList()
+            val byId = db.transactionTimingDao().getAll().associateBy { it.trafficId }
+            rows.map { it.toUiModel(byId[it.id]) }
+        }
+
     /** Real row count, used for the "ALL (n)" chip so the number cannot drift from the list. */
     fun observeCount(context: Context): Flow<Int> =
         RequestrDatabase.get(context).capturedTrafficDao().observeCount()

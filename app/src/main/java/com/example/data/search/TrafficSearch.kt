@@ -115,9 +115,16 @@ object TrafficSearch {
         return true
     }
 
+    /**
+     * In-memory filter over an already-loaded list. S3 task 22: parsed by
+     * [TrafficSearchCompiler] so `OR`, `NOT`/`-term` and parentheses work here exactly as in the
+     * SQL path; each term keeps the per-field semantics of [matches].
+     */
     fun filter(items: List<CapturedTrafficItem>, raw: String): List<CapturedTrafficItem> {
-        val query = parse(raw)
-        return items.filter { matches(it, query) }
+        if (raw.isBlank()) return items
+        val compiler = TrafficSearchCompiler(useFts = false)
+        val node = compiler.parse(raw)
+        return items.filter { compiler.matches(node, it) }
     }
 
     /** Split on AND/and, then on spaces, preserving quoted terms. */

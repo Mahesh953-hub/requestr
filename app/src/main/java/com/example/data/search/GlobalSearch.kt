@@ -1,6 +1,7 @@
 package com.example.data.search
 
 import com.example.data.models.ApiRequestItem
+import com.example.data.models.CapturedTrafficItem
 import com.example.data.models.FlowNodeItem
 import com.example.data.models.NoteItem
 import com.example.data.repository.ToolItem
@@ -44,6 +45,21 @@ sealed interface GlobalSearchHit {
     }
 
     /**
+     * S3 task 22: a captured transaction. Unlike the other arms these are not substring-scanned
+     * here: callers pass the rows the compiled FTS query already returned
+     * (`CaptureLogRepository.searchTraffic`), so Home search over traffic is index-backed.
+     */
+    data class Traffic(val item: CapturedTrafficItem) : GlobalSearchHit {
+        override val title: String get() = "${item.method.name} ${item.host}${item.path}"
+        override val subtitle: String
+            get() = buildString {
+                if (item.statusCode > 0) append(item.statusCode).append(' ')
+                append(item.protocol)
+                if (item.appPackage.isNotBlank()) append(" \u00b7 ").append(item.appPackage)
+            }
+    }
+
+    /**
      * A conversation whose title or message content matched. [conversationId] is what the UI
      * hands to `ChatRepository.switchToConversation` before navigating to the `"chat"` route.
      * [matchedMessage] is the first message body that contained the query (null when only the
@@ -83,6 +99,7 @@ object GlobalSearch {
         tools: List<ToolItem> = emptyList(),
         flows: List<FlowNodeItem> = emptyList(),
         chats: List<ChatSearchEntry> = emptyList(),
+        traffic: List<CapturedTrafficItem> = emptyList(),
     ): List<GlobalSearchHit> {
         if (query.isBlank()) return emptyList()
         val q = query.trim()
@@ -111,6 +128,10 @@ object GlobalSearch {
             )
         }
 
-        return apiHits + noteHits + toolHits + flowHits + chatHits
+        // Already matched by the compiled query (see GlobalSearchHit.Traffic) -- never re-filtered
+        // by substring here, which would silently drop structured hits like `status:500`.
+        val trafficHits = traffic.map { GlobalSearchHit.Traffic(it) }
+
+        return apiHits + noteHits + toolHits + flowHits + chatHits + trafficHits
     }
 }

@@ -42,10 +42,41 @@ class InterceptorFlags private constructor(private val prefs: SharedPreferences)
      */
     val bodySpill: Boolean get() = prefs.getBoolean(KEY_BODY_SPILL, true)
 
+    /**
+     * S3 task 20: when `true` WebSocket messages, SSE events and gRPC messages are written as
+     * v20 child rows under one parent transaction (the 101 upgrade, the event-stream response,
+     * the gRPC call); when `false` the pre-v20 flattened rows (`WS→`/`WS←`, `x-grpc-*`) are
+     * produced instead, exactly as before, so the traffic list keeps its per-message rows until
+     * the protocol viewers land.
+     */
+    val protocolChildren: Boolean get() = prefs.getBoolean(KEY_PROTOCOL_CHILDREN, true)
+
+    /**
+     * S3 task 22: when `true` the traffic list and Home search run the compiled
+     * [com.example.data.search.TrafficSearchCompiler] query against Room (FTS5 `MATCH` where the
+     * index exists, `LIKE` otherwise); when `false` search is the pre-v22 in-memory filter over the
+     * loaded list. The index is maintained either way once it exists.
+     */
+    val ftsSearch: Boolean get() = prefs.getBoolean(KEY_FTS_SEARCH, true)
+
+    /**
+     * S3 task 57 (D7, gate G27): when `true` the MITM proxy offers `h2` to the intercepted app
+     * and terminates HTTP/2 itself ([com.example.interception.http.Http2ProxyConnection]:
+     * SETTINGS/flow control/streams are ours, headers are decoded and re-encoded, and the
+     * upstream leg is h2 or HTTP/1.1 by ALPN). When `false` the client-facing ALPN offer is
+     * `http/1.1` only, so apps negotiate HTTP/1.1 and go through the existing rule-evaluated
+     * HTTP/1.x relay -- the observe-only h2 byte forwarding was removed at this cutover and is
+     * not a fallback.
+     */
+    val h2Terminate: Boolean get() = prefs.getBoolean(KEY_H2_TERMINATE, true)
+
     fun setRelayPoolBounded(enabled: Boolean) = prefs.edit().putBoolean(KEY_RELAY_POOL_BOUNDED, enabled).apply()
     fun setQuicTeePolicy(enabled: Boolean) = prefs.edit().putBoolean(KEY_QUIC_TEE_POLICY, enabled).apply()
     fun setPcapng(enabled: Boolean) = prefs.edit().putBoolean(KEY_PCAPNG, enabled).apply()
     fun setBodySpill(enabled: Boolean) = prefs.edit().putBoolean(KEY_BODY_SPILL, enabled).apply()
+    fun setProtocolChildren(enabled: Boolean) = prefs.edit().putBoolean(KEY_PROTOCOL_CHILDREN, enabled).apply()
+    fun setFtsSearch(enabled: Boolean) = prefs.edit().putBoolean(KEY_FTS_SEARCH, enabled).apply()
+    fun setH2Terminate(enabled: Boolean) = prefs.edit().putBoolean(KEY_H2_TERMINATE, enabled).apply()
 
     companion object {
         private const val PREFS_NAME = "requestr_interceptor_flags"
@@ -53,6 +84,9 @@ class InterceptorFlags private constructor(private val prefs: SharedPreferences)
         internal const val KEY_QUIC_TEE_POLICY = "quic_tee_policy"
         internal const val KEY_PCAPNG = "pcapng"
         internal const val KEY_BODY_SPILL = "body_spill"
+        internal const val KEY_PROTOCOL_CHILDREN = "protocol_children"
+        internal const val KEY_FTS_SEARCH = "fts_search"
+        internal const val KEY_H2_TERMINATE = "h2_terminate"
 
         @Volatile
         private var INSTANCE: InterceptorFlags? = null

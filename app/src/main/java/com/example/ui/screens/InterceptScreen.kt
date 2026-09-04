@@ -353,13 +353,24 @@ fun InterceptScreen(
     var showSortSheet by remember { mutableStateOf(false) }
     var sortSpecs by remember { mutableStateOf(listOf(CaptureSortSpec(CaptureSortKey.TIMESTAMP, descending = true))) }
 
-    val filteredTraffic = remember(capturedTraffic, searchQuery, selectedMethodFilter, sortSpecs) {
-        val baseFiltered = if (selectedMethodFilter == null) capturedTraffic
-            else capturedTraffic.filter { it.method == selectedMethodFilter }
-        val searched = if (searchQuery.isNotBlank()) {
-            com.example.data.search.TrafficSearch.filter(baseFiltered, searchQuery)
-        } else baseFiltered
-        sortCaptures(searched, sortSpecs)
+    // S3 task 22: with the `ftsSearch` flag on, a non-blank query is compiled to SQL and run
+    // against Room (FTS5 MATCH where the index exists, LIKE otherwise) every time the query or
+    // the live list changes, so hits are not limited to what the in-memory list currently holds.
+    // Flag off = the pre-v22 in-memory filter (which now also understands OR / NOT / parentheses).
+    val ftsSearchEnabled = remember(screenContext) { com.example.data.persistence.InterceptorFlags.get(screenContext).ftsSearch }
+    val dbSearched by produceState<List<CapturedTrafficItem>?>(initialValue = null, searchQuery, capturedTraffic, ftsSearchEnabled) {
+        value = if (!ftsSearchEnabled || searchQuery.isBlank()) null
+        else runCatching { CaptureLogRepository.searchTraffic(screenContext, searchQuery) }.getOrNull()
+    }
+    val filteredTraffic = remember(capturedTraffic, searchQuery, selectedMethodFilter, sortSpecs, dbSearched) {
+        val searchedBase = when {
+            searchQuery.isBlank() -> capturedTraffic
+            dbSearched != null -> dbSearched!!
+            else -> com.example.data.search.TrafficSearch.filter(capturedTraffic, searchQuery)
+        }
+        val methodFiltered = if (selectedMethodFilter == null) searchedBase
+            else searchedBase.filter { it.method == selectedMethodFilter }
+        sortCaptures(methodFiltered, sortSpecs)
     }
 
     // FAB colour is driven by the real engine status, and the three states are genuinely

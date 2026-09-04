@@ -81,6 +81,12 @@ internal class LazyUpstreamConnection(
          */
         val setupTimings: com.example.interception.relay.UpstreamSetupTimings =
             com.example.interception.relay.UpstreamSetupTimings(null, null, null),
+        /**
+         * S3 task 57: the ALPN protocol the upstream actually negotiated (`"h2"`, `"http/1.1"`)
+         * or `null` when none was offered/selected or the platform cannot report it. Decides
+         * whether the terminated h2 client leg is bridged to an h2 or an HTTP/1.1 upstream.
+         */
+        val alpn: String? = null,
     )
 
     @Volatile private var connected: Connected? = null
@@ -156,9 +162,18 @@ internal class LazyUpstreamConnection(
                 val tlsStart = System.nanoTime()
                 sslSocket.startHandshake()
                 val tlsMs = (System.nanoTime() - tlsStart) / 1_000_000
+                // Same API-24 getter the client-facing leg uses (`getApplicationProtocol` is
+                // API 29); read right after the handshake so the value is still available.
+                val negotiated = runCatching {
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                        sslSocket.handshakeApplicationProtocol?.ifBlank { null }
+                            ?: if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) sslSocket.applicationProtocol?.ifBlank { null } else null
+                    } else null
+                }.getOrNull()
                 val result = Connected(
                     socket, sslSocket, sslSocket.getInputStream(), sslSocket.getOutputStream(),
                     setupTimings = com.example.interception.relay.UpstreamSetupTimings(dnsMs, connectMs, tlsMs),
+                    alpn = negotiated,
                 )
                 connected = result
                 onFirstConnect(result)

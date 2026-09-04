@@ -20,6 +20,7 @@ enum class HomeSearchType(val label: String) {
     TOOL("Tools"),
     FLOW("Flow"),
     CHAT("Chats"),
+    TRAFFIC("Traffic"),
 }
 
 /** Which category a hit belongs to. Exhaustive over [GlobalSearchHit]. */
@@ -29,6 +30,7 @@ fun searchTypeOf(hit: GlobalSearchHit): HomeSearchType = when (hit) {
     is GlobalSearchHit.Tool -> HomeSearchType.TOOL
     is GlobalSearchHit.FlowNode -> HomeSearchType.FLOW
     is GlobalSearchHit.Chat -> HomeSearchType.CHAT
+    is GlobalSearchHit.Traffic -> HomeSearchType.TRAFFIC
 }
 
 /**

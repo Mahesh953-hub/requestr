@@ -56,6 +56,7 @@ object HttpParser {
         // insertion order once written -- so the only place this survives is right here,
         // at parse time, in a field kept alongside (not instead of) the lowercased map.
         val rawHeaderNames = mutableListOf<String>()
+        val headerLines = mutableListOf<Pair<String, String>>()
         for (i in 1 until lines.size) {
             val colon = lines[i].indexOf(':')
             if (colon > 0) {
@@ -64,6 +65,7 @@ object HttpParser {
                 val value = lines[i].substring(colon + 1).trim()
                 headers[name] = value
                 rawHeaderNames.add(rawName)
+                headerLines.add(rawName to value)
             }
         }
 
@@ -102,6 +104,7 @@ object HttpParser {
             body = decoded.text,
             consumedBytes = totalNeeded,
             rawHeaderNames = rawHeaderNames,
+            headerLines = headerLines,
             isBodyBinary = decoded.isBinary,
             rawBodyBytes = rawBodyBytes,
             decodedBodyBytes = decoded.decodedBytes,
@@ -139,12 +142,14 @@ object HttpParser {
         val reasonPhrase = statusParts.getOrElse(2) { "" }
 
         val headers = mutableMapOf<String, String>()
+        val headerLines = mutableListOf<Pair<String, String>>()
         for (i in 1 until lines.size) {
             val colon = lines[i].indexOf(':')
             if (colon > 0) {
-                val name = lines[i].substring(0, colon).trim().lowercase()
+                val rawName = lines[i].substring(0, colon).trim()
                 val value = lines[i].substring(colon + 1).trim()
-                headers[name] = value
+                headers[rawName.lowercase()] = value
+                headerLines.add(rawName to value)
             }
         }
 
@@ -161,6 +166,8 @@ object HttpParser {
         // consumed from the buffer, only how the body is represented afterwards.
         val rawBodyBytes: ByteArray
         val totalNeeded: Int
+        // S3 task 20: chunked trailers (RFC 9112 §7.1.2) -- kept, no longer discarded.
+        var trailers: List<Pair<String, String>> = emptyList()
 
         if (bodyless) {
             totalNeeded = headerEnd + 4
@@ -176,6 +183,7 @@ object HttpParser {
                 is ChunkedDecodeResult.Complete -> {
                     rawBodyBytes = chunkResult.body
                     totalNeeded = chunkResult.consumedBytes
+                    trailers = chunkResult.trailers
                 }
                 ChunkedDecodeResult.Incomplete, ChunkedDecodeResult.Malformed -> return null
             }
@@ -205,6 +213,8 @@ object HttpParser {
             body = decoded.text,
             contentType = contentType,
             consumedBytes = totalNeeded,
+            headerLines = headerLines,
+            trailers = trailers,
             isBodyBinary = decoded.isBinary,
             rawBodyBytes = rawBodyBytes,
             decodedBodyBytes = decoded.decodedBytes,
@@ -275,7 +285,12 @@ object HttpParser {
      * done ([Complete]) -- callers must only build a [ParsedHttpMessage] from [Complete].
      */
     private sealed class ChunkedDecodeResult {
-        data class Complete(val body: ByteArray, val consumedBytes: Int) : ChunkedDecodeResult()
+        data class Complete(
+            val body: ByteArray,
+            val consumedBytes: Int,
+            /** Trailer fields in wire order, original casing (S3 task 20). */
+            val trailers: List<Pair<String, String>> = emptyList(),
+        ) : ChunkedDecodeResult()
         object Incomplete : ChunkedDecodeResult()
         object Malformed : ChunkedDecodeResult()
     }
@@ -308,7 +323,7 @@ object HttpParser {
                 // terminator itself, when there were none), leaving any additional trailer
                 // lines in the buffer to be misparsed as the start of the next message.
                 val trailerEnd = findTrailerEnd(bytes, chunkDataStart) ?: return ChunkedDecodeResult.Incomplete
-                return ChunkedDecodeResult.Complete(out.toByteArray(), trailerEnd)
+                return ChunkedDecodeResult.Complete(out.toByteArray(), trailerEnd, parseTrailers(bytes, chunkDataStart, trailerEnd))
             }
 
             // Checked arithmetic: chunkSize is attacker-controlled hex from the wire. A value
@@ -355,6 +370,20 @@ object HttpParser {
             val crlf = findCrlf(bytes, pos) ?: return null
             if (crlf == pos) return crlf + 2 // blank line: trailer section (maybe empty) is done
             pos = crlf + 2
+        }
+    }
+
+    /**
+     * S3 task 20: the trailer field lines between the last-chunk and the terminating blank line
+     * (`[start, end)`), in wire order with original casing. Lines without a colon are skipped
+     * exactly like malformed header lines are. Previously scanned for framing and then dropped.
+     */
+    private fun parseTrailers(bytes: ByteArray, start: Int, end: Int): List<Pair<String, String>> {
+        if (end - start <= 2) return emptyList()
+        val block = String(bytes, start, end - start, Charsets.ISO_8859_1)
+        return block.split("\r\n").mapNotNull { line ->
+            val colon = line.indexOf(':')
+            if (colon <= 0) null else line.substring(0, colon).trim() to line.substring(colon + 1).trim()
         }
     }
 
@@ -427,6 +456,19 @@ data class ParsedHttpMessage(
      * it is lost -- never populated for responses, and empty when the request had no headers.
      */
     val rawHeaderNames: List<String> = emptyList(),
+    /**
+     * S3 task 20: every header line as it appeared on the wire -- original casing, wire order,
+     * duplicates preserved (repeated `Set-Cookie`, `Via`, `Warning`). Populated by both
+     * [HttpParser] entry points and by the HTTP/2 session (from the HPACK-decoded list, pseudo-
+     * headers excluded); empty for synthesized messages. This is the source for the normalized
+     * `transaction_headers` rows; [headers] stays the lossy lower-cased lookup map.
+     */
+    val headerLines: List<Pair<String, String>> = emptyList(),
+    /**
+     * S3 task 20: trailer fields (HTTP/1.1 chunked trailer section, HTTP/2 trailing HEADERS),
+     * wire order and casing. Empty when the message had none.
+     */
+    val trailers: List<Pair<String, String>> = emptyList(),
     /**
      * §2.7: true when [HttpBodyDecoder.isProbablyUtf8] flagged the (post-decompression) body
      * bytes as binary. When true, [body] is [HttpBodyDecoder.BINARY_BODY_PLACEHOLDER], which

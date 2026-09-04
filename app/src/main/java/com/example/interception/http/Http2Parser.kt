@@ -30,6 +30,36 @@ object Http2Parser {
     const val FRAME_WINDOW_UPDATE = 0x8
     const val FRAME_CONTINUATION = 0x9
 
+    /** RFC 9113 §7 error code names (RST_STREAM / GOAWAY payloads). */
+    private val ERROR_CODE_NAMES = arrayOf(
+        "NO_ERROR", "PROTOCOL_ERROR", "INTERNAL_ERROR", "FLOW_CONTROL_ERROR", "SETTINGS_TIMEOUT",
+        "STREAM_CLOSED", "FRAME_SIZE_ERROR", "REFUSED_STREAM", "CANCEL", "COMPRESSION_ERROR",
+        "CONNECT_ERROR", "ENHANCE_YOUR_CALM", "INADEQUATE_SECURITY", "HTTP_1_1_REQUIRED",
+    )
+
+    /** Name of the 32-bit error code at the start of [payload] (RST_STREAM), or `0x..` when unknown. */
+    fun errorCodeName(payload: ByteArray): String {
+        if (payload.size < 4) return "?"
+        val code = ((payload[0].toInt() and 0xFF) shl 24) or ((payload[1].toInt() and 0xFF) shl 16) or
+            ((payload[2].toInt() and 0xFF) shl 8) or (payload[3].toInt() and 0xFF)
+        return ERROR_CODE_NAMES.getOrNull(code) ?: "0x${Integer.toHexString(code)}"
+    }
+
+    /** RFC 9113 §6 frame type name for logs/timelines. */
+    fun frameTypeName(type: Int): String = when (type) {
+        FRAME_DATA -> "DATA"
+        FRAME_HEADERS -> "HEADERS"
+        FRAME_PRIORITY -> "PRIORITY"
+        FRAME_RST_STREAM -> "RST_STREAM"
+        FRAME_SETTINGS -> "SETTINGS"
+        FRAME_PUSH_PROMISE -> "PUSH_PROMISE"
+        FRAME_PING -> "PING"
+        FRAME_GOAWAY -> "GOAWAY"
+        FRAME_WINDOW_UPDATE -> "WINDOW_UPDATE"
+        FRAME_CONTINUATION -> "CONTINUATION"
+        else -> "0x${Integer.toHexString(type)}"
+    }
+
     // Flag masks
     const val FLAG_ACK = 0x01
     const val FLAG_END_STREAM = 0x01
@@ -70,15 +100,68 @@ object Http2Parser {
         override fun hashCode(): Int = 31 * (31 * type + streamId) + payload.contentHashCode()
     }
 
-    /** Parsed header block from HPACK-decompressed HEADERS frame */
-    data class H2Headers(
+    /**
+     * Parsed header block from an HPACK-decompressed HEADERS frame.
+     *
+     * S3 task 20: [entries] is the primary representation -- every field in wire order with
+     * duplicates preserved (repeated `set-cookie` is the norm on h2, and RFC 9113 §8.2.3 only
+     * folds `cookie`). [pseudoHeaders]/[regularHeaders] are derived last-wins lookup maps kept for
+     * the many readers that only need one value per name. Equality is by [entries].
+     */
+    class H2Headers(
         val streamId: Int,
-        val pseudoHeaders: Map<String, String>,
-        val regularHeaders: Map<String, String>,
+        val entries: List<Pair<String, String>>,
         val endStream: Boolean,
+        /**
+         * S3 task 23 (gate G11): the first RFC 7541 decoding violation met in this block, or
+         * `null` for a clean decode. [entries] then holds everything decoded before the fault.
+         * Observe-only readers may keep using the partial list; a terminating endpoint (task 57)
+         * must answer a non-null [error] with `GOAWAY(COMPRESSION_ERROR)` because the peer's
+         * dynamic table and ours can no longer be assumed to agree.
+         */
+        val error: String? = null,
     ) {
+        /** Compatibility constructor for callers/tests that still build the two maps. */
+        constructor(
+            streamId: Int,
+            pseudoHeaders: Map<String, String>,
+            regularHeaders: Map<String, String>,
+            endStream: Boolean,
+        ) : this(
+            streamId,
+            pseudoHeaders.map { it.key to it.value } + regularHeaders.map { it.key to it.value },
+            endStream,
+        )
+
+        /** `:`-prefixed fields in wire order (last wins on a duplicate). */
+        val pseudoHeaders: Map<String, String> = LinkedHashMap<String, String>().also { m ->
+            for ((n, v) in entries) if (n.startsWith(":")) m[n] = v
+        }
+
+        /** Non-pseudo fields in wire order (last wins on a duplicate -- use [entries] for all values). */
+        val regularHeaders: Map<String, String> = LinkedHashMap<String, String>().also { m ->
+            for ((n, v) in entries) if (!n.startsWith(":")) m[n] = v
+        }
+
         /** Pseudo-headers overlaid with regular headers for convenient lookup. */
         val all: Map<String, String> get() = pseudoHeaders + regularHeaders
+
+        /** Non-pseudo fields in wire order, duplicates kept. */
+        val regularEntries: List<Pair<String, String>> get() = entries.filter { !it.first.startsWith(":") }
+
+        fun copy(
+            streamId: Int = this.streamId,
+            entries: List<Pair<String, String>> = this.entries,
+            endStream: Boolean = this.endStream,
+            error: String? = this.error,
+        ) = H2Headers(streamId, entries, endStream, error)
+
+        override fun equals(other: Any?): Boolean =
+            other is H2Headers && streamId == other.streamId && entries == other.entries && endStream == other.endStream
+
+        override fun hashCode(): Int = 31 * (31 * streamId + entries.hashCode()) + endStream.hashCode()
+
+        override fun toString(): String = "H2Headers(streamId=$streamId, entries=$entries, endStream=$endStream${error?.let { ", error=$it" } ?: ""})"
     }
 
     /**
@@ -95,9 +178,32 @@ object Http2Parser {
         private var dynamicSize = 0
         private var maxDynamicSize = DEFAULT_TABLE_SIZE
 
+        /**
+         * `SETTINGS_HEADER_TABLE_SIZE` we advertised and the peer acknowledged -- the ceiling a
+         * dynamic table size update on the wire may request (RFC 7541 §4.2, §6.3).
+         */
+        var maxHeaderTableSize: Int = DEFAULT_TABLE_SIZE
+            private set
+
         /** HPACK index 62 == most recently inserted dynamic entry (element 0). */
         fun dynamicEntry(hpackIndex: Int): Pair<String, String>? =
             dynamic.elementAtOrNull(hpackIndex - STATIC_TABLE_SIZE - 1)
+
+        /** Number of dynamic entries currently held (tests, diagnostics). */
+        val dynamicCount: Int get() = dynamic.size
+
+        /** Current dynamic table size in RFC 7541 §4.1 octets. */
+        val size: Int get() = dynamicSize
+
+        /**
+         * Apply a new acknowledged `SETTINGS_HEADER_TABLE_SIZE`. The encoder is then required to
+         * emit a dynamic table size update at the start of its next block (a shrink takes effect
+         * immediately so oversized entries are evicted; a growth only widens the ceiling).
+         */
+        fun setMaxHeaderTableSize(settingsValue: Int) {
+            maxHeaderTableSize = settingsValue
+            if (settingsValue < maxDynamicSize) resize(settingsValue)
+        }
 
         fun insert(name: String, value: String) {
             val entrySize = name.length + value.length + 32 // RFC 7541 §4.1
@@ -137,10 +243,12 @@ object Http2Parser {
                            (data[pos + 2].toInt() and 0xFF)
             val type = data[pos + 3].toInt() and 0xFF
             val flags = data[pos + 4].toInt() and 0xFF
-            val streamId = ((data[pos + 5].toInt() and 0xFF) shl 24) or
+            // RFC 9113 §4.1: the high bit of the stream identifier is reserved and MUST be
+            // ignored on receipt -- without the mask a peer setting it yields a negative id.
+            val streamId = (((data[pos + 5].toInt() and 0xFF) shl 24) or
                            ((data[pos + 6].toInt() and 0xFF) shl 16) or
                            ((data[pos + 7].toInt() and 0xFF) shl 8) or
-                           (data[pos + 8].toInt() and 0xFF)
+                           (data[pos + 8].toInt() and 0xFF)) and 0x7FFFFFFF
 
             if (frameLen < 0 || frameLen > MAX_FRAME_LENGTH || pos + 9 + frameLen > end) break
 
@@ -249,123 +357,164 @@ object Http2Parser {
      *        every header block travelling in one direction of a connection.
      */
     fun decodeHeaders(frame: H2Frame, payload: ByteArray, state: HpackDecoder = HpackDecoder()): H2Headers {
-        val pseudoHeaders = mutableMapOf<String, String>()
-        val regularHeaders = mutableMapOf<String, String>()
+        val entries = ArrayList<Pair<String, String>>()
         var pos = 0
         val end = payload.size
+        var error: String? = null
 
         fun store(name: String, value: String) {
-            if (name.startsWith(":")) pseudoHeaders[name] = value else regularHeaders[name] = value
+            entries.add(name to value)
         }
 
         // Skip padding if FLAG_PADDED is set
         var effectiveEnd = end
-        if ((frame.flags and FLAG_PADDED) != 0 && pos < effectiveEnd) {
-            val padLen = payload[pos].toInt() and 0xFF
-            pos++
-            effectiveEnd = end - padLen
+        if ((frame.flags and FLAG_PADDED) != 0) {
+            if (pos < effectiveEnd) {
+                val padLen = payload[pos].toInt() and 0xFF
+                pos++
+                effectiveEnd = end - padLen
+                if (effectiveEnd < pos) error = "padding ($padLen) exceeds frame payload" // RFC 9113 §6.2
+            } else {
+                error = "PADDED flag on empty payload"
+            }
         }
 
         // Skip priority if FLAG_PRIORITY is set
-        if ((frame.flags and FLAG_PRIORITY) != 0 && pos + 5 <= effectiveEnd) {
-            pos += 5 // E bit + stream dependency + weight
+        if (error == null && (frame.flags and FLAG_PRIORITY) != 0) {
+            if (pos + 5 <= effectiveEnd) pos += 5 // E bit + stream dependency + weight
+            else error = "PRIORITY flag with fewer than 5 octets"
         }
 
-        while (pos < effectiveEnd) {
+        var fieldsSeen = false
+        decode@ while (error == null && pos < effectiveEnd) {
             val firstByte = payload[pos].toInt() and 0xFF
             pos++
 
             if (firstByte and 0x80 == 0x80) {
                 // Indexed header field — 7-bit prefix
-                val index = decodeInteger(payload, pos, 7, firstByte)
+                val index = decodeInteger(payload, pos, 7, firstByte, effectiveEnd)
+                if (index.second < 0) { error = "indexed field: integer overflow or truncated"; break@decode }
                 pos = index.first
-                val (name, value) = lookup(index.second, state)
-                store(name, value)
+                val entry = lookupStrict(index.second, state)
+                if (entry == null) { error = "indexed field: invalid index ${index.second}"; break@decode }
+                store(entry.first, entry.second)
+                fieldsSeen = true
             } else if (firstByte and 0x40 == 0x40) {
                 // Literal with incremental indexing — 6-bit prefix name index
-                val nameIdx = decodeInteger(payload, pos, 6, firstByte)
+                val nameIdx = decodeInteger(payload, pos, 6, firstByte, effectiveEnd)
+                if (nameIdx.second < 0) { error = "literal name index: integer overflow or truncated"; break@decode }
                 pos = nameIdx.first
                 val name: String
                 if (nameIdx.second != 0) {
-                    name = lookup(nameIdx.second, state).first
+                    val entry = lookupStrict(nameIdx.second, state)
+                    if (entry == null) { error = "literal name: invalid index ${nameIdx.second}"; break@decode }
+                    name = entry.first
                 } else {
-                    val (np, n) = decodeString(payload, pos)
+                    val (np, n) = decodeString(payload, pos, effectiveEnd)
+                    if (n == null) { error = "literal name: bad string literal"; break@decode }
                     pos = np
                     name = n
                 }
-                val (newPos, value) = decodeString(payload, pos)
+                val (newPos, value) = decodeString(payload, pos, effectiveEnd)
+                if (value == null) { error = "literal value: bad string literal"; break@decode }
                 pos = newPos
                 store(name, value)
                 state.insert(name, value)
+                fieldsSeen = true
             } else if (firstByte and 0x20 == 0x20) {
                 // Dynamic table size update — 5-bit prefix
-                val result = decodeInteger(payload, pos, 5, firstByte)
+                val result = decodeInteger(payload, pos, 5, firstByte, effectiveEnd)
+                if (result.second < 0) { error = "table size update: integer overflow or truncated"; break@decode }
                 pos = result.first
+                if (fieldsSeen) { error = "table size update after a header field (RFC 7541 §4.2)"; break@decode }
+                if (result.second > state.maxHeaderTableSize) {
+                    error = "table size update ${result.second} exceeds SETTINGS_HEADER_TABLE_SIZE ${state.maxHeaderTableSize}"
+                    break@decode
+                }
                 state.resize(result.second)
             } else {
                 // Literal without indexing (0000xxxx) / never indexed (0001xxxx) — 4-bit prefix
                 val name: String
                 if ((firstByte and 0x0F) != 0) {
-                    val res = decodeInteger(payload, pos, 4, firstByte)
+                    val res = decodeInteger(payload, pos, 4, firstByte, effectiveEnd)
+                    if (res.second < 0) { error = "literal name index: integer overflow or truncated"; break@decode }
                     pos = res.first
-                    name = lookup(res.second, state).first
+                    val entry = lookupStrict(res.second, state)
+                    if (entry == null) { error = "literal name: invalid index ${res.second}"; break@decode }
+                    name = entry.first
                 } else {
-                    val (np2, n) = decodeString(payload, pos)
+                    val (np2, n) = decodeString(payload, pos, effectiveEnd)
+                    if (n == null) { error = "literal name: bad string literal"; break@decode }
                     pos = np2
                     name = n
                 }
-                val (np2, value) = decodeString(payload, pos)
+                val (np2, value) = decodeString(payload, pos, effectiveEnd)
+                if (value == null) { error = "literal value: bad string literal"; break@decode }
                 pos = np2
                 store(name, value)
+                fieldsSeen = true
             }
         }
 
         return H2Headers(
             streamId = frame.streamId,
-            pseudoHeaders = pseudoHeaders,
-            regularHeaders = regularHeaders,
-            endStream = (frame.flags and FLAG_END_STREAM) != 0
+            entries = entries,
+            endStream = (frame.flags and FLAG_END_STREAM) != 0,
+            error = error,
         )
     }
 
-    /** Resolve a 1-based HPACK index against the static + dynamic tables. */
-    private fun lookup(index: Int, state: HpackDecoder): Pair<String, String> =
+    /** Resolve a 1-based HPACK index against the static + dynamic tables; `null` when out of range. */
+    private fun lookupStrict(index: Int, state: HpackDecoder): Pair<String, String>? =
         if (index in 1..STATIC_TABLE_SIZE) getStaticEntry(index)
-        else state.dynamicEntry(index) ?: ("(idx$index)" to "")
+        else if (index > STATIC_TABLE_SIZE) state.dynamicEntry(index)
+        else null
 
-    private fun decodeInteger(bytes: ByteArray, offset: Int, prefixBits: Int, firstByte: Int): Pair<Int, Int> {
+    /**
+     * RFC 7541 §5.1 integer. Returns `(next offset, value)`, or a negative value when the
+     * continuation bytes run past [end] or the value would exceed [MAX_HPACK_INTEGER]
+     * (unbounded `1111 1111 ...` sequences are a classic decoder DoS -- cap instead of wrapping).
+     */
+    private fun decodeInteger(bytes: ByteArray, offset: Int, prefixBits: Int, firstByte: Int, end: Int = bytes.size): Pair<Int, Int> {
         val mask = (1 shl prefixBits) - 1
         val prefix = firstByte and mask
         if (prefix < mask) return offset to prefix
-        var result = mask
+        var result = mask.toLong()
         var m = 0
         var pos = offset
         while (true) {
-            if (pos >= bytes.size) return pos to result
+            if (pos >= end) return pos to -1
             val b = bytes[pos].toInt() and 0xFF
             pos++
-            result += (b and 127) shl m
+            if (m > 28) return pos to -1 // more than 5 continuation octets can never fit
+            result += (b and 127).toLong() shl m
+            if (result > MAX_HPACK_INTEGER) return pos to -1
             if (b and 128 == 0) break
             m += 7
         }
-        return pos to result
+        return pos to result.toInt()
     }
 
+    /** Largest integer any HPACK field may carry (index, length or table size): 2^28 - 1. */
+    private const val MAX_HPACK_INTEGER = (1 shl 28) - 1
+
     /**
-     * Decode an HPACK string literal at [offset].
-     * @return (offset past the string) to decoded text. Huffman-coded strings
-     *         (H bit set) are decoded with the RFC 7541 Appendix B code.
+     * Decode an HPACK string literal at [offset] (never reading past [end]).
+     * @return (offset past the string) to decoded text, or `null` text when the literal is
+     *         malformed (bad length, or an invalid Huffman encoding -- see [HpackHuffman.decodeStrict]).
+     *         Octets become text via [HpackHuffman.octetsToString] (UTF-8 when valid, else
+     *         ISO-8859-1) for raw and Huffman literals alike.
      */
-    private fun decodeString(bytes: ByteArray, offset: Int): Pair<Int, String> {
-        if (offset >= bytes.size) return offset to ""
+    private fun decodeString(bytes: ByteArray, offset: Int, end: Int = bytes.size): Pair<Int, String?> {
+        if (offset >= end) return offset to null
         val firstByte = bytes[offset].toInt() and 0xFF
         val huffman = firstByte and 0x80 == 0x80
-        val (pos, len) = decodeInteger(bytes, offset + 1, 7, firstByte)
-        if (len < 0 || pos + len > bytes.size) return bytes.size to ""
+        val (pos, len) = decodeInteger(bytes, offset + 1, 7, firstByte, end)
+        if (len < 0 || pos + len > end) return end to null
         return if (huffman) {
-            (pos + len) to HpackHuffman.decode(bytes, pos, len)
+            (pos + len) to HpackHuffman.decodeStrict(bytes, pos, len)
         } else {
-            (pos + len) to String(bytes, pos, len, Charsets.UTF_8)
+            (pos + len) to HpackHuffman.octetsToString(bytes, pos, len)
         }
     }
 
@@ -374,7 +523,10 @@ object Http2Parser {
     // RFC 9204 §4.1.2 mandates for QPACK, instead of duplicating ~180 lines of code tables.
 
     /** Full RFC 7541 Appendix A static table (61 entries). */
-    private const val STATIC_TABLE_SIZE = 61
+    internal const val STATIC_TABLE_SIZE = 61
+
+    /** S3 task 57: static table as an indexable list (element 0 == HPACK index 1) for [HpackEncoder]. */
+    internal val STATIC_TABLE: List<Pair<String, String>> = (1..STATIC_TABLE_SIZE).map { getStaticEntry(it) }
 
     private fun getStaticEntry(index: Int): Pair<String, String> = when (index) {
         1 -> ":authority" to ""

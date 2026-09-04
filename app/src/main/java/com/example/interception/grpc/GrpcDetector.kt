@@ -188,6 +188,27 @@ object GrpcDetector {
             ?.value?.trim()?.toIntOrNull()
     }
 
+    /**
+     * S3 task 20: `grpc-message` is percent-encoded (gRPC-over-HTTP/2 spec, "Status-Message"):
+     * `%XX` sequences decode as UTF-8 bytes; anything malformed is kept verbatim.
+     */
+    fun decodeGrpcMessage(raw: String): String {
+        if (!raw.contains('%')) return raw
+        val out = java.io.ByteArrayOutputStream()
+        var i = 0
+        while (i < raw.length) {
+            val c = raw[i]
+            if (c == '%' && i + 2 < raw.length) {
+                val hex = raw.substring(i + 1, i + 3).toIntOrNull(16)
+                if (hex != null) {
+                    out.write(hex); i += 3; continue
+                }
+            }
+            out.write(c.toString().toByteArray(Charsets.UTF_8)); i++
+        }
+        return String(out.toByteArray(), Charsets.UTF_8)
+    }
+
     /** Short one-line description for logs. */
     fun describe(call: GrpcCall, message: GrpcMessage): String =
         "gRPC ${call.grpcMethod} msg#${message.length}B${if (message.compressed) " (compressed)" else ""}"

@@ -73,3 +73,150 @@ Exported from the platform todo list at handoff time.
       unit-tested (v20–v24 arrive in S3); G8 (timings within 10 ms of tcpdump) needs the
       physical lane -- Redroid has no tun, so relay timings were exercised through
       `MitmProxyEngineTimingTest`/`ConnectionTimingTrackerTest` only.
+  - S2 merged as PR #21.
+  - S3 task 20 — done on `vorflux/interceptor-s3-protocol`:
+    - Room v20 (`websocket_messages`, `sse_events`, `grpc_calls`, `grpc_messages`,
+      `http2_stream_events`; `Migration19To20` + test, schema `20.json`, `SCHEMA_VERSION = 20`).
+    - `data/persistence/CaptureSink` (parent handle + protocol children); `PersistenceQueue`
+      implements it via `PersistenceOp.AppendChildren` (children of a dead parent are refused and
+      counted as orphaned). `interception/persist/ProtocolRows` builds every child row.
+    - Both engines write children under ONE parent: MITM relay (`MitmProxyEngine` with
+      `sink = PersistenceQueue`) and tun path (`CaptureEngine`). WebSocket messages hang off the
+      101 upgrade row, SSE events off the carrying response, gRPC messages off one row per call
+      (`protocol = "gRPC"`, `statusCode` NULL until the trailers, `grpc_calls` upsert; no
+      synthetic `x-grpc-*` header on the new path). Flag `protocolChildren` (default on);
+      off = the pre-v20 flat `WS→`/`WS←` and `x-grpc-*` rows.
+    - Ordered headers: `ParsedHttpMessage.headerLines` (raw casing, duplicates) + `trailers`
+      (HTTP/1.1 chunked trailers parsed), `H2Headers.entries` ordered list (maps stay
+      last-wins), `Http2Session` request/response trailers + bounded frame timeline
+      (`MAX_FRAME_EVENTS = 512`). `transaction_headers` rows are written for every transaction
+      (REQUEST/RESPONSE/*_PSEUDO/*_TRAILER kinds).
+    - Fixed while here: the tun path never parsed WS frames after the handshake (frames were
+      only inspected while an HTTP request was pending); a declined upgrade (non-101) now
+      leaves the stream as plain HTTP.
+    - Known limits: WS text > 4,096 chars and binary > 2 MiB are truncated with
+      `payloadTruncated` (no per-message BodyStore spill yet); SSE on the HTTP/1.x relay is
+      persisted when the response framing completes (`ProtocolRows.sseEvents(firstIndex)`
+      supports incremental appends once a streaming parser lands); the tun path only sees
+      client-side bytes unless the return path is mirrored into the reassembler.
+    - UI: with `protocolChildren` on, WS/gRPC per-message rows disappear from the traffic list
+      (the parent row stays); the viewers arrive with UI tasks 11–13.
+  - S3 task 21 — done on `vorflux/interceptor-s3-protocol`:
+    - Room v21 (`Migration20To21` + test, schema `21.json`, `SCHEMA_VERSION = 21`, 13 migrations):
+      one new nullable column `captured_traffic.legacyBackfill` (`"v21-ws"` / `"v21-grpc"`)
+      stamped on the parents the backfill synthesizes.
+    - Backfill runs inside the migration transaction: flat `WS→`/`WS←` rows are grouped by
+      `(sessionId, connectionId, wsUrl)` into ONE synthesized 101 parent (`GET`, `WEBSOCKET`,
+      timestamp = first frame, sizes = sums) with `websocket_messages` children (opcode from the
+      `" (OPCODE)"` URL suffix, `frameIndex` in timestamp/id order); flat `x-grpc-*` rows are
+      grouped by `(sessionId, connectionId, url, x-grpc-stream-id)` into one parent per call
+      (`statusCode` stays NULL -- never recorded) with `grpc_messages` children (payload re-parsed
+      from the hex dump, `payloadTruncated` when the dump was cut, `decodedText` from
+      `x-protobuf-decoded`) and a `grpc_calls` row (last `x-grpc-status` seen). Converted flat
+      rows are deleted; nothing is invented.
+    - Idempotent: `Migration20To21.backfill(db)` re-run is a no-op (test proves it); live v20
+      parents (no synthetic headers) are never touched or stamped.
+    - Fixture built from the real legacy writers (`MitmProxyEngine(protocolChildren = false)`
+      for WS, `Http2Session` harness for gRPC) inserted through the real type converters.
+    - Known limits: MITM-relay flat rows carried `connectionId = "host:port"`, so several legacy
+      WS connections to one endpoint in a session fold into one parent (tun rows keep their
+      5-tuple key and stay separate); a spilled legacy body imports its stored preview with
+      `payloadTruncated = 1`.
+  - S3 task 22 — done on `vorflux/interceptor-s3-protocol`:
+    - Room v22 (`Migration21To22` + test, schema `22.json`, `SCHEMA_VERSION = 22`, 14 migrations):
+      new Room table `search_presets` (unique `name`, `query`, three-condition `conditions` +
+      `combineWithOr`) via `SearchPresetDao`; the FTS index is NOT a Room entity.
+    - `FtsSchema`: `CREATE VIRTUAL TABLE traffic_fts USING fts5(traffic_id UNINDEXED, url, host,
+      headers_text, body_text, tokenize='unicode61')` with `rowid = captured_traffic.id`, three
+      triggers (insert / delete / update of the indexed columns) and eager population from
+      `captured_traffic` + `websocket_messages.payloadText` + `sse_events` + `grpc_messages.decodedText`
+      the first time the index is created. Runs from a Room open callback in both driver modes
+      and best-effort at the end of `MIGRATION_21_22`.
+    - FTS5 exists only on `BundledSQLiteDriver` (fresh installs); Robolectric/framework SQLite has
+      no `fts5` module, so `FtsSchema.ensure` logs and sets `FtsSchema.available = false` and the
+      app falls back to a bound `LIKE` query over the same columns (+ children via EXISTS). A
+      database migrated on the framework driver gets its index on the next bundled-driver open.
+    - `TrafficSearchCompiler`: one grammar for both paths -- `key:value`, quoted phrases
+      (`body:"rate limit"`), `AND` (implicit), `OR`, `NOT` / `-term`, parentheses; keys
+      `status` (`5xx`, `>=`, `<`, ...), `method`, `host`, `path`, `duration`, `ct`/`content-type`,
+      `proto`, `source`/`src`, `tag`, `header:`/`body:` (column-scoped), free text -> `MATCH`
+      (`"term"*`, FTS operators quoted so user text is literal) or the `LIKE` fallback; every
+      value is a bound argument (`SimpleSQLiteQuery` through `TrafficFtsDao.search`);
+      `compileConditions` implements the three-condition + AND/OR preset model. NULL body/status
+      columns are coalesced so `NOT` behaves like the in-memory filter.
+    - Children written through `PersistenceQueue.AppendChildren` append their text to the parent's
+      `body_text` (`FtsIndexer.appendChildText`, capped at 16 KiB per append) so a WS/SSE/gRPC
+      parent is found by message content. Binary bodies index only url/host/headers.
+    - `TrafficSearch.filter` (in-memory, flag off or already-loaded lists) now parses with the
+      same compiler, so `OR`/`NOT`/parens work there too; `status:5xx` no longer silently matches
+      everything.
+    - Flag `InterceptorFlags.ftsSearch` (default on): traffic-list search and Home search become
+      DB-backed (`CaptureLogRepository.searchTraffic`, Home shows a new "Traffic" result type that
+      opens the Intercept tab). Off -> legacy in-memory filtering, Home shows no traffic hits.
+    - Tests: `TrafficSearchCompilerTest` (grammar, per-key SQL, injection, LIKE fallback shape,
+      in-memory parity), `TrafficFtsIndexTest` (bundled driver: MATCH on url/host/header/body,
+      children, delete/update triggers, binary bodies, LIKE == FTS hits, `ensure` populate +
+      idempotent, presets), `Migration21To22Test` (framework driver: presets + unique index,
+      no FTS5, LIKE fallback query runs), `GlobalSearchTest` Traffic arm.
+  - S3 task 23 — done on `vorflux/interceptor-s3-protocol` (decision D7, gate G11):
+    - Decision: in-house `Http2Parser`/`HpackDecoder`/`Http2Session` stay; `h2Netty` NOT armed (flag not declared);
+      task 57 builds termination on them. Record: `plans/decisions/D7-http2-conformance.md`.
+    - Evidence: nghttp2 HPACK corpus (`http2jp/hpack-test-case`, 3 profiles, vendored gzipped
+      under `app/src/test/resources/hpack-test-case/`, MIT) -- 9,918/9,918 blocks byte-exact;
+      16 malformed vectors reported via `H2Headers.error` without throwing; frame/header fuzzer
+      (`Http2FuzzTest`, fixed seed, `Http2Session` desync probe) 4M iterations 0 failures;
+      WS/gRPC/protobuf/SSE fuzzer (`ProtocolFramingFuzzTest`) 1M iterations 0 failures.
+      Harness entry point `tools/harness/fuzz/run.sh` (+ README); same classes run in CI's
+      `:app:testDebugUnitTest`.
+    - Hardening: bounded HPACK integers, index validation, strict Huffman (`decodeStrict`; EOS,
+      padding rules), table-size-update ordering + `SETTINGS_HEADER_TABLE_SIZE` bound
+      (`setMaxHeaderTableSize`), PADDED/PRIORITY checks, reserved stream-id bit masked, header
+      octets decoded as UTF-8 with ISO-8859-1 fallback, `H2Headers.error` (task 57 answers with
+      `GOAWAY(COMPRESSION_ERROR)`), `Http2Session.hpackErrorCount`; `WebSocketParser` no longer
+      crashes on a 64-bit length with the reserved MSB set.
+    - Not covered: mitmproxy side-by-side comparator (device lane, with G27); HPACK encoder
+      round-trip (task 57); WS/SSE/gRPC conformance corpora (task 55).
+  - S3 task 57 — done on `vorflux/interceptor-s3-protocol` (gate G27):
+    - The MITM proxy now TERMINATES HTTP/2 instead of forwarding decrypted h2 bytes. Flag
+      `InterceptorFlags.h2Terminate` (default on): on -> the client-side TLS offers ALPN
+      `h2, http/1.1` and an h2 client is served by `Http2ProxyConnection`; off -> only
+      `http/1.1` is offered so apps fall back to HTTP/1.1 through the proxy. The observe-only
+      byte-forwarding path (`inspectH2ClientToServer` / `inspectH2ServerToClient`) is deleted, not
+      kept as a fallback (`MitmProxyEngineH2TerminationCutoverTest` asserts on the source).
+    - New (all `com.example.interception.http`): `Http2Endpoint` (server- or client-role RFC 9113
+      connection: preface, SETTINGS handshake + ACK, PING, GOAWAY, RST_STREAM, PRIORITY ignored,
+      PUSH_PROMISE -> PROTOCOL_ERROR, CONTINUATION assembly with PADDED/PRIORITY stripped,
+      MAX_CONCURRENT_STREAMS -> REFUSED_STREAM, header-list-size bound, per-connection and
+      per-stream error mapping); `HpackEncoder` (dynamic table, never-indexed `authorization` /
+      `proxy-authorization` / short `cookie`, Huffman when shorter, size-update emission;
+      `HpackHuffman.encode`); `Http2FlowControl` (send windows with a 30 s wait timeout ->
+      `FlowControlException` -> RST FLOW_CONTROL_ERROR; receive side re-credits in half-window
+      batches); `Http2Translator` (header validation, h2 request -> HTTP/1.1 head incl. cookie
+      folding + `Host` from `:authority`, HTTP/1.1 response -> h2 headers/trailers, chunked
+      framing, bounded `Http1ResponseReader`); `Http2ProxyConnection` (client leg + upstream leg;
+      upstream dialled once at the first HEADERS with ALPN preference `h2, http/1.1`; negotiated
+      `h2` -> client-role `Http2Endpoint` re-encodes every stream on a new connection, ordered
+      headers preserved; `http/1.1` -> `Http1UpstreamBridge` serialises streams onto one
+      keep-alive connection in arrival order; dial failure -> `:status 502` per stream).
+    - `LazyUpstreamConnection.Connected.alpn` carries the negotiated upstream protocol
+      (`handshakeApplicationProtocol`, API 24+).
+    - Persistence unchanged: `Http2Session` is fed the frames read from / written to the CLIENT
+      endpoint (`onFrameRead` / `onFrameWritten` hooks), so transactions, gRPC messages, timings
+      and the v20 children rows are written exactly as before.
+    - Tests: `Http2EndpointTest` (24: handshake, settings validation, flow control both sides,
+      CONTINUATION, padded/priority, trailers, RST/GOAWAY, concurrency limit, malformed
+      requests -> per-stream vs connection errors), `HpackEncoderTest` (7: round-trip, dynamic
+      table, sensitive fields, size updates, Huffman all octets, nghttp2 corpus re-encode 6,651
+      blocks), `Http2FlowControlTest` (8), `Http2TranslatorTest` (16), `Http2ProxyConnectionTest`
+      (11: h1 and h2 upstreams, gRPC end-to-end, 502, RST/GOAWAY relay, large bodies, trailers),
+      `MitmProxyEngineH2TerminationCutoverTest` (3).
+    - Known limits: HTTP/1.1 client -> h2 upstream translation exists in `Http2Translator`
+      (`requestToH2` / `responseToHttp1`) but is NOT wired (h1 clients still get an h1-only
+      upstream); a request body destined for an HTTP/1.1 upstream is buffered (FlowBuffer) until
+      END_STREAM rather than streamed; a client read thread blocked in upstream `writeData` while
+      the upstream read thread blocks in client `writeData` is broken only by the 30 s flow-control
+      timeout; the receive side never reports a peer overrun (it re-credits as it consumes), so
+      overrun detection is unit-level only; interception rules on translated h2 = task 35;
+      mitmproxy side-by-side comparator still pending the device lane; `Http2Session` merges
+      CONTINUATION after HEADERS padding (pre-existing, endpoint strips padding first so the
+      observer is unaffected on the terminated path).

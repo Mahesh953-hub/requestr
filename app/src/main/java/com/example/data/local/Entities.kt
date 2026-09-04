@@ -152,6 +152,13 @@ data class CapturedTrafficEntity(
      */
     val negotiatedProtocol: String? = null,
     val protocolDowngradeReason: String? = null,
+    /**
+     * S3 task 21 (v21): non-null on a parent row that [MIGRATION_20_21] synthesized from the
+     * pre-v20 flattened `WS→`/`WS←` or `x-grpc-*` rows (`"v21-ws"` / `"v21-grpc"`), so a
+     * backfilled flow is distinguishable from a live-captured 101 upgrade or gRPC call and the
+     * backfill itself is idempotent. Null for every row a capture engine wrote.
+     */
+    val legacyBackfill: String? = null,
 )
 
 /**

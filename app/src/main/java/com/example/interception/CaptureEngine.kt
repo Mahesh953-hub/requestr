@@ -9,8 +9,11 @@ import com.example.data.local.InterceptRuleEntity
 import com.example.data.local.RequestrDatabase
 import com.example.data.local.TcpConnectionEntity
 import com.example.data.local.TlsSessionEntity
+import com.example.data.persistence.RowHandle
 import com.example.interception.grpc.GrpcDetector
 import com.example.interception.grpc.ProtobufDecoder
+import com.example.interception.http.H2FrameEvent
+import com.example.interception.persist.ProtocolRows
 import com.example.interception.http.Http2Parser
 import com.example.interception.http.HttpBodyDecoder
 import com.example.interception.http.HttpParser
@@ -80,6 +83,13 @@ class CaptureEngine(
      */
     private val persistence: com.example.data.persistence.PersistenceQueue =
         com.example.data.persistence.PersistenceQueue.forDatabase(db),
+    /**
+     * S3 task 20: `InterceptorFlags.protocolChildren`. `true` writes WebSocket messages and gRPC
+     * messages as v20 child rows under one parent transaction (the 101 upgrade / the call);
+     * `false` keeps the pre-v20 flattened rows.
+     */
+    var protocolChildren: Boolean =
+        runCatching { com.example.data.persistence.InterceptorFlags.get(context).protocolChildren }.getOrDefault(true),
 ) {
     // Complaint #5 audit fix: this used to build a path via
     // `Environment.getExternalStoragePublicDirectory(DIRECTORY_DOWNLOADS)` and open a raw
@@ -110,6 +120,20 @@ class CaptureEngine(
     private val pendingRequests = LinkedHashMap<String, ParsedHttpMessage>() // keyed by stream key
     // Streams that upgraded to WebSocket — subsequent bytes are WS frames (Fix #14)
     private val wsStreams = mutableSetOf<String>()
+    // S3 task 20: the 101 upgrade row each WS stream's messages hang off, and the next frameIndex.
+    private val wsParents = mutableMapOf<String, RowHandle>()
+    private val wsFrameIndex = mutableMapOf<String, Int>()
+
+    /** S3 task 20: one gRPC call = one parent row; tracked per (stream key, h2 stream id). */
+    private class GrpcParent(val handle: RowHandle, val entity: CapturedTrafficEntity, val startedAt: Long) {
+        var messageIndex = 0
+        var requestBytes = 0L
+        var responseBytes = 0L
+        var responseHeaders: Http2Parser.H2Headers? = null
+        var trailers: Http2Parser.H2Headers? = null
+        val frameEvents = ArrayList<H2FrameEvent>()
+    }
+    private val grpcParents = mutableMapOf<String, MutableMap<Int, GrpcParent>>()
 
 
     // ── HTTP/2 / gRPC state ─────────────────────────────────────────────
@@ -343,6 +367,15 @@ class CaptureEngine(
         }
 
         // ── HTTP detection ───────────────────────────────────────────────
+        // S3 task 20: once the 101 has been seen (the upgrade request is no longer pending) every
+        // byte on the stream is a WebSocket frame, so never run the HTTP parser over it again.
+        // Before this, WS frames were only ever parsed while an HTTP request was still pending,
+        // which on a real WS connection is never -- frames after the handshake were dropped.
+        if (stream.key in wsStreams && stream.key !in pendingRequests) {
+            parseWsFrames(stream)
+            return
+        }
+
         val csBytes = stream.clientToServer.bytes()
         val request = HttpParser.tryParseRequest(
             bytes = csBytes,
@@ -374,50 +407,59 @@ class CaptureEngine(
         val response = HttpParser.tryParseResponse(scBytes, sentRequestUrl = pendingReq.url)
 
         if (response != null) {
-            // Server-Sent Events (text/event-stream) are detected and logged only — events
-            // are not persisted as their own transactions the way WS frames are
-            // (see persistWsFrame). The underlying HTTP request/response pair that carries
-            // this SSE stream is still persisted below via persistTransaction.
-            if (com.example.interception.http.SseParser.looksLikeSse(response.headers)) {
-                val (events, _) = com.example.interception.http.SseParser.parseEvents(response.body)
-                if (events.isNotEmpty()) {
-                    Log.i(
-                        TAG,
-                        "SSE stream on ${stream.key}: ${events.size} events, first=" +
-                            events.first().event
-                    )
-                }
-            }
-
             stream.serverToClient.drain(response.consumedBytes)
             pendingRequests.remove(stream.key)
 
             // Persist the pair
-            persistTransaction(pendingReq, response, stream)
-        }
+            val handle = persistTransaction(pendingReq, response, stream)
 
-        // Fix #14: After WebSocket upgrade, parse frames from either direction
-        if (stream.key in wsStreams) {
-            val clientBytes = stream.clientToServer.bytes()
-            val serverBytes = stream.serverToClient.bytes()
-            if (clientBytes.isNotEmpty()) {
-                val (consumed, frames) = com.example.interception.http.WebSocketParser.parseFrames(clientBytes)
-                if (consumed > 0) {
-                    stream.clientToServer.drain(consumed)
-                    frames.forEach { frame ->
-                        Log.d(TAG, "WS <- client: ${com.example.interception.http.WebSocketParser.describe(frame)}")
-                        persistWsFrame(stream, frame, isClient = true)
-                    }
+            // S3 task 20: Server-Sent Events (text/event-stream) become `sse_events` children of
+            // the carrying response row (previously detected and logged only).
+            if (handle != null && responseLogging && com.example.interception.http.SseParser.looksLikeSse(response.headers)) {
+                val rows = ProtocolRows.sseEvents(response.body, System.currentTimeMillis())
+                if (rows.isNotEmpty()) {
+                    Log.i(TAG, "SSE stream on ${stream.key}: ${rows.size} events")
+                    persistence.sseEvents(handle, rows)
                 }
             }
-            if (serverBytes.isNotEmpty()) {
-                val (consumed, frames) = com.example.interception.http.WebSocketParser.parseFrames(serverBytes)
-                if (consumed > 0) {
-                    stream.serverToClient.drain(consumed)
-                    frames.forEach { frame ->
-                        Log.d(TAG, "WS -> server: ${com.example.interception.http.WebSocketParser.describe(frame)}")
-                        persistWsFrame(stream, frame, isClient = false)
-                    }
+            if (stream.key in wsStreams) {
+                if (response.statusCode == 101) {
+                    // S3 task 20: the 101 upgrade exchange is the parent of every WS message
+                    // that follows.
+                    if (handle != null) wsParents[stream.key] = handle
+                } else {
+                    // The server declined the upgrade: the stream stays plain HTTP.
+                    synchronized(wsStreams) { wsStreams.remove(stream.key) }
+                }
+            }
+        }
+
+        // Fix #14: after the WebSocket upgrade, frames that arrived in the same segments as the
+        // handshake are parsed from either direction.
+        if (stream.key in wsStreams && stream.key !in pendingRequests) parseWsFrames(stream)
+    }
+
+    /** Drains and persists every complete WebSocket frame buffered in either direction. */
+    private fun parseWsFrames(stream: TcpStream) {
+        val clientBytes = stream.clientToServer.bytes()
+        val serverBytes = stream.serverToClient.bytes()
+        if (clientBytes.isNotEmpty()) {
+            val (consumed, frames) = com.example.interception.http.WebSocketParser.parseFrames(clientBytes)
+            if (consumed > 0) {
+                stream.clientToServer.drain(consumed)
+                frames.forEach { frame ->
+                    Log.d(TAG, "WS <- client: ${com.example.interception.http.WebSocketParser.describe(frame)}")
+                    persistWsFrame(stream, frame, isClient = true)
+                }
+            }
+        }
+        if (serverBytes.isNotEmpty()) {
+            val (consumed, frames) = com.example.interception.http.WebSocketParser.parseFrames(serverBytes)
+            if (consumed > 0) {
+                stream.serverToClient.drain(consumed)
+                frames.forEach { frame ->
+                    Log.d(TAG, "WS -> server: ${com.example.interception.http.WebSocketParser.describe(frame)}")
+                    persistWsFrame(stream, frame, isClient = false)
                 }
             }
         }
@@ -472,10 +514,20 @@ class CaptureEngine(
                         payload = acc.toByteArray()
                     }
                     val headers = Http2Parser.decodeHeaders(frame, payload, state)
+                    // Record before handling so the trailer block that closes the call is kept,
+                    // and after when this very block just opened the call.
+                    val known = grpcParents[stream.key]?.containsKey(frame.streamId) == true
+                    if (known) recordGrpcFrame(stream, frame, isClient)
                     handleH2Headers(stream, headers, isClient)
+                    if (!known) recordGrpcFrame(stream, frame, isClient)
                 }
-                Http2Parser.FRAME_DATA -> handleH2Data(stream, frame, isClient)
+                Http2Parser.FRAME_DATA -> {
+                    recordGrpcFrame(stream, frame, isClient)
+                    handleH2Data(stream, frame, isClient)
+                }
                 Http2Parser.FRAME_RST_STREAM -> {
+                    recordGrpcFrame(stream, frame, isClient)
+                    finishGrpcCall(stream, frame.streamId, grpcStatuses[stream.key]?.get(frame.streamId))
                     grpcCalls[stream.key]?.remove(frame.streamId)
                     grpcStatuses[stream.key]?.remove(frame.streamId)
                     grpcDataBuffers[stream.key]?.remove("${if (isClient) "c" else "s"}|${frame.streamId}")
@@ -515,6 +567,18 @@ class CaptureEngine(
         if (status != null) {
             grpcStatuses.getOrPut(stream.key) { mutableMapOf() }[headers.streamId] = status
             Log.d(TAG, "gRPC trailer: stream=${headers.streamId} grpc-status=$status")
+            // S3 task 20: a trailers-only response (single HEADERS block carrying :status AND
+            // grpc-status) is also the response headers; either way the call is over.
+            grpcParents[stream.key]?.get(headers.streamId)?.let { parent ->
+                if (parent.responseHeaders == null && headers.pseudoHeaders.containsKey(":status")) {
+                    parent.responseHeaders = headers
+                } else {
+                    parent.trailers = headers
+                }
+            }
+            if (headers.endStream || grpcParents[stream.key]?.get(headers.streamId)?.trailers != null) {
+                finishGrpcCall(stream, headers.streamId, status)
+            }
             return
         }
 
@@ -526,7 +590,11 @@ class CaptureEngine(
                 it.key.equals("content-type", ignoreCase = true) && GrpcDetector.isGrpcContentType(it.value)
             }
             if (!isGrpc) return
-            if (grpcCalls[stream.key]?.containsKey(headers.streamId) == true) return
+            if (grpcCalls[stream.key]?.containsKey(headers.streamId) == true) {
+                // S3 task 20: the response HEADERS block of a call we already know.
+                if (!isClient) grpcParents[stream.key]?.get(headers.streamId)?.let { if (it.responseHeaders == null) it.responseHeaders = headers }
+                return
+            }
             call = GrpcDetector.GrpcCall(
                 streamId = headers.streamId,
                 grpcMethod = "/(mid-stream)",
@@ -549,6 +617,84 @@ class CaptureEngine(
             "gRPC call: ${call.url} h2stream=${headers.streamId} " +
                 "type=${call.encoding} msgHint=${call.messageType.ifEmpty { "—" }}"
         )
+        startGrpcCall(stream, call, headers, isClient)
+    }
+
+    /**
+     * S3 task 20: create the one `captured_traffic` parent row for a gRPC call (plus its
+     * `grpc_calls` row) the moment the call is identified. `statusCode` stays NULL until the
+     * trailers arrive. No synthetic `x-grpc-*` header is written.
+     */
+    private fun startGrpcCall(stream: TcpStream, call: GrpcDetector.GrpcCall, headers: Http2Parser.H2Headers, isClient: Boolean) {
+        if (!captureEnabled || !protocolChildren) return
+        val now = System.currentTimeMillis()
+        val host = call.authority.ifEmpty { stream.sniHost ?: "${stream.dstIp}:${stream.dstPort}" }
+        val entity = ProtocolRows.grpcParent(
+            call, sessionId, host, stream.key, CaptureRowMethod.VPN_TUN,
+            wasDecrypted = stream.decryptedByMitm, logRequests = requestLogging, now = now,
+        )
+        val headerRows = if (isClient) {
+            ProtocolRows.headerRows(
+                request = ParsedHttpMessage(isRequest = true, method = null, headerLines = headers.regularEntries),
+                response = null, logRequests = requestLogging, logResponses = false, h2Request = headers,
+            )
+        } else emptyList()
+        runCatching {
+            val handle = persistence.insertTransaction(entity, headerRows)
+            persistence.grpcCall(handle, ProtocolRows.grpcCall(call, headers.streamId, grpcStatus = null, grpcMessage = null))
+            val parent = GrpcParent(handle, entity, now)
+            if (!isClient) parent.responseHeaders = headers
+            grpcParents.getOrPut(stream.key) { mutableMapOf() }[headers.streamId] = parent
+            transactionCount++
+        }.onFailure { e -> Log.w(TAG, "Failed to persist gRPC call: ${e.message}") }
+    }
+
+    /** S3 task 20: frame timeline for the call's `http2_stream_events` (bounded). */
+    private fun recordGrpcFrame(stream: TcpStream, frame: Http2Parser.H2Frame, isClient: Boolean) {
+        val parent = grpcParents[stream.key]?.get(frame.streamId) ?: return
+        if (parent.frameEvents.size >= com.example.interception.http.Http2Session.MAX_FRAME_EVENTS) return
+        val note = when (frame.type) {
+            Http2Parser.FRAME_RST_STREAM -> "RST_STREAM ${Http2Parser.errorCodeName(frame.payload)}"
+            else -> buildList {
+                if (frame.endStream) add("END_STREAM")
+                if (frame.type == Http2Parser.FRAME_HEADERS && frame.endHeaders) add("END_HEADERS")
+            }.joinToString(" ").ifEmpty { null }
+        }
+        parent.frameEvents += H2FrameEvent(
+            frame.streamId, isClient, frame.type, frame.flags, frame.payload.size, System.currentTimeMillis(), note,
+        )
+    }
+
+    /**
+     * S3 task 20: the call ended (trailers with END_STREAM, or RST_STREAM). Patches the parent
+     * with `:status`/response headers/byte totals/latency, upserts the trailer status and
+     * appends the frame timeline. Idempotent: the entry is removed on first completion.
+     */
+    private fun finishGrpcCall(stream: TcpStream, streamId: Int, grpcStatus: Int?) {
+        val parent = grpcParents[stream.key]?.remove(streamId) ?: return
+        val call = grpcCalls[stream.key]?.get(streamId) ?: return
+        val now = System.currentTimeMillis()
+        val patch = ProtocolRows.grpcParentPatch(
+            parent.entity, parent.responseHeaders,
+            requestBytes = parent.requestBytes, responseBytes = parent.responseBytes,
+            latencyMs = (now - parent.startedAt).coerceAtLeast(0L), logResponses = responseLogging,
+        )
+        val headerRows = ProtocolRows.headerRows(
+            request = null,
+            response = parent.responseHeaders?.let { ParsedHttpMessage(isRequest = false, method = null, headerLines = it.regularEntries) },
+            logRequests = requestLogging, logResponses = responseLogging,
+            h2Response = parent.responseHeaders, h2ResponseTrailers = parent.trailers,
+        )
+        val grpcMessage = parent.trailers?.regularEntries
+            ?.firstOrNull { it.first.equals("grpc-message", ignoreCase = true) }
+            ?.let { GrpcDetector.decodeGrpcMessage(it.second) }
+        runCatching {
+            persistence.patchDecodedExchange(parent.handle, patch, headers = headerRows.ifEmpty { null })
+            persistence.grpcCall(parent.handle, ProtocolRows.grpcCall(call, streamId, grpcStatus, grpcMessage))
+            if (parent.frameEvents.isNotEmpty()) {
+                persistence.http2StreamEvents(parent.handle, ProtocolRows.http2StreamEvents(parent.frameEvents, stream.key))
+            }
+        }.onFailure { e -> Log.w(TAG, "Failed to close gRPC call: ${e.message}") }
     }
 
     /**
@@ -593,6 +739,21 @@ class CaptureEngine(
         isClient: Boolean,
     ) {
         if (!captureEnabled) return
+
+        // S3 task 20: one `grpc_messages` child under the call's parent row.
+        val parent = if (protocolChildren) grpcParents[stream.key]?.get(call.streamId) else null
+        if (parent != null) {
+            val row = ProtocolRows.grpcMessage(
+                msg, isClient, call.streamId, parent.messageIndex++,
+                logPayload = if (isClient) requestLogging else responseLogging,
+                now = System.currentTimeMillis(),
+            )
+            val wire = (msg.length + GrpcDetector.MESSAGE_HEADER_SIZE).toLong()
+            if (isClient) parent.requestBytes += wire else parent.responseBytes += wire
+            runCatching { persistence.grpcMessage(parent.handle, row) }
+                .onFailure { e -> Log.w(TAG, "Failed to persist gRPC message: ${e.message}") }
+            return
+        }
 
         val hexDump = ProtobufDecoder.hexDump(msg.payload)
         val decoded = if (!msg.compressed) ProtobufDecoder.decodeToString(msg.payload) else null
@@ -653,9 +814,9 @@ class CaptureEngine(
         request: ParsedHttpMessage,
         response: ParsedHttpMessage,
         stream: TcpStream,
-    ) {
+    ): RowHandle? {
         // v5: captureEnabled flag passed from RequestrVpnService (reads live settings at start)
-        if (!captureEnabled) return
+        if (!captureEnabled) return null
 
         // Fix 15 (AUDIT_REPORT): Consult intercept rules before persisting.
         // All rule actions are implemented below: BLOCK, REDIRECT, MODIFY_REQUEST,
@@ -664,7 +825,7 @@ class CaptureEngine(
         when (ruleAction) {
             com.example.data.local.RuleAction.BLOCK -> {
                 Log.d(TAG, "BLOCKED by rule: ${request.method?.name} ${request.url.take(80)}")
-                return  // Drop entirely — never persisted, never forwarded
+                return null  // Drop entirely — never persisted, never forwarded
             }
             com.example.data.local.RuleAction.REDIRECT -> {
                 // REDIRECT: find the matching rule's replacementValue, rewrite the request's
@@ -792,14 +953,17 @@ class CaptureEngine(
             captureMethod = CaptureRowMethod.VPN_TUN,
         )
 
-        runCatching {
+        // S3 task 20: wire-ordered, duplicate-preserving header rows (incl. chunked trailers).
+        val headerRows = ProtocolRows.headerRows(request, response, requestLogging, responseLogging)
+        return runCatching {
             // S2 task 15: queued, never runBlocking on the pump thread.
-            persistence.insertTransaction(entity)
+            val handle = persistence.insertTransaction(entity, headerRows)
             transactionCount++
             Log.d(TAG, "Captured: ${response.statusCode} ${request.method?.name} ${request.url.take(120)}")
+            handle
         }.onFailure { e ->
             Log.w(TAG, "Failed to persist transaction: ${e.message}")
-        }
+        }.getOrNull()
     }
 
     // ── lifecycle ───────────────────────────────────────────────────────
@@ -816,6 +980,9 @@ class CaptureEngine(
         grpcCalls.keys.removeAll { it !in activeKeys }
         grpcDataBuffers.keys.removeAll { it !in activeKeys }
         grpcStatuses.keys.removeAll { it !in activeKeys }
+        grpcParents.keys.removeAll { it !in activeKeys }
+        wsParents.keys.removeAll { it !in activeKeys }
+        wsFrameIndex.keys.removeAll { it !in activeKeys }
         // M1: drop throttling bookkeeping for streams evicted by the reassembler. Their last
         // known state was already persisted either on close (immediate write in
         // persistTcpConnection) or at the last TCP_PERSIST_INTERVAL_MS tick.
@@ -842,6 +1009,21 @@ class CaptureEngine(
      */
     private fun persistWsFrame(stream: TcpStream, frame: com.example.interception.http.WebSocketParser.WsFrame, isClient: Boolean) {
         if (!captureEnabled) return
+
+        // S3 task 20: one `websocket_messages` child under the 101 upgrade row.
+        val parent = if (protocolChildren) wsParents[stream.key] else null
+        if (parent != null) {
+            val index = wsFrameIndex[stream.key] ?: 0
+            wsFrameIndex[stream.key] = index + 1
+            val row = ProtocolRows.webSocketMessage(
+                frame, isClient, stream.key, index,
+                logPayload = if (isClient) requestLogging else responseLogging,
+                now = System.currentTimeMillis(),
+            )
+            runCatching { persistence.webSocketMessage(parent, row) }
+                .onFailure { e -> Log.w(TAG, "Failed to persist WS message: ${e.message}") }
+            return
+        }
 
         val wsHost = stream.sniHost ?: stream.dstIp
         val wsUrl = "ws://$wsHost${if (stream.dstPort != 80) ":${stream.dstPort}" else ""}"

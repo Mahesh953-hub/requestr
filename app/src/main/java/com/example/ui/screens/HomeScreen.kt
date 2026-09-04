@@ -57,6 +57,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -187,7 +188,14 @@ fun HomeScreen(
     var isFilterPanelOpen by remember { mutableStateOf(false) }
     var isRecentsExpanded by remember { mutableStateOf(true) }
 
-    val allHits = remember(searchQuery, savedApis, notes, toolsCatalog, flows, chats) {
+    // S3 task 22: traffic hits come from the compiled FTS query (flag `ftsSearch`), fetched off
+    // the main thread whenever the query changes; empty until the query settles.
+    val ftsSearchEnabled = remember(homeContext) { com.example.data.persistence.InterceptorFlags.get(homeContext).ftsSearch }
+    val trafficHits by produceState(initialValue = emptyList<com.example.data.models.CapturedTrafficItem>(), searchQuery, ftsSearchEnabled) {
+        value = if (!ftsSearchEnabled || searchQuery.isBlank()) emptyList()
+        else runCatching { CaptureLogRepository.searchTraffic(homeContext, searchQuery, limit = 50) }.getOrDefault(emptyList())
+    }
+    val allHits = remember(searchQuery, savedApis, notes, toolsCatalog, flows, chats, trafficHits) {
         GlobalSearch.search(
             searchQuery,
             apis = savedApis,
@@ -195,6 +203,7 @@ fun HomeScreen(
             tools = toolsCatalog,
             flows = flows,
             chats = chats,
+            traffic = trafficHits,
         )
     }
     val searchHits = remember(allHits, searchFilter) { applyHomeSearchFilter(allHits, searchFilter) }
@@ -545,6 +554,7 @@ internal fun searchHitKey(hit: GlobalSearchHit): String = when (hit) {
     is GlobalSearchHit.Tool -> hit.item.id
     is GlobalSearchHit.FlowNode -> hit.item.id
     is GlobalSearchHit.Chat -> hit.conversationId
+    is GlobalSearchHit.Traffic -> "traffic:" + hit.item.id
 }
 
 /**
@@ -569,6 +579,7 @@ private fun openSearchHit(
         is GlobalSearchHit.Tool -> onOpenToolWorkspace(hit.item.id)
         is GlobalSearchHit.Chat -> onOpenChatConversation(hit.conversationId)
         is GlobalSearchHit.FlowNode -> onNavigateToSection("flow")
+        is GlobalSearchHit.Traffic -> onNavigateToSection("intercept")
     }
 }
 
@@ -768,6 +779,7 @@ private fun SearchResultRow(hit: GlobalSearchHit, onClick: () -> Unit) {
         HomeSearchType.TOOL -> Color(0xFFD97706)
         HomeSearchType.FLOW -> Color(0xFF4F46E5)
         HomeSearchType.CHAT -> Color(0xFF0EA5E9)
+        HomeSearchType.TRAFFIC -> Color(0xFFEF4444)
     }
     GlassCard(
         modifier = Modifier.fillMaxWidth(),
