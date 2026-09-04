@@ -96,7 +96,12 @@ object WebSocketParser {
                 for (i in 0 until 8) {
                     len = (len shl 8) or (data[idx + i].toLong() and 0xFF)
                 }
-                payloadLen = len.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+                // RFC 6455 §5.2: the most significant bit MUST be 0. A negative (or > 2 GiB)
+                // length can never be satisfied by a buffer we hold, so treat it like an
+                // incomplete frame instead of coercing -- the old coerceAtMost kept the
+                // negative value and copyOfRange threw (found by ProtocolFramingFuzzTest, G11).
+                if (len < 0 || len > Int.MAX_VALUE) return null
+                payloadLen = len.toInt()
                 idx += 8
             }
         }

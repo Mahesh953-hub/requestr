@@ -158,3 +158,21 @@ Exported from the platform todo list at handoff time.
       children, delete/update triggers, binary bodies, LIKE == FTS hits, `ensure` populate +
       idempotent, presets), `Migration21To22Test` (framework driver: presets + unique index,
       no FTS5, LIKE fallback query runs), `GlobalSearchTest` Traffic arm.
+  - S3 task 23 — done on `vorflux/interceptor-s3-protocol` (decision D7, gate G11):
+    - Decision: in-house `Http2Parser`/`HpackDecoder`/`Http2Session` stay; `h2Netty` NOT armed (flag not declared);
+      task 57 builds termination on them. Record: `plans/decisions/D7-http2-conformance.md`.
+    - Evidence: nghttp2 HPACK corpus (`http2jp/hpack-test-case`, 3 profiles, vendored gzipped
+      under `app/src/test/resources/hpack-test-case/`, MIT) -- 9,918/9,918 blocks byte-exact;
+      16 malformed vectors reported via `H2Headers.error` without throwing; frame/header fuzzer
+      (`Http2FuzzTest`, fixed seed, `Http2Session` desync probe) 4M iterations 0 failures;
+      WS/gRPC/protobuf/SSE fuzzer (`ProtocolFramingFuzzTest`) 1M iterations 0 failures.
+      Harness entry point `tools/harness/fuzz/run.sh` (+ README); same classes run in CI's
+      `:app:testDebugUnitTest`.
+    - Hardening: bounded HPACK integers, index validation, strict Huffman (`decodeStrict`; EOS,
+      padding rules), table-size-update ordering + `SETTINGS_HEADER_TABLE_SIZE` bound
+      (`setMaxHeaderTableSize`), PADDED/PRIORITY checks, reserved stream-id bit masked, header
+      octets decoded as UTF-8 with ISO-8859-1 fallback, `H2Headers.error` (task 57 answers with
+      `GOAWAY(COMPRESSION_ERROR)`), `Http2Session.hpackErrorCount`; `WebSocketParser` no longer
+      crashes on a 64-bit length with the reserved MSB set.
+    - Not covered: mitmproxy side-by-side comparator (device lane, with G27); HPACK encoder
+      round-trip (task 57); WS/SSE/gRPC conformance corpora (task 55).

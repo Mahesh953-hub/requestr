@@ -59,6 +59,10 @@ internal class Http2Session(
 ) {
     private val clientHpack = Http2Parser.HpackDecoder()
     private val serverHpack = Http2Parser.HpackDecoder()
+
+    /** Header blocks that violated RFC 7541 on this connection (see [Http2Parser.H2Headers.error]). */
+    @Volatile var hpackErrorCount: Int = 0
+        private set
     private val streams = object : LinkedHashMap<Int, StreamState>(16, 0.75f, false) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, StreamState>): Boolean =
             size > maxStreams
@@ -216,6 +220,13 @@ internal class Http2Session(
         val headers = runCatching { Http2Parser.decodeHeaders(frame, payload, decoder) }
             .onFailure { e -> Log.w(TAG, "HPACK decode failed on stream ${frame.streamId}: ${e.message}") }
             .getOrNull() ?: return
+        if (headers.error != null) {
+            // S3 task 23: observe-only today, so keep whatever decoded before the fault (the
+            // stream is still worth a row) but count it -- a terminating endpoint (task 57)
+            // answers this with GOAWAY(COMPRESSION_ERROR) instead.
+            hpackErrorCount++
+            Log.w(TAG, "HPACK violation on stream ${frame.streamId} (${if (fromClient) "client" else "server"}): ${headers.error}")
+        }
 
         if (fromClient) {
             if (state.requestHeaders == null) {

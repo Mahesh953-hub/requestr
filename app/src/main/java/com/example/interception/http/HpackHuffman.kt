@@ -96,22 +96,60 @@ internal object HpackHuffman {
      * decoding and returns what was decoded so far (best effort — capture must not crash on
      * malformed input).
      */
-    fun decode(bytes: ByteArray, offset: Int, length: Int): String {
-        val sb = StringBuilder(length)
+    fun decode(bytes: ByteArray, offset: Int, length: Int): String = decodeInternal(bytes, offset, length, strict = false)!!
+
+    /**
+     * S3 task 23 (gate G11): RFC 7541 §5.2 strict decode. Returns `null` when the string is not
+     * a valid Huffman encoding -- an undefined code path, the EOS symbol inside the string,
+     * padding longer than 7 bits, or padding that is not the all-ones EOS prefix. HPACK requires
+     * each of these to be treated as a decoding error (COMPRESSION_ERROR on the connection)
+     * rather than silently accepted, otherwise two peers can disagree on the header list.
+     */
+    fun decodeStrict(bytes: ByteArray, offset: Int, length: Int): String? = decodeInternal(bytes, offset, length, strict = true)
+
+    /**
+     * HPACK/QPACK string literals are octet sequences (RFC 7541 §5.2). Real traffic carries UTF-8
+     * in header values often enough (file names, JSON in custom headers) that decoding them as
+     * text is what every reader wants -- but an invalid UTF-8 sequence must not be replaced with
+     * U+FFFD (that changes the value the peer sent), so such values fall back to ISO-8859-1, which
+     * maps every octet 1:1. Used for raw and Huffman-coded literals alike so both spellings of the
+     * same header compare equal.
+     */
+    fun octetsToString(bytes: ByteArray, offset: Int, length: Int): String {
+        val decoder = Charsets.UTF_8.newDecoder()
+            .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+            .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+        return try {
+            decoder.decode(java.nio.ByteBuffer.wrap(bytes, offset, length)).toString()
+        } catch (_: java.nio.charset.CharacterCodingException) {
+            String(bytes, offset, length, Charsets.ISO_8859_1)
+        }
+    }
+
+    private fun decodeInternal(bytes: ByteArray, offset: Int, length: Int, strict: Boolean): String? {
+        val out = java.io.ByteArrayOutputStream(length)
+        fun result() = octetsToString(out.toByteArray(), 0, out.size())
         var node = root
+        var pendingBits = 0      // bits consumed since the last emitted symbol
+        var pendingAllOnes = true
         for (i in offset until offset + length) {
             val b = bytes[i].toInt() and 0xFF
             for (bitIdx in 7 downTo 0) {
                 val bit = (b ushr bitIdx) and 1
-                val next = node.child[bit] ?: return sb.toString() // invalid path
+                val next = node.child[bit] ?: return if (strict) null else result() // invalid path / EOS
                 node = next
+                pendingBits++
+                if (bit == 0) pendingAllOnes = false
                 if (node.symbol >= 0) {
-                    sb.append(node.symbol.toChar())
+                    out.write(node.symbol)
                     node = root
+                    pendingBits = 0
+                    pendingAllOnes = true
                 }
             }
         }
-        // Trailing partial path = all-ones padding (< 8 bits) — ignored.
-        return sb.toString()
+        // Trailing partial path must be a < 8-bit all-ones EOS prefix (RFC 7541 §5.2).
+        if (strict && (pendingBits > 7 || !pendingAllOnes)) return null
+        return result()
     }
 }
