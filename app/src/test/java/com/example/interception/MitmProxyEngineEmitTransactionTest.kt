@@ -109,25 +109,32 @@ class MitmProxyEngineEmitTransactionTest {
 
     @Test
     fun `binary response body exceeding the storage cap is not stored but true size and truncation flag survive`() {
-        val huge = ByteArray(com.example.interception.http.HttpBodyDecoder.MAX_STORED_BODY_BYTES + 1)
-        val response = ParsedHttpMessage(
-            isRequest = false,
-            method = null,
-            statusCode = 200,
-            body = com.example.interception.http.HttpBodyDecoder.BINARY_BODY_PLACEHOLDER,
-            isBodyBinary = true,
-            rawBodyBytes = huge,
-        )
-        var captured: CapturedTrafficEntity? = null
-        val engine = MitmProxyEngine(onDecryptedTransaction = { captured = it })
+        // S2 task 16: with `bodySpill` on the cap becomes a spill decision; this asserts the
+        // flag-off contract, so the flag is forced off for the duration of the test.
+        com.example.interception.http.HttpBodyDecoder.spillEnabled = false
+        try {
+            val huge = ByteArray(com.example.interception.http.HttpBodyDecoder.MAX_STORED_BODY_BYTES + 1)
+            val response = ParsedHttpMessage(
+                isRequest = false,
+                method = null,
+                statusCode = 200,
+                body = com.example.interception.http.HttpBodyDecoder.BINARY_BODY_PLACEHOLDER,
+                isBodyBinary = true,
+                rawBodyBytes = huge,
+            )
+            var captured: CapturedTrafficEntity? = null
+            val engine = MitmProxyEngine(onDecryptedTransaction = { captured = it })
 
-        engine.emitTransaction(request(), response, 10L, "example.com:443", logRequests = true, logResponses = true)
+            engine.emitTransaction(request(), response, 10L, "example.com:443", logRequests = true, logResponses = true)
 
-        val entity = captured ?: throw AssertionError("callback was never invoked")
-        assertTrue(entity.isResponseBodyBinary)
-        assertEquals(null, entity.responseBodyBytes)
-        assertTrue(entity.responseBodyBytesTruncated)
-        assertEquals(huge.size.toLong(), entity.responseSizeBytes)
+            val entity = captured ?: throw AssertionError("callback was never invoked")
+            assertTrue(entity.isResponseBodyBinary)
+            assertEquals(null, entity.responseBodyBytes)
+            assertTrue(entity.responseBodyBytesTruncated)
+            assertEquals(huge.size.toLong(), entity.responseSizeBytes)
+        } finally {
+            com.example.interception.http.HttpBodyDecoder.spillEnabled = true
+        }
     }
 
     @Test

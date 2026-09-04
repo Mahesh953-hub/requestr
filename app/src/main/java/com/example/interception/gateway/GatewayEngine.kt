@@ -299,8 +299,9 @@ object GatewayEngine {
             sourceIp = sourceIp,
             connectionId = connectionId,
         )
-        runCatching { RequestrDatabase.get(ctx).capturedTrafficDao().insert(entity) }
-            .onFailure { Log.w(TAG, "Failed to persist gateway transaction: ${it.message}") }
+        // S2 task 15: queued through the single-writer persistence actor (failures are counted
+        // in PersistenceHealth rather than logged here).
+        com.example.data.persistence.PersistenceQueue.get(ctx).insertTransaction(entity)
     }
 
     /**

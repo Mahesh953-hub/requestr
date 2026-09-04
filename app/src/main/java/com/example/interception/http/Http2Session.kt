@@ -66,6 +66,20 @@ internal class Http2Session(
         var requestEnded = false
         var responseEnded = false
         val startedAt = System.currentTimeMillis()
+        // S2 task 18: observed instants (first-set wins) for the measured phase split.
+        var requestEndedAt: Long? = null
+        var responseHeadersAt: Long? = null
+        var responseEndedAt: Long? = null
+
+        fun markRequestEnded() {
+            requestEnded = true
+            if (requestEndedAt == null) requestEndedAt = System.currentTimeMillis()
+        }
+
+        fun markResponseEnded() {
+            responseEnded = true
+            if (responseEndedAt == null) responseEndedAt = System.currentTimeMillis()
+        }
         var grpcCall: GrpcDetector.GrpcCall? = null
         var grpcStatus: Int? = null
         // CONTINUATION coalescing (one in-flight header block per direction per stream --
@@ -167,10 +181,11 @@ internal class Http2Session(
                 state.requestHeaders = headers
                 state.grpcCall = GrpcDetector.callFromHeaders(headers)
             }
-            if (headers.endStream) state.requestEnded = true
+            if (headers.endStream) state.markRequestEnded()
         } else {
             if (state.responseHeaders == null) {
                 state.responseHeaders = headers
+                state.responseHeadersAt = System.currentTimeMillis()
             } else {
                 // A second HEADERS block on the response side is HTTP/2 trailers (RFC 7540
                 // §8.1) -- gRPC's grpc-status/grpc-message live here.
@@ -178,7 +193,7 @@ internal class Http2Session(
                     GrpcDetector.grpcStatusFromTrailers(headers)?.let { status -> state.grpcStatus = status }
                 }
             }
-            if (headers.endStream) state.responseEnded = true
+            if (headers.endStream) state.markResponseEnded()
         }
         maybeEmit(frame.streamId, state)
     }
@@ -191,11 +206,11 @@ internal class Http2Session(
         if (fromClient) {
             if (grpcCall != null) drainGrpc(grpcCall, state, isClient = true, data)
             else writeBounded(state.requestBody, data)
-            if (frame.endStream) state.requestEnded = true
+            if (frame.endStream) state.markRequestEnded()
         } else {
             if (grpcCall != null) drainGrpc(grpcCall, state, isClient = false, data)
             else writeBounded(state.responseBody, data)
-            if (frame.endStream) state.responseEnded = true
+            if (frame.endStream) state.markResponseEnded()
         }
         maybeEmit(frame.streamId, state)
     }
@@ -244,7 +259,14 @@ internal class Http2Session(
         val latencyMs = System.currentTimeMillis() - state.startedAt
         val requestMsg = buildRequestMessage(request, state.requestBody.toByteArray())
         val responseMsg = buildResponseMessage(response, state.responseBody.toByteArray())
-        runCatching { onTransaction(Http2Transaction(requestMsg, responseMsg, latencyMs)) }
+        val tx = Http2Transaction(
+            requestMsg, responseMsg, latencyMs,
+            startedAt = state.startedAt,
+            requestEndedAt = state.requestEndedAt,
+            responseHeadersAt = state.responseHeadersAt,
+            responseEndedAt = state.responseEndedAt,
+        )
+        runCatching { onTransaction(tx) }
             .onFailure { e -> Log.w(TAG, "h2 transaction callback failed: ${e.message}") }
     }
 
@@ -318,6 +340,11 @@ internal data class Http2Transaction(
     val request: ParsedHttpMessage,
     val response: ParsedHttpMessage,
     val latencyMs: Long,
+    /** S2 task 18: epoch-millis instants the session observed; null when a frame was never seen. */
+    val startedAt: Long? = null,
+    val requestEndedAt: Long? = null,
+    val responseHeadersAt: Long? = null,
+    val responseEndedAt: Long? = null,
 )
 
 /** One gRPC message (request or response direction), with the call it belongs to. */

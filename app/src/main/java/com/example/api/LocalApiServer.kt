@@ -908,7 +908,10 @@ object LocalApiServer {
         return try {
             val json = JSONObject(body)
             val events = json.optJSONArray("events") ?: return err(400, "missing 'events' array")
-            val dao = db()?.capturedTrafficDao() ?: return err(500, "db unavailable")
+            val database = db() ?: return err(500, "db unavailable")
+            // S2 task 15: SDK ingestion is a NanoHTTPD handler, not a relay -- back-pressured
+            // queue path, awaited so `received` reports rows that actually landed.
+            val queue = com.example.data.persistence.PersistenceQueue.forDatabase(database)
             val sessionId = sdkSessionId()
             var inserted = 0
             for (i in 0 until events.length()) {
@@ -964,8 +967,10 @@ object LocalApiServer {
                     // not a heuristic. See ConnectionLineage.httpSteps(), which only attaches
                     // rows carrying a real connectionId.
                     connectionId = null,
+                    // S2 task 15: honest provenance instead of UNKNOWN.
+                    captureMethod = com.example.data.local.CaptureRowMethod.SDK_OBSERVER,
                 )
-                dao.insert(entity)
+                queue.insertTransactionAndAwait(entity)
                 inserted++
             }
             ok("""{"received":$inserted}""")

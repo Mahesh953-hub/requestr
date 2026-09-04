@@ -5,6 +5,7 @@ import android.database.sqlite.SQLiteDatabase
 import android.util.Log
 import java.io.File
 import java.io.IOException
+import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 
@@ -70,6 +71,10 @@ class DbBackup(private val context: Context) {
         private const val KEY_WIPE_TIMESTAMP = "wipeTimestamp"
         private const val KEY_OPEN_GENERATION = "openGeneration"
         private const val KEY_LAST_CLEAN_GENERATION = "lastCleanGeneration"
+        private const val KEY_RECOVERY_EVENTS = "recoveryEvents"
+
+        /** Diagnostics rows kept in metadata (task 17); oldest are dropped past this. */
+        const val MAX_RECOVERY_EVENTS = 20
 
         /** Number of distinct `buildDatabase` generations with clean opens required. */
         private const val STABLE_GENERATION_THRESHOLD = 2
@@ -131,8 +136,10 @@ class DbBackup(private val context: Context) {
             databaseDir.mkdirs()
             dbFile.copyTo(backupFile, overwrite = true)
 
+            val previousEvents = readMetadata()?.optJSONArray(KEY_RECOVERY_EVENTS)
             writeMetadata(
                 JSONObject().apply {
+                    if (previousEvents != null) put(KEY_RECOVERY_EVENTS, previousEvents)
                     put(KEY_BACKUP_VERSION, currentVersion)
                     put(KEY_BACKUP_TIMESTAMP, System.currentTimeMillis())
                     put(KEY_BACKUP_PATH, backupFile.absolutePath)
@@ -276,12 +283,49 @@ class DbBackup(private val context: Context) {
         if (currentGen >= STABLE_GENERATION_THRESHOLD) {
             val backupPath = metadata.optString(KEY_BACKUP_PATH, "")
             if (backupPath.isNotEmpty()) File(backupPath).delete()
-            metadataFile.delete()
+            // Task 17: the diagnostics rows outlive the backup they describe.
+            val events = metadata.optJSONArray(KEY_RECOVERY_EVENTS)
+            if (events != null && events.length() > 0) {
+                writeMetadata(JSONObject().put(KEY_RECOVERY_EVENTS, events))
+            } else {
+                metadataFile.delete()
+            }
             Log.d(TAG, "Stable (generation $currentGen) — backup removed")
             return
         }
 
         writeMetadata(metadata)
+    }
+
+    /** One persisted recovery/diagnostics row (task 17). */
+    data class RecoveryEvent(val kind: String, val detail: String, val at: Long)
+
+    /**
+     * Appends a diagnostics row describing a migration/recovery event (backup taken, backup
+     * failed, restored, wiped, migration failed). Survives process restarts, unlike
+     * [PersistenceHealth], so the Settings diagnostics surface can show what happened on the
+     * last few opens. Never throws.
+     */
+    fun recordRecoveryEvent(kind: String, detail: String, at: Long = System.currentTimeMillis()) {
+        try {
+            val metadata = readMetadata() ?: JSONObject()
+            val events = metadata.optJSONArray(KEY_RECOVERY_EVENTS) ?: JSONArray()
+            events.put(JSONObject().put("kind", kind).put("detail", detail).put("at", at))
+            while (events.length() > MAX_RECOVERY_EVENTS) events.remove(0)
+            metadata.put(KEY_RECOVERY_EVENTS, events)
+            writeMetadata(metadata)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to record recovery event $kind", e)
+        }
+    }
+
+    /** Persisted recovery rows, oldest first. */
+    fun readRecoveryEvents(): List<RecoveryEvent> {
+        val events = readMetadata()?.optJSONArray(KEY_RECOVERY_EVENTS) ?: return emptyList()
+        return (0 until events.length()).mapNotNull { i ->
+            val o = events.optJSONObject(i) ?: return@mapNotNull null
+            RecoveryEvent(o.optString("kind"), o.optString("detail"), o.optLong("at"))
+        }
     }
 
     /**

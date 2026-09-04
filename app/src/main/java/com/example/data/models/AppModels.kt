@@ -218,17 +218,20 @@ data class CollectionTestReport(
     val failedAssertions: Int get() = totalAssertions - passedAssertions
 }
 
+/**
+ * S2 task 18: the defaults below used to be plausible-looking fabrications (`protocol = "h2"`,
+ * `latencyMs = 142`, a made-up `server` header, fixed phase splits). They are now
+ * empty/zero/null so an unmeasured value renders as "not measured" and can never pass for data.
+ * Phase fields are nullable: null means the phase was not observed on this call (no TLS on
+ * plain http, no DNS/connect on a reused connection, nothing at all for a mock).
+ */
 data class ApiResponseData(
     val statusCode: Int = 200,
     val statusMessage: String = "OK",
-    val protocol: String = "h2",
-    val latencyMs: Long = 142,
-    val sizeBytes: Long = 1024,
-    val headers: Map<String, String> = mapOf(
-        "content-type" to "application/json; charset=utf-8",
-        "server" to "requestr-proxy/2.0",
-        "x-request-id" to UUID.randomUUID().toString().take(8)
-    ),
+    val protocol: String = "",
+    val latencyMs: Long = 0,
+    val sizeBytes: Long = 0,
+    val headers: Map<String, String> = emptyMap(),
     /**
      * Duplicate-capable wire header lines. [headers] remains the convenient single-value view for
      * scripts, assertions, polling, and existing callers; this list preserves repeated fields
@@ -238,11 +241,17 @@ data class ApiResponseData(
     val body: String = "",
     val timestamp: Long = System.currentTimeMillis(),
     val isSuccess: Boolean = true,
-    val dnsTimeMs: Long = 18,
-    val connectTimeMs: Long = 24,
-    val tlsTimeMs: Long = 38,
-    val requestTimeMs: Long = 12,
-    val responseTimeMs: Long = 50,
+    val dnsTimeMs: Long? = null,
+    val connectTimeMs: Long? = null,
+    val tlsTimeMs: Long? = null,
+    /** Request headers + body written (send phase). */
+    val requestTimeMs: Long? = null,
+    /** Request fully sent -> first response header byte (wait / TTFB). */
+    val responseTimeMs: Long? = null,
+    /** Response headers -> body fully read (receive phase). */
+    val receiveTimeMs: Long? = null,
+    /** True when the call reused a pooled connection, so DNS/connect/TLS legitimately did not run. */
+    val connectionReused: Boolean = false,
     val error: String? = null,
     /**
      * Master plan §2.8 — true when this response was synthesized locally from a saved request's

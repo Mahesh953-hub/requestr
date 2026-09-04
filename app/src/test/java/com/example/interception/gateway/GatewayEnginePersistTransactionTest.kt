@@ -35,7 +35,9 @@ class GatewayEnginePersistTransactionTest {
 
     private val context = ApplicationProvider.getApplicationContext<android.content.Context>()
 
+    /** S2 task 15: writes go through the persistence actor, so drain it before reading. */
     private fun latestRow() = runBlocking {
+        com.example.data.persistence.PersistenceQueue.get(context).awaitIdle()
         RequestrDatabase.get(context).capturedTrafficDao().observeAll().first().first()
     }
 
@@ -99,26 +101,37 @@ class GatewayEnginePersistTransactionTest {
 
     @Test
     fun `binary response body exceeding the storage cap is dropped but the true size is kept`() = runBlocking {
-        GatewayEngine.init(context)
-        val oversized = ByteArray(HttpBodyDecoder.MAX_STORED_BODY_BYTES + 1) { 0xFF.toByte() }
+        // S2 task 16: with `bodySpill` on the cap becomes a spill decision; this asserts the
+        // flag-off contract, so the rollout flag is turned off for the duration of the test
+        // (PersistenceQueue.get mirrors the flag into HttpBodyDecoder.spillEnabled).
+        val flags = com.example.data.persistence.InterceptorFlags.get(context)
+        flags.setBodySpill(false)
+        HttpBodyDecoder.spillEnabled = false
+        try {
+            GatewayEngine.init(context)
+            val oversized = ByteArray(HttpBodyDecoder.MAX_STORED_BODY_BYTES + 1) { 0xFF.toByte() }
 
-        GatewayEngine.persistTransaction(
-            method = "GET",
-            rawUrl = "http://example.test/huge.bin",
-            statusCode = 200,
-            latencyMs = 5L,
-            reqHeaders = emptyMap(),
-            respHeaders = emptyMap(),
-            reqBodyBytes = ByteArray(0),
-            respBodyBytes = oversized,
-            sourceIp = null,
-            connectionId = "test-oversized",
-        )
+            GatewayEngine.persistTransaction(
+                method = "GET",
+                rawUrl = "http://example.test/huge.bin",
+                statusCode = 200,
+                latencyMs = 5L,
+                reqHeaders = emptyMap(),
+                respHeaders = emptyMap(),
+                reqBodyBytes = ByteArray(0),
+                respBodyBytes = oversized,
+                sourceIp = null,
+                connectionId = "test-oversized",
+            )
 
-        val row = latestRow()
-        assertTrue(row.isResponseBodyBinary)
-        assertNull("bytes must be dropped, not a truncated prefix", row.responseBodyBytes)
-        assertTrue(row.responseBodyBytesTruncated)
-        assertEquals((HttpBodyDecoder.MAX_STORED_BODY_BYTES + 1).toLong(), row.responseSizeBytes)
+            val row = latestRow()
+            assertTrue(row.isResponseBodyBinary)
+            assertNull("bytes must be dropped, not a truncated prefix", row.responseBodyBytes)
+            assertTrue(row.responseBodyBytesTruncated)
+            assertEquals((HttpBodyDecoder.MAX_STORED_BODY_BYTES + 1).toLong(), row.responseSizeBytes)
+        } finally {
+            flags.setBodySpill(true)
+            HttpBodyDecoder.spillEnabled = true
+        }
     }
 }

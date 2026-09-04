@@ -123,6 +123,35 @@ data class CapturedTrafficEntity(
      * not recorded.
      */
     val captureMethod: CaptureRowMethod = CaptureRowMethod.UNKNOWN,
+    /**
+     * S2 task 16 (v19) -- the FOURTH body state: spilled to a file. When a body exceeds
+     * [com.example.data.persistence.BodyStore.INLINE_LIMIT_BYTES] it is streamed to
+     * `filesDir/captures/<sessionId>/<trafficId>.<req|res>.bin` and the row records the
+     * relative path, the SHA-256 of the FULL body, a bounded UTF-8 preview, how many bytes were
+     * actually stored (file size) and how many were on the wire. The inline text/BLOB columns are
+     * null for a spilled body. A non-null `*BodyFilePath` whose file is missing renders as
+     * "body evicted" (orphan sweep / pruning), never as an error.
+     *
+     * `*BodyTotalBytes` is 0 when unknown (rows older than v19 or paths that never measured it);
+     * `requestSizeBytes`/`responseSizeBytes` remain the wire sizes the engines already record.
+     */
+    val requestBodyFilePath: String? = null,
+    val responseBodyFilePath: String? = null,
+    val requestBodySha256: String? = null,
+    val responseBodySha256: String? = null,
+    val requestBodyPreview: String? = null,
+    val responseBodyPreview: String? = null,
+    val requestBodyStoredBytes: Long = 0,
+    val responseBodyStoredBytes: Long = 0,
+    val requestBodyTotalBytes: Long = 0,
+    val responseBodyTotalBytes: Long = 0,
+    /**
+     * API-Testr HTTP/3 (tasks 58-60, columns reserved in v19 per §4): the protocol the client
+     * actually negotiated (`h3`, `h2`, `http/1.1`) and, when the request asked for more than it
+     * got under `AUTO`, why it was downgraded. Null for captured (non-API-Testr) traffic.
+     */
+    val negotiatedProtocol: String? = null,
+    val protocolDowngradeReason: String? = null,
 )
 
 /**
@@ -150,11 +179,17 @@ data class CapturedTrafficEntity(
  *    starving the traffic list for this tier; the fix mirrors [GATEWAY]'s `persistTransaction`
  *    exactly, including `HttpBodyDecoder.forStorage`'s binary/text/truncation contract).
  *
- * [UNKNOWN] is the default for legacy rows (see [CapturedTrafficEntity.captureMethod]'s doc) and
- * for the persist sites this enum's introduction did not (yet) reach: `RuntimeTrafficSink`,
- * `LocalApiServer`'s SDK-observer ingestion, and `HarImporter`'s file import.
+ *  - [RUNTIME]: `runtime/RuntimeTrafficSink` -- in-process Cronet/WebView/adapter observations
+ *    (S2 task 15; previously written as [UNKNOWN]).
+ *  - [SDK_OBSERVER]: `api/LocalApiServer.receiveObserverEvents` -- rows POSTed by the
+ *    `requestr-sdk` Observer module or the MV3 extension (S2 task 15; previously [UNKNOWN]).
+ *  - [HAR_IMPORT]: `data/import/HarImporter` -- rows reconstructed from a HAR file (S2 task 15;
+ *    previously [UNKNOWN]).
+ *
+ * [UNKNOWN] is now only the default for legacy rows (see [CapturedTrafficEntity.captureMethod]'s
+ * doc) written before the enum existed.
  */
-enum class CaptureRowMethod { UNKNOWN, VPN_TUN, MITM_PROXY, GATEWAY, HTTP_PROXY }
+enum class CaptureRowMethod { UNKNOWN, VPN_TUN, MITM_PROXY, GATEWAY, HTTP_PROXY, RUNTIME, SDK_OBSERVER, HAR_IMPORT }
 
 
 /**
@@ -304,6 +339,11 @@ data class SavedApiRequestEntity(
     val pollingLocationHeader: String = "Location",
     /** P2 fix — see [com.example.data.models.ApiRequestItem.pollingAllowCrossOriginRedirect]. */
     val pollingAllowCrossOriginRedirect: Boolean = false,
+    /**
+     * v19 (§4, task 58): `AUTO` / `H1` / `H2` / `H3`. Stored as text so the enum can live in
+     * `data/models/RequestProtocol.kt` when task 58 lands; every pre-v19 row reads `AUTO`.
+     */
+    val protocolPreference: String = "AUTO",
 )
 
 /**

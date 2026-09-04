@@ -75,6 +75,12 @@ internal class LazyUpstreamConnection(
         val sslSocket: SSLSocket,
         val input: InputStream,
         val output: OutputStream,
+        /**
+         * S2 task 18: what this leg's DNS lookup, TCP connect and TLS handshake actually took.
+         * Measured around the blocking calls in [connect]; never derived.
+         */
+        val setupTimings: com.example.interception.relay.UpstreamSetupTimings =
+            com.example.interception.relay.UpstreamSetupTimings(null, null, null),
     )
 
     @Volatile private var connected: Connected? = null
@@ -106,6 +112,11 @@ internal class LazyUpstreamConnection(
             try {
                 NetworkConditionInjector.apply(networkCondition, random, sleep)
                 val socket = socketFactory()
+                // S2 task 18: phase clocks. InetSocketAddress(host, port) is where the blocking
+                // name lookup happens (an IP literal resolves instantly, and ~0 ms is the honest
+                // answer for it); the connector is the TCP connect; startHandshake() is TLS.
+                val dnsMs: Long
+                val connectMs: Long
                 try {
                     val protectResult = SocketProtector.protectSocket(socket)
                     if (protectResult == SocketProtector.ProtectResult.Failed) {
@@ -113,7 +124,12 @@ internal class LazyUpstreamConnection(
                             "SocketProtector.protectSocket failed for upstream $host:$port; refusing to connect"
                         )
                     }
-                    socketConnector(socket, InetSocketAddress(host, port))
+                    val dnsStart = System.nanoTime()
+                    val address = InetSocketAddress(host, port)
+                    val connectStart = System.nanoTime()
+                    dnsMs = (connectStart - dnsStart) / 1_000_000
+                    socketConnector(socket, address)
+                    connectMs = (System.nanoTime() - connectStart) / 1_000_000
                 } catch (t: Throwable) {
                     runCatching { socket.close() }
                     throw t
@@ -137,8 +153,13 @@ internal class LazyUpstreamConnection(
                         sslSocket.sslParameters = params
                     }
                 }
+                val tlsStart = System.nanoTime()
                 sslSocket.startHandshake()
-                val result = Connected(socket, sslSocket, sslSocket.getInputStream(), sslSocket.getOutputStream())
+                val tlsMs = (System.nanoTime() - tlsStart) / 1_000_000
+                val result = Connected(
+                    socket, sslSocket, sslSocket.getInputStream(), sslSocket.getOutputStream(),
+                    setupTimings = com.example.interception.relay.UpstreamSetupTimings(dnsMs, connectMs, tlsMs),
+                )
                 connected = result
                 onFirstConnect(result)
                 return result

@@ -167,7 +167,9 @@ object ApiTestrScriptRunner {
             override fun responseHeaderNames(): Array<String> = headers.keys.toTypedArray()
             override fun responseGetBody(): String = body
             override fun responseSetBody(value: String) { body = value }
-            override fun responseGetResponseTimeMs(): Long = response.responseTimeMs
+            // S2 task 18: pm.response.responseTime is the measured round trip (Postman semantics),
+            // not the old fabricated "server response" split.
+            override fun responseGetResponseTimeMs(): Long = response.latencyMs
         }
 
         val result = JsScriptEngine.eval(script, PmPrelude.SOURCE, bridge)

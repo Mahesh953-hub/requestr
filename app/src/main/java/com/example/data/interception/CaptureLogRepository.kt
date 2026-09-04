@@ -5,11 +5,13 @@ import com.example.data.local.CapturedTrafficEntity
 import com.example.data.local.InterceptRuleEntity
 import com.example.data.local.RequestrDatabase
 import com.example.data.local.RuleAction
+import com.example.data.local.TransactionTimingEntity
 import com.example.data.models.CapturedTrafficItem
 import com.example.data.models.HttpMethod
 import com.example.data.models.TrafficSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 
@@ -24,10 +26,22 @@ import kotlinx.coroutines.withContext
  */
 object CaptureLogRepository {
 
-    /** Live traffic log, newest first, mapped to the UI model. Empty until the engine writes. */
-    fun observeTraffic(context: Context): Flow<List<CapturedTrafficItem>> =
-        RequestrDatabase.get(context).capturedTrafficDao().observeAll()
-            .map { rows -> rows.map { it.toUiModel() } }
+    /**
+     * Live traffic log, newest first, mapped to the UI model. Empty until the engine writes.
+     * S2 task 18: joined with `transaction_timings` so the timing bars show measured phases; a
+     * row without a timing row (or a phase that was not observed) keeps the `-1` "not measured"
+     * sentinel of [CapturedTrafficItem].
+     */
+    fun observeTraffic(context: Context): Flow<List<CapturedTrafficItem>> {
+        val db = RequestrDatabase.get(context)
+        return combine(
+            db.capturedTrafficDao().observeAll(),
+            db.transactionTimingDao().observeAll(),
+        ) { rows, timings ->
+            val byId = timings.associateBy { it.trafficId }
+            rows.map { it.toUiModel(byId[it.id]) }
+        }
+    }
 
     /** Real row count, used for the "ALL (n)" chip so the number cannot drift from the list. */
     fun observeCount(context: Context): Flow<Int> =
@@ -35,17 +49,31 @@ object CaptureLogRepository {
 
     /** One-shot snapshot of all traffic entries, ordered newest first. Used for JSON export. */
     suspend fun getAllTraffic(context: Context): List<CapturedTrafficItem> = withContext(Dispatchers.IO) {
-        RequestrDatabase.get(context).capturedTrafficDao().getAll()
-            .map { it.toUiModel() }
+        val db = RequestrDatabase.get(context)
+        val byId = db.transactionTimingDao().getAll().associateBy { it.trafficId }
+        db.capturedTrafficDao().getAll().map { it.toUiModel(byId[it.id]) }
     }
 
+    /**
+     * Clears every captured row and (S2 task 16) every spilled body file. Rows go first so a
+     * crash in between leaves orphan files (swept at next start), never rows pointing at nothing.
+     */
     suspend fun clearAll(context: Context) = withContext(Dispatchers.IO) {
         RequestrDatabase.get(context).capturedTrafficDao().clearAll()
+        com.example.data.persistence.BodyStore.get(context).deleteAll()
+        Unit
     }
 
     suspend fun deleteEntry(context: Context, uiId: String) = withContext(Dispatchers.IO) {
-        uiId.toLongOrNull()?.let {
-            RequestrDatabase.get(context).capturedTrafficDao().deleteById(it)
+        uiId.toLongOrNull()?.let { id ->
+            val dao = RequestrDatabase.get(context).capturedTrafficDao()
+            val refs = dao.getSpilledBodyRef(id)
+            dao.deleteById(id)
+            if (refs != null) {
+                val store = com.example.data.persistence.BodyStore.get(context)
+                store.deleteBody(refs.requestBodyFilePath)
+                store.deleteBody(refs.responseBodyFilePath)
+            }
         }
         Unit
     }
@@ -166,7 +194,12 @@ object CaptureLogRepository {
  * Absent values stay visibly absent: an un-decoded response has no status code, so the UI shows
  * a real "pending/opaque" marker rather than defaulting to 200 OK.
  */
-internal fun CapturedTrafficEntity.toUiModel(): CapturedTrafficItem = CapturedTrafficItem(
+/**
+ * @param timings S2 task 18: the row's measured phases, when a `transaction_timings` row exists.
+ *   NULL phases (not observed) map to the UI model's `-1` sentinel, which every consumer already
+ *   renders as "not measured"; `downloadMs` is the `receive` phase.
+ */
+internal fun CapturedTrafficEntity.toUiModel(timings: TransactionTimingEntity? = null): CapturedTrafficItem = CapturedTrafficItem(
     id = id.toString(),
     method = runCatching { HttpMethod.valueOf(method.uppercase()) }.getOrDefault(HttpMethod.GET),
     url = url,
@@ -176,12 +209,19 @@ internal fun CapturedTrafficEntity.toUiModel(): CapturedTrafficItem = CapturedTr
     statusMessage = statusCode?.let { httpStatusMessage(it) } ?: "",
     protocol = protocol,
     latencyMs = latencyMs,
+    dnsMs = timings?.dnsMs ?: -1,
+    connectMs = timings?.connectMs ?: -1,
+    tlsMs = timings?.tlsMs ?: -1,
+    waitMs = timings?.waitMs ?: -1,
+    downloadMs = timings?.receiveMs ?: -1,
     requestSize = requestSizeBytes,
     responseSize = responseSizeBytes,
     requestHeaders = requestHeaders,
     responseHeaders = responseHeaders,
-    requestBody = requestBody ?: "",
-    responseBody = responseBody ?: "",
+    // S2 task 16: a spilled text body leaves only its UTF-8 preview on the row; surface that so
+    // the list/detail views are not blank for it (the full body lives in the BodyStore file).
+    requestBody = requestBody ?: requestBodyPreview ?: "",
+    responseBody = responseBody ?: responseBodyPreview ?: "",
     timestamp = timestamp,
     appPackage = appPackage ?: "",
     appName = appPackage ?: "",

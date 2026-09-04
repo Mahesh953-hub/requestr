@@ -243,6 +243,39 @@ interface CapturedTrafficDao {
         responseBodyBytesTruncated: Boolean = false,
     )
 
+    /** Whole-row update; used by the persistence actor after a body spill re-homes the body columns. */
+    @Update
+    suspend fun update(item: CapturedTrafficEntity)
+
+    /** S2 task 16: rows that reference a spilled body file (orphan sweep / delete cleanup). */
+    @Query(
+        "SELECT id, requestBodyFilePath, responseBodyFilePath FROM captured_traffic " +
+            "WHERE requestBodyFilePath IS NOT NULL OR responseBodyFilePath IS NOT NULL",
+    )
+    suspend fun getSpilledBodyRefs(): List<SpilledBodyRef>
+
+    @Query("SELECT id, requestBodyFilePath, responseBodyFilePath FROM captured_traffic WHERE id = :id")
+    suspend fun getSpilledBodyRef(id: Long): SpilledBodyRef?
+
+    /**
+     * Clears a body-file reference whose file is gone; the truncated flag is raised for the
+     * evicted direction so the UI renders "not stored" instead of an empty body.
+     */
+    @Query(
+        "UPDATE captured_traffic SET requestBodyFilePath = :requestBodyFilePath, " +
+            "responseBodyFilePath = :responseBodyFilePath, " +
+            "requestBodyBytesTruncated = CASE WHEN :requestEvicted THEN 1 ELSE requestBodyBytesTruncated END, " +
+            "responseBodyBytesTruncated = CASE WHEN :responseEvicted THEN 1 ELSE responseBodyBytesTruncated END " +
+            "WHERE id = :id",
+    )
+    suspend fun clearEvictedBodyRefs(
+        id: Long,
+        requestBodyFilePath: String?,
+        responseBodyFilePath: String?,
+        requestEvicted: Boolean,
+        responseEvicted: Boolean,
+    )
+
     @Delete
     suspend fun delete(item: CapturedTrafficEntity)
 
@@ -251,7 +284,33 @@ interface CapturedTrafficDao {
 
     @Query("DELETE FROM captured_traffic")
     suspend fun clearAll()
+
+    // -- S2 task 19: session pruning -------------------------------------------------------------
+
+    @Query("SELECT COUNT(*) FROM captured_traffic WHERE sessionId = :sessionId")
+    suspend fun countForSession(sessionId: Long): Int
+
+    /** Oldest-first (capture order) rows of one session, with their spill references; pruning picks the head. */
+    @Query(
+        "SELECT id, requestBodyFilePath, responseBodyFilePath FROM captured_traffic " +
+            "WHERE sessionId = :sessionId ORDER BY timestamp ASC, id ASC LIMIT :limit",
+    )
+    suspend fun getOldestRefsForSession(sessionId: Long, limit: Int): List<SpilledBodyRef>
+
+    /** Child rows (headers, timings, applied rules) go with the parent through `ON DELETE CASCADE`. */
+    @Query("DELETE FROM captured_traffic WHERE id IN (:ids)")
+    suspend fun deleteByIds(ids: List<Long>): Int
+
+    @Query("DELETE FROM captured_traffic WHERE sessionId = :sessionId")
+    suspend fun clearSession(sessionId: Long): Int
 }
+
+/** Projection of the body-file reference columns of one `captured_traffic` row. */
+data class SpilledBodyRef(
+    val id: Long,
+    val requestBodyFilePath: String?,
+    val responseBodyFilePath: String?,
+)
 
 @Dao
 interface CaptureSessionDao {
@@ -283,6 +342,15 @@ interface CaptureSessionDao {
 
     @Query("DELETE FROM capture_sessions")
     suspend fun clearAll()
+
+    // -- S2 task 19: session pruning -------------------------------------------------------------
+
+    /** Ended sessions, oldest first -- the order the pruner evicts whole sessions in. */
+    @Query("SELECT * FROM capture_sessions WHERE endedAt IS NOT NULL ORDER BY startedAt ASC, id ASC")
+    suspend fun getEndedOldestFirst(): List<CaptureSessionEntity>
+
+    @Query("DELETE FROM capture_sessions WHERE id = :id")
+    suspend fun deleteById(id: Long)
 }
 
 @Dao
@@ -897,4 +965,81 @@ interface ConnectAttemptDao {
 
     @Query("DELETE FROM connect_attempts WHERE sessionId = :sessionId")
     suspend fun clearSession(sessionId: Long)
+}
+
+// ---- S2 task 14 (v19): persistence-spine child tables ------------------------------------------
+
+/**
+ * Ordered, duplicate-preserving headers. Rows come back in wire order (`ordinal`) within a
+ * [HeaderKind] block; consumers that need the legacy folded map keep reading
+ * `captured_traffic.requestHeaders`/`responseHeaders`, which stay written as a derived cache.
+ */
+@Dao
+interface TransactionHeaderDao {
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertAll(rows: List<TransactionHeaderEntity>)
+
+    @Query("SELECT * FROM transaction_headers WHERE trafficId = :trafficId ORDER BY kind, ordinal")
+    suspend fun forTraffic(trafficId: Long): List<TransactionHeaderEntity>
+
+    @Query("SELECT * FROM transaction_headers WHERE trafficId = :trafficId AND kind = :kind ORDER BY ordinal")
+    suspend fun forTraffic(trafficId: Long, kind: HeaderKind): List<TransactionHeaderEntity>
+
+    @Query("SELECT * FROM transaction_headers WHERE trafficId = :trafficId ORDER BY kind, ordinal")
+    fun observeForTraffic(trafficId: Long): Flow<List<TransactionHeaderEntity>>
+
+    /** Case-insensitive lookup by header name across one transaction (e.g. every `set-cookie`). */
+    @Query(
+        "SELECT * FROM transaction_headers WHERE trafficId = :trafficId AND kind = :kind AND nameLower = :nameLower ORDER BY ordinal"
+    )
+    suspend fun named(trafficId: Long, kind: HeaderKind, nameLower: String): List<TransactionHeaderEntity>
+
+    @Query("DELETE FROM transaction_headers WHERE trafficId = :trafficId AND kind = :kind")
+    suspend fun deleteKind(trafficId: Long, kind: HeaderKind)
+
+    @Query("SELECT COUNT(*) FROM transaction_headers")
+    suspend fun count(): Int
+}
+
+/** Measured phase timings; NULL means "not observed", never `-1`. */
+@Dao
+interface TransactionTimingDao {
+    /** REPLACE: the response-side patch (task 15's two-phase write) overwrites the request-side row. */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(row: TransactionTimingEntity)
+
+    @Query("SELECT * FROM transaction_timings WHERE trafficId = :trafficId")
+    suspend fun forTraffic(trafficId: Long): TransactionTimingEntity?
+
+    @Query("SELECT * FROM transaction_timings WHERE trafficId = :trafficId")
+    fun observeForTraffic(trafficId: Long): Flow<TransactionTimingEntity?>
+
+    @Query("SELECT * FROM transaction_timings WHERE trafficId IN (:trafficIds)")
+    suspend fun forTraffic(trafficIds: List<Long>): List<TransactionTimingEntity>
+
+    /** S2 task 18: joined into the traffic list read model by [com.example.data.interception.CaptureLogRepository]. */
+    @Query("SELECT * FROM transaction_timings")
+    fun observeAll(): Flow<List<TransactionTimingEntity>>
+
+    @Query("SELECT * FROM transaction_timings")
+    suspend fun getAll(): List<TransactionTimingEntity>
+
+    @Query("SELECT COUNT(*) FROM transaction_timings")
+    suspend fun count(): Int
+}
+
+/** Rule provenance rows written by the S4 pipeline (`FlowAuditTrail`). */
+@Dao
+interface AppliedRuleDao {
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertAll(rows: List<AppliedRuleEntity>)
+
+    @Query("SELECT * FROM applied_rules WHERE trafficId = :trafficId ORDER BY appliedAt, id")
+    suspend fun forTraffic(trafficId: Long): List<AppliedRuleEntity>
+
+    @Query("SELECT * FROM applied_rules WHERE trafficId = :trafficId ORDER BY appliedAt, id")
+    fun observeForTraffic(trafficId: Long): Flow<List<AppliedRuleEntity>>
+
+    @Query("SELECT COUNT(*) FROM applied_rules")
+    suspend fun count(): Int
 }

@@ -52,6 +52,15 @@ class RequestrTypeConverters {
     fun nameToCaptureRowMethod(value: String?): CaptureRowMethod =
         runCatching { CaptureRowMethod.valueOf(value ?: "") }.getOrNull() ?: CaptureRowMethod.UNKNOWN
 
+    // -- S2 task 14: transaction_headers.kind ------------------------------------------------
+
+    @TypeConverter
+    fun headerKindToName(value: HeaderKind?): String = (value ?: HeaderKind.REQUEST).name
+
+    @TypeConverter
+    fun nameToHeaderKind(value: String?): HeaderKind =
+        runCatching { HeaderKind.valueOf(value ?: "") }.getOrNull() ?: HeaderKind.REQUEST
+
     // -- Saved API Testr requests (A4) --------------------------------------------------------
 
     @TypeConverter

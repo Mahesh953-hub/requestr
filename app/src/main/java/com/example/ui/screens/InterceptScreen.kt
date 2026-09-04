@@ -468,6 +468,14 @@ fun InterceptScreen(
                 onExpand = { showRelayHealthSheet = true },
             )
 
+            // S2 task 17: persistence failure table (dropped/failed writes, spill failures,
+            // migration backup/restore/wipe, quota pause). Renders nothing while healthy.
+            val persistenceHealth by InterceptionStateRepository.persistence.collectAsState()
+            if (persistenceHealth.headline != null) {
+                Spacer(modifier = Modifier.height(6.dp))
+                com.example.ui.components.PersistenceHealthBanner(snapshot = persistenceHealth)
+            }
+
             Spacer(modifier = Modifier.height(6.dp))
 
             // Search and Fast Method Filters
@@ -4345,7 +4353,8 @@ private fun CaptureBodySection(label: String, body: String, contentType: String?
  * the true body was bigger than [com.example.interception.http.HttpBodyDecoder.MAX_STORED_BODY_BYTES])
  * an honest "wasn't stored" explanation instead of pretending it's empty.
  *
- * [bytes] is the real, byte-exact body straight from [com.example.data.local.CapturedTrafficEntity]
+ * [inlineBytes] is the real, byte-exact body straight from [com.example.data.local.CapturedTrafficEntity]
+ * (or, for a body spilled to the BodyStore by S2 task 16, the bytes read back from [spilledPath])
  * -- decoding happens here (Bitmap decode is CPU work, not I/O, so it's fine on the composition
  * thread for the sizes involved; large-N cases are exactly the ones [truncated] routes around).
  */
@@ -4356,17 +4365,34 @@ private fun CaptureBinaryBodySection(
     contentType: String?,
     truncated: Boolean,
     trueSizeBytes: Long,
-    bytes: ByteArray?,
+    inlineBytes: ByteArray?,
     fileBaseName: String,
+    spilledPath: String? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val clipboardManager = LocalClipboardManager.current
+    // S2 task 16: a body above BodyStore.INLINE_LIMIT_BYTES lives in a spill file, not the BLOB
+    // column -- load it off the composition thread and render exactly as an inline body.
+    val spilledBytes by produceState<ByteArray?>(initialValue = null, spilledPath) {
+        value = if (spilledPath == null) null else withContext(Dispatchers.IO) {
+            com.example.data.persistence.BodyStore.get(context).read(spilledPath)
+        }
+    }
+    val spillLoading = spilledPath != null && inlineBytes == null && spilledBytes == null
+    val bytes = inlineBytes ?: spilledBytes
     var exportResult by remember(bytes) { mutableStateOf<String?>(null) }
     val storageState = remember(truncated) { classifyBodyStorageState(isBinary = true, truncated = truncated) }
 
     Text("$label:", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = labelColor)
     when {
+        spillLoading -> {
+            Text(
+                "Loading ${formatByteCount(trueSizeBytes)} body from the capture store...",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+            )
+        }
         storageState == BodyStorageState.BINARY_EXCEEDED_CAP || bytes == null -> {
             Text(
                 exceededCapMessage(trueSizeBytes, com.example.interception.http.HttpBodyDecoder.MAX_STORED_BODY_BYTES.toLong()),
@@ -4926,8 +4952,9 @@ fun CapturedDetailBottomSheet(
                                             contentType = contentTypeOf(item.responseHeaders),
                                             truncated = capturedEntity?.responseBodyBytesTruncated == true,
                                             trueSizeBytes = capturedEntity?.responseSizeBytes ?: 0L,
-                                            bytes = capturedEntity?.responseBodyBytes,
+                                            inlineBytes = capturedEntity?.responseBodyBytes,
                                             fileBaseName = "captured-response-${item.id}",
+                                            spilledPath = capturedEntity?.responseBodyFilePath,
                                         )
                                     } else {
                                         CaptureBodySection(
@@ -4946,8 +4973,9 @@ fun CapturedDetailBottomSheet(
                                             contentType = contentTypeOf(item.requestHeaders),
                                             truncated = capturedEntity?.requestBodyBytesTruncated == true,
                                             trueSizeBytes = capturedEntity?.requestSizeBytes ?: 0L,
-                                            bytes = capturedEntity?.requestBodyBytes,
+                                            inlineBytes = capturedEntity?.requestBodyBytes,
                                             fileBaseName = "captured-request-${item.id}",
+                                            spilledPath = capturedEntity?.requestBodyFilePath,
                                         )
                                     } else {
                                         CaptureBodySection(

@@ -5,6 +5,7 @@ import android.os.Looper
 import android.util.Log
 import androidx.room.Database
 import androidx.room.Room
+import androidx.room.useReaderConnection
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
 import androidx.room.migration.Migration
@@ -12,6 +13,7 @@ import androidx.sqlite.SQLiteConnection
 import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import com.example.data.persistence.DbBackup
+import com.example.data.persistence.PersistenceHealth
 import com.example.data.persistence.DbDriverFlag
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
@@ -46,6 +48,10 @@ import kotlinx.coroutines.runBlocking
         ChatConversationEntity::class,
         RecentActivityEntity::class,
         ConnectAttemptEntity::class,
+        // S2 task 14 (v19): persistence spine children of captured_traffic.
+        TransactionHeaderEntity::class,
+        TransactionTimingEntity::class,
+        AppliedRuleEntity::class,
     ],
     // v3.5: bumped 4 -> 5 for FlowNodeEntity + FlowConnectionEntity (Flow persistence).
     // v5.6 (M1): bumped 5 -> 6 to register TcpConnectionEntity/UdpFlowEntity/QuicConnectionEntity,
@@ -103,7 +109,11 @@ import kotlinx.coroutines.runBlocking
     // table records genuine open events (see RecentActivityRepository). Pure CREATE TABLE -- no
     // existing table is touched, and there is deliberately no backfill: nothing has been "opened"
     // until the user opens it, so an upgraded install starts with an honest empty section.
-    version = 18,
+    // S2 task 14 (interceptor plan §4 v19): bumped 18 -> 19 for the persistence spine --
+    // transaction_headers / transaction_timings / applied_rules child tables, body-reference
+    // columns for the spill store (task 16), and the API-Testr protocol columns reserved for
+    // tasks 58-60. Additive only; see Migration18To19.kt.
+    version = 19,
     exportSchema = true,
 )
 @TypeConverters(RequestrTypeConverters::class)
@@ -129,6 +139,9 @@ abstract class RequestrDatabase : RoomDatabase() {
     abstract fun chatConversationDao(): ChatConversationDao
     abstract fun recentActivityDao(): RecentActivityDao
     abstract fun connectAttemptDao(): ConnectAttemptDao
+    abstract fun transactionHeaderDao(): TransactionHeaderDao
+    abstract fun transactionTimingDao(): TransactionTimingDao
+    abstract fun appliedRuleDao(): AppliedRuleDao
 
     companion object {
         private const val TAG = "RequestrDatabase"
@@ -137,7 +150,7 @@ abstract class RequestrDatabase : RoomDatabase() {
          * The current schema version declared in the [@Database] annotation above.
          * Kept in sync manually; a CI schema-drift check validates the exported JSON.
          */
-        const val SCHEMA_VERSION = 18
+        const val SCHEMA_VERSION = 19
 
         @Volatile
         private var INSTANCE: RequestrDatabase? = null
@@ -163,8 +176,30 @@ abstract class RequestrDatabase : RoomDatabase() {
             synchronized(this) {
                 if (INSTANCE != null) return
                 val db = buildDatabase(context, DbDriverFlag.get(context).isEnabled)
+                warmUp(context, db)
                 INSTANCE = db
                 ready.complete(db)
+            }
+        }
+
+        /**
+         * Task 17: opens the connection now (off the main thread only) so a failing migration
+         * surfaces here, once, as [PersistenceHealth.MigrationEvent.MIGRATION_FAILED] plus a
+         * persisted diagnostics row -- instead of as an opaque crash in whichever DAO call
+         * happens first. Room runs each migration in a transaction, so on failure the file is
+         * still on its previous version; the exception is swallowed here and will re-surface
+         * to the first real query, which is the existing behaviour.
+         */
+        private fun warmUp(context: Context, db: RequestrDatabase) {
+            val mainLooper = Looper.getMainLooper()
+            if (mainLooper != null && Looper.myLooper() == mainLooper) return
+            try {
+                runBlocking { db.useReaderConnection { } }
+            } catch (t: Throwable) {
+                val detail = (t.message ?: t.javaClass.simpleName).take(200)
+                Log.e(TAG, "Database open/migration failed", t)
+                PersistenceHealth.recordMigration(PersistenceHealth.MigrationEvent.MIGRATION_FAILED, detail)
+                DbBackup(context.applicationContext).recordRecoveryEvent("migration_failed", detail)
             }
         }
 
@@ -240,7 +275,17 @@ abstract class RequestrDatabase : RoomDatabase() {
             // ── Phase 1: restore from a previous downgrade-wipe backup ───────
             if (backup.shouldRestoreBeforeOpen(SCHEMA_VERSION)) {
                 Log.i(TAG, "Viable backup after previous downgrade wipe — restoring")
-                backup.restoreBackup()
+                val backupVersion = backup.readMetadata()?.optInt("backupVersion", -1) ?: -1
+                if (backup.restoreBackup()) {
+                    // Task 17: the wipe is undone -- say so, and keep a diagnostics row.
+                    val detail = "v$backupVersion copy restored after a downgrade wipe"
+                    PersistenceHealth.recordMigration(PersistenceHealth.MigrationEvent.RESTORED_FROM_BACKUP, detail)
+                    backup.recordRecoveryEvent("restored", detail)
+                } else {
+                    val detail = "backup v$backupVersion could not be restored; starting empty"
+                    PersistenceHealth.recordMigration(PersistenceHealth.MigrationEvent.DESTRUCTIVE_WIPE, detail)
+                    backup.recordRecoveryEvent("restore_failed", detail)
+                }
             }
 
             // ── Phase 2: backup before any migration ─────────────────────────
@@ -252,7 +297,17 @@ abstract class RequestrDatabase : RoomDatabase() {
             if (preOpenVersion >= DbBackup.MINIMUM_RESTORABLE_VERSION &&
                 preOpenVersion != SCHEMA_VERSION
             ) {
-                backup.backupBeforeMigration(preOpenVersion)
+                if (backup.backupBeforeMigration(preOpenVersion)) {
+                    val detail = "v$preOpenVersion → v$SCHEMA_VERSION"
+                    PersistenceHealth.recordMigration(PersistenceHealth.MigrationEvent.BACKED_UP, detail)
+                    backup.recordRecoveryEvent("backed_up", detail)
+                } else {
+                    // Task 17 failure table: the migration still runs (Room migrations are
+                    // transactional), but the user is told there is no safety copy.
+                    val detail = "v$preOpenVersion → v$SCHEMA_VERSION"
+                    PersistenceHealth.recordMigration(PersistenceHealth.MigrationEvent.BACKUP_FAILED, detail)
+                    backup.recordRecoveryEvent("backup_failed", detail)
+                }
             }
 
             // ── Phase 2b: bump open generation for stable-launch tracking ────
@@ -334,6 +389,12 @@ abstract class RequestrDatabase : RoomDatabase() {
 
             private fun handleDestructiveMigration() {
                 backup.recordDestructiveWipe(preOpenVersion, SCHEMA_VERSION)
+                // Task 17: rows were lost -- visible in PersistenceHealth (banner) and as a
+                // persisted diagnostics row. A restore, if a viable backup exists, happens on
+                // the next open (Phase 1), which then reports RESTORED_FROM_BACKUP.
+                val detail = "v$preOpenVersion → v$SCHEMA_VERSION downgrade wiped all tables"
+                PersistenceHealth.recordMigration(PersistenceHealth.MigrationEvent.DESTRUCTIVE_WIPE, detail)
+                backup.recordRecoveryEvent("destructive_wipe", detail)
             }
 
             private fun handleOpen() {
@@ -635,11 +696,11 @@ abstract class RequestrDatabase : RoomDatabase() {
             }
         }
 
-        /** All ten registered migrations v8→v18, exposed for tests and the builder. */
+        /** All eleven registered migrations v8→v19, exposed for tests and the builder. */
         val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
             MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16,
-            MIGRATION_16_17, MIGRATION_17_18,
+            MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19,
         )
     }
 }

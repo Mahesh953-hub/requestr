@@ -4,6 +4,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.After
+import org.junit.Before
 import org.junit.Test
 
 /**
@@ -11,10 +13,33 @@ import org.junit.Test
  * storage cap) and [HttpBodyDecoder.forStorage] (the [com.example.data.local.CapturedTrafficEntity]
  * three-state field computation shared by every persistence path). Plain JVM, no Robolectric
  * needed -- same as [HttpBodyDecoderTest].
+ *
+ * S2 task 16: with `bodySpill` on, bodies between the inline cap and the spill ceiling pass
+ * through untruncated for the BodyStore (covered by [com.example.data.persistence.BodySpillThresholdTest]);
+ * the cap semantics asserted here are the flag-off contract, so the flag is forced off per test.
  */
 class HttpBodyDecoderStorageTest {
 
+    @Before
+    fun spillOff() {
+        HttpBodyDecoder.spillEnabled = false
+    }
+
+    @After
+    fun spillBack() {
+        HttpBodyDecoder.spillEnabled = true
+    }
+
     // ── clampForStorage ──────────────────────────────────────────────
+
+    @Test
+    fun `with body spill on, a body over the inline cap but under the spill ceiling passes through untruncated`() {
+        HttpBodyDecoder.spillEnabled = true
+        val overCap = ByteArray(HttpBodyDecoder.MAX_STORED_BODY_BYTES + 1)
+        val result = HttpBodyDecoder.clampForStorage(overCap)
+        assertFalse(result.truncated)
+        assertTrue(result.bytes!!.contentEquals(overCap))
+    }
 
     @Test
     fun `bytes at or under the cap are stored verbatim, not truncated`() {

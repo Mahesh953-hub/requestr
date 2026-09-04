@@ -45,8 +45,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.channels.BufferOverflow
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.drop
@@ -95,21 +93,17 @@ class RequestrVpnService : VpnService() {
     internal var lifecycleStepRecorder: (String) -> Unit = {}
     private var sessionId: Long? = null
     private var healthJob: Job? = null
-    private var persistJob: Job? = null
     private var foregroundStarted = false
 
     /**
-     * S1 task 11: bounded persistence sink replacing the two `runBlocking(Dispatchers.IO)` Room
-     * writes that used to run on the relay/pump threads ([onDecryptedTransaction] and
-     * [onDnsObserved]). One consumer drains it; when the database falls behind, the *oldest*
-     * queued write is dropped and counted ([persistDropped]) rather than stalling a relay --
-     * a stalled relay silently back-pressures the tun and every app on the device.
+     * S2 task 15: the process-wide single-writer queue. Replaces the S1 task 11 private
+     * `Channel<suspend () -> Unit>` mini-queue this service used to own: same never-block-a-relay
+     * contract, but shared with every other persist site, with drop/failure counters surfaced via
+     * [com.example.data.persistence.PersistenceHealth] instead of a service-local counter.
      */
-    private val persistQueue = Channel<suspend () -> Unit>(
-        capacity = PERSIST_QUEUE_CAPACITY,
-        onBufferOverflow = BufferOverflow.DROP_OLDEST,
-    )
-    private val persistDropped = java.util.concurrent.atomic.AtomicLong()
+    private val persistence: com.example.data.persistence.PersistenceQueue by lazy {
+        com.example.data.persistence.PersistenceQueue.get(applicationContext)
+    }
 
     /** S1 task 11: Wi-Fi/LTE handover coordinator; null while no capture is running. */
     @Volatile private var networkHandoff: VpnNetworkHandoff? = null
@@ -289,6 +283,11 @@ class RequestrVpnService : VpnService() {
                 // UnsupportedOperationException at establish() time, which is exactly why
                 // SELECTED_APPS mode never worked before this fix (see resolveFilterPlan doc).
                 val plan = resolveFilterPlan(filterMode, selected, packageName)
+                // S2 task 16: resolve the shared persistence queue before any engine (PacketPump,
+                // relay pool, gateway) is built so the `bodySpill` flag is applied -- BodyStore
+                // attached (with its startup orphan sweep queued) and the decoder cap mirrored --
+                // ahead of the first insert of this session.
+                persistence
                 // S1 task 10: the allow-list is the only legitimate input to the attributor's
                 // single-app inference step; everything else is attributed from the kernel.
                 com.example.interception.uid.UidAttributor.captureSelectionSnapshot =
@@ -409,11 +408,11 @@ class RequestrVpnService : VpnService() {
                 val relayPool = com.example.interception.relay.RelayPool.shared(
                     bounded = com.example.data.persistence.InterceptorFlags.get(applicationContext).relayPoolBounded,
                 )
-                startPersistConsumer()
                 val mitmEngine = MitmProxyEngine(
-                    onDecryptedTransaction = { entity ->
-                        // S1 task 11: never block a relay thread on Room; see [persistQueue].
-                        persist { db.capturedTrafficDao().insert(entity) }
+                    onDecryptedTransactionTimed = { entity, timings ->
+                        // S2 task 15: never block a relay thread on Room; see [persistence].
+                        // S2 task 18: the measured phases ride along in the same queued op.
+                        persistence.insertTransaction(entity, timings = timings)
                     },
                     relayPool = relayPool,
                     uidAttributor = uidAttributor,
@@ -618,8 +617,8 @@ class RequestrVpnService : VpnService() {
      * IP instead of by connectionId.
      *
      * Called from [PacketPump]'s tun-read loop (a plain callback, not a suspend context), so the
-     * Room write goes through the bounded [persistQueue] (S1 task 11) instead of blocking the
-     * read loop.
+     * Room write goes through the bounded [persistence] queue (S1 task 11 / S2 task 15) instead
+     * of blocking the read loop.
      */
     private fun onDnsObserved(
         sessionId: Long,
@@ -630,20 +629,18 @@ class RequestrVpnService : VpnService() {
         dPort: Int,
     ) {
         if (dns.hostname.isEmpty()) return
-        // S1 task 11: queued instead of runBlocking on the tun-read thread; see [persistQueue].
-        persist {
-            RequestrDatabase.get(applicationContext).dnsQueryDao().insert(
-                com.example.data.local.DnsQueryEntity(
-                    sessionId = sessionId,
-                    transactionId = dns.transactionId,
-                    hostname = dns.hostname,
-                    queryType = dns.qtypeName,
-                    isResponse = dns.isResponse,
-                    resolvedIps = dns.resolvedIps,
-                    resolver = "UDP:53",
-                )
+        // S2 task 15: queued instead of runBlocking on the tun-read thread; see [persistence].
+        persistence.insertDns(
+            com.example.data.local.DnsQueryEntity(
+                sessionId = sessionId,
+                transactionId = dns.transactionId,
+                hostname = dns.hostname,
+                queryType = dns.qtypeName,
+                isResponse = dns.isResponse,
+                resolvedIps = dns.resolvedIps,
+                resolver = "UDP:53",
             )
-        }
+        )
 
         com.example.correlation.CorrelationEngine.ingest(
             com.example.correlation.DnsEvent(
@@ -794,9 +791,8 @@ class RequestrVpnService : VpnService() {
         runCatching { com.example.interception.packet.PacketCaptureEngine.stop() }
         // Task 5: secrets are in-memory only and must not outlive a capture session.
         runCatching { TlsKeyLogRegistry.clear() }
-        // S1 task 11: let queued Room writes drain on their own consumer; only stop accepting
-        // new ones. (The consumer is cancelled with [scope] in onDestroy.)
-        persistJob = null
+        // S2 task 15: queued Room writes drain on the process-wide persistence actor, which
+        // outlives this service on purpose -- nothing to stop here.
         releaseWakeLock()
         stopForegroundCompat()
     }
@@ -827,27 +823,7 @@ class RequestrVpnService : VpnService() {
         )
     }
 
-    // ---- S1 task 11: foreground/notification, persistence sink, network handoff -------------
-
-    /** Enqueue a Room write off the calling (relay / tun-read) thread. Drops oldest when full. */
-    private fun persist(write: suspend () -> Unit) {
-        val result = persistQueue.trySend(write)
-        if (result.isFailure) persistDropped.incrementAndGet()
-    }
-
-    private fun startPersistConsumer() {
-        if (persistJob?.isActive == true) return
-        persistJob = scope.launch {
-            for (write in persistQueue) {
-                try {
-                    write()
-                } catch (t: Throwable) {
-                    if (t is kotlinx.coroutines.CancellationException) throw t
-                    Log.w(TAG, "Persist failed: ${t.message}")
-                }
-            }
-        }
-    }
+    // ---- S1 task 11: foreground/notification, network handoff ------------------------------
 
     /** Health counters shown in the notification (S1 task 11), refreshed every [HEALTH_REFRESH_MS]. */
     internal fun healthLine(relay: com.example.interception.relay.RelayMetrics.Snapshot?): String {
@@ -859,8 +835,10 @@ class RequestrVpnService : VpnService() {
             parts += "up ${formatBytes(snap.bytesToUpstream)} / down ${formatBytes(snap.bytesToClient)}"
             if (snap.rejected > 0 || snap.evicted > 0) parts += "${snap.rejected + snap.evicted} shed"
         }
-        val dropped = persistDropped.get()
-        if (dropped > 0) parts += "$dropped writes dropped"
+        val persist = com.example.data.persistence.PersistenceHealth.snapshot()
+        val lost = persist.droppedWrites + persist.failedWrites
+        if (lost > 0) parts += "$lost writes lost"
+        if (persist.capturePaused != null) parts += "capture paused: quota"
         if (networkHandoff?.isDegraded == true) parts += "no network -- waiting"
         return parts.joinToString(" \u00b7 ").ifEmpty { "VPN active" }
     }
@@ -1077,9 +1055,6 @@ class RequestrVpnService : VpnService() {
 
         /** S1 task 11: notification health-counter refresh cadence. */
         private const val HEALTH_REFRESH_MS = 10_000L
-        /** S1 task 11: bounded persistence sink depth; oldest write dropped (and counted) above it. */
-        internal const val PERSIST_QUEUE_CAPACITY = 2_048
-
         private const val MTU = 1500
         private const val TUN_ADDRESS = "10.111.222.1"
         private const val TUN_PREFIX = 32

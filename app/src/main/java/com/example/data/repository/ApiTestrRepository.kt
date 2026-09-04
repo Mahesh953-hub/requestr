@@ -451,10 +451,12 @@ object ApiTestrRepository {
             body = requestItem.mockBody,
             timestamp = System.currentTimeMillis(),
             isSuccess = requestItem.mockStatusCode in 200..399,
-            dnsTimeMs = 0,
-            connectTimeMs = 0,
-            tlsTimeMs = 0,
-            requestTimeMs = 0,
+            // S2 task 18: a mock never touched the network, so no phase was measured; only the
+            // simulated delay is a real (self-inflicted) wait.
+            dnsTimeMs = null,
+            connectTimeMs = null,
+            tlsTimeMs = null,
+            requestTimeMs = null,
             responseTimeMs = requestItem.mockDelayMs,
             isMocked = true,
         )
@@ -543,12 +545,18 @@ object ApiTestrRepository {
             else -> requestBuilder.get()
         }
 
+        // S2 task 18: one EventListener per call measures DNS/connect/TLS/send/wait/receive from
+        // OkHttp's own hooks. newBuilder() shares the pool/dispatcher, so nothing is re-created
+        // beyond the client facade.
+        val phases = CallPhaseTimings()
+        val timedClient = reqClient.newBuilder().eventListener(phases).build()
         val t0 = System.currentTimeMillis()
         try {
-            val response: Response = reqClient.newCall(requestBuilder.build()).execute()
-            val latency = System.currentTimeMillis() - t0
+            val response: Response = timedClient.newCall(requestBuilder.build()).execute()
             val responseBody = response.body?.string() ?: ""
+            val latency = System.currentTimeMillis() - t0
             val size = responseBody.toByteArray().size.toLong()
+            val measured = phases.snapshot()
 
             val headerLines = response.headers.map { it.first to it.second }
             // Keep an ordered duplicate-capable wire view plus a case-insensitive last-value map
@@ -570,11 +578,13 @@ object ApiTestrRepository {
                 body = responseBody,
                 timestamp = System.currentTimeMillis(),
                 isSuccess = response.isSuccessful,
-                dnsTimeMs = (latency * 0.15).toLong().coerceAtLeast(4),
-                connectTimeMs = (latency * 0.20).toLong().coerceAtLeast(8),
-                tlsTimeMs = (latency * 0.30).toLong().coerceAtLeast(12),
-                requestTimeMs = (latency * 0.10).toLong().coerceAtLeast(3),
-                responseTimeMs = (latency * 0.25).toLong().coerceAtLeast(10)
+                dnsTimeMs = measured.dnsMs,
+                connectTimeMs = measured.connectMs,
+                tlsTimeMs = measured.tlsMs,
+                requestTimeMs = measured.sendMs,
+                responseTimeMs = measured.waitMs,
+                receiveTimeMs = measured.receiveMs,
+                connectionReused = measured.connectionReused,
             )
         } catch (e: IOException) {
             // Master plan §2.21 — specific, user-facing categorization instead of a single
