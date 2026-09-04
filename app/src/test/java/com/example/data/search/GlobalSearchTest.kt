@@ -1,6 +1,8 @@
 package com.example.data.search
 
 import com.example.data.models.ApiRequestItem
+import com.example.data.models.CapturedTrafficItem
+import com.example.data.models.HttpMethod
 import com.example.data.models.FlowNodeItem
 import com.example.data.models.FlowNodeType
 import com.example.data.models.NoteFormatType
@@ -171,5 +173,18 @@ class GlobalSearchTest {
         assertEquals(1, hits.count { it is GlobalSearchHit.Chat })
         // Omitting `chats` (the pre-existing call shape from HomeScreen) yields no chat hits.
         assertTrue(GlobalSearch.search("token", apis = apis, notes = notes, tools = tools, flows = flows).none { it is GlobalSearchHit.Chat })
+    }
+    @Test
+    fun `traffic hits are appended as given and typed for the Traffic filter`() {
+        val traffic = listOf(
+            CapturedTrafficItem(id = "41", method = HttpMethod.POST, host = "api.example.com", path = "/orders", statusCode = 500, protocol = "HTTP/2"),
+        )
+        val hits = GlobalSearch.search("zzz-not-matching-anything", apis = apis, traffic = traffic)
+        assertEquals(1, hits.size)
+        val hit = hits.single() as GlobalSearchHit.Traffic
+        assertEquals("41", hit.item.id)
+        assertEquals("POST api.example.com/orders", hit.title)
+        assertTrue(hit.subtitle.contains("500"))
+        assertTrue(GlobalSearch.search("Users", apis = apis).none { it is GlobalSearchHit.Traffic })
     }
 }

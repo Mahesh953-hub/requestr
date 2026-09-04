@@ -122,3 +122,39 @@ Exported from the platform todo list at handoff time.
       WS connections to one endpoint in a session fold into one parent (tun rows keep their
       5-tuple key and stay separate); a spilled legacy body imports its stored preview with
       `payloadTruncated = 1`.
+  - S3 task 22 — done on `vorflux/interceptor-s3-protocol`:
+    - Room v22 (`Migration21To22` + test, schema `22.json`, `SCHEMA_VERSION = 22`, 14 migrations):
+      new Room table `search_presets` (unique `name`, `query`, three-condition `conditions` +
+      `combineWithOr`) via `SearchPresetDao`; the FTS index is NOT a Room entity.
+    - `FtsSchema`: `CREATE VIRTUAL TABLE traffic_fts USING fts5(traffic_id UNINDEXED, url, host,
+      headers_text, body_text, tokenize='unicode61')` with `rowid = captured_traffic.id`, three
+      triggers (insert / delete / update of the indexed columns) and eager population from
+      `captured_traffic` + `websocket_messages.payloadText` + `sse_events` + `grpc_messages.decodedText`
+      the first time the index is created. Runs from a Room open callback in both driver modes
+      and best-effort at the end of `MIGRATION_21_22`.
+    - FTS5 exists only on `BundledSQLiteDriver` (fresh installs); Robolectric/framework SQLite has
+      no `fts5` module, so `FtsSchema.ensure` logs and sets `FtsSchema.available = false` and the
+      app falls back to a bound `LIKE` query over the same columns (+ children via EXISTS). A
+      database migrated on the framework driver gets its index on the next bundled-driver open.
+    - `TrafficSearchCompiler`: one grammar for both paths -- `key:value`, quoted phrases
+      (`body:"rate limit"`), `AND` (implicit), `OR`, `NOT` / `-term`, parentheses; keys
+      `status` (`5xx`, `>=`, `<`, ...), `method`, `host`, `path`, `duration`, `ct`/`content-type`,
+      `proto`, `source`/`src`, `tag`, `header:`/`body:` (column-scoped), free text -> `MATCH`
+      (`"term"*`, FTS operators quoted so user text is literal) or the `LIKE` fallback; every
+      value is a bound argument (`SimpleSQLiteQuery` through `TrafficFtsDao.search`);
+      `compileConditions` implements the three-condition + AND/OR preset model. NULL body/status
+      columns are coalesced so `NOT` behaves like the in-memory filter.
+    - Children written through `PersistenceQueue.AppendChildren` append their text to the parent's
+      `body_text` (`FtsIndexer.appendChildText`, capped at 16 KiB per append) so a WS/SSE/gRPC
+      parent is found by message content. Binary bodies index only url/host/headers.
+    - `TrafficSearch.filter` (in-memory, flag off or already-loaded lists) now parses with the
+      same compiler, so `OR`/`NOT`/parens work there too; `status:5xx` no longer silently matches
+      everything.
+    - Flag `InterceptorFlags.ftsSearch` (default on): traffic-list search and Home search become
+      DB-backed (`CaptureLogRepository.searchTraffic`, Home shows a new "Traffic" result type that
+      opens the Intercept tab). Off -> legacy in-memory filtering, Home shows no traffic hits.
+    - Tests: `TrafficSearchCompilerTest` (grammar, per-key SQL, injection, LIKE fallback shape,
+      in-memory parity), `TrafficFtsIndexTest` (bundled driver: MATCH on url/host/header/body,
+      children, delete/update triggers, binary bodies, LIKE == FTS hits, `ensure` populate +
+      idempotent, presets), `Migration21To22Test` (framework driver: presets + unique index,
+      no FTS5, LIKE fallback query runs), `GlobalSearchTest` Traffic arm.

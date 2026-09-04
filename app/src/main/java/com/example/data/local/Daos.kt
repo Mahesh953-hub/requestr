@@ -47,8 +47,9 @@ interface CapturedTrafficDao {
     )
     suspend fun getByHostInWindow(sessionId: Long, host: String, fromTs: Long, toTs: Long): List<CapturedTrafficEntity>
 
-    @Query("SELECT * FROM captured_traffic WHERE host LIKE '%' || :query || '%' OR url LIKE '%' || :query || '%' ORDER BY timestamp DESC")
-    fun search(query: String): Flow<List<CapturedTrafficEntity>>
+    // S3 task 22: the `host LIKE '%q%' OR url LIKE '%q%'` search that lived here was replaced by
+    // the compiled, parameterised query in com.example.data.search.TrafficSearchCompiler executed
+    // through com.example.data.search.TrafficFtsDao (FTS5 MATCH with a LIKE fallback).
 
     @Query("SELECT * FROM captured_traffic WHERE id = :id")
     suspend fun getById(id: Long): CapturedTrafficEntity?

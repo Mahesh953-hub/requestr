@@ -16,6 +16,7 @@ import com.example.data.local.SseEventEntity
 import com.example.data.local.TransactionHeaderEntity
 import com.example.data.local.TransactionTimingEntity
 import com.example.data.local.WebSocketMessageEntity
+import com.example.data.search.FtsIndexer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
@@ -151,6 +152,8 @@ sealed class PersistenceOp {
     class AppendChildren(
         val target: RowHandle,
         override val label: String,
+        /** S3 task 22: payload text to fold into the parent's FTS document after [write] commits. */
+        val searchText: String? = null,
         val write: suspend (RequestrDatabase, Long) -> Unit,
     ) : PersistenceOp()
 
@@ -359,7 +362,7 @@ class PersistenceQueue internal constructor(
 
     override fun webSocketMessage(parent: RowHandle, message: WebSocketMessageEntity) {
         if (parent.isDead) return dropChild(parent)
-        submit(PersistenceOp.AppendChildren(parent, "ws-message") { db, id ->
+        submit(PersistenceOp.AppendChildren(parent, "ws-message", FtsIndexer.childText(message)) { db, id ->
             db.webSocketMessageDao().insert(message.copy(trafficId = id))
         })
     }
@@ -367,7 +370,7 @@ class PersistenceQueue internal constructor(
     override fun sseEvents(parent: RowHandle, events: List<SseEventEntity>) {
         if (events.isEmpty()) return
         if (parent.isDead) return dropChild(parent)
-        submit(PersistenceOp.AppendChildren(parent, "sse-events") { db, id ->
+        submit(PersistenceOp.AppendChildren(parent, "sse-events", FtsIndexer.childText(events)) { db, id ->
             db.sseEventDao().insertAll(events.map { it.copy(trafficId = id) })
         })
     }
@@ -381,7 +384,7 @@ class PersistenceQueue internal constructor(
 
     override fun grpcMessage(parent: RowHandle, message: GrpcMessageEntity) {
         if (parent.isDead) return dropChild(parent)
-        submit(PersistenceOp.AppendChildren(parent, "grpc-message") { db, id ->
+        submit(PersistenceOp.AppendChildren(parent, "grpc-message", FtsIndexer.childText(message)) { db, id ->
             db.grpcMessageDao().insert(message.copy(trafficId = id))
         })
     }
@@ -604,6 +607,9 @@ class PersistenceQueue internal constructor(
             is PersistenceOp.AppendChildren -> {
                 val id = resolve(op.target) ?: return false
                 op.write(db, id)
+                // Outside the child's transaction and best-effort (FtsIndexer never throws): the
+                // children are committed whatever happens to the search index.
+                op.searchText?.let { FtsIndexer.appendChildText(db, id, it) }
                 return true
             }
             is PersistenceOp.Custom -> {

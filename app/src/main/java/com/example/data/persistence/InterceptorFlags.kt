@@ -51,11 +51,20 @@ class InterceptorFlags private constructor(private val prefs: SharedPreferences)
      */
     val protocolChildren: Boolean get() = prefs.getBoolean(KEY_PROTOCOL_CHILDREN, true)
 
+    /**
+     * S3 task 22: when `true` the traffic list and Home search run the compiled
+     * [com.example.data.search.TrafficSearchCompiler] query against Room (FTS5 `MATCH` where the
+     * index exists, `LIKE` otherwise); when `false` search is the pre-v22 in-memory filter over the
+     * loaded list. The index is maintained either way once it exists.
+     */
+    val ftsSearch: Boolean get() = prefs.getBoolean(KEY_FTS_SEARCH, true)
+
     fun setRelayPoolBounded(enabled: Boolean) = prefs.edit().putBoolean(KEY_RELAY_POOL_BOUNDED, enabled).apply()
     fun setQuicTeePolicy(enabled: Boolean) = prefs.edit().putBoolean(KEY_QUIC_TEE_POLICY, enabled).apply()
     fun setPcapng(enabled: Boolean) = prefs.edit().putBoolean(KEY_PCAPNG, enabled).apply()
     fun setBodySpill(enabled: Boolean) = prefs.edit().putBoolean(KEY_BODY_SPILL, enabled).apply()
     fun setProtocolChildren(enabled: Boolean) = prefs.edit().putBoolean(KEY_PROTOCOL_CHILDREN, enabled).apply()
+    fun setFtsSearch(enabled: Boolean) = prefs.edit().putBoolean(KEY_FTS_SEARCH, enabled).apply()
 
     companion object {
         private const val PREFS_NAME = "requestr_interceptor_flags"
@@ -64,6 +73,7 @@ class InterceptorFlags private constructor(private val prefs: SharedPreferences)
         internal const val KEY_PCAPNG = "pcapng"
         internal const val KEY_BODY_SPILL = "body_spill"
         internal const val KEY_PROTOCOL_CHILDREN = "protocol_children"
+        internal const val KEY_FTS_SEARCH = "fts_search"
 
         @Volatile
         private var INSTANCE: InterceptorFlags? = null
