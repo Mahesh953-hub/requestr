@@ -409,11 +409,12 @@ class RequestrVpnService : VpnService() {
                     bounded = com.example.data.persistence.InterceptorFlags.get(applicationContext).relayPoolBounded,
                 )
                 val mitmEngine = MitmProxyEngine(
-                    onDecryptedTransactionTimed = { entity, timings ->
-                        // S2 task 15: never block a relay thread on Room; see [persistence].
-                        // S2 task 18: the measured phases ride along in the same queued op.
-                        persistence.insertTransaction(entity, timings = timings)
-                    },
+                    // S2 task 15: never block a relay thread on Room; see [persistence].
+                    // S2 task 18: the measured phases ride along in the same queued op.
+                    // S3 task 20: the queue is the CaptureSink -- parent rows, wire-ordered
+                    // headers AND the protocol children (WebSocket/SSE/gRPC/h2 frames) all go
+                    // through it, so the flat callback seam is no longer wired in production.
+                    sink = persistence,
                     relayPool = relayPool,
                     uidAttributor = uidAttributor,
                     udpAssociationHandler = udpPolicyRouter,

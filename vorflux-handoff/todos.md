@@ -73,3 +73,31 @@ Exported from the platform todo list at handoff time.
       unit-tested (v20–v24 arrive in S3); G8 (timings within 10 ms of tcpdump) needs the
       physical lane -- Redroid has no tun, so relay timings were exercised through
       `MitmProxyEngineTimingTest`/`ConnectionTimingTrackerTest` only.
+  - S2 merged as PR #21.
+  - S3 task 20 — done on `vorflux/interceptor-s3-protocol`:
+    - Room v20 (`websocket_messages`, `sse_events`, `grpc_calls`, `grpc_messages`,
+      `http2_stream_events`; `Migration19To20` + test, schema `20.json`, `SCHEMA_VERSION = 20`).
+    - `data/persistence/CaptureSink` (parent handle + protocol children); `PersistenceQueue`
+      implements it via `PersistenceOp.AppendChildren` (children of a dead parent are refused and
+      counted as orphaned). `interception/persist/ProtocolRows` builds every child row.
+    - Both engines write children under ONE parent: MITM relay (`MitmProxyEngine` with
+      `sink = PersistenceQueue`) and tun path (`CaptureEngine`). WebSocket messages hang off the
+      101 upgrade row, SSE events off the carrying response, gRPC messages off one row per call
+      (`protocol = "gRPC"`, `statusCode` NULL until the trailers, `grpc_calls` upsert; no
+      synthetic `x-grpc-*` header on the new path). Flag `protocolChildren` (default on);
+      off = the pre-v20 flat `WS→`/`WS←` and `x-grpc-*` rows.
+    - Ordered headers: `ParsedHttpMessage.headerLines` (raw casing, duplicates) + `trailers`
+      (HTTP/1.1 chunked trailers parsed), `H2Headers.entries` ordered list (maps stay
+      last-wins), `Http2Session` request/response trailers + bounded frame timeline
+      (`MAX_FRAME_EVENTS = 512`). `transaction_headers` rows are written for every transaction
+      (REQUEST/RESPONSE/*_PSEUDO/*_TRAILER kinds).
+    - Fixed while here: the tun path never parsed WS frames after the handshake (frames were
+      only inspected while an HTTP request was pending); a declined upgrade (non-101) now
+      leaves the stream as plain HTTP.
+    - Known limits: WS text > 4,096 chars and binary > 2 MiB are truncated with
+      `payloadTruncated` (no per-message BodyStore spill yet); SSE on the HTTP/1.x relay is
+      persisted when the response framing completes (`ProtocolRows.sseEvents(firstIndex)`
+      supports incremental appends once a streaming parser lands); the tun path only sees
+      client-side bytes unless the return path is mirrored into the reassembler.
+    - UI: with `protocolChildren` on, WS/gRPC per-message rows disappear from the traffic list
+      (the parent row stays); the viewers arrive with UI tasks 11–13.

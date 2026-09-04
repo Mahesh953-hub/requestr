@@ -7,10 +7,15 @@ import androidx.room.useWriterConnection
 import com.example.data.local.AppliedRuleEntity
 import com.example.data.local.CapturedTrafficEntity
 import com.example.data.local.DnsQueryEntity
+import com.example.data.local.GrpcCallEntity
+import com.example.data.local.GrpcMessageEntity
 import com.example.data.local.HeaderKind
+import com.example.data.local.Http2StreamEventEntity
 import com.example.data.local.RequestrDatabase
+import com.example.data.local.SseEventEntity
 import com.example.data.local.TransactionHeaderEntity
 import com.example.data.local.TransactionTimingEntity
+import com.example.data.local.WebSocketMessageEntity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
@@ -138,6 +143,18 @@ sealed class PersistenceOp {
     }
 
     /**
+     * S3 task 20: protocol children (WebSocket messages, SSE events, gRPC call/messages, HTTP/2
+     * frame events) appended under an existing transaction. [write] receives the resolved parent
+     * id; a dead parent (dropped/refused insert) skips the op and counts an orphaned patch, the
+     * same contract as [PatchDecodedExchange].
+     */
+    class AppendChildren(
+        val target: RowHandle,
+        override val label: String,
+        val write: suspend (RequestrDatabase, Long) -> Unit,
+    ) : PersistenceOp()
+
+    /**
      * Escape hatch for writes that have no dedicated op yet (session bookkeeping, protocol
      * children). Runs inside the actor, so it still serialises against every other write.
      */
@@ -183,7 +200,7 @@ class PersistenceQueue internal constructor(
     private val capacity: Int = DEFAULT_CAPACITY,
     private val health: PersistenceHealth = PersistenceHealth,
     private val clock: () -> Long = System::currentTimeMillis,
-) {
+) : CaptureSink {
 
     /** What one drained batch committed; consumed by pruning/quota logic. */
     data class Batch(
@@ -327,6 +344,62 @@ class PersistenceQueue internal constructor(
         submit(PersistenceOp.AppendAppliedRules(target, rules))
 
     fun insertDns(entity: DnsQueryEntity) = submit(PersistenceOp.InsertDns(entity))
+
+    // -- S3 task 20: protocol children (CaptureSink) ----------------------------------------------
+
+    override fun transaction(
+        entity: CapturedTrafficEntity,
+        headers: List<TransactionHeaderEntity>,
+        timings: TransactionTimingEntity?,
+    ): RowHandle = insertTransaction(entity, headers, timings)
+
+    override fun patchExchange(target: RowHandle, patch: CapturedTrafficEntity, headers: List<TransactionHeaderEntity>?) {
+        patchDecodedExchange(target, patch, headers = headers)
+    }
+
+    override fun webSocketMessage(parent: RowHandle, message: WebSocketMessageEntity) {
+        if (parent.isDead) return dropChild(parent)
+        submit(PersistenceOp.AppendChildren(parent, "ws-message") { db, id ->
+            db.webSocketMessageDao().insert(message.copy(trafficId = id))
+        })
+    }
+
+    override fun sseEvents(parent: RowHandle, events: List<SseEventEntity>) {
+        if (events.isEmpty()) return
+        if (parent.isDead) return dropChild(parent)
+        submit(PersistenceOp.AppendChildren(parent, "sse-events") { db, id ->
+            db.sseEventDao().insertAll(events.map { it.copy(trafficId = id) })
+        })
+    }
+
+    override fun grpcCall(parent: RowHandle, call: GrpcCallEntity) {
+        if (parent.isDead) return dropChild(parent)
+        submit(PersistenceOp.AppendChildren(parent, "grpc-call") { db, id ->
+            db.grpcCallDao().upsert(call.copy(trafficId = id))
+        })
+    }
+
+    override fun grpcMessage(parent: RowHandle, message: GrpcMessageEntity) {
+        if (parent.isDead) return dropChild(parent)
+        submit(PersistenceOp.AppendChildren(parent, "grpc-message") { db, id ->
+            db.grpcMessageDao().insert(message.copy(trafficId = id))
+        })
+    }
+
+    override fun http2StreamEvents(parent: RowHandle, events: List<Http2StreamEventEntity>) {
+        if (events.isEmpty()) return
+        if (parent.isDead) return dropChild(parent)
+        submit(PersistenceOp.AppendChildren(parent, "h2-stream-events") { db, id ->
+            db.http2StreamEventDao().insertAll(events.map { it.copy(trafficId = id) })
+        })
+    }
+
+    /** A child for a parent already known to be dead: no queue slot, quota-refused parents stay quiet. */
+    private fun dropChild(parent: RowHandle) {
+        if (parent.rejectedByQuota) return
+        health.recordOrphanedPatch()
+        warnRateLimited(lastFailLogAt, "child of ${parent} skipped: parent row never written")
+    }
 
     fun execute(label: String, block: suspend (RequestrDatabase) -> Unit) = submit(PersistenceOp.Custom(label, block))
 
@@ -526,6 +599,11 @@ class PersistenceQueue internal constructor(
             is PersistenceOp.InsertDns -> {
                 db.dnsQueryDao().insert(op.entity)
                 sessions += op.entity.sessionId
+                return true
+            }
+            is PersistenceOp.AppendChildren -> {
+                val id = resolve(op.target) ?: return false
+                op.write(db, id)
                 return true
             }
             is PersistenceOp.Custom -> {

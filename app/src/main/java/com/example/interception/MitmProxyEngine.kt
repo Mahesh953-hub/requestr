@@ -26,8 +26,16 @@ import com.example.interception.http.WebSocketParser
 import com.example.interception.http.WsMessageAssembler
 import com.example.interception.gateway.GatewaySessionHandler
 import com.example.interception.gateway.LocalGateway
+import com.example.data.local.TransactionHeaderEntity
 import com.example.data.local.TransactionTimingEntity
+import com.example.data.persistence.CaptureSink
+import com.example.data.persistence.InterceptorFlags
 import com.example.data.persistence.PersistenceHealth
+import com.example.data.persistence.RowHandle
+import com.example.interception.http.GrpcCallEnd
+import com.example.interception.http.GrpcCallStart
+import com.example.interception.http.SseParser
+import com.example.interception.persist.ProtocolRows
 import com.example.interception.relay.ConnectionStateMachine
 import com.example.interception.relay.ConnectionTimingTracker
 import com.example.interception.relay.RelayPool
@@ -113,6 +121,14 @@ class MitmProxyEngine(
      */
     private val onDecryptedTransactionTimed: ((CapturedTrafficEntity, TransactionTimingEntity?) -> Unit)? = null,
     /**
+     * S3 task 20: the persistence sink for parent rows AND their protocol children (WebSocket
+     * messages, SSE events, gRPC call/messages, HTTP/2 frame events). When set it takes
+     * precedence over both callbacks above -- production wires [PersistenceQueue] here; the
+     * callbacks stay as the flat-entity seam for the many existing tests. Every call is
+     * fire-and-forget on the relay thread.
+     */
+    private val sink: CaptureSink? = null,
+    /**
      * Optional JSSE provider name for the client-facing TLS context (e.g. "SunJSSE").
      * Defaults to null so the platform's default provider (Conscrypt on Android) is used.
      * Exposed as a test seam so Robolectric/JVM tests can avoid Conscrypt's limitation
@@ -163,6 +179,12 @@ class MitmProxyEngine(
     private val plaintextDelegate: HttpProxyEngine by lazy { HttpProxyEngine(scope) }
     private val packetCount = AtomicLong(0)
     private val sessionId = AtomicLong(System.currentTimeMillis())
+    /**
+     * S3 task 20: `InterceptorFlags.protocolChildren`, sampled at [start]. `true` writes v20
+     * child rows under one parent; `false` keeps the pre-v20 flattened `WS→`/`x-grpc-*` rows.
+     * Only consulted when a [sink] is present -- the callback seam is always flat.
+     */
+    @Volatile internal var protocolChildren: Boolean = true
     private val injectedCertificateEngine = certificateEngine
     /**
      * S1 task 8: one issuer for every leaf (see [CertificateEngine]); its internal
@@ -209,6 +231,7 @@ class MitmProxyEngine(
         if (running.get()) return this.port
         appContext = context.applicationContext
         plaintextDelegate.bind(context)
+        protocolChildren = InterceptorFlags.get(context).protocolChildren
 
         // Pre-warm the CA material off the caller's thread (S1 task 7: no runBlocking on the
         // start path); the first MITM'd connection awaits the same suspend getOrCreate.
@@ -622,14 +645,26 @@ class MitmProxyEngine(
                 // frames are never rule-evaluated -- that only applies to the HTTP/1.x path);
                 // Http2Session is handed a copy of each parsed frame purely to explain what it
                 // means (HPACK decode, per-stream pairing, gRPC message framing).
+                val grpcCalls = GrpcCallTable()
                 val h2Session = Http2Session(
                     onTransaction = { tx ->
-                        emitTransaction(
+                        val handle = emitTransaction(
                             tx.request, tx.response, tx.latencyMs, "$host:$port", logRequests, logResponses,
                             timings = h2Timings(tx, timing),
+                            headers = ProtocolRows.headerRows(
+                                tx.request, tx.response, logRequests, logResponses,
+                                h2Request = tx.requestHeaders, h2Response = tx.responseHeaders,
+                                h2RequestTrailers = tx.requestTrailers, h2ResponseTrailers = tx.responseTrailers,
+                                metadataKeys = RuleEnforcer.METADATA_HEADER_KEYS,
+                            ),
                         )
+                        if (handle != null && tx.frameEvents.isNotEmpty()) {
+                            sink?.http2StreamEvents(handle, ProtocolRows.http2StreamEvents(tx.frameEvents, "$host:$port"))
+                        }
                     },
-                    onGrpcMessage = { event -> emitGrpcMessage(event, host, port, logRequests, logResponses) },
+                    onGrpcMessage = { event -> emitGrpcMessage(event, host, port, logRequests, logResponses, grpcCalls) },
+                    onGrpcCallStarted = { start -> emitGrpcCallStart(start, host, port, logRequests, grpcCalls) },
+                    onGrpcCallEnded = { end -> emitGrpcCallEnd(end, host, port, logRequests, logResponses, grpcCalls) },
                 )
                 clientToUpstream = { inspectH2ClientToServer(db, decryptedInput, upstream, host, port, h2Session, sent) }
                 upstreamToClient = { inspectH2ServerToClient(upstream, decryptedOutput, host, port, h2Session, received) }
@@ -783,6 +818,22 @@ class MitmProxyEngine(
         @Volatile var wsUrl: String = ""
         val clientAssembler = WsMessageAssembler()
         val serverAssembler = WsMessageAssembler()
+        /** S3 task 20: the 101 upgrade row every message on this connection hangs off. */
+        @Volatile var wsParent: RowHandle? = null
+        /** S3 task 20: next `frameIndex`, both directions interleaved. */
+        val wsFrameIndex = java.util.concurrent.atomic.AtomicInteger(0)
+    }
+
+    /**
+     * S3 task 20: per-connection gRPC call table (h2 stream id -> parent row + running byte
+     * totals), created by the call-start event and released by the call-end event.
+     */
+    internal class GrpcCallTable {
+        class Entry(val parent: RowHandle, val entity: CapturedTrafficEntity, val startedAt: Long) {
+            val requestBytes = AtomicLong(0)
+            val responseBytes = AtomicLong(0)
+        }
+        val byStream = java.util.concurrent.ConcurrentHashMap<Int, Entry>()
     }
 
     /** `"https://host/path"` → `"wss://host/path"`, `"http://"` → `"ws://"`. */
@@ -843,7 +894,7 @@ class MitmProxyEngine(
                     }
                     for (frame in frames) {
                         wsState.clientAssembler.offer(frame)?.let { complete ->
-                            emitWsFrame(complete, isClient = true, wsState.wsUrl, host, port, logRequests, logResponses)
+                            emitWsFrame(complete, isClient = true, wsState, host, port, logRequests, logResponses)
                         }
                     }
                     continue
@@ -970,7 +1021,7 @@ class MitmProxyEngine(
                     }
                     for (frame in frames) {
                         wsState.serverAssembler.offer(frame)?.let { complete ->
-                            emitWsFrame(complete, isClient = false, wsState.wsUrl, host, port, logRequests, logResponses)
+                            emitWsFrame(complete, isClient = false, wsState, host, port, logRequests, logResponses)
                         }
                     }
                     continue
@@ -1376,7 +1427,21 @@ class MitmProxyEngine(
         }
         if (request != null) {
             val latencyMs = System.currentTimeMillis() - pair!!.second
-            emitTransaction(request, responseToEmit, latencyMs, "$host:$port", logRequests, logResponses, timings = measured)
+            val handle = emitTransaction(
+                request, responseToEmit, latencyMs, "$host:$port", logRequests, logResponses, timings = measured,
+                headers = ProtocolRows.headerRows(
+                    request, responseToEmit, logRequests, logResponses, metadataKeys = RuleEnforcer.METADATA_HEADER_KEYS,
+                ),
+            )
+            // S3 task 20: a text/event-stream response's events become `sse_events` children of
+            // this row. The HTTP/1.x relay hands over the response once its framing completes,
+            // so a finite stream is persisted whole here; ProtocolRows.sseEvents numbers events
+            // from an offset so a streaming producer can append in later batches.
+            if (handle != null && logResponses && SseParser.looksLikeSse(responseToEmit.headers) &&
+                responseToEmit.body.isNotEmpty()
+            ) {
+                sink?.sseEvents(handle, ProtocolRows.sseEvents(responseToEmit.body, System.currentTimeMillis()))
+            }
             // §4/§5: a successful WebSocket upgrade handshake is terminal for HTTP/1.x framing
             // on this connection -- everything from here on is WS frames, in both directions.
             // Switching modes here (rather than, say, only in inspectClientToServer) means both
@@ -1387,6 +1452,7 @@ class MitmProxyEngine(
                 WebSocketParser.looksLikeUpgrade(responseToEmit.headers, false)
             ) {
                 wsState.wsUrl = buildWsUrl(request.url)
+                wsState.wsParent = handle
                 wsState.webSocketMode.set(true)
             }
         }
@@ -1411,7 +1477,9 @@ class MitmProxyEngine(
         logResponses: Boolean,
         /** S2 task 18: measured phases, or null when nothing was observed for this exchange. */
         timings: TransactionTimingEntity? = null,
-    ) {
+        /** S3 task 20: wire-ordered `transaction_headers` rows; empty when the caller has none. */
+        headers: List<TransactionHeaderEntity> = emptyList(),
+    ): RowHandle? {
         // Binary-body persistence (image gallery / hex viewer support): [HttpBodyDecoder.forStorage]
         // is the single source of truth for what to write to the *BodyBytes/isXBodyBinary/
         // XBodyBytesTruncated columns -- see that function's doc for the three-state contract.
@@ -1461,7 +1529,7 @@ class MitmProxyEngine(
             // MITM_PROXY-tier.
             captureMethod = CaptureRowMethod.MITM_PROXY,
         )
-        deliverEntity(entity, timings)
+        return deliverEntity(entity, timings, headers)
     }
 
     /**
@@ -1491,24 +1559,41 @@ class MitmProxyEngine(
     }
 
     /**
-     * §4/§5: emit one reassembled WebSocket message (see [WsMessageAssembler]) as a
-     * [CapturedTrafficEntity], matching [com.example.interception.CaptureEngine.persistWsFrame]'s
-     * field convention exactly (`method`/`protocol`/`url` shape) so the traffic list renders
-     * MITM'd and VPN-captured WebSocket frames identically.
+     * §4/§5 + S3 task 20: emit one reassembled WebSocket message (see [WsMessageAssembler]).
+     *
+     * With a [sink] and `protocolChildren` on, the message is a `websocket_messages` child of the
+     * connection's 101 upgrade row ([ConnectionProtocolState.wsParent]); text is capped at
+     * [com.example.data.local.WebSocketMessageEntity.MAX_TEXT_CHARS], binary is byte-exact up to
+     * `MAX_STORED_BODY_BYTES`, and `payloadTruncated` says so honestly. Otherwise the pre-v20
+     * flattened `WS→`/`WS←` [CapturedTrafficEntity] is produced, matching
+     * [com.example.interception.CaptureEngine]'s legacy convention exactly.
      */
     internal fun emitWsFrame(
         frame: WebSocketParser.WsFrame,
         isClient: Boolean,
-        wsUrl: String,
+        wsState: ConnectionProtocolState,
         host: String,
         port: Int,
         logRequests: Boolean,
         logResponses: Boolean,
     ) {
+        val parent = wsState.wsParent
+        val target = sink
+        if (target != null && protocolChildren && parent != null) {
+            val row = ProtocolRows.webSocketMessage(
+                frame, isClient, "$host:$port", wsState.wsFrameIndex.getAndIncrement(),
+                logPayload = if (isClient) logRequests else logResponses,
+                now = System.currentTimeMillis(),
+            )
+            runCatching { target.webSocketMessage(parent, row) }
+                .onSuccess { bumpCounters() }
+                .onFailure { Log.w(TAG, "websocket child failed: ${it.message}") }
+            return
+        }
         val entity = CapturedTrafficEntity(
             sessionId = sessionId.get(),
             method = if (isClient) "WS→" else "WS←",
-            url = "$wsUrl (${frame.opcodeName})",
+            url = "${wsState.wsUrl} (${frame.opcodeName})",
             host = host,
             path = "/",
             statusCode = null,
@@ -1530,10 +1615,51 @@ class MitmProxyEngine(
     }
 
     /**
-     * §3/§5: emit one gRPC message (request or response direction) as a [CapturedTrafficEntity],
-     * matching [com.example.interception.CaptureEngine.persistGrpcMessage]'s field convention
-     * exactly (`metaHeaders`, hex/decoded body rendering, per-direction size accounting) so a
-     * gRPC call MITM'd here renders identically to one observed on the VPN-capture path.
+     * S3 task 20: a gRPC call was identified from its request HEADERS. Creates the one
+     * `captured_traffic` parent row for the whole call (`protocol = "gRPC"`, `statusCode` NULL
+     * until the trailers arrive) plus its `grpc_calls` row, and remembers the handle so every
+     * message on the stream can hang off it. No-op on the legacy (flat) path.
+     */
+    internal fun emitGrpcCallStart(
+        start: GrpcCallStart,
+        host: String,
+        port: Int,
+        logRequests: Boolean,
+        table: GrpcCallTable,
+    ) {
+        val target = sink ?: return
+        if (!protocolChildren) return
+        val call = start.call
+        val entity = ProtocolRows.grpcParent(
+            call, sessionId.get(), host, "$host:$port", CaptureRowMethod.MITM_PROXY,
+            wasDecrypted = true, logRequests = logRequests, now = start.startedAt,
+            metadataKeys = RuleEnforcer.METADATA_HEADER_KEYS,
+        )
+        check(!ProtocolRows.hasSyntheticGrpcHeader(entity)) { "gRPC parent must not carry synthetic x-grpc-* headers" }
+        val headers = ProtocolRows.headerRows(
+            request = null, response = null, logRequests = logRequests, logResponses = false,
+            h2Request = start.requestHeaders, metadataKeys = RuleEnforcer.METADATA_HEADER_KEYS,
+        ) + ProtocolRows.headerRows(
+            request = ParsedHttpMessage(isRequest = true, method = null, headerLines = start.requestHeaders.regularEntries),
+            response = null, logRequests = logRequests, logResponses = false,
+            metadataKeys = RuleEnforcer.METADATA_HEADER_KEYS,
+        )
+        runCatching {
+            val handle = target.transaction(entity, headers)
+            target.grpcCall(handle, ProtocolRows.grpcCall(call, call.streamId, grpcStatus = null, grpcMessage = null))
+            table.byStream[call.streamId] = GrpcCallTable.Entry(handle, entity, start.startedAt)
+        }.onSuccess { bumpCounters() }
+            .onFailure { Log.w(TAG, "gRPC call-start persist failed: ${it.message}") }
+    }
+
+    /**
+     * §3/§5 + S3 task 20: emit one gRPC message (request or response direction).
+     *
+     * With a [sink] and `protocolChildren` on, the message is a `grpc_messages` child of the
+     * call's parent row (byte-exact payload up to `MAX_STORED_BODY_BYTES`, decoded protobuf
+     * field tree in `decodedText`) -- no synthetic `x-grpc-*` header anywhere. Otherwise the
+     * pre-v20 flattened [CapturedTrafficEntity] is produced, matching
+     * [com.example.interception.CaptureEngine]'s legacy convention exactly.
      */
     internal fun emitGrpcMessage(
         event: GrpcEvent,
@@ -1541,9 +1667,25 @@ class MitmProxyEngine(
         port: Int,
         logRequests: Boolean,
         logResponses: Boolean,
+        table: GrpcCallTable? = null,
     ) {
         val call = event.call
         val msg = event.message
+        val target = sink
+        val entry = table?.byStream?.get(call.streamId)
+        if (target != null && protocolChildren && entry != null) {
+            val row = ProtocolRows.grpcMessage(
+                msg, event.isClient, call.streamId, event.messageIndex,
+                logPayload = if (event.isClient) logRequests else logResponses,
+                now = System.currentTimeMillis(),
+            )
+            val wire = (msg.length + GrpcDetector.MESSAGE_HEADER_SIZE).toLong()
+            if (event.isClient) entry.requestBytes.addAndGet(wire) else entry.responseBytes.addAndGet(wire)
+            runCatching { target.grpcMessage(entry.parent, row) }
+                .onSuccess { bumpCounters() }
+                .onFailure { Log.w(TAG, "gRPC message child failed: ${it.message}") }
+            return
+        }
         val hexDump = ProtobufDecoder.hexDump(msg.payload)
         val decoded = if (!msg.compressed) ProtobufDecoder.decodeToString(msg.payload) else null
         val metaHeaders = buildMap {
@@ -1581,20 +1723,74 @@ class MitmProxyEngine(
     }
 
     /**
+     * S3 task 20: the gRPC stream ended. Patches the parent with `:status`, the response headers
+     * and byte totals, upserts `grpc_calls` with the trailer status, replaces the header rows
+     * (pseudo + response + both trailer blocks) and appends the stream's frame timeline.
+     */
+    internal fun emitGrpcCallEnd(
+        end: GrpcCallEnd,
+        host: String,
+        port: Int,
+        logRequests: Boolean,
+        logResponses: Boolean,
+        table: GrpcCallTable,
+    ) {
+        val target = sink ?: return
+        val entry = table.byStream.remove(end.streamId) ?: return
+        val patch = ProtocolRows.grpcParentPatch(
+            entry.entity, end.responseHeaders,
+            requestBytes = entry.requestBytes.get(), responseBytes = entry.responseBytes.get(),
+            latencyMs = (end.responseEndedAt - entry.startedAt).coerceAtLeast(0L),
+            logResponses = logResponses,
+        )
+        val headers = ProtocolRows.headerRows(
+            request = end.requestHeaders?.let { ParsedHttpMessage(isRequest = true, method = null, headerLines = it.regularEntries) },
+            response = end.responseHeaders?.let { ParsedHttpMessage(isRequest = false, method = null, headerLines = it.regularEntries) },
+            logRequests = logRequests, logResponses = logResponses,
+            h2Request = end.requestHeaders, h2Response = end.responseHeaders,
+            h2RequestTrailers = end.requestTrailers, h2ResponseTrailers = end.responseTrailers,
+            metadataKeys = RuleEnforcer.METADATA_HEADER_KEYS,
+        )
+        runCatching {
+            target.patchExchange(entry.parent, patch, headers)
+            target.grpcCall(entry.parent, ProtocolRows.grpcCall(end.call, end.streamId, end.grpcStatus, end.grpcMessage))
+            if (end.frameEvents.isNotEmpty()) {
+                target.http2StreamEvents(entry.parent, ProtocolRows.http2StreamEvents(end.frameEvents, "$host:$port"))
+            }
+        }.onFailure { Log.w(TAG, "gRPC call-end persist failed: ${it.message}") }
+    }
+
+    private fun bumpCounters() {
+        packetCount.incrementAndGet()
+        InterceptionStateRepository.updateCounters(packetCount = packetCount.get().toInt())
+    }
+
+    /**
      * Shared tail for [emitTransaction]/[emitWsFrame]/[emitGrpcMessage]: hands [entity] to
      * [onDecryptedTransaction], bumping [packetCount] on success. Never throws -- a failed
      * callback must not break the relay that already forwarded the underlying bytes.
      */
-    private fun deliverEntity(entity: CapturedTrafficEntity, timings: TransactionTimingEntity? = null) {
+    private fun deliverEntity(
+        entity: CapturedTrafficEntity,
+        timings: TransactionTimingEntity? = null,
+        headers: List<TransactionHeaderEntity> = emptyList(),
+    ): RowHandle? {
+        val target = sink
+        if (target != null) {
+            // S3 task 20: the queue path -- parent row + wire-ordered headers in one op; the
+            // returned handle is what protocol children hang off.
+            return runCatching { target.transaction(entity, headers, timings) }
+                .onSuccess { bumpCounters() }
+                .onFailure { Log.w(TAG, "sink.transaction failed: ${it.message}") }
+                .getOrNull()
+        }
         val timed = onDecryptedTransactionTimed
         val callback = onDecryptedTransaction
-        if (timed == null && callback == null) return
+        if (timed == null && callback == null) return null
         runCatching { if (timed != null) timed(entity, timings) else callback!!(entity) }
-            .onSuccess {
-                packetCount.incrementAndGet()
-                InterceptionStateRepository.updateCounters(packetCount = packetCount.get().toInt())
-            }
+            .onSuccess { bumpCounters() }
             .onFailure { Log.w(TAG, "onDecryptedTransaction failed: ${it.message}") }
+        return null
     }
 
     // ── Re-serialization (only used when a rule modified the message) ───

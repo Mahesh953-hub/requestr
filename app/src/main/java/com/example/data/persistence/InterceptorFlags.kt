@@ -42,10 +42,20 @@ class InterceptorFlags private constructor(private val prefs: SharedPreferences)
      */
     val bodySpill: Boolean get() = prefs.getBoolean(KEY_BODY_SPILL, true)
 
+    /**
+     * S3 task 20: when `true` WebSocket messages, SSE events and gRPC messages are written as
+     * v20 child rows under one parent transaction (the 101 upgrade, the event-stream response,
+     * the gRPC call); when `false` the pre-v20 flattened rows (`WS→`/`WS←`, `x-grpc-*`) are
+     * produced instead, exactly as before, so the traffic list keeps its per-message rows until
+     * the protocol viewers land.
+     */
+    val protocolChildren: Boolean get() = prefs.getBoolean(KEY_PROTOCOL_CHILDREN, true)
+
     fun setRelayPoolBounded(enabled: Boolean) = prefs.edit().putBoolean(KEY_RELAY_POOL_BOUNDED, enabled).apply()
     fun setQuicTeePolicy(enabled: Boolean) = prefs.edit().putBoolean(KEY_QUIC_TEE_POLICY, enabled).apply()
     fun setPcapng(enabled: Boolean) = prefs.edit().putBoolean(KEY_PCAPNG, enabled).apply()
     fun setBodySpill(enabled: Boolean) = prefs.edit().putBoolean(KEY_BODY_SPILL, enabled).apply()
+    fun setProtocolChildren(enabled: Boolean) = prefs.edit().putBoolean(KEY_PROTOCOL_CHILDREN, enabled).apply()
 
     companion object {
         private const val PREFS_NAME = "requestr_interceptor_flags"
@@ -53,6 +63,7 @@ class InterceptorFlags private constructor(private val prefs: SharedPreferences)
         internal const val KEY_QUIC_TEE_POLICY = "quic_tee_policy"
         internal const val KEY_PCAPNG = "pcapng"
         internal const val KEY_BODY_SPILL = "body_spill"
+        internal const val KEY_PROTOCOL_CHILDREN = "protocol_children"
 
         @Volatile
         private var INSTANCE: InterceptorFlags? = null

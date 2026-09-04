@@ -52,6 +52,12 @@ import kotlinx.coroutines.runBlocking
         TransactionHeaderEntity::class,
         TransactionTimingEntity::class,
         AppliedRuleEntity::class,
+        // S3 task 20 (v20): first-class protocol events, children of captured_traffic.
+        WebSocketMessageEntity::class,
+        SseEventEntity::class,
+        GrpcCallEntity::class,
+        GrpcMessageEntity::class,
+        Http2StreamEventEntity::class,
     ],
     // v3.5: bumped 4 -> 5 for FlowNodeEntity + FlowConnectionEntity (Flow persistence).
     // v5.6 (M1): bumped 5 -> 6 to register TcpConnectionEntity/UdpFlowEntity/QuicConnectionEntity,
@@ -113,7 +119,11 @@ import kotlinx.coroutines.runBlocking
     // transaction_headers / transaction_timings / applied_rules child tables, body-reference
     // columns for the spill store (task 16), and the API-Testr protocol columns reserved for
     // tasks 58-60. Additive only; see Migration18To19.kt.
-    version = 19,
+    // S3 task 20 (interceptor plan §4 v20): bumped 19 -> 20 for the protocol event tables --
+    // websocket_messages / sse_events / grpc_calls / grpc_messages / http2_stream_events, all
+    // CASCADE children of captured_traffic. Additive only; see Migration19To20.kt. The legacy
+    // flattened WS→/WS← and x-grpc-* rows are folded into them by v21 (task 21).
+    version = 20,
     exportSchema = true,
 )
 @TypeConverters(RequestrTypeConverters::class)
@@ -142,6 +152,11 @@ abstract class RequestrDatabase : RoomDatabase() {
     abstract fun transactionHeaderDao(): TransactionHeaderDao
     abstract fun transactionTimingDao(): TransactionTimingDao
     abstract fun appliedRuleDao(): AppliedRuleDao
+    abstract fun webSocketMessageDao(): WebSocketMessageDao
+    abstract fun sseEventDao(): SseEventDao
+    abstract fun grpcCallDao(): GrpcCallDao
+    abstract fun grpcMessageDao(): GrpcMessageDao
+    abstract fun http2StreamEventDao(): Http2StreamEventDao
 
     companion object {
         private const val TAG = "RequestrDatabase"
@@ -150,7 +165,7 @@ abstract class RequestrDatabase : RoomDatabase() {
          * The current schema version declared in the [@Database] annotation above.
          * Kept in sync manually; a CI schema-drift check validates the exported JSON.
          */
-        const val SCHEMA_VERSION = 19
+        const val SCHEMA_VERSION = 20
 
         @Volatile
         private var INSTANCE: RequestrDatabase? = null
@@ -700,7 +715,7 @@ abstract class RequestrDatabase : RoomDatabase() {
         val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
             MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16,
-            MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19,
+            MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20,
         )
     }
 }

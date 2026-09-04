@@ -30,6 +30,36 @@ object Http2Parser {
     const val FRAME_WINDOW_UPDATE = 0x8
     const val FRAME_CONTINUATION = 0x9
 
+    /** RFC 9113 §7 error code names (RST_STREAM / GOAWAY payloads). */
+    private val ERROR_CODE_NAMES = arrayOf(
+        "NO_ERROR", "PROTOCOL_ERROR", "INTERNAL_ERROR", "FLOW_CONTROL_ERROR", "SETTINGS_TIMEOUT",
+        "STREAM_CLOSED", "FRAME_SIZE_ERROR", "REFUSED_STREAM", "CANCEL", "COMPRESSION_ERROR",
+        "CONNECT_ERROR", "ENHANCE_YOUR_CALM", "INADEQUATE_SECURITY", "HTTP_1_1_REQUIRED",
+    )
+
+    /** Name of the 32-bit error code at the start of [payload] (RST_STREAM), or `0x..` when unknown. */
+    fun errorCodeName(payload: ByteArray): String {
+        if (payload.size < 4) return "?"
+        val code = ((payload[0].toInt() and 0xFF) shl 24) or ((payload[1].toInt() and 0xFF) shl 16) or
+            ((payload[2].toInt() and 0xFF) shl 8) or (payload[3].toInt() and 0xFF)
+        return ERROR_CODE_NAMES.getOrNull(code) ?: "0x${Integer.toHexString(code)}"
+    }
+
+    /** RFC 9113 §6 frame type name for logs/timelines. */
+    fun frameTypeName(type: Int): String = when (type) {
+        FRAME_DATA -> "DATA"
+        FRAME_HEADERS -> "HEADERS"
+        FRAME_PRIORITY -> "PRIORITY"
+        FRAME_RST_STREAM -> "RST_STREAM"
+        FRAME_SETTINGS -> "SETTINGS"
+        FRAME_PUSH_PROMISE -> "PUSH_PROMISE"
+        FRAME_PING -> "PING"
+        FRAME_GOAWAY -> "GOAWAY"
+        FRAME_WINDOW_UPDATE -> "WINDOW_UPDATE"
+        FRAME_CONTINUATION -> "CONTINUATION"
+        else -> "0x${Integer.toHexString(type)}"
+    }
+
     // Flag masks
     const val FLAG_ACK = 0x01
     const val FLAG_END_STREAM = 0x01
@@ -70,15 +100,59 @@ object Http2Parser {
         override fun hashCode(): Int = 31 * (31 * type + streamId) + payload.contentHashCode()
     }
 
-    /** Parsed header block from HPACK-decompressed HEADERS frame */
-    data class H2Headers(
+    /**
+     * Parsed header block from an HPACK-decompressed HEADERS frame.
+     *
+     * S3 task 20: [entries] is the primary representation -- every field in wire order with
+     * duplicates preserved (repeated `set-cookie` is the norm on h2, and RFC 9113 §8.2.3 only
+     * folds `cookie`). [pseudoHeaders]/[regularHeaders] are derived last-wins lookup maps kept for
+     * the many readers that only need one value per name. Equality is by [entries].
+     */
+    class H2Headers(
         val streamId: Int,
-        val pseudoHeaders: Map<String, String>,
-        val regularHeaders: Map<String, String>,
+        val entries: List<Pair<String, String>>,
         val endStream: Boolean,
     ) {
+        /** Compatibility constructor for callers/tests that still build the two maps. */
+        constructor(
+            streamId: Int,
+            pseudoHeaders: Map<String, String>,
+            regularHeaders: Map<String, String>,
+            endStream: Boolean,
+        ) : this(
+            streamId,
+            pseudoHeaders.map { it.key to it.value } + regularHeaders.map { it.key to it.value },
+            endStream,
+        )
+
+        /** `:`-prefixed fields in wire order (last wins on a duplicate). */
+        val pseudoHeaders: Map<String, String> = LinkedHashMap<String, String>().also { m ->
+            for ((n, v) in entries) if (n.startsWith(":")) m[n] = v
+        }
+
+        /** Non-pseudo fields in wire order (last wins on a duplicate -- use [entries] for all values). */
+        val regularHeaders: Map<String, String> = LinkedHashMap<String, String>().also { m ->
+            for ((n, v) in entries) if (!n.startsWith(":")) m[n] = v
+        }
+
         /** Pseudo-headers overlaid with regular headers for convenient lookup. */
         val all: Map<String, String> get() = pseudoHeaders + regularHeaders
+
+        /** Non-pseudo fields in wire order, duplicates kept. */
+        val regularEntries: List<Pair<String, String>> get() = entries.filter { !it.first.startsWith(":") }
+
+        fun copy(
+            streamId: Int = this.streamId,
+            entries: List<Pair<String, String>> = this.entries,
+            endStream: Boolean = this.endStream,
+        ) = H2Headers(streamId, entries, endStream)
+
+        override fun equals(other: Any?): Boolean =
+            other is H2Headers && streamId == other.streamId && entries == other.entries && endStream == other.endStream
+
+        override fun hashCode(): Int = 31 * (31 * streamId + entries.hashCode()) + endStream.hashCode()
+
+        override fun toString(): String = "H2Headers(streamId=$streamId, entries=$entries, endStream=$endStream)"
     }
 
     /**
@@ -249,13 +323,12 @@ object Http2Parser {
      *        every header block travelling in one direction of a connection.
      */
     fun decodeHeaders(frame: H2Frame, payload: ByteArray, state: HpackDecoder = HpackDecoder()): H2Headers {
-        val pseudoHeaders = mutableMapOf<String, String>()
-        val regularHeaders = mutableMapOf<String, String>()
+        val entries = ArrayList<Pair<String, String>>()
         var pos = 0
         val end = payload.size
 
         fun store(name: String, value: String) {
-            if (name.startsWith(":")) pseudoHeaders[name] = value else regularHeaders[name] = value
+            entries.add(name to value)
         }
 
         // Skip padding if FLAG_PADDED is set
@@ -322,9 +395,8 @@ object Http2Parser {
 
         return H2Headers(
             streamId = frame.streamId,
-            pseudoHeaders = pseudoHeaders,
-            regularHeaders = regularHeaders,
-            endStream = (frame.flags and FLAG_END_STREAM) != 0
+            entries = entries,
+            endStream = (frame.flags and FLAG_END_STREAM) != 0,
         )
     }
 

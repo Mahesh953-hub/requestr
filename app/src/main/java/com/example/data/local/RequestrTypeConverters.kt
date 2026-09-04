@@ -61,6 +61,15 @@ class RequestrTypeConverters {
     fun nameToHeaderKind(value: String?): HeaderKind =
         runCatching { HeaderKind.valueOf(value ?: "") }.getOrNull() ?: HeaderKind.REQUEST
 
+    // -- S3 task 20: websocket_messages / grpc_messages / http2_stream_events.direction ---------
+
+    @TypeConverter
+    fun messageDirectionToName(value: MessageDirection?): String = (value ?: MessageDirection.CLIENT).name
+
+    @TypeConverter
+    fun nameToMessageDirection(value: String?): MessageDirection =
+        runCatching { MessageDirection.valueOf(value ?: "") }.getOrNull() ?: MessageDirection.CLIENT
+
     // -- Saved API Testr requests (A4) --------------------------------------------------------
 
     @TypeConverter

@@ -1043,3 +1043,96 @@ interface AppliedRuleDao {
     @Query("SELECT COUNT(*) FROM applied_rules")
     suspend fun count(): Int
 }
+
+// ── S3 task 20: v20 protocol event tables ──────────────────────────────────────
+
+@Dao
+interface WebSocketMessageDao {
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insert(row: WebSocketMessageEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertAll(rows: List<WebSocketMessageEntity>)
+
+    @Query("SELECT * FROM websocket_messages WHERE trafficId = :trafficId ORDER BY frameIndex, id")
+    suspend fun forTraffic(trafficId: Long): List<WebSocketMessageEntity>
+
+    @Query("SELECT * FROM websocket_messages WHERE trafficId = :trafficId ORDER BY frameIndex, id")
+    fun observeForTraffic(trafficId: Long): Flow<List<WebSocketMessageEntity>>
+
+    @Query("SELECT COUNT(*) FROM websocket_messages WHERE trafficId = :trafficId")
+    suspend fun countForTraffic(trafficId: Long): Int
+
+    @Query("SELECT COUNT(*) FROM websocket_messages")
+    suspend fun count(): Int
+}
+
+@Dao
+interface SseEventDao {
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertAll(rows: List<SseEventEntity>)
+
+    @Query("SELECT * FROM sse_events WHERE trafficId = :trafficId ORDER BY eventIndex, id")
+    suspend fun forTraffic(trafficId: Long): List<SseEventEntity>
+
+    @Query("SELECT * FROM sse_events WHERE trafficId = :trafficId ORDER BY eventIndex, id")
+    fun observeForTraffic(trafficId: Long): Flow<List<SseEventEntity>>
+
+    @Query("SELECT COUNT(*) FROM sse_events WHERE trafficId = :trafficId")
+    suspend fun countForTraffic(trafficId: Long): Int
+
+    @Query("SELECT COUNT(*) FROM sse_events")
+    suspend fun count(): Int
+}
+
+@Dao
+interface GrpcCallDao {
+    /** REPLACE: the trailer-time upsert (grpc-status) overwrites the headers-time row. */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(row: GrpcCallEntity)
+
+    @Query("SELECT * FROM grpc_calls WHERE trafficId = :trafficId")
+    suspend fun forTraffic(trafficId: Long): GrpcCallEntity?
+
+    @Query("SELECT * FROM grpc_calls WHERE trafficId = :trafficId")
+    fun observeForTraffic(trafficId: Long): Flow<GrpcCallEntity?>
+
+    @Query("SELECT COUNT(*) FROM grpc_calls")
+    suspend fun count(): Int
+}
+
+@Dao
+interface GrpcMessageDao {
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insert(row: GrpcMessageEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertAll(rows: List<GrpcMessageEntity>)
+
+    @Query("SELECT * FROM grpc_messages WHERE trafficId = :trafficId ORDER BY messageIndex, id")
+    suspend fun forTraffic(trafficId: Long): List<GrpcMessageEntity>
+
+    @Query("SELECT * FROM grpc_messages WHERE trafficId = :trafficId ORDER BY messageIndex, id")
+    fun observeForTraffic(trafficId: Long): Flow<List<GrpcMessageEntity>>
+
+    @Query("SELECT COUNT(*) FROM grpc_messages WHERE trafficId = :trafficId")
+    suspend fun countForTraffic(trafficId: Long): Int
+
+    @Query("SELECT COUNT(*) FROM grpc_messages")
+    suspend fun count(): Int
+}
+
+@Dao
+interface Http2StreamEventDao {
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertAll(rows: List<Http2StreamEventEntity>)
+
+    @Query("SELECT * FROM http2_stream_events WHERE trafficId = :trafficId ORDER BY id")
+    suspend fun forTraffic(trafficId: Long): List<Http2StreamEventEntity>
+
+    @Query("SELECT * FROM http2_stream_events WHERE trafficId = :trafficId ORDER BY id")
+    fun observeForTraffic(trafficId: Long): Flow<List<Http2StreamEventEntity>>
+
+    @Query("SELECT COUNT(*) FROM http2_stream_events")
+    suspend fun count(): Int
+}
