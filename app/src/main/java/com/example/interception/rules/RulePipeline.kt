@@ -221,6 +221,40 @@ class RuleDecision(
         get() = gateway.effectiveMode != null || mirror != null || !rewrite.isEmpty || breakpoint != null ||
             scripts.isNotEmpty() || mock != null || bodyCrypto != null || throttle != null || chaos != null
 
+    /**
+     * S4 task 33: the winning rules of the stages in [RuleStage.MUTATING] -- what the safety gate
+     * refuses when the flow's package is outside the capture selection. Mirror, throttle and the
+     * gateway are not in the set (they never alter bytes the client sees).
+     */
+    val mutatingRules: List<RuleRef>
+        get() {
+            val out = ArrayList<RuleRef>(0)
+            rewrite.rules.forEach { out += it.rule }
+            breakpoint?.let { out += it.rule }
+            scripts.forEach { out += it.rule }
+            mock?.let { out += it.rule }
+            bodyCrypto?.let { out += it.rule }
+            chaos?.let { out += it.rule }
+            return out
+        }
+
+    /** S4 task 33: this decision with every mutating slot emptied; gateway/mirror/throttle/observe intact. */
+    fun observeOnly(): RuleDecision = RuleDecision(
+        revision = revision,
+        gateway = gateway,
+        mirror = mirror,
+        rewrite = ResolvedRewrite.EMPTY,
+        breakpoint = null,
+        scripts = emptyList(),
+        mock = null,
+        bodyCrypto = null,
+        throttle = throttle,
+        chaos = null,
+        observe = observe,
+        matchedRules = matchedRules,
+        skipped = skipped,
+    )
+
     override fun toString(): String =
         "RuleDecision(rev=$revision, gateway=$gateway, matched=${matchedRules.size}, skipped=${skipped.size})"
 

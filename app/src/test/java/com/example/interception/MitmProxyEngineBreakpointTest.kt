@@ -274,7 +274,7 @@ class MitmProxyEngineBreakpointTest {
     }
 
     private fun startEngine(sink: RecordingCaptureSink, snap: RuleSnapshot): Int {
-        engine = MitmProxyEngine(sink = sink, caTrustGate = CaTrustGate(probe = { true }), ruleSnapshot = { snap }, breakpoints = registry)
+        engine = MitmProxyEngine(sink = sink, caTrustGate = CaTrustGate(probe = { true }), ruleSnapshot = { snap }, safetyGate = com.example.interception.rules.InterceptorSafetyGate(followSettings = false), breakpoints = registry)
         return engine.start(context, 0)
     }
 

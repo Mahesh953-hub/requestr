@@ -26,6 +26,7 @@ import com.example.interception.rules.FlowKey
 import com.example.interception.rules.GatewayOutcome
 import com.example.interception.rules.RuleDecision
 import com.example.interception.rules.RuleMetadataHeaders
+import com.example.interception.rules.InterceptorSafetyGate
 import com.example.interception.rules.RulePipeline
 import com.example.interception.rules.RuleSnapshot
 import com.example.interception.rules.RuleSnapshotStore
@@ -186,6 +187,12 @@ class MitmProxyEngine(
      */
     private val scriptHostClient: (Context) -> ScriptHostClient = { ScriptHostClient.get(it) },
     /**
+     * S4 task 33 (D3): acknowledgement + capture-selection gate in front of every mutating stage.
+     * Production shares [InterceptorSafetyGate.shared], which [start] binds to settings; tests
+     * inject a fixed policy.
+     */
+    internal val safetyGate: InterceptorSafetyGate = InterceptorSafetyGate.shared,
+    /**
      * S4 task 26: where every rule decision reads its immutable [RuleSnapshot] from. Production
      * reads the process-wide [RuleSnapshotStore]; tests inject a fixed snapshot. Nothing on the
      * hot path touches a DAO.
@@ -281,6 +288,9 @@ class MitmProxyEngine(
             // S4 task 32: SCRIPT rules run in the isolated :scripthost process unless the flag is off.
             ScriptStage.runner = if (flags.scriptHost) ScriptStage.HostRunner(scriptHostClient(context.applicationContext)) else ScriptStage.ScriptRunner { ScriptStage.runInProcess(it) }
         }
+        // S4 task 33 (D3): the safety policy follows settings for the engine's lifetime.
+        safetyGate.unbind(safetyBinding)
+        safetyBinding = safetyGate.bind(context, scope)
 
         // Pre-warm the CA material off the caller's thread (S1 task 7: no runBlocking on the
         // start path); the first MITM'd connection awaits the same suspend getOrCreate.
@@ -314,6 +324,8 @@ class MitmProxyEngine(
         running.set(false)
         gateway?.stop()
         gateway = null
+        safetyGate.unbind(safetyBinding)
+        safetyBinding = null
         // Scripts outside a running engine (ApiTestr, exports, tests) stay in-process.
         ScriptStage.runner = ScriptStage.ScriptRunner { ScriptStage.runInProcess(it) }
         Log.i(TAG, "MITM proxy stopped")
@@ -363,6 +375,7 @@ class MitmProxyEngine(
             val replies = HttpProxyShared.ConnectReplies.forSession(session)
 
             val db = RequestrDatabase.get(context)
+            val safetyUid = clientUidForSafety(context, client, session.origin)
             // S4 task 26: one immutable-snapshot decision for the CONNECT; no DAO on this path.
             val verdict = ConnectControl.decide(
                 host, port,
@@ -826,7 +839,7 @@ class MitmProxyEngine(
                     try {
                         inspectClientToServer(db, decryptedInput, upstream, decryptedOutput,
                             clientWriteLock, host, port, pending, sent, logRequests, logResponses, wsState, timing,
-                            mirror = mirrorPlan)
+                            mirror = mirrorPlan, clientUid = safetyUid)
                     } finally {
                         // S4 task 31: the client is gone (EOF/error on its leg) -- a response still
                         // parked at a breakpoint for this connection has nobody to go to.
@@ -952,6 +965,19 @@ class MitmProxyEngine(
     }
 
     private val injectedUidAttributor = uidAttributor
+    @Volatile private var safetyBinding: kotlinx.coroutines.Job? = null
+
+    /**
+     * S4 task 33: the client uid for the safety gate's selection check, resolved once per
+     * connection and only when the policy actually restricts to a selection (attribution reads
+     * /proc or ConnectivityManager). Null when unknown -- the gate treats that as allowed.
+     */
+    private fun clientUidForSafety(context: Context, client: Socket, origin: ClientOrigin?): Int? {
+        if (!safetyGate.policy.value.restrictToSelection) return null
+        return runCatching {
+            uidAttributor(context).attribute(UidAttributor.Flow(origin = origin, clientSocket = client, destination = null)).uidOrNull
+        }.getOrNull()
+    }
     private fun uidAttributor(context: Context): UidAttributor = injectedUidAttributor ?: UidAttributor.shared(context)
 
     // ── WebSocket mode switch (§4/§5) ────────────────────────────────────
@@ -1025,6 +1051,7 @@ class MitmProxyEngine(
         wsState: ConnectionProtocolState,
         timing: ConnectionTimingTracker? = null,
         mirror: MirrorStage.Plan? = null,
+        clientUid: Int? = null,
     ) {
         val buffer = ByteArrayOutputStream()
         val wsBuffer = ByteArrayOutputStream()
@@ -1085,7 +1112,7 @@ class MitmProxyEngine(
                         bytes = bytes.copyOfRange(parsed.consumedBytes, bytes.size)
                         handleParsedRequest(
                             db, parsed, raw, upstream, clientOut, clientWriteLock, pending,
-                            host, port, logRequests, logResponses, timing, mirror,
+                            host, port, logRequests, logResponses, timing, mirror, clientUid,
                         )
                         buffer.reset()
                         buffer.write(bytes)
@@ -1296,10 +1323,16 @@ class MitmProxyEngine(
         logResponses: Boolean,
         timing: ConnectionTimingTracker? = null,
         mirror: MirrorStage.Plan? = null,
+        clientUid: Int? = null,
     ) {
-        val decision = RulePipeline.evaluate(ruleSnapshot(), flowKeyFor(request, host, port))
         val trail = FlowAuditTrail()
         val phase = FlowAuditTrail.Phase.REQUEST
+        // S4 task 33 (D3): the gate runs before any stage -- a refused flow keeps only its
+        // gateway/throttle/observe slots and carries a REFUSED_SAFETY record per mutating rule.
+        val decision = safetyGate.screen(
+            RulePipeline.evaluate(ruleSnapshot(), flowKeyFor(request, host, port)),
+            phase, trail, clientUid = clientUid,
+        )
         trail.recordDecision(decision, phase)
         val what = "${request.method?.name} ${request.url.take(80)}"
 
@@ -1499,7 +1532,10 @@ class MitmProxyEngine(
         var chaosDelayMs = 0L
         if (exchange != null && request != null) {
             val decision = exchange.decision
-                ?: RulePipeline.evaluate(ruleSnapshot(), flowKeyFor(request, host, port)).also {
+                ?: safetyGate.screen(
+                    RulePipeline.evaluate(ruleSnapshot(), flowKeyFor(request, host, port)),
+                    FlowAuditTrail.Phase.REQUEST, exchange.trail,
+                ).also {
                     exchange.decision = it
                     exchange.trail.recordDecision(it, FlowAuditTrail.Phase.REQUEST)
                 }

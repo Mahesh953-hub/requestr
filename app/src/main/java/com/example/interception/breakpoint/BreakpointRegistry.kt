@@ -180,7 +180,7 @@ class BreakpointRegistry(
     }
 
     companion object {
-        const val MAX_PAUSED_FLOWS = 8
+        const val MAX_PAUSED_FLOWS = com.example.interception.rules.RuleLimits.MAX_PAUSED_FLOWS
         const val SLOT_WAIT_MS = 250L
 
         /** Process-wide queue the MITM engine, the API and the UI share. */

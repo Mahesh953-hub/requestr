@@ -297,7 +297,7 @@ data class ChaosConfig(
         const val DEFAULT_FAIL_STATUS_CODE = 503
         const val DEFAULT_FAIL_STATUS_MESSAGE = "Service Unavailable"
         const val DEFAULT_FAIL_BODY = "{\"error\":\"chaos-injected failure\"}"
-        const val MAX_DELAY_MS: Long = RuleEnforcer.MAX_CHAOS_DELAY_MS
+        const val MAX_DELAY_MS: Long = RuleLimits.MAX_CHAOS_DELAY_MS
     }
 }
 

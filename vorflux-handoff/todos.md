@@ -510,3 +510,47 @@ Exported from the platform todo list at handoff time.
       mutating lifecycle script byte-correct on both legs with shared context; hanging host cut at
       the deadline on both legs with the concurrent flow unaffected and FAILED audit records;
       aborting hook answers 499 without dialling the origin), `RuleEvaluationBenchmarkTest` (3).
+  - S4 task 33 — done on `vorflux/interceptor-s4-rules`:
+    - `interception/rules/RuleLimits.kt`: `MAX_ENABLED_RULES = 200`, `MAX_PAUSED_FLOWS = 8`,
+      `MAX_REPLAY_CONCURRENCY = 255`, `MAX_SCRIPT_TIMEOUT_MS = 10_000`, `MAX_CHAOS_DELAY_MS = 30_000`,
+      `MAX_BREAKPOINT_TIMEOUT_MS = 10 min`. `ChaosConfig.MAX_DELAY_MS`, `BreakpointRegistry.MAX_PAUSED_FLOWS`
+      and `ScriptHostClient.MAX_TIMEOUT_MS` now alias these (RuleConfig no longer imports `RuleEnforcer`).
+    - `interception/rules/RuleValidation.kt`: `validate(rule, enabledRules, acknowledged)` -> `Problem(field,
+      message)` list (blank name, matcher errors, 201st enabled rule, mutating stage without the
+      acknowledgement, per-config bounds: script timeout/instructions, chaos rates/delay, breakpoint
+      timeout, throttle, mirror host); `clampForSnapshot(config)` is the compile-time backstop.
+      `RuleSnapshotCompiler.compile` now excludes every enabled rule past the 200th (issue per rule)
+      and clamps script/chaos/breakpoint configs (issue per clamp) so imports/direct writes cannot
+      exceed the caps. Task 34 wires `validate` into the API/UI/import writers when they cut over.
+    - `interception/rules/InterceptorSafetyGate.kt`: `Policy(acknowledged, restrictToSelection,
+      selectedPackages)` kept current from `SettingsDataStore` by `bind(context, scope)` (called from
+      `MitmProxyEngine.start`, released by `stop`); `allowMutation(appPackage, clientUid)` -> `Verdict`
+      (unattributed flows are allowed -- the VPN tier already enforces the selection); `screen(decision,
+      phase, trail, ...)` empties every mutating slot (`RuleDecision.observeOnly()`, new
+      `RuleDecision.mutatingRules`) and records `REFUSED_SAFETY` per mutating rule; `disableAllMutatingRules
+      (dao, breakpoints, scriptHost)` = `InterceptorRuleDao.disableStages(MUTATING)` + `BreakpointRegistry.
+      resumeAll()` + `ScriptHostClient.killSwitch()`. Fail-open/fail-closed per stage is declared in the
+      class doc (GATEWAY and BODY_CRYPTO fail-closed; MIRROR/REWRITE/SCRIPT/THROTTLE/CHAOS/BREAKPOINT
+      fail-open; MOCK fails open to origin only when the fixture cannot be built).
+    - `interception/rules/ReplayPermits.kt`: `Semaphore(255)` the S5 replay queue takes before dialling.
+    - `MitmProxyEngine`: constructor seam `safetyGate` (default `InterceptorSafetyGate.shared`);
+      `clientUidForSafety` resolves the uid once per connection (only when the policy restricts) and
+      threads it `handleClient -> inspectClientToServer -> handleParsedRequest(clientUid)`; both legs
+      screen the decision before any stage runs.
+    - `SettingsDataStore` / `UnifiedDataStore`: `MUTATING_RULES_ACKNOWLEDGED` + `MUTATING_RULES_ACTIVE`
+      keys, `mutatingRulesAcknowledged` / `mutatingRulesActive` flows and setters.
+    - `RequestrVpnService`: `ACTION_DISABLE_MUTATING_RULES` notification action ("Disable mutating rules")
+      shown while any mutating rule is enabled; the health line says "N mutating rules MODIFYING TRAFFIC";
+      `startMutatingRulesWatch` observes the DAO and mirrors the state into `mutatingRulesActive`.
+    - `SettingsScreen`: "TRAFFIC MODIFICATION (DEVELOPER MODE)" card -- acknowledgement switch, warning
+      while a mutating rule is enabled, and the same kill switch as the notification.
+    - Tests: `RuleValidationTest` (7), `InterceptorSafetyGateTest` (14 -- unacknowledged mutating rule
+      fails validation for every mutating stage while observe/gateway/mirror/throttle pass; runtime
+      backstop refuses without the acknowledgement; out-of-selection package observed but never
+      mutated with one REFUSED_SAFETY record per mutating rule and gateway/throttle/observe intact;
+      selected/unattributed flows untouched; uid -> packages incl. shared uids; kill switch against
+      Room disables exactly the 6 mutating stages, resumes 3 paused flows, kills the host, leaves the
+      4 others enabled; engine-level: refused MOCK dials upstream while the same snapshot mocks a
+      selected uid, refused response rewrite forwards origin bytes with REFUSED_SAFETY provenance;
+      201st rule rejected + excluded, 9th pause refused, 256th replay permit refused, 11 s script
+      timeout rejected, constants aliased).

@@ -116,7 +116,7 @@ class ScriptHostClient(
 
     companion object {
         private const val TAG = "ScriptHostClient"
-        const val MAX_TIMEOUT_MS = 10_000L
+        const val MAX_TIMEOUT_MS = com.example.interception.rules.RuleLimits.MAX_SCRIPT_TIMEOUT_MS
         const val DEADLINE_GRACE_MS = 500L
         const val CIRCUIT_BREAKER_FAILURES = 3
 

@@ -127,6 +127,13 @@ object AppSettingsKeys {
     // CertificateAuthority.issueMirroredLeaf's KDoc and MitmProxyEngine's cert-cache call site.
     val REMOTE_CERT_MIRROR_ENABLED = booleanPreferencesKey("remote_cert_mirror_enabled")
 
+    // S4 task 33 (D3) -- permanent safety gates, not rollout flags. `MUTATING_RULES_ACKNOWLEDGED`
+    // is the one-time developer-mode acknowledgement without which no mutating stage (rewrite,
+    // breakpoint, script, mock, body crypto, chaos) ever acts; `MUTATING_RULES_ACTIVE` mirrors
+    // "at least one mutating rule is enabled" so the VPN notification can show the kill switch.
+    val MUTATING_RULES_ACKNOWLEDGED = booleanPreferencesKey("mutating_rules_acknowledged")
+    val MUTATING_RULES_ACTIVE = booleanPreferencesKey("mutating_rules_active")
+
     // S1 task 9 (D6) -- capture-scoped UDP/QUIC policy. Default policy for an in-scope app is
     // "tee then drop UDP/443" so the client deterministically falls back to HTTP/2; this override
     // switches in-scope flows to "tee then pass" (observed, decoded only when keys exist). Out-of-

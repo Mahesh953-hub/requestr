@@ -51,6 +51,8 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
 /**
@@ -93,6 +95,10 @@ class RequestrVpnService : VpnService() {
     internal var lifecycleStepRecorder: (String) -> Unit = {}
     private var sessionId: Long? = null
     private var healthJob: Job? = null
+    /** S4 task 33 (D3): watches the rule table for enabled mutating rules (notification + kill switch). */
+    private var mutatingRulesJob: Job? = null
+    /** S4 task 33: number of enabled mutating rules as of the last DAO emission. */
+    @Volatile internal var mutatingRuleCount: Int = 0
     /** S4 task 31: Room mirror of the paused-flow queue for this capture session. */
     private var breakpointPersistence: com.example.interception.breakpoint.BreakpointPersistence? = null
     private var foregroundStarted = false
@@ -204,6 +210,20 @@ class RequestrVpnService : VpnService() {
             ACTION_RESUME_ALL_BREAKPOINTS -> {
                 val n = com.example.interception.breakpoint.BreakpointRegistry.shared.resumeAll()
                 Log.i(TAG, "resume-all: $n paused flow(s) resumed from the notification")
+                return if (tunInterface == null) START_NOT_STICKY else START_STICKY
+            }
+            // S4 task 33 (D3): one-tap kill switch -- every mutating rule off, every paused flow
+            // resumed, the script host killed. Observe/gateway/throttle/mirror rules are untouched.
+            ACTION_DISABLE_MUTATING_RULES -> {
+                scope.launch {
+                    val disabled = runCatching {
+                        com.example.interception.rules.InterceptorSafetyGate.shared.disableAllMutatingRules(
+                            dao = RequestrDatabase.get(applicationContext).interceptorRuleDao(),
+                            scriptHost = com.example.scripting.host.ScriptHostClient.get(applicationContext),
+                        )
+                    }.onFailure { Log.w(TAG, "kill switch failed: ${it.message}") }.getOrDefault(0)
+                    Log.i(TAG, "kill switch: $disabled mutating rule(s) disabled from the notification")
+                }
                 return if (tunInterface == null) START_NOT_STICKY else START_STICKY
             }
             else -> {
@@ -588,6 +608,7 @@ class RequestrVpnService : VpnService() {
 
                 Log.i(TAG, "Capture started on tun, session=$newId port=$port dns=$dnsServers virtualDns=$virtualDns")
                 startHealthUpdates(port)
+                startMutatingRulesWatch(port)
 
                 // Hot-reload app filter. VpnService.Builder doesn't support dynamic app list
                 // changes after establish(), so we tear down and re-establish the tun when the
@@ -717,6 +738,8 @@ class RequestrVpnService : VpnService() {
         unregisterNetworkCallback()
         healthJob?.cancel()
         healthJob = null
+        mutatingRulesJob?.cancel()
+        mutatingRulesJob = null
         // S4 task 31: nothing may stay parked once capture stops; the Room mirror is detached
         // after the registry drained so the last onReleased deletes land.
         com.example.interception.breakpoint.BreakpointRegistry.shared.resumeAll()
@@ -860,7 +883,29 @@ class RequestrVpnService : VpnService() {
         // S4 task 31: surface the breakpoint queue so an operator never wonders why a flow hangs.
         val pausedFlows = com.example.interception.breakpoint.BreakpointRegistry.shared.pausedCount
         if (pausedFlows > 0) parts += "$pausedFlows paused at breakpoint"
+        // S4 task 33 (D3): an operator must always be able to see that traffic is being modified.
+        val mutating = mutatingRuleCount
+        if (mutating > 0) parts += "$mutating mutating rule${if (mutating == 1) "" else "s"} MODIFYING TRAFFIC"
         return parts.joinToString(" \u00b7 ").ifEmpty { "VPN active" }
+    }
+
+    /**
+     * S4 task 33 (D3): mirrors "any mutating rule enabled" into the notification (with the kill
+     * switch action) and into `SettingsDataStore.mutatingRulesActive` for the UI banner.
+     */
+    private fun startMutatingRulesWatch(port: Int) {
+        mutatingRulesJob?.cancel()
+        mutatingRulesJob = scope.launch {
+            val prefs = SettingsDataStore.get(applicationContext)
+            RequestrDatabase.get(applicationContext).interceptorRuleDao().observeEnabledOrdered()
+                .map { rows -> rows.count { it.stage in com.example.interception.rules.RuleStage.MUTATING } }
+                .distinctUntilChanged()
+                .collect { count ->
+                    mutatingRuleCount = count
+                    runCatching { prefs.setMutatingRulesActive(count > 0) }
+                    runCatching { updateNotification(port, healthLine(null)) }
+                }
+        }
     }
 
     private fun startHealthUpdates(port: Int) {
@@ -1041,6 +1086,16 @@ class RequestrVpnService : VpnService() {
             )
             builder.addAction(android.R.drawable.ic_media_play, "Resume all", resumeAll)
         }
+        // S4 task 33 (D3): the kill switch is present exactly while a mutating rule is enabled.
+        if (mutatingRuleCount > 0) {
+            val disableMutating = PendingIntent.getService(
+                this,
+                3,
+                Intent(this, RequestrVpnService::class.java).setAction(ACTION_DISABLE_MUTATING_RULES),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            builder.addAction(android.R.drawable.ic_delete, "Disable mutating rules", disableMutating)
+        }
         return builder.build()
     }
 
@@ -1097,6 +1152,8 @@ class RequestrVpnService : VpnService() {
         const val ACTION_STOP = "com.example.interception.STOP"
         /** S4 task 31: notification action that calls `BreakpointRegistry.resumeAll()`. */
         const val ACTION_RESUME_ALL_BREAKPOINTS = "com.example.interception.RESUME_ALL_BREAKPOINTS"
+        /** S4 task 33 (D3): notification kill switch -- disables every mutating rule and resumes paused flows. */
+        const val ACTION_DISABLE_MUTATING_RULES = "com.example.interception.DISABLE_MUTATING_RULES"
 
         /** Task 14 bridge -- see [activePump]'s doc for why this exists. Null whenever no
          * capture is running; the UI must treat null as "relay down", not as "loading". */

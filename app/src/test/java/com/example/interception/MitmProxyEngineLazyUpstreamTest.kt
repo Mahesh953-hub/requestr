@@ -327,6 +327,8 @@ class MitmProxyEngineLazyUpstreamTest {
         engine = MitmProxyEngine(
             onDecryptedTransaction = { entity -> captured.add(entity); latch.countDown() },
             caTrustGate = CaTrustGate(probe = { true }),
+            // S4 task 33: pin a permissive safety policy; a started engine otherwise follows settings.
+            safetyGate = com.example.interception.rules.InterceptorSafetyGate(followSettings = false),
         )
         val proxyPort = engine.start(context, 0)
 
@@ -358,6 +360,8 @@ class MitmProxyEngineLazyUpstreamTest {
         engine = MitmProxyEngine(
             onDecryptedTransaction = { entity -> synchronized(captured) { captured.add(entity) } },
             caTrustGate = CaTrustGate(probe = { true }),
+            // S4 task 33: pin a permissive safety policy; a started engine otherwise follows settings.
+            safetyGate = com.example.interception.rules.InterceptorSafetyGate(followSettings = false),
         )
         val proxyPort = engine.start(context, 0)
 
@@ -402,6 +406,8 @@ class MitmProxyEngineLazyUpstreamTest {
         engine = MitmProxyEngine(
             onDecryptedTransaction = { entity -> synchronized(captured) { captured.add(entity) } },
             caTrustGate = CaTrustGate(probe = { true }),
+            // S4 task 33: pin a permissive safety policy; a started engine otherwise follows settings.
+            safetyGate = com.example.interception.rules.InterceptorSafetyGate(followSettings = false),
         )
         val proxyPort = engine.start(context, 0)
 

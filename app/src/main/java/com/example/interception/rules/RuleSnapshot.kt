@@ -122,12 +122,21 @@ object RuleSnapshotCompiler {
                 }
                 if (!enabled) continue
             }
-            val config: RuleConfig = try {
+            // S4 task 33: the cap is enforced here as well as in RuleValidation, so a hand-edited
+            // import or a direct DB write cannot put more than MAX_ENABLED_RULES into a snapshot.
+            if (compiled.size >= RuleLimits.MAX_ENABLED_RULES) {
+                issues += SnapshotIssue(e.id, e.name, "more than ${RuleLimits.MAX_ENABLED_RULES} enabled rules; rule excluded")
+                continue
+            }
+            val decoded: RuleConfig = try {
                 RuleConfigJson.decodeConfig(e.configJson)
             } catch (t: Throwable) {
                 issues += SnapshotIssue(e.id, e.name, "configJson does not decode (${t.message}); rule excluded")
                 continue
             }
+            val clamped = RuleValidation.clampForSnapshot(decoded)
+            for (note in clamped.notes) issues += SnapshotIssue(e.id, e.name, note)
+            val config = clamped.config
             val spec: RuleMatcherSpec = try {
                 RuleConfigJson.decodeMatcher(e.matcherJson)
             } catch (t: Throwable) {

@@ -286,7 +286,7 @@ class MitmProxyEngineScriptTest {
     }
 
     private fun startEngine(sink: RecordingCaptureSink, snap: RuleSnapshot): Int {
-        engine = MitmProxyEngine(sink = sink, caTrustGate = CaTrustGate(probe = { true }), ruleSnapshot = { snap }, scriptHostClient = { client })
+        engine = MitmProxyEngine(sink = sink, caTrustGate = CaTrustGate(probe = { true }), ruleSnapshot = { snap }, safetyGate = com.example.interception.rules.InterceptorSafetyGate(followSettings = false), scriptHostClient = { client })
         return engine.start(context, 0)
     }
 
