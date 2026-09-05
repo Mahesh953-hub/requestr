@@ -1,7 +1,8 @@
 # Sub-agent tasks (platform) snapshot
 
-Exported at handoff time. All sub-agent tasks are terminal (completed or
-cancelled). No sub-agent is currently running.
+Exported at the S0 handoff. All sub-agent tasks are terminal (completed or
+cancelled). No sub-agent is currently running. S1–S3 (2026-09-03 → 2026-09-05)
+were implemented directly by the main agent; no further sub-agent tasks exist.
 
 | task_id | agent_type | final state |
 |---|---|---|

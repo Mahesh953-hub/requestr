@@ -15,12 +15,12 @@ Exported from the platform todo list at handoff time.
 - 6faed — Synthesize and submit the full implementation plan for approval — completed
 
 ## S0 (interceptor runtime foundation)
-- 6ab46 — S0.1 Vendor the focused pinned tun2proxy fork and document the patch baseline — in_progress
-- dc2d3 — S0.2 Add stable native/Kotlin JNI bridge events and configuration — pending
-- 77ef4 — S0.3 Switch Room to bundled SQLite with WAL and migration compatibility — pending
-- 8cc9b — S0.4 Add process-wide socket protection across all egress paths — pending
-- 59608 — S0.5 Add CI foundation and downgrade-safe database backup/restore — pending
-- d5c8e — Verify, review, test, and open the S0 runtime-foundation PR — pending
+- 6ab46 — S0.1 Vendor the focused pinned tun2proxy fork and document the patch baseline — completed (PR #17/#18)
+- dc2d3 — S0.2 Add stable native/Kotlin JNI bridge events and configuration — completed (PR #18)
+- 77ef4 — S0.3 Switch Room to bundled SQLite with WAL and migration compatibility — completed (PR #18)
+- 8cc9b — S0.4 Add process-wide socket protection across all egress paths — completed (PR #18)
+- 59608 — S0.5 Add CI foundation and downgrade-safe database backup/restore — completed (PR #18)
+- d5c8e — Verify, review, test, and open the S0 runtime-foundation PR — completed (PR #18 merged)
 
 ## S1–S8 (approved interceptor architecture slices)
 - cbaea — Execute S1–S8 approved interceptor architecture slices — in_progress
@@ -50,7 +50,7 @@ Exported from the platform todo list at handoff time.
       watcher DEGRADED reason, CA-sheet findings card.
     - Not verifiable in this environment (Redroid has no tun): G9/G10/G14, network handoff,
       tee/PCAPng on device, real trust-store scan. Unit suites cover the logic.
-  - S2 tasks 14–19 — done on `vorflux/interceptor-s2-persistence` (PR pending review):
+  - S2 tasks 14–19 — done on `vorflux/interceptor-s2-persistence` (PR #21, merged):
     - 14 Room v19 (`transaction_headers`, `transaction_timings`, `applied_rules`, body-reference
       columns, `Migration18To19` + test, schema `19.json`).
     - 15 `data/persistence/PersistenceQueue` single-writer actor (capacity 500, drop-oldest with
@@ -176,7 +176,7 @@ Exported from the platform todo list at handoff time.
       crashes on a 64-bit length with the reserved MSB set.
     - Not covered: mitmproxy side-by-side comparator (device lane, with G27); HPACK encoder
       round-trip (task 57); WS/SSE/gRPC conformance corpora (task 55).
-  - S3 task 57 — done on `vorflux/interceptor-s3-protocol` (gate G27):
+  - S3 task 57 — done on `vorflux/interceptor-s3-protocol` (gate G27; PR #22, merged `4cf1226`):
     - The MITM proxy now TERMINATES HTTP/2 instead of forwarding decrypted h2 bytes. Flag
       `InterceptorFlags.h2Terminate` (default on): on -> the client-side TLS offers ALPN
       `h2, http/1.1` and an h2 client is served by `Http2ProxyConnection`; off -> only
@@ -220,3 +220,43 @@ Exported from the platform todo list at handoff time.
       mitmproxy side-by-side comparator still pending the device lane; `Http2Session` merges
       CONTINUATION after HEADERS padding (pre-existing, endpoint strips padding first so the
       observer is unaffected on the terminated path).
+
+## Program status at session close-out (2026-09-05 UTC)
+
+Slices S0–S3 are complete and merged into `main` (`4cf1226`):
+
+| Slice | PR | Gates closed |
+|---|---|---|
+| S0 runtime foundation | https://github.com/Mahesh953-hub/requestr/pull/17, https://github.com/Mahesh953-hub/requestr/pull/18 | Rust/JVM/migration evidence |
+| S1 transport front door | https://github.com/Mahesh953-hub/requestr/pull/19, https://github.com/Mahesh953-hub/requestr/pull/20 | G1, G3, G18, G25 (G9/G10/G14 need a tun-capable device) |
+| S2 persistence spine | https://github.com/Mahesh953-hub/requestr/pull/21 | G2, G8, G15 |
+| S3 protocol + search | https://github.com/Mahesh953-hub/requestr/pull/22 | G5, G11, G19, G27 |
+
+Remaining (not started): S4 rule engine (tasks 24–35, v23–v24, gates G6/G7/G16/G20/G21),
+S5 inspector/export/replay/report/API-Testr H3, S6 UI program, S7 root/Shizuku/pinning/legacy
+retirement, S8 device verification lanes (physical Wi-Fi/cellular/rooted device, Firebase Test
+Lab, mitmproxy comparator). Next task in order: 24 (typed rule schema + `LegacyRuleConverter`,
+`Migration22To23`), then 25, 26, then the parallel stage tasks 27–32, 33, 34, 35.
+
+Feature flags introduced so far (`data/persistence/InterceptorFlags`), all default on:
+`relayPoolBounded`, `quicTeePolicy`, `pcapng`, `bodySpill`, `protocolChildren`, `ftsSearch`,
+`h2Terminate`. `h2Netty` exists but is NOT armed (decision D7 kept the in-house codec).
+
+Carry-overs into S4/S5: HTTP/1.1-client -> h2-upstream translation implemented but unwired
+(`Http2Translator.requestToH2` / `responseToHttp1`); request bodies to an HTTP/1.1 upstream
+buffered until END_STREAM; rules on translated h2 = task 35; WS/gRPC per-message viewers =
+UI tasks 11–13; `Http2Session` CONTINUATION-after-padding merge bug (observer unaffected on the
+terminated path); one pre-existing flaky 3 s timing test `ToolsRepositoryRoomTest` under
+full-suite load.
+
+Verification baseline at close-out: `:app:testDebugUnitTest` 2,391 tests; interception + QUIC
+suites 1,122; `tools/ci/*.sh` green; Redroid (Android 15 x86_64) instrumentation `OK (11 tests)`.
+
+Branches left on origin after close-out: `main`, `vorflux/interceptor-s0-runtime`,
+`vorflux/interceptor-s1-transport`, `vorflux/interceptor-s1-transport-2`,
+`vorflux/interceptor-s2-persistence`, `vorflux/interceptor-s3-protocol` (all merged),
+`vorflux/fix-audit-gaps`, `handoff-uncommited-work`,
+`vorflux/master-plan-and-phased-design-implementation`, `s0-backup` (two S0 interim commits
+that were folded into PR #18; pushed for completeness), and this branch
+`vorflux/handoff-2026-09-05-close-out`. No uncommitted work remained on the development
+machine; the machine was wiped after the `Mahesh953-hub/backup` archive was refreshed.

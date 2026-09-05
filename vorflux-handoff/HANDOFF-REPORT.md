@@ -12,6 +12,28 @@ what was verified, and what remains open. Read this first.
 
 ---
 
+## 0. Status update — 2026-09-05 (read this before the S0-era sections)
+
+The sections below were written at the S0 handoff and are kept as history. Current truth:
+
+- S0, S1, S2 and S3 are complete and merged into `main` at `4cf1226`
+  (PRs https://github.com/Mahesh953-hub/requestr/pull/17,
+  https://github.com/Mahesh953-hub/requestr/pull/18,
+  https://github.com/Mahesh953-hub/requestr/pull/19,
+  https://github.com/Mahesh953-hub/requestr/pull/20,
+  https://github.com/Mahesh953-hub/requestr/pull/21,
+  https://github.com/Mahesh953-hub/requestr/pull/22).
+- Room schema is at v22; the MITM proxy terminates HTTP/2 (flag `h2Terminate`); FTS5 search
+  and protocol child tables are live (flags `ftsSearch`, `protocolChildren`).
+- The next slice is S4 (rule engine, tasks 24–35). Per-task outcomes, known limits and the
+  verification baseline are in `todos.md` ("Program status at session close-out").
+- Decision records: `plans/decisions/D7-http2-conformance.md` (in-house codec kept, `h2Netty`
+  not armed).
+- Every sub-agent task listed in `tasks.md` is historical; S1–S3 were implemented directly by the
+  main agent without sub-agents.
+
+---
+
 ## 1. Goal and approved scope
 
 The user read all 468 lines of:
