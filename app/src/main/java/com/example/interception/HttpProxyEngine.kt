@@ -116,11 +116,13 @@ class HttpProxyEngine(
                 // §3 (C2) -- read fresh per connection. Disabled (NONE) by default.
                 val networkCondition = SettingsDataStore.get(ctx).networkCondition.first()
                 val db = RequestrDatabase.get(ctx)
-                val disposition = ConnectControl.evaluate(db, host, connectPort)
+                val disposition = ConnectControl.evaluate(host, connectPort)
                 val dispositionName = when (disposition) {
                     is ConnectControl.Disposition.AllowOpaque -> "ALLOWED_OPAQUE"
                     is ConnectControl.Disposition.Block -> "BLOCKED"
                     is ConnectControl.Disposition.Redirect -> "REDIRECTED"
+                    is ConnectControl.Disposition.Mirror -> "REDIRECTED"
+                    is ConnectControl.Disposition.Suspend -> "SUSPENDED"
                     is ConnectControl.Disposition.ForceMitm -> "BLOCKED"
                 }
                 val entity = ConnectAttemptEntity(
@@ -128,7 +130,8 @@ class HttpProxyEngine(
                     targetHost = host,
                     targetPort = connectPort,
                     disposition = dispositionName,
-                    redirectTarget = (disposition as? ConnectControl.Disposition.Redirect)?.target,
+                    redirectTarget = (disposition as? ConnectControl.Disposition.Redirect)?.target
+                        ?: (disposition as? ConnectControl.Disposition.Mirror)?.target,
                     failureReason = if (disposition is ConnectControl.Disposition.ForceMitm) {
                         "MITM not available in HTTP_PROXY tier"
                     } else null,

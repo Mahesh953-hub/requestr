@@ -37,6 +37,7 @@ class HttpProxyEngineConnectTest {
 
     @After
     fun tearDown() {
+        com.example.interception.rules.LegacyRuleTestSupport.clear()
         // HttpProxyEngine resolves RequestrDatabase.get(context) itself (the real production
         // singleton, not a test-owned instance), so tearDown must not close it here -- Room's
         // close() cancels the database's internal coroutine scope, which can race with the
@@ -103,6 +104,7 @@ class HttpProxyEngineConnectTest {
             RequestrDatabase.get(context).interceptRuleDao().insert(
                 InterceptRuleEntity(name = "test", domain = "blocked.example", action = RuleAction.BLOCK)
             )
+            com.example.interception.rules.LegacyRuleTestSupport.syncSnapshotFromLegacy(RequestrDatabase.get(context))
         }
         val port = engine.start(context, 0)
         val statusLine = sendConnectAndReadStatusLine(port, "blocked.example:443")
@@ -118,6 +120,7 @@ class HttpProxyEngineConnectTest {
             RequestrDatabase.get(context).interceptRuleDao().insert(
                 InterceptRuleEntity(name = "test", domain = "mitm.example", action = RuleAction.FORCE_MITM)
             )
+            com.example.interception.rules.LegacyRuleTestSupport.syncSnapshotFromLegacy(RequestrDatabase.get(context))
         }
         val port = engine.start(context, 0)
         val statusLine = sendConnectAndReadStatusLine(port, "mitm.example:443")
@@ -188,6 +191,7 @@ class HttpProxyEngineConnectTest {
             RequestrDatabase.get(context).interceptRuleDao().insert(
                 InterceptRuleEntity(name = "test", domain = "socks-blocked.example", action = RuleAction.BLOCK)
             )
+            com.example.interception.rules.LegacyRuleTestSupport.syncSnapshotFromLegacy(RequestrDatabase.get(context))
         }
         val port = engine.start(context, 0)
         val socket = Socket("127.0.0.1", port)

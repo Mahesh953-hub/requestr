@@ -35,6 +35,7 @@ class CdpFetchAdapterTest {
 
     @After
     fun tearDown() {
+        com.example.interception.rules.LegacyRuleTestSupport.clear()
         runBlocking {
             val dao = RequestrDatabase.get(context).interceptRuleDao()
             dao.getEnabledRules().forEach { dao.deleteById(it.id) }
@@ -79,6 +80,7 @@ class CdpFetchAdapterTest {
         RequestrDatabase.get(context).interceptRuleDao().insert(
             InterceptRuleEntity(name = "test-rule", domain = domain, action = action, replacementValue = replacementValue),
         )
+        com.example.interception.rules.LegacyRuleTestSupport.syncSnapshotFromLegacy(RequestrDatabase.get(context))
     }
 
     private fun requestPausedEvent(
@@ -192,7 +194,9 @@ class CdpFetchAdapterTest {
 
     @Test
     fun `base64-encoded body decoding round-trips`() {
-        insertRule("example.com", RuleAction.MODIFY_RESPONSE, """{}""")
+        // S4 task 26: a header-only rewrite still fulfils the response from the fetched body; an
+        // empty `{}` config is now a no-op rule and resumes the response untouched instead.
+        insertRule("example.com", RuleAction.MODIFY_RESPONSE, """{"addHeaders":{"x-seen":"1"}}""")
         val recorder = RecordingClient(context)
         val originalBody = "{\"hello\":\"world\"}"
         recorder.cannedResults["Fetch.getResponseBody"] = JSONObject().apply {
@@ -206,7 +210,7 @@ class CdpFetchAdapterTest {
 
         val fulfillParams = recorder.paramsFor("Fetch.fulfillRequest")!!
         val decodedBody = String(Base64.getDecoder().decode(fulfillParams.getString("body")))
-        // An empty {} config leaves the real captured body untouched -- round-trip check.
+        // A header-only config leaves the real captured body untouched -- round-trip check.
         assertEquals(originalBody, decodedBody)
     }
 

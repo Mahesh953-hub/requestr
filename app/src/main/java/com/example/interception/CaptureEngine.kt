@@ -5,7 +5,6 @@ import android.util.Log
 import com.example.data.export.MediaStoreExporter
 import com.example.data.local.CaptureRowMethod
 import com.example.data.local.CapturedTrafficEntity
-import com.example.data.local.InterceptRuleEntity
 import com.example.data.local.RequestrDatabase
 import com.example.data.local.TcpConnectionEntity
 import com.example.data.local.TlsSessionEntity
@@ -18,6 +17,13 @@ import com.example.interception.http.Http2Parser
 import com.example.interception.http.HttpBodyDecoder
 import com.example.interception.http.HttpParser
 import com.example.interception.http.ParsedHttpMessage
+import com.example.interception.rules.FlowAuditTrail
+import com.example.interception.rules.FlowKey
+import com.example.interception.rules.RuleMetadataHeaders
+import com.example.interception.rules.RulePipeline
+import com.example.interception.rules.RuleSnapshot
+import com.example.interception.rules.RuleSnapshotStore
+import com.example.interception.rules.stages.RewriteStage
 import com.example.interception.tcp.TcpReassembler
 import com.example.interception.tcp.TcpStream
 import com.example.interception.tls.TlsDecoder
@@ -90,6 +96,8 @@ class CaptureEngine(
      */
     var protocolChildren: Boolean =
         runCatching { com.example.data.persistence.InterceptorFlags.get(context).protocolChildren }.getOrDefault(true),
+    /** S4 task 26: the immutable rule snapshot every decision reads; a test seam over [RuleSnapshotStore]. */
+    private val ruleSnapshot: () -> RuleSnapshot = { RuleSnapshotStore.current },
 ) {
     // Complaint #5 audit fix: this used to build a path via
     // `Environment.getExternalStoragePublicDirectory(DIRECTORY_DOWNLOADS)` and open a raw
@@ -815,97 +823,40 @@ class CaptureEngine(
         response: ParsedHttpMessage,
         stream: TcpStream,
     ): RowHandle? {
-        // v5: captureEnabled flag passed from RequestrVpnService (reads live settings at start)
-        if (!captureEnabled) return null
 
-        // Fix 15 (AUDIT_REPORT): Consult intercept rules before persisting.
-        // All rule actions are implemented below: BLOCK, REDIRECT, MODIFY_REQUEST,
-        // MODIFY_RESPONSE, LOG_ONLY.
-        val ruleAction = checkRules(request.url, request.host)
-        when (ruleAction) {
-            com.example.data.local.RuleAction.BLOCK -> {
-                Log.d(TAG, "BLOCKED by rule: ${request.method?.name} ${request.url.take(80)}")
-                return null  // Drop entirely — never persisted, never forwarded
-            }
-            com.example.data.local.RuleAction.REDIRECT -> {
-                // REDIRECT: find the matching rule's replacementValue, rewrite the request's
-                // URL/host to it, then log and persist the rewritten request below like any
-                // other transaction.
-                Log.d(TAG, "REDIRECT rule matched: ${request.url.take(80)}")
-                // Persist with modified URL if replacementValue is set
-                val matchedRule = getMatchingRule(request.url, request.host)
-                if (matchedRule?.replacementValue?.isNotBlank() == true) {
-                    request.url = matchedRule.replacementValue!!
-                    request.host = runCatching {
-                        java.net.URI(matchedRule.replacementValue!!).host ?: request.host
-                    }.getOrDefault(request.host)
-                }
-            }
-            com.example.data.local.RuleAction.MODIFY_REQUEST -> {
-                // MODIFY_REQUEST: Transform request headers/body per rule's replacementValue.
-                // replacementValue format: JSON with optional "addHeaders", "removeHeaders", "bodyReplace"
-                Log.d(TAG, "MODIFY_REQUEST rule matched: ${request.url.take(80)}")
-                val matchedRule = getMatchingRule(request.url, request.host)
-                matchedRule?.replacementValue?.let { config ->
-                    applyRequestModification(request, config)
-                }
-            }
-            com.example.data.local.RuleAction.MODIFY_RESPONSE -> {
-                // MODIFY_RESPONSE: Transform response headers/body per rule's replacementValue.
-                Log.d(TAG, "MODIFY_RESPONSE rule matched: ${request.url.take(80)}")
-                val matchedRule = getMatchingRule(request.url, request.host)
-                matchedRule?.replacementValue?.let { config ->
-                    applyResponseModification(response, config)
-                }
-            }
-            com.example.data.local.RuleAction.LOG_ONLY -> {
-                // LOG_ONLY: Always persist, even if trafficCaptureEnabled is off.
-                // This overrides the capture toggle — tagged requests are always saved.
-            }
-            com.example.data.local.RuleAction.FORCE_MITM -> {
-                // FORCE_MITM is evaluated at CONNECT time (see ConnectControl) before this
-                // engine's tun pipeline ever decodes an HTTP transaction inside the tunnel --
-                // by the time a request reaches here the MITM decision has already been made.
-                // Nothing further to do at the per-transaction level; persist normally.
-            }
-            com.example.data.local.RuleAction.MOCK_RESPONSE -> {
-                // §1.5 (plan Gap #11): MOCK_RESPONSE's whole point is answering the client
-                // BEFORE a real upstream round trip happens -- see
-                // [MitmProxyEngine.handleParsedRequest] and [com.example.browser.CdpFetchAdapter]
-                // for the two engines that actually terminate the connection live and can do
-                // that short-circuit. This tun-pipeline path only ever sees [request]/[response]
-                // after the real exchange already completed on the wire, so there is nothing
-                // left to mock post-hoc here; persist the real transaction as observed, same as
-                // LOG_ONLY.
-            }
-            com.example.data.local.RuleAction.SCRIPT_REWRITE -> {
-                // Same rationale as MOCK_RESPONSE above: SCRIPT_REWRITE (master plan §1.11) runs
-                // against the live request/response inside the engines that terminate the
-                // connection (RuleEnforcer.applyScriptRewrite from MitmProxyEngine). This
-                // tun-pipeline path only observes the transaction after the fact; persist as
-                // observed, same as LOG_ONLY.
-            }
-            com.example.data.local.RuleAction.CHAOS -> {
-                // CHAOS (fault injection, see ChaosInjector) is not wired into this
-                // tun-pipeline path -- same rationale as SCRIPT_REWRITE/MOCK_RESPONSE above:
-                // this path only observes the transaction after the real exchange already
-                // completed on the wire, so there is no live request/response left to inject
-                // a fault into here; persist as observed, same as LOG_ONLY.
-            }
-            com.example.data.local.RuleAction.BODY_ENCRYPT_AES, com.example.data.local.RuleAction.BODY_DECRYPT_AES -> {
-                // §2.14(b): wired into RuleEnforcer/MitmProxyEngine, the engines that terminate
-                // the connection and can still transform request/response bytes before they hit
-                // the wire. Same rationale as SCRIPT_REWRITE/CHAOS/MOCK_RESPONSE above -- this
-                // tun-pipeline path only observes the transaction after the real exchange
-                // already completed, so there is nothing left to encrypt/decrypt in place here;
-                // persist as observed, same as LOG_ONLY.
-            }
+        // S4 task 26: one immutable-snapshot decision per exchange (RulePipeline; zero DAO calls).
+        // This tun-pipeline path only OBSERVES a transaction after the real exchange already
+        // completed on the wire, so only the observation-shaping slots act here: a gateway BLOCK
+        // drops the row, rewrite edits what is persisted, OBSERVE forces persistence. Mock,
+        // scripts, body crypto, chaos, breakpoints and throttling all need a live connection to
+        // act on and are wired into the engines that terminate it (MitmProxyEngine,
+        // CdpFetchAdapter) -- there is nothing left to mock/inject post-hoc here.
+        val decision = RulePipeline.evaluate(
+            ruleSnapshot(),
+            FlowKey(
+                host = request.host, port = stream.dstPort, url = request.url, method = request.method?.name,
+                headers = request.headers, sourceIp = stream.srcIp, upstreamIp = stream.dstIp,
+            ),
+        )
+        val trail = FlowAuditTrail()
+        trail.recordDecision(decision, FlowAuditTrail.Phase.REQUEST)
+        val gateway = decision.gateway
+        if (gateway.blocks) {
+            Log.d(TAG, "BLOCKED by rule: ${request.method?.name} ${request.url.take(80)}")
+            return null  // Drop entirely -- never persisted
         }
-
-        // LOG_ONLY rules override the capture toggle — always persist tagged traffic
-        val forcePersist = (ruleAction == com.example.data.local.RuleAction.LOG_ONLY
-            && checkRules(request.url, request.host) != com.example.data.local.RuleAction.LOG_ONLY)
-            // ^ if a specific LOG_ONLY rule matched (not the default), force persist
+        if (decision.rewrite.hasRequestWork) {
+            Log.d(TAG, "REWRITE request rule matched: ${request.url.take(80)}")
+            RewriteStage.applyRequest(request, decision.rewrite, trail)
+        }
+        if (decision.rewrite.hasResponseWork) {
+            Log.d(TAG, "REWRITE response rule matched: ${request.url.take(80)}")
+            RewriteStage.applyResponse(response, decision.rewrite, trail)
+        }
+        // OBSERVE rules override the capture toggle -- always persist tagged traffic.
+        // v5: captureEnabled flag passed from RequestrVpnService (reads live settings at start).
+        val forcePersist = decision.observe.isNotEmpty()
+        if (!captureEnabled && !forcePersist) return null
 
         // Enhanced Mode: an independent ProtocolDetector pass over the same exchange, purely
         // additive diagnostic headers (never gates persistence/blocking -- see
@@ -931,7 +882,9 @@ class CaptureEngine(
             statusCode = if (response.statusCode == 0) null else response.statusCode,
             protocol = response.version.ifEmpty { request.version },
             requestHeaders = (if (requestLogging) request.headers else emptyMap()) + enhancedHeaders,
-            responseHeaders = if (responseLogging) response.headers else emptyMap(),
+            responseHeaders = RuleMetadataHeaders.withRulesBadge(
+                if (responseLogging) response.headers else emptyMap(), trail,
+            ),
             // storage.text (not message.body): same rule as MitmProxyEngine.emitTransaction, so a
             // bodyReplaced message (none are produced on this observe-only path today) would
             // persist what was sent rather than what arrived.
@@ -957,7 +910,7 @@ class CaptureEngine(
         val headerRows = ProtocolRows.headerRows(request, response, requestLogging, responseLogging)
         return runCatching {
             // S2 task 15: queued, never runBlocking on the pump thread.
-            val handle = persistence.insertTransaction(entity, headerRows)
+            val handle = persistence.insertTransaction(entity, headerRows, appliedRules = trail.toEntities())
             transactionCount++
             Log.d(TAG, "Captured: ${response.statusCode} ${request.method?.name} ${request.url.take(120)}")
             handle
@@ -992,16 +945,6 @@ class CaptureEngine(
     fun streamCount(): Int = reassembler.streamCount()
 
     // ── Rules engine (Fix 15 / AUDIT_REPORT) ─────────────────────────────
-
-    /**
-     * Check enabled intercept rules against a request URL/host.
-     * Returns the highest-priority action if any rule matches, or LOG_ONLY as default.
-     *
-     * Rule matching: pattern is checked as regex against the full URL.
-     * Domain field is checked as substring against the host.
-     */
-    private fun checkRules(url: String, host: String): com.example.data.local.RuleAction =
-        RuleEnforcer.checkRules(db, url, host)
 
     /**
      * Persists a WebSocket frame as a fake transaction so it appears in the capture log.
@@ -1051,24 +994,6 @@ class CaptureEngine(
         // S2 task 15: queued, never runBlocking on the pump thread.
         persistence.insertTransaction(entity)
     }
-
-    /** Returns the first matching rule entity (for accessing replacementValue). */
-    private fun getMatchingRule(url: String, host: String): InterceptRuleEntity? =
-        RuleEnforcer.getMatchingRule(db, url, host)
-
-    /**
-     * Applies request modifications from a rule's replacementValue (JSON config).
-     * Format: {"addHeaders":{"X-Custom":"value"}, "removeHeaders":["Cookie"], "bodyReplace":"new body"}
-     */
-    private fun applyRequestModification(request: ParsedHttpMessage, config: String) =
-        RuleEnforcer.applyRequestModification(request, config)
-
-    /**
-     * Applies response modifications from a rule's replacementValue (JSON config).
-     * Format: {"statusCode":200, "addHeaders":{"X-Mock":"true"}, "bodyReplace":"{}"}
-     */
-    private fun applyResponseModification(response: ParsedHttpMessage, config: String) =
-        RuleEnforcer.applyResponseModification(response, config)
 
     private fun scHex(bytes: ByteArray) = bytes.joinToString("") { "%02x".format(it) }
 

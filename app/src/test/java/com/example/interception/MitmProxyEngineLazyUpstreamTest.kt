@@ -131,11 +131,13 @@ class MitmProxyEngineLazyUpstreamTest {
             RequestrDatabase.get(context).interceptRuleDao().insert(
                 InterceptRuleEntity(name = "mitm local", pattern = "^https://localhost:\\d+/$", action = RuleAction.FORCE_MITM)
             )
+            com.example.interception.rules.LegacyRuleTestSupport.syncSnapshotFromLegacy(RequestrDatabase.get(context))
         }
     }
 
     @After
     fun tearDown() {
+        com.example.interception.rules.LegacyRuleTestSupport.clear()
         engine.stop()
         CertificateAuthority.passwordProviderForTest = null
         File(context.filesDir, CertificateAuthority.KEYSTORE_FILE).delete()
@@ -151,6 +153,7 @@ class MitmProxyEngineLazyUpstreamTest {
         RequestrDatabase.get(context).interceptRuleDao().insert(
             InterceptRuleEntity(name = name, domain = domain, pattern = pattern, action = action, replacementValue = replacementValue)
         )
+        com.example.interception.rules.LegacyRuleTestSupport.syncSnapshotFromLegacy(RequestrDatabase.get(context))
     }
 
     private fun generateSelfSignedCert(host: String): Pair<X509Certificate, KeyPair> {

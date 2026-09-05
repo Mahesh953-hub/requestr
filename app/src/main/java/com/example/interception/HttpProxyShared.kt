@@ -145,12 +145,39 @@ internal object HttpProxyShared {
                 replies.established()
                 relay(client, host, port, onBytesTransferred, socketFactory, socketConnector, relayPool)
             }
+            is ConnectControl.Disposition.Mirror -> {
+                // S4 task 28: an opaque tunnel cannot rewrite SNI/Host, so a MIRROR here is a
+                // plain re-point of the tunnel at the mirror address (same as Redirect). Only the
+                // MITM path can honour the name policies.
+                NetworkConditionInjector.apply(networkCondition, random, sleep)
+                replies.established()
+                relay(client, disposition.targetHost, disposition.targetPort, onBytesTransferred, socketFactory, socketConnector, relayPool)
+            }
+            is ConnectControl.Disposition.Suspend -> {
+                // S4 task 27: park this flow only -- no reply, no relay permit, no upstream dial.
+                // The client sees a CONNECT that never completes; after the rule's timeout the
+                // socket is closed so the client's own timeout/retry logic takes over.
+                suspendFlow(client, disposition.timeoutMs, sleep)
+            }
             is ConnectControl.Disposition.ForceMitm -> {
                 // A plain Socket relay can never terminate TLS -- only MitmProxyEngine can
                 // honor FORCE_MITM. Callers that can't MITM (HttpProxyEngine, GatewayEngine)
                 // must report this honestly rather than silently tunneling opaquely.
                 replies.mitmUnavailable()
             }
+        }
+    }
+
+    /**
+     * S4 task 27: holds [client] open without reading or writing for [timeoutMs], then closes it.
+     * Runs on the caller's thread (each CONNECT already has its own), so no shared relay permit
+     * is consumed and other flows are unaffected. Injectable [sleep] keeps tests instant.
+     */
+    fun suspendFlow(client: Socket, timeoutMs: Long, sleep: (Long) -> Unit = Thread::sleep) {
+        try {
+            if (timeoutMs > 0) sleep(timeoutMs)
+        } finally {
+            runCatching { client.close() }
         }
     }
 

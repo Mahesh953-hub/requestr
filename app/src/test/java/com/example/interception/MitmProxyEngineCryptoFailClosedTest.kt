@@ -49,6 +49,7 @@ class MitmProxyEngineCryptoFailClosedTest {
 
     @After
     fun tearDown() {
+        com.example.interception.rules.LegacyRuleTestSupport.clear()
         db.close()
     }
 
@@ -61,6 +62,7 @@ class MitmProxyEngineCryptoFailClosedTest {
                 cryptoKeyAlias = "", // blank alias -> RequestCryptoManager always fails closed
             )
         )
+        com.example.interception.rules.LegacyRuleTestSupport.syncSnapshotFromLegacy(db)
     }
 
     private fun request(url: String = "https://crypto.example/api", host: String = "crypto.example", body: String = "plaintext-body") =
@@ -80,7 +82,7 @@ class MitmProxyEngineCryptoFailClosedTest {
 
         val engine = MitmProxyEngine()
         val upstream = neverConnectUpstream()
-        val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>()
+        val pending = ConcurrentLinkedQueue<MitmProxyEngine.PendingExchange>()
 
         engine.handleParsedRequest(
             db, request(), ByteArray(0), upstream, ByteArrayOutputStream(), Any(), pending,
@@ -135,8 +137,8 @@ class MitmProxyEngineCryptoFailClosedTest {
 
         val engine = MitmProxyEngine()
         val clientOut = ByteArrayOutputStream()
-        val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>()
-        pending.add(request() to System.currentTimeMillis())
+        val pending = ConcurrentLinkedQueue<MitmProxyEngine.PendingExchange>()
+        pending.add(MitmProxyEngine.PendingExchange(request(), System.currentTimeMillis()))
 
         val response = ParsedHttpMessage(
             isRequest = false, method = null, statusCode = 200, statusMessage = "OK",
@@ -160,8 +162,8 @@ class MitmProxyEngineCryptoFailClosedTest {
 
         var captured: CapturedTrafficEntity? = null
         val engine = MitmProxyEngine(onDecryptedTransaction = { captured = it })
-        val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>()
-        pending.add(request() to System.currentTimeMillis())
+        val pending = ConcurrentLinkedQueue<MitmProxyEngine.PendingExchange>()
+        pending.add(MitmProxyEngine.PendingExchange(request(), System.currentTimeMillis()))
 
         val response = ParsedHttpMessage(
             isRequest = false, method = null, statusCode = 200, statusMessage = "OK",

@@ -100,11 +100,13 @@ class MitmProxyEngineMitmHandshakeTest {
             RequestrDatabase.get(context).interceptRuleDao().insert(
                 InterceptRuleEntity(name = "mitm local", domain = "localhost", action = RuleAction.FORCE_MITM)
             )
+            com.example.interception.rules.LegacyRuleTestSupport.syncSnapshotFromLegacy(RequestrDatabase.get(context))
         }
     }
 
     @After
     fun tearDown() {
+        com.example.interception.rules.LegacyRuleTestSupport.clear()
         engine.stop()
         CertificateAuthority.passwordProviderForTest = null
         File(context.filesDir, CertificateAuthority.KEYSTORE_FILE).delete()
@@ -281,6 +283,7 @@ class MitmProxyEngineMitmHandshakeTest {
             RequestrDatabase.get(context).interceptRuleDao().insert(
                 InterceptRuleEntity(name = "mitm ip", domain = "127.0.0.1", action = RuleAction.FORCE_MITM)
             )
+            com.example.interception.rules.LegacyRuleTestSupport.syncSnapshotFromLegacy(RequestrDatabase.get(context))
         }
         engine = MitmProxyEngine(caTrustGate = CaTrustGate(probe = { true }))
         val proxyPort = engine.start(context, 0)

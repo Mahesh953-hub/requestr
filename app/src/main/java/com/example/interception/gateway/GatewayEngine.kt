@@ -189,7 +189,7 @@ object GatewayEngine {
                     val (host, connectPort) = HttpProxyShared.parseHostPort(rawUrl, 443)
                     val db = RequestrDatabase.get(ctx)
                     val rawDisposition = com.example.interception.ConnectControl.evaluate(
-                        db, host, connectPort, sourceIp = if (isRemote) clientIp else null,
+                        host, connectPort, sourceIp = if (isRemote) clientIp else null,
                     )
                     // FORCE_MITM is not supported for gateway clients — no channel to install
                     // requestr's CA on the remote device — so it always falls back to Block.
@@ -200,6 +200,8 @@ object GatewayEngine {
                         is com.example.interception.ConnectControl.Disposition.AllowOpaque -> "ALLOWED_OPAQUE"
                         is com.example.interception.ConnectControl.Disposition.Block -> "BLOCKED"
                         is com.example.interception.ConnectControl.Disposition.Redirect -> "REDIRECTED"
+                        is com.example.interception.ConnectControl.Disposition.Mirror -> "REDIRECTED"
+                        is com.example.interception.ConnectControl.Disposition.Suspend -> "SUSPENDED"
                         is com.example.interception.ConnectControl.Disposition.ForceMitm -> "BLOCKED" // unreachable, see above
                     }
                     val entity = com.example.data.local.ConnectAttemptEntity(
@@ -208,7 +210,8 @@ object GatewayEngine {
                         targetPort = connectPort,
                         sourceIp = if (isRemote) clientIp else null,
                         disposition = dispositionName,
-                        redirectTarget = (disposition as? com.example.interception.ConnectControl.Disposition.Redirect)?.target,
+                        redirectTarget = (disposition as? com.example.interception.ConnectControl.Disposition.Redirect)?.target
+                            ?: (disposition as? com.example.interception.ConnectControl.Disposition.Mirror)?.target,
                         failureReason = (disposition as? com.example.interception.ConnectControl.Disposition.Block)?.reason,
                     )
                     HttpProxyShared.handleConnectAttempt(

@@ -573,12 +573,8 @@ object RuleEnforcer {
      * prefix — which is client content, and is exactly what turning header logging off is meant
      * to suppress. Consumed by `MitmProxyEngine.emitTransaction`.
      */
-    val METADATA_HEADER_KEYS: Set<String> = setOf(
-        CHAOS_ATTRIBUTION_HEADER,
-        SCRIPT_ERROR_HEADER,
-        "x-requestr-crypto-failed",
-        "x-requestr-json-prettified",
-    )
+    val METADATA_HEADER_KEYS: Set<String>
+        get() = com.example.interception.rules.RuleMetadataHeaders.KEYS
 
     const val CHAOS_ATTRIBUTION_HEADER = "x-requestr-chaos"
 

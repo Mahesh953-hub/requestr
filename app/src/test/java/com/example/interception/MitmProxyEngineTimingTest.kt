@@ -42,7 +42,10 @@ class MitmProxyEngineTimingTest {
     }
 
     @After
-    fun tearDown() = db.close()
+    fun tearDown() {
+        com.example.interception.rules.LegacyRuleTestSupport.clear()
+        db.close()
+    }
 
     private fun request() = ParsedHttpMessage(
         isRequest = true, method = HttpMethod.GET, url = "https://timing.example/api", host = "timing.example",
@@ -66,7 +69,7 @@ class MitmProxyEngineTimingTest {
         val tracker = ConnectionTimingTracker(clock = { now })
         tracker.attachSetup(UpstreamSetupTimings(dnsMs = 3, connectMs = 21, tlsMs = 44))
         val req = request()
-        val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>().apply { add(req to 10_000L) }
+        val pending = ConcurrentLinkedQueue<MitmProxyEngine.PendingExchange>().apply { add(MitmProxyEngine.PendingExchange(req, 10_000L)) }
         tracker.onRequestSent(req, startedAt = 10_000L, sentAt = 10_002L)
         now = 10_050L; tracker.markFirstResponseByte()
         now = 10_070L
@@ -94,7 +97,7 @@ class MitmProxyEngineTimingTest {
         var delivered = false
         var timings: TransactionTimingEntity? = TransactionTimingEntity(trafficId = 99)
         val engine = MitmProxyEngine(onDecryptedTransactionTimed = { _, t -> delivered = true; timings = t })
-        val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>().apply { add(request() to System.currentTimeMillis()) }
+        val pending = ConcurrentLinkedQueue<MitmProxyEngine.PendingExchange>().apply { add(MitmProxyEngine.PendingExchange(request(), System.currentTimeMillis())) }
 
         engine.handleParsedResponse(
             db, response(), ByteArray(0), ByteArrayOutputStream(), Any(), pending,
@@ -109,7 +112,7 @@ class MitmProxyEngineTimingTest {
     fun `plain callback still works when no timed callback is wired`() {
         var captured: CapturedTrafficEntity? = null
         val engine = MitmProxyEngine(onDecryptedTransaction = { captured = it })
-        val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>().apply { add(request() to System.currentTimeMillis()) }
+        val pending = ConcurrentLinkedQueue<MitmProxyEngine.PendingExchange>().apply { add(MitmProxyEngine.PendingExchange(request(), System.currentTimeMillis())) }
         engine.handleParsedResponse(
             db, response(), ByteArray(0), ByteArrayOutputStream(), Any(), pending,
             "timing.example", 443, true, true, MitmProxyEngine.ConnectionProtocolState(), ConnectionTimingTracker(),

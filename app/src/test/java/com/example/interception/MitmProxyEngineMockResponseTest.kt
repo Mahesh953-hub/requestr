@@ -47,6 +47,7 @@ class MitmProxyEngineMockResponseTest {
 
     @After
     fun tearDown() {
+        com.example.interception.rules.LegacyRuleTestSupport.clear()
         db.close()
     }
 
@@ -59,6 +60,7 @@ class MitmProxyEngineMockResponseTest {
                 replacementValue = replacementValue,
             )
         )
+        com.example.interception.rules.LegacyRuleTestSupport.syncSnapshotFromLegacy(db)
     }
 
     private fun request(url: String = "https://mock.example/api", host: String = "mock.example") = ParsedHttpMessage(
@@ -89,7 +91,7 @@ class MitmProxyEngineMockResponseTest {
         val engine = MitmProxyEngine()
         val clientOut = ByteArrayOutputStream()
         val upstream = neverConnectUpstream()
-        val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>()
+        val pending = ConcurrentLinkedQueue<MitmProxyEngine.PendingExchange>()
 
         engine.handleParsedRequest(
             db, request(), ByteArray(0), upstream, clientOut, Any(), pending,
@@ -107,7 +109,7 @@ class MitmProxyEngineMockResponseTest {
         insertMockRule("mock.example", """{"bodyReplace":"mocked"}""")
 
         val engine = MitmProxyEngine()
-        val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>()
+        val pending = ConcurrentLinkedQueue<MitmProxyEngine.PendingExchange>()
 
         engine.handleParsedRequest(
             db, request(), ByteArray(0), neverConnectUpstream(), ByteArrayOutputStream(), Any(), pending,

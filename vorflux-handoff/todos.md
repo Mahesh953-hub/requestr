@@ -302,3 +302,46 @@ Exported from the platform todo list at handoff time.
       `replaceForTest` then live revisions move past it; `startFromApplication` disarmed; `publish`).
     - Not in this task: nothing evaluates against the snapshot yet (task 26); `RuleLimits`
       enforcement at compile time is task 33.
+  - S4 task 26 — done on `vorflux/interceptor-s4-rules`:
+    - `RulePipeline.evaluate(snapshot, key)` (pure, allocation-light, no DAO on the hot path):
+      one pass over `snapshot.rules` in `sortOrder ASC, id ASC` into a `RuleDecision` with one slot
+      per stage. Gateway precedence `ALLOW_ONLY > BYPASS > BLOCK > SUSPEND > FORCE_DECRYPT`
+      regardless of list order (`GatewayOutcome.Pass/Apply/ImpliedBlock`; losers recorded as
+      `Skipped("precedence: X outranks Y")`); ALLOW_ONLY rules present but none matching ->
+      `ImpliedBlock` naming the allow-list. Mirror/mock/body-crypto/throttle/chaos are first-match
+      (later matches `Skipped(PRECEDENCE_FIRST_MATCH)`); rewrite composes (`ResolvedRewrite`: first
+      redirection, first request/response replacement, all modifications in order); scripts and
+      observe accumulate. `evaluateConnect(snapshot, host, port, ...)` for the CONNECT phase.
+      `RuleDecision.mutates` is the hook task 33 uses for the safety gate.
+    - `FlowAuditTrail` (per-exchange provenance; `Phase` CONNECT/REQUEST/RESPONSE, `Outcome`
+      MATCHED/APPLIED/SKIPPED_PRECEDENCE/REFUSED_SAFETY/FAILED) -> `AppliedRuleEntity` rows through
+      the new `CaptureSink.appliedRules(parent, rows)` (`PersistenceQueue` -> `appendAppliedRules`)
+      and the `x-requestr-rules` badge (`RuleMetadataHeaders.rulesBadge`: `stage:ruleId,...` of
+      APPLIED/FAILED rules) on the persisted row's response headers only -- never on the wire.
+    - Stages under `interception/rules/stages/`: `RewriteStage` (redirect + request/response
+      modifications with `$1`/`${name}` variables, Content-Length via `bodyReplaced`), `MockStage`,
+      `BodyCryptoStage` (fail-closed synthetic 502 as before), `ChaosStage` (request leg rolls fail
+      only, response leg corrupt/delay), `ScriptStage` (Rhino via `ScriptRewriteEngine`, error header
+      stamped per legacy), `AccessControlStage` (task 27's CONNECT disposition, landed early because
+      `ConnectControl` needed it). `RuleMetadataHeaders` replaces `RuleEnforcer.METADATA_HEADER_KEYS`
+      (aliased until task 34 deletes the enforcer).
+    - Engine cut-over: `MitmProxyEngine` (`PendingExchange` carries the request-time decision + trail
+      to the response leg; gateway block honours `showBlockedInList`; `Mirror`/`Suspend`
+      dispositions on CONNECT -- opaque mirror relay now, full MITM mirror is task 28),
+      `CaptureEngine.persistTransaction` (observe rules force-persist even with capture off),
+      `CdpFetchAdapter` (block / mock / redirect / rewrite / continue), `ConnectControl.decide` ->
+      `Verdict(decision, disposition, trail)` reading `RuleSnapshotStore.current` (the `db`
+      parameter is gone), `HttpProxyEngine` + `GatewayEngine` + `HttpProxyShared.suspendFlow`.
+      All engines take a `ruleSnapshot: () -> RuleSnapshot` seam for tests.
+    - G16 parity: `LegacyParityTest` (16) converts every one of the 11 legacy `RuleAction`s through
+      `LegacyRuleConverter` and asserts the new stages produce a field-identical `ParsedHttpMessage`
+      (url/host/status/headers/body/bodyReplaced/isBodyBinary/replacedBodyBytes) to `RuleEnforcer`
+      -- including seeded chaos outcomes, script error headers, crypto round-trips and fail-closed
+      502s. Other tests: `RulePipelineTest` (15, incl. a DAO-that-throws zero-DB check),
+      `FlowAuditTrailTest` (7), `AccessControlStageTest` (12), `MitmProxyEngineProvenanceTest` (3:
+      `applied_rules` rows + badge through `RecordingCaptureSink`). Legacy engine tests keep their
+      `intercept_rules` fixtures and sync them into the snapshot via `LegacyRuleTestSupport`.
+    - Behaviour change worth knowing: a MODIFY_RESPONSE rule with an empty `{}` config is now a
+      no-op (CDP resumes the response instead of re-fulfilling it); `CdpFetchAdapterTest` updated.
+    - Not in this task: throttle/breakpoint/script-host stages (30-32), the safety gate (33), legacy
+      table drop + `LocalApiServer`/dashboard/exporter/UI cut-over (34), h2 event rules (35).

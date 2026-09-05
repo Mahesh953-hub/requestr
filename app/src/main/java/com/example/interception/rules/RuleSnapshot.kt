@@ -50,10 +50,19 @@ class RuleSnapshot(
 ) {
     val byStage: Map<RuleStage, List<CompiledRule>>
 
+    /**
+     * S4 task 26: every enabled `GatewayMode.ALLOW_ONLY` rule. Non-empty flips the gateway
+     * default for flows matching none of them to an implied block ([GatewayOutcome.ImpliedBlock]);
+     * precomputed here so [RulePipeline.evaluate] never rescans the stage on the hot path.
+     */
+    val allowOnlyGatewayRules: List<CompiledRule>
+
     init {
         val buckets = HashMap<RuleStage, ArrayList<CompiledRule>>(RuleStage.entries.size)
         for (r in rules) buckets.getOrPut(r.stage) { ArrayList(4) }.add(r)
         byStage = buckets
+        allowOnlyGatewayRules = (buckets[RuleStage.GATEWAY] ?: emptyList<CompiledRule>())
+            .filter { (it.config as? GatewayConfig)?.mode == GatewayMode.ALLOW_ONLY }
     }
 
     val isEmpty: Boolean get() = rules.isEmpty()

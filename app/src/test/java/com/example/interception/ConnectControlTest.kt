@@ -37,6 +37,7 @@ class ConnectControlTest {
 
     @After
     fun tearDown() {
+        com.example.interception.rules.LegacyRuleTestSupport.clear()
         db.close()
     }
 
@@ -48,18 +49,19 @@ class ConnectControlTest {
         db.interceptRuleDao().insert(
             InterceptRuleEntity(name = "test", domain = domain, action = action, replacementValue = replacementValue)
         )
+        com.example.interception.rules.LegacyRuleTestSupport.syncSnapshotFromLegacy(db)
     }
 
     @Test
     fun `no matching rule allows opaque tunnel`() {
-        val disposition = ConnectControl.evaluate(db, "example.com", 443)
+        val disposition = ConnectControl.evaluate("example.com", 443)
         assertTrue(disposition is ConnectControl.Disposition.AllowOpaque)
     }
 
     @Test
     fun `BLOCK rule maps to Block with a reason`() {
         insertRule("blocked.example", RuleAction.BLOCK)
-        val disposition = ConnectControl.evaluate(db, "blocked.example", 443)
+        val disposition = ConnectControl.evaluate("blocked.example", 443)
         assertTrue(disposition is ConnectControl.Disposition.Block)
         assertTrue((disposition as ConnectControl.Disposition.Block).reason?.contains("blocked.example") == true)
     }
@@ -67,14 +69,14 @@ class ConnectControlTest {
     @Test
     fun `FORCE_MITM rule maps to ForceMitm`() {
         insertRule("mitm.example", RuleAction.FORCE_MITM)
-        val disposition = ConnectControl.evaluate(db, "mitm.example", 443)
+        val disposition = ConnectControl.evaluate("mitm.example", 443)
         assertTrue(disposition is ConnectControl.Disposition.ForceMitm)
     }
 
     @Test
     fun `REDIRECT rule with a replacementValue maps to Redirect`() {
         insertRule("old.example", RuleAction.REDIRECT, replacementValue = "new.example:8443")
-        val disposition = ConnectControl.evaluate(db, "old.example", 443)
+        val disposition = ConnectControl.evaluate("old.example", 443)
         assertTrue(disposition is ConnectControl.Disposition.Redirect)
         assertEquals("new.example:8443", (disposition as ConnectControl.Disposition.Redirect).target)
     }
@@ -82,7 +84,7 @@ class ConnectControlTest {
     @Test
     fun `REDIRECT rule with a blank replacementValue falls back to AllowOpaque`() {
         insertRule("old.example", RuleAction.REDIRECT, replacementValue = "")
-        val disposition = ConnectControl.evaluate(db, "old.example", 443)
+        val disposition = ConnectControl.evaluate("old.example", 443)
         assertTrue(disposition is ConnectControl.Disposition.AllowOpaque)
     }
 
@@ -91,9 +93,9 @@ class ConnectControlTest {
         insertRule("a.example", RuleAction.LOG_ONLY)
         insertRule("b.example", RuleAction.MODIFY_REQUEST)
         insertRule("c.example", RuleAction.MODIFY_RESPONSE)
-        assertTrue(ConnectControl.evaluate(db, "a.example", 443) is ConnectControl.Disposition.AllowOpaque)
-        assertTrue(ConnectControl.evaluate(db, "b.example", 443) is ConnectControl.Disposition.AllowOpaque)
-        assertTrue(ConnectControl.evaluate(db, "c.example", 443) is ConnectControl.Disposition.AllowOpaque)
+        assertTrue(ConnectControl.evaluate("a.example", 443) is ConnectControl.Disposition.AllowOpaque)
+        assertTrue(ConnectControl.evaluate("b.example", 443) is ConnectControl.Disposition.AllowOpaque)
+        assertTrue(ConnectControl.evaluate("c.example", 443) is ConnectControl.Disposition.AllowOpaque)
     }
 
     // ── PinningFailureRegistry auto-bypass ────────────────────────────────────────────────
@@ -108,14 +110,14 @@ class ConnectControlTest {
         insertRule("pinned.example", RuleAction.FORCE_MITM)
         ConnectControl.PinningFailureRegistry.recordFailure("pinned.example", threshold = 3)
         ConnectControl.PinningFailureRegistry.recordFailure("pinned.example", threshold = 3)
-        assertTrue(ConnectControl.evaluate(db, "pinned.example", 443) is ConnectControl.Disposition.ForceMitm)
+        assertTrue(ConnectControl.evaluate("pinned.example", 443) is ConnectControl.Disposition.ForceMitm)
     }
 
     @Test
     fun `FORCE_MITM rule downgrades to AllowOpaque once the pinning-failure threshold trips`() {
         insertRule("pinned.example", RuleAction.FORCE_MITM)
         repeat(3) { ConnectControl.PinningFailureRegistry.recordFailure("pinned.example", threshold = 3) }
-        assertTrue(ConnectControl.evaluate(db, "pinned.example", 443) is ConnectControl.Disposition.AllowOpaque)
+        assertTrue(ConnectControl.evaluate("pinned.example", 443) is ConnectControl.Disposition.AllowOpaque)
     }
 
     @Test
@@ -123,8 +125,8 @@ class ConnectControlTest {
         insertRule("pinned.example", RuleAction.FORCE_MITM)
         insertRule("other.example", RuleAction.FORCE_MITM)
         repeat(3) { ConnectControl.PinningFailureRegistry.recordFailure("Pinned.Example", threshold = 3) }
-        assertTrue(ConnectControl.evaluate(db, "pinned.example", 443) is ConnectControl.Disposition.AllowOpaque)
-        assertTrue(ConnectControl.evaluate(db, "other.example", 443) is ConnectControl.Disposition.ForceMitm)
+        assertTrue(ConnectControl.evaluate("pinned.example", 443) is ConnectControl.Disposition.AllowOpaque)
+        assertTrue(ConnectControl.evaluate("other.example", 443) is ConnectControl.Disposition.ForceMitm)
     }
 
     @Test
@@ -135,8 +137,8 @@ class ConnectControlTest {
             ConnectControl.PinningFailureRegistry.recordFailure("blocked.example", threshold = 3)
             ConnectControl.PinningFailureRegistry.recordFailure("old.example", threshold = 3)
         }
-        assertTrue(ConnectControl.evaluate(db, "blocked.example", 443) is ConnectControl.Disposition.Block)
-        assertTrue(ConnectControl.evaluate(db, "old.example", 443) is ConnectControl.Disposition.Redirect)
+        assertTrue(ConnectControl.evaluate("blocked.example", 443) is ConnectControl.Disposition.Block)
+        assertTrue(ConnectControl.evaluate("old.example", 443) is ConnectControl.Disposition.Redirect)
     }
 
     @Test

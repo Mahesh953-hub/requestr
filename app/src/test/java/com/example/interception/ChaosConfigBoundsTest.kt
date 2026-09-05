@@ -101,9 +101,15 @@ class ChaosConfigBoundsTest {
                 RuleEnforcer.SCRIPT_ERROR_HEADER,
                 "x-requestr-crypto-failed",
                 "x-requestr-json-prettified",
+                // S4 (task 26+): stage attribution headers stamped by the typed rule engine.
+                "x-requestr-breakpoint",
+                "x-requestr-replay-id",
+                "x-requestr-mirror",
+                "x-requestr-rules",
             ),
             RuleEnforcer.METADATA_HEADER_KEYS
         )
+        assertEquals(RuleEnforcer.METADATA_HEADER_KEYS, com.example.interception.rules.RuleMetadataHeaders.KEYS)
     }
 
     @Test
