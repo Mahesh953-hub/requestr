@@ -1,12 +1,13 @@
 package com.example.interception
 
+import com.example.interception.rules.legacyRuleDao
 import android.os.Build
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.CapturedTrafficEntity
-import com.example.data.local.InterceptRuleEntity
+import com.example.interception.rules.LegacyInterceptRule
 import com.example.data.local.RequestrDatabase
-import com.example.data.local.RuleAction
+import com.example.interception.rules.LegacyRuleAction
 import com.example.data.models.HttpMethod
 import com.example.interception.http.ParsedHttpMessage
 import java.io.ByteArrayOutputStream
@@ -53,9 +54,9 @@ class MitmProxyEngineCryptoFailClosedTest {
         db.close()
     }
 
-    private fun insertCryptoRule(action: RuleAction, domain: String = "crypto.example") = runBlocking {
-        db.interceptRuleDao().insert(
-            InterceptRuleEntity(
+    private fun insertCryptoRule(action: LegacyRuleAction, domain: String = "crypto.example") = runBlocking {
+        db.legacyRuleDao().insert(
+            LegacyInterceptRule(
                 name = "broken-crypto-rule",
                 domain = domain,
                 action = action,
@@ -78,7 +79,7 @@ class MitmProxyEngineCryptoFailClosedTest {
 
     @Test
     fun `BODY_ENCRYPT_AES failure never dials upstream and never enqueues into pending`() {
-        insertCryptoRule(RuleAction.BODY_ENCRYPT_AES)
+        insertCryptoRule(LegacyRuleAction.BODY_ENCRYPT_AES)
 
         val engine = MitmProxyEngine()
         val upstream = neverConnectUpstream()
@@ -95,7 +96,7 @@ class MitmProxyEngineCryptoFailClosedTest {
 
     @Test
     fun `BODY_ENCRYPT_AES failure writes a visible failure response to the client, not the plaintext`() {
-        insertCryptoRule(RuleAction.BODY_ENCRYPT_AES)
+        insertCryptoRule(LegacyRuleAction.BODY_ENCRYPT_AES)
 
         val engine = MitmProxyEngine()
         val clientOut = ByteArrayOutputStream()
@@ -113,7 +114,7 @@ class MitmProxyEngineCryptoFailClosedTest {
 
     @Test
     fun `BODY_ENCRYPT_AES failure still emits a captured transaction so it is visible in the traffic list`() {
-        insertCryptoRule(RuleAction.BODY_ENCRYPT_AES)
+        insertCryptoRule(LegacyRuleAction.BODY_ENCRYPT_AES)
 
         var captured: CapturedTrafficEntity? = null
         val engine = MitmProxyEngine(onDecryptedTransaction = { captured = it })
@@ -133,7 +134,7 @@ class MitmProxyEngineCryptoFailClosedTest {
 
     @Test
     fun `BODY_DECRYPT_AES failure on the response path never forwards the untransformed body to the client`() {
-        insertCryptoRule(RuleAction.BODY_DECRYPT_AES)
+        insertCryptoRule(LegacyRuleAction.BODY_DECRYPT_AES)
 
         val engine = MitmProxyEngine()
         val clientOut = ByteArrayOutputStream()
@@ -158,7 +159,7 @@ class MitmProxyEngineCryptoFailClosedTest {
 
     @Test
     fun `BODY_DECRYPT_AES failure on the response path emits the failure response, not the real one`() {
-        insertCryptoRule(RuleAction.BODY_DECRYPT_AES)
+        insertCryptoRule(LegacyRuleAction.BODY_DECRYPT_AES)
 
         var captured: CapturedTrafficEntity? = null
         val engine = MitmProxyEngine(onDecryptedTransaction = { captured = it })

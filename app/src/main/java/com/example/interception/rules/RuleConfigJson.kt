@@ -16,7 +16,7 @@ import java.lang.reflect.Type
  * `app/build.gradle.kts`); only the discriminators are hand-written here, so no
  * `moshi-adapters` dependency is needed.
  *
- * Decoding contract (mirrors "unknown `RuleAction` decodes to `LOG_ONLY`" in `RequestrTypeConverters`):
+ * Decoding contract (mirrors "unknown `LegacyRuleAction` decodes to `LOG_ONLY`" in `RequestrTypeConverters`):
  *  - a `configJson` whose `stage` is missing or unknown decodes to [ObserveConfig];
  *  - a `configJson` whose `stage` is known but whose body is malformed throws [JsonDataException]
  *    -- the caller (snapshot compiler / converter) decides whether to fail open. Silently turning a

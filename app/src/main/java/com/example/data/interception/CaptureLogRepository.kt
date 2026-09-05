@@ -2,13 +2,23 @@ package com.example.data.interception
 
 import android.content.Context
 import com.example.data.local.CapturedTrafficEntity
-import com.example.data.local.InterceptRuleEntity
+import com.example.data.local.InterceptorRuleDao
+import com.example.data.local.InterceptorRuleEntity
 import com.example.data.local.RequestrDatabase
-import com.example.data.local.RuleAction
 import com.example.data.local.TransactionTimingEntity
 import com.example.data.models.CapturedTrafficItem
 import com.example.data.models.HttpMethod
 import com.example.data.models.TrafficSource
+import com.example.interception.rules.GatewayConfig
+import com.example.interception.rules.GatewayMode
+import com.example.interception.rules.InterceptorRule
+import com.example.interception.rules.MatchCombine
+import com.example.interception.rules.ObserveConfig
+import com.example.interception.rules.RewriteConfig
+import com.example.interception.rules.RuleConfig
+import com.example.interception.rules.RuleMatcherSpec
+import com.example.interception.rules.RuleStage
+import com.example.interception.rules.RuleValidation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
@@ -101,46 +111,52 @@ object CaptureLogRepository {
      *
      * v2.1 rendered that row greyed-out unconditionally, which looked like state but was a
      * static style (APP_v2.md Bug 3.8). This queries the rules table so the row is disabled
-     * only when a block rule genuinely exists for the host.
+     * only when a block rule genuinely exists for the host. S4 task 34: the query runs against
+     * the typed `interceptor_rules` (an enabled GATEWAY/BLOCK rule whose host glob is
+     * `*<domain>*`, the exact shape [addBlockRule] and the v23 backfill write).
      */
     fun observeHasBlockRule(context: Context, domain: String): Flow<Boolean> =
-        RequestrDatabase.get(context).interceptRuleDao().observeHasBlockRuleForDomain(domain)
+        RequestrDatabase.get(context).interceptorRuleDao().observeHasBlockRuleForDomain(domain)
 
     suspend fun hasBlockRule(context: Context, domain: String): Boolean = withContext(Dispatchers.IO) {
-        RequestrDatabase.get(context).interceptRuleDao().hasBlockRuleForDomain(domain)
+        RequestrDatabase.get(context).interceptorRuleDao().hasBlockRuleForDomain(domain)
     }
 
     /** Persists a real block rule for [domain]; the disabled state above then follows from it. */
     suspend fun addBlockRule(context: Context, domain: String) = withContext(Dispatchers.IO) {
         if (domain.isBlank()) return@withContext
-        val dao = RequestrDatabase.get(context).interceptRuleDao()
+        val dao = RequestrDatabase.get(context).interceptorRuleDao()
         if (dao.hasBlockRuleForDomain(domain)) return@withContext
-        dao.insert(
-            InterceptRuleEntity(
-                name = "Block $domain",
-                pattern = Regex.escape(domain),
-                domain = domain,
-                action = RuleAction.BLOCK,
-                enabled = true,
-            )
+        insertTyped(
+            dao,
+            name = "Block $domain",
+            matcher = RuleMatcherSpec(hostGlobs = listOf("*$domain*"), urlRegex = Regex.escape(domain), combine = MatchCombine.ANY),
+            config = GatewayConfig(mode = GatewayMode.BLOCK, showBlockedInList = false),
         )
         Unit
     }
 
-    /** Creates an intercept rule seeded from an observed transaction. */
+    /**
+     * Creates a typed intercept rule seeded from an observed transaction: an exact-URL matcher
+     * (plus the host) with the given [stage]'s empty config -- a REWRITE rule with no steps by
+     * default, ready to be filled in from the rule editor. Anything but a rewrite/observe seed
+     * is a caller bug; the quick action only ever offers those two.
+     */
     suspend fun addRuleFromTransaction(
         context: Context,
         item: CapturedTrafficItem,
-        action: RuleAction,
+        stage: RuleStage = RuleStage.REWRITE,
     ) = withContext(Dispatchers.IO) {
-        RequestrDatabase.get(context).interceptRuleDao().insert(
-            InterceptRuleEntity(
-                name = "${item.method.name} ${item.path}".trim(),
-                pattern = Regex.escape(item.url),
-                domain = item.host,
-                action = action,
-                enabled = true,
-            )
+        val config: RuleConfig = when (stage) {
+            RuleStage.REWRITE -> RewriteConfig()
+            RuleStage.OBSERVE -> ObserveConfig
+            else -> throw IllegalArgumentException("addRuleFromTransaction seeds REWRITE or OBSERVE rules only, not $stage")
+        }
+        insertTyped(
+            RequestrDatabase.get(context).interceptorRuleDao(),
+            name = "${item.method.name} ${item.path}".trim(),
+            matcher = RuleMatcherSpec(hostGlobs = listOf("*${item.host}*"), urlRegex = Regex.escape(item.url), combine = MatchCombine.ANY),
+            config = config,
         )
         Unit
     }
@@ -155,54 +171,67 @@ object CaptureLogRepository {
      * 4. Block known fingerprint/tracking scripts
      * 5. Log API error responses (5xx) for debugging
      *
-     * Called once when the database is created (empty rules table).
+     * Called once when the database is created (empty rules table). The seeds are the typed
+     * equivalents of the v1 defaults (GATEWAY/BLOCK with `*<domain>*` + URL regex, OBSERVE with a
+     * URL regex) so a fresh v24 install and a migrated v22 install hold the same rules.
      */
     suspend fun seedDefaultRules(context: Context) = withContext(Dispatchers.IO) {
-        val dao = RequestrDatabase.get(context).interceptRuleDao()
-        val existing = dao.getEnabledRules()
-        if (existing.isNotEmpty()) return@withContext // Already seeded or user has rules
+        val dao = RequestrDatabase.get(context).interceptorRuleDao()
+        if (dao.count() > 0) return@withContext // Already seeded or user has rules
 
+        data class Seed(val name: String, val pattern: String, val domain: String, val config: RuleConfig)
+        val block = GatewayConfig(mode = GatewayMode.BLOCK, showBlockedInList = false)
         val defaults = listOf(
-            InterceptRuleEntity(
-                name = "Block Ad Trackers",
-                pattern = ".*(doubleclick\\.net|googlesyndication\\.com|adservice\\.google\\.com|ads\\.facebook\\.com|analyticsengine\\.s3\\.amazonaws\\.com).*",
-                domain = "doubleclick.net",
-                action = RuleAction.BLOCK,
-                enabled = true,
+            Seed(
+                "Block Ad Trackers",
+                ".*(doubleclick\\.net|googlesyndication\\.com|adservice\\.google\\.com|ads\\.facebook\\.com|analyticsengine\\.s3\\.amazonaws\\.com).*",
+                "doubleclick.net", block,
             ),
-            InterceptRuleEntity(
-                name = "Block Analytics",
-                pattern = ".*(google-analytics\\.com|analytics\\.google\\.com|segment\\.io|mixpanel\\.com|amplitude\\.com|hotjar\\.com).*",
-                domain = "google-analytics.com",
-                action = RuleAction.BLOCK,
-                enabled = true,
+            Seed(
+                "Block Analytics",
+                ".*(google-analytics\\.com|analytics\\.google\\.com|segment\\.io|mixpanel\\.com|amplitude\\.com|hotjar\\.com).*",
+                "google-analytics.com", block,
             ),
-            InterceptRuleEntity(
-                name = "Log Auth Endpoints",
-                pattern = ".*(auth|login|oauth|token|signin|signup|session).*",
-                domain = "",
-                action = RuleAction.LOG_ONLY,
-                enabled = true,
+            Seed("Log Auth Endpoints", ".*(auth|login|oauth|token|signin|signup|session).*", "", ObserveConfig),
+            Seed(
+                "Block Fingerprinting",
+                ".*(fingerprint|fpjs\\.io|fingerprintjs\\.com|browser-update\\.org|cdn\\.cookielaw\\.org).*",
+                "fpjs.io", block,
             ),
-            InterceptRuleEntity(
-                name = "Block Fingerprinting",
-                pattern = ".*(fingerprint|fpjs\\.io|fingerprintjs\\.com|browser-update\\.org|cdn\\.cookielaw\\.org).*",
-                domain = "fpjs.io",
-                action = RuleAction.BLOCK,
-                enabled = true,
-            ),
-            InterceptRuleEntity(
-                name = "Log API Errors",
-                pattern = ".*/api/.*",
-                domain = "",
-                action = RuleAction.LOG_ONLY,
-                enabled = true,
-            ),
+            Seed("Log API Errors", ".*/api/.*", "", ObserveConfig),
         )
 
-        defaults.forEach { rule ->
-            runCatching { dao.insert(rule) }
+        defaults.forEach { seed ->
+            runCatching {
+                insertTyped(
+                    dao,
+                    name = seed.name,
+                    matcher = RuleMatcherSpec(
+                        hostGlobs = if (seed.domain.isNotEmpty()) listOf("*${seed.domain}*") else emptyList(),
+                        urlRegex = seed.pattern,
+                        combine = MatchCombine.ANY,
+                    ),
+                    config = seed.config,
+                )
+            }
         }
+    }
+
+    /** Appends a validated typed rule after the current tail; returns its id, or null when validation refuses it. */
+    private suspend fun insertTyped(dao: InterceptorRuleDao, name: String, matcher: RuleMatcherSpec, config: RuleConfig): Long? {
+        val now = System.currentTimeMillis()
+        val rule = InterceptorRule(
+            name = name,
+            stage = config.stage,
+            enabled = true,
+            sortOrder = dao.maxSortOrder() + 1,
+            matcher = matcher,
+            config = config,
+            createdAt = now,
+            updatedAt = now,
+        )
+        if (RuleValidation.validate(rule, enabledRules = dao.countEnabled()).isNotEmpty()) return null
+        return dao.insert(InterceptorRuleEntity.fromDomain(rule))
     }
 }
 

@@ -2,9 +2,9 @@ package com.example.api
 
 import android.content.Context
 import android.util.Log
-import com.example.data.local.InterceptRuleEntity
+import com.example.data.local.InterceptorRuleEntity
 import com.example.data.local.RequestrDatabase
-import com.example.data.local.RuleAction
+import com.example.interception.rules.RuleApiJson
 import com.example.data.prefs.SettingsDataStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -303,64 +303,46 @@ object LanDashboardServer {
         )
     }
 
-    private fun ruleJson(rule: InterceptRuleEntity) = JSONObject()
-        .put("id", rule.id)
-        .put("name", rule.name)
-        .put("pattern", rule.pattern)
-        .put("domain", rule.domain)
-        .put("action", rule.action.name)
-        .put("enabled", rule.enabled)
-        .put("replacementValue", rule.replacementValue ?: JSONObject.NULL)
+    // S4 task 34: the rules CRUD mirrors LocalApiServer's typed `schemaVersion: 2` envelope
+    // (RuleApiJson). v1 flat bodies from the in-page form are accepted and converted; the list
+    // response carries the v1 projection fields the page renders (domain/pattern/action).
 
     private suspend fun dashListRules(): Triple<Int, String, String> {
-        val dao = db()?.interceptRuleDao() ?: return ok("[]")
-        val arr = JSONArray()
-        dao.observeAll().first().forEach { arr.put(ruleJson(it)) }
-        return ok(arr.toString())
+        val database = db() ?: return ok(RuleApiJson.envelope(emptyList()).toString())
+        return ok(RuleApiJson.envelope(database.interceptorRuleDao().getAllOrdered(), database.ruleFolderDao().getAll()).toString())
     }
 
     private suspend fun dashCreateRule(body: String): Triple<Int, String, String> {
-        val dao = db()?.interceptRuleDao() ?: return err(500, "db unavailable")
+        val dao = db()?.interceptorRuleDao() ?: return err(500, "db unavailable")
         val json = JSONObject(body)
-        val action = runCatching { RuleAction.valueOf(json.optString("action", "LOG_ONLY").uppercase()) }
-            .getOrDefault(RuleAction.LOG_ONLY)
-        val rule = InterceptRuleEntity(
-            name = json.optString("name", ""),
-            pattern = json.optString("pattern", ""),
-            domain = json.optString("domain", ""),
-            action = action,
-            enabled = json.optBoolean("enabled", true),
-            replacementValue = if (json.has("replacementValue") && !json.isNull("replacementValue")) json.getString("replacementValue") else null,
-        )
-        val id = dao.insert(rule)
-        return ok(ruleJson(rule.copy(id = id)).toString())
+        return when (val parsed = RuleApiJson.parseNewRule(json, sortOrder = dao.maxSortOrder() + 1, enabledRules = dao.countEnabled())) {
+            is RuleApiJson.Parsed.Invalid -> err(400, parsed.message)
+            is RuleApiJson.Parsed.Ok -> {
+                val id = dao.insert(InterceptorRuleEntity.fromDomain(parsed.rule))
+                ok(RuleApiJson.ruleToJson(parsed.rule.copy(id = id)).toString())
+            }
+        }
     }
 
     private suspend fun dashUpdateRule(idRaw: String, body: String): Triple<Int, String, String> {
         val id = idRaw.toLongOrNull() ?: return err(400, "invalid id")
-        val dao = db()?.interceptRuleDao() ?: return err(500, "db unavailable")
+        val dao = db()?.interceptorRuleDao() ?: return err(500, "db unavailable")
         val existing = dao.getById(id) ?: return err(404, "rule not found")
         val json = JSONObject(body)
-        val action = if (json.has("action")) {
-            runCatching { RuleAction.valueOf(json.getString("action").uppercase()) }.getOrDefault(existing.action)
-        } else existing.action
-        val updated = existing.copy(
-            name = if (json.has("name")) json.optString("name", existing.name) else existing.name,
-            pattern = if (json.has("pattern")) json.optString("pattern", existing.pattern) else existing.pattern,
-            domain = if (json.has("domain")) json.optString("domain", existing.domain) else existing.domain,
-            action = action,
-            enabled = if (json.has("enabled")) json.optBoolean("enabled", existing.enabled) else existing.enabled,
-            replacementValue = if (json.has("replacementValue")) {
-                if (json.isNull("replacementValue")) null else json.getString("replacementValue")
-            } else existing.replacementValue,
-        )
-        dao.update(updated)
-        return ok(ruleJson(updated).toString())
+        val enabledOthers = dao.countEnabled() - (if (existing.enabled) 1 else 0)
+        return when (val parsed = RuleApiJson.applyUpdate(existing.toDomain(), json, enabledRules = enabledOthers)) {
+            is RuleApiJson.Parsed.Invalid -> err(400, parsed.message)
+            is RuleApiJson.Parsed.Ok -> {
+                val updated = InterceptorRuleEntity.fromDomain(parsed.rule.copy(id = id))
+                dao.update(updated)
+                ok(RuleApiJson.ruleToJson(updated).toString())
+            }
+        }
     }
 
     private suspend fun dashDeleteRule(idRaw: String): Triple<Int, String, String> {
         val id = idRaw.toLongOrNull() ?: return err(400, "invalid id")
-        val dao = db()?.interceptRuleDao() ?: return err(500, "db unavailable")
+        val dao = db()?.interceptorRuleDao() ?: return err(500, "db unavailable")
         dao.deleteById(id)
         return ok("""{"status":"deleted","id":$id}""")
     }
@@ -474,13 +456,14 @@ async function showDetail(id) {
 
 async function refreshRules() {
   const res = await api('/dash/rules');
-  const rules = await res.json();
+  const json = await res.json();
+  const rules = Array.isArray(json.rules) ? json.rules : Array.isArray(json) ? json : [];
   const div = document.getElementById('rules');
   div.innerHTML = '';
   for (const r of rules) {
     const row = document.createElement('div');
     row.className = 'ruleRow';
-    row.innerHTML = `<b>${'$'}{r.name || '(unnamed)'}</b> <span>${'$'}{r.action}</span> ` +
+    row.innerHTML = `<b>${'$'}{r.name || '(unnamed)'}</b> <span>${'$'}{r.stage || ''}</span> <span>${'$'}{r.action}</span> ` +
       `<span>domain=${'$'}{r.domain}</span> <span>pattern=${'$'}{r.pattern}</span> ` +
       `<button data-id="${'$'}{r.id}" data-en="${'$'}{r.enabled}">${'$'}{r.enabled ? 'Disable' : 'Enable'}</button> ` +
       `<button data-del="${'$'}{r.id}">Delete</button>`;

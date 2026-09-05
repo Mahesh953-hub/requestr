@@ -1,7 +1,5 @@
 package com.example.interception.rules
 
-import com.example.data.local.InterceptRuleEntity
-import com.example.data.local.RuleAction
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -11,7 +9,7 @@ import org.json.JSONObject
  * a `schemaVersion: 1` file, and by `LocalApiServer` / `LanDashboardServer` when a v1 flat body is
  * POSTed -- one implementation, not three.
  *
- * ### Mapping (every one of the eleven [RuleAction] values lands on exactly one [RuleStage])
+ * ### Mapping (every one of the eleven [LegacyRuleAction] values lands on exactly one [RuleStage])
  *
  * | legacy action | stage | typed config |
  * |---|---|---|
@@ -62,7 +60,7 @@ object LegacyRuleConverter {
      * Converts one legacy row. [sortOrder] is supplied by the caller, which owns the ordering
      * contract (see the class KDoc); [convertAll] applies it.
      */
-    fun convert(legacy: InterceptRuleEntity, sortOrder: Int): ConversionResult {
+    fun convert(legacy: LegacyInterceptRule, sortOrder: Int): ConversionResult {
         val warnings = ArrayList<String>(2)
         val matcher = matcherOf(legacy)
         val config: RuleConfig = try {
@@ -90,8 +88,8 @@ object LegacyRuleConverter {
      * Converts a whole legacy table in evaluation order (`createdAt ASC, id ASC`), assigning
      * consecutive `sortOrder` values from [firstSortOrder]. Unconvertible rows do not consume a slot.
      */
-    fun convertAll(legacy: Collection<InterceptRuleEntity>, firstSortOrder: Int = 0): List<ConversionResult> {
-        val ordered = legacy.sortedWith(compareBy<InterceptRuleEntity> { it.createdAt }.thenBy { it.id })
+    fun convertAll(legacy: Collection<LegacyInterceptRule>, firstSortOrder: Int = 0): List<ConversionResult> {
+        val ordered = legacy.sortedWith(compareBy<LegacyInterceptRule> { it.createdAt }.thenBy { it.id })
         var next = firstSortOrder
         return ordered.map { row ->
             val result = convert(row, next)
@@ -103,7 +101,7 @@ object LegacyRuleConverter {
     // ── matcher ───────────────────────────────────────────────────────────────────────────────
 
     /** `domain` substring → `*domain*` glob; `pattern` → `urlRegex`; OR-combined. Both blank → matches nothing. */
-    fun matcherOf(legacy: InterceptRuleEntity): RuleMatcherSpec {
+    fun matcherOf(legacy: LegacyInterceptRule): RuleMatcherSpec {
         val hostGlobs = if (legacy.domain.isNotEmpty()) listOf("*${legacy.domain}*") else emptyList()
         val urlRegex = legacy.pattern.takeIf { it.isNotEmpty() }
         return RuleMatcherSpec(hostGlobs = hostGlobs, urlRegex = urlRegex, combine = MatchCombine.ANY)
@@ -111,21 +109,21 @@ object LegacyRuleConverter {
 
     // ── per-action config ─────────────────────────────────────────────────────────────────────
 
-    private fun configOf(legacy: InterceptRuleEntity, warnings: MutableList<String>): RuleConfig = when (legacy.action) {
-        RuleAction.BLOCK -> GatewayConfig(mode = GatewayMode.BLOCK, showBlockedInList = false)
-        RuleAction.FORCE_MITM -> GatewayConfig(mode = GatewayMode.FORCE_DECRYPT)
-        RuleAction.LOG_ONLY -> ObserveConfig
-        RuleAction.REDIRECT -> redirect(legacy, warnings)
-        RuleAction.MODIFY_REQUEST -> modifyRequest(legacy, warnings)
-        RuleAction.MODIFY_RESPONSE -> modifyResponse(legacy, warnings)
-        RuleAction.MOCK_RESPONSE -> mock(legacy, warnings)
-        RuleAction.SCRIPT_REWRITE -> script(legacy, warnings)
-        RuleAction.CHAOS -> chaos(legacy, warnings)
-        RuleAction.BODY_ENCRYPT_AES -> bodyCrypto(legacy, CryptoDirection.ENCRYPT, warnings)
-        RuleAction.BODY_DECRYPT_AES -> bodyCrypto(legacy, CryptoDirection.DECRYPT, warnings)
+    private fun configOf(legacy: LegacyInterceptRule, warnings: MutableList<String>): RuleConfig = when (legacy.action) {
+        LegacyRuleAction.BLOCK -> GatewayConfig(mode = GatewayMode.BLOCK, showBlockedInList = false)
+        LegacyRuleAction.FORCE_MITM -> GatewayConfig(mode = GatewayMode.FORCE_DECRYPT)
+        LegacyRuleAction.LOG_ONLY -> ObserveConfig
+        LegacyRuleAction.REDIRECT -> redirect(legacy, warnings)
+        LegacyRuleAction.MODIFY_REQUEST -> modifyRequest(legacy, warnings)
+        LegacyRuleAction.MODIFY_RESPONSE -> modifyResponse(legacy, warnings)
+        LegacyRuleAction.MOCK_RESPONSE -> mock(legacy, warnings)
+        LegacyRuleAction.SCRIPT_REWRITE -> script(legacy, warnings)
+        LegacyRuleAction.CHAOS -> chaos(legacy, warnings)
+        LegacyRuleAction.BODY_ENCRYPT_AES -> bodyCrypto(legacy, CryptoDirection.ENCRYPT, warnings)
+        LegacyRuleAction.BODY_DECRYPT_AES -> bodyCrypto(legacy, CryptoDirection.DECRYPT, warnings)
     }
 
-    private fun redirect(legacy: InterceptRuleEntity, warnings: MutableList<String>): RewriteConfig {
+    private fun redirect(legacy: LegacyInterceptRule, warnings: MutableList<String>): RewriteConfig {
         val target = legacy.replacementValue?.trim().orEmpty()
         if (target.isEmpty()) {
             warnings += "REDIRECT rule '${legacy.name}' (#${legacy.id}) has no target URL; converted to a no-op rewrite"
@@ -135,7 +133,7 @@ object LegacyRuleConverter {
         return RewriteConfig(redirection = RedirectSpec(targetUrl = target, preserveHost = false, directoryMatch = false))
     }
 
-    private fun modifyRequest(legacy: InterceptRuleEntity, warnings: MutableList<String>): RewriteConfig {
+    private fun modifyRequest(legacy: LegacyInterceptRule, warnings: MutableList<String>): RewriteConfig {
         val json = parseObjectOrNull(legacy, warnings) ?: return RewriteConfig()
         val mods = ArrayList<Modification>()
         // Order matters and matches RuleEnforcer.applyRequestModification exactly.
@@ -149,7 +147,7 @@ object LegacyRuleConverter {
         return RewriteConfig(requestModifications = mods, variables = variablesOf(json))
     }
 
-    private fun modifyResponse(legacy: InterceptRuleEntity, warnings: MutableList<String>): RewriteConfig {
+    private fun modifyResponse(legacy: LegacyInterceptRule, warnings: MutableList<String>): RewriteConfig {
         val json = parseObjectOrNull(legacy, warnings) ?: return RewriteConfig()
         val mods = ArrayList<Modification>()
         // Order matters and matches RuleEnforcer.applyResponseModification exactly: statusCode,
@@ -170,7 +168,7 @@ object LegacyRuleConverter {
         return RewriteConfig(responseModifications = mods, variables = variablesOf(json))
     }
 
-    private fun mock(legacy: InterceptRuleEntity, warnings: MutableList<String>): MockConfig {
+    private fun mock(legacy: LegacyInterceptRule, warnings: MutableList<String>): MockConfig {
         val json = parseObjectOrNull(legacy, warnings) ?: return MockConfig()
         val headers = LinkedHashMap<String, String>()
         json.optJSONObject("addHeaders")?.let { added ->
@@ -186,14 +184,14 @@ object LegacyRuleConverter {
         )
     }
 
-    private fun script(legacy: InterceptRuleEntity, warnings: MutableList<String>): ScriptConfig {
+    private fun script(legacy: LegacyInterceptRule, warnings: MutableList<String>): ScriptConfig {
         val json = parseObjectOrNull(legacy, warnings) ?: return ScriptConfig(source = "")
         val source = json.optString("script", "")
         if (source.isBlank()) warnings += "SCRIPT_REWRITE rule '${legacy.name}' (#${legacy.id}) has a blank script; converted as a no-op"
         return ScriptConfig(source = source, variables = variablesOf(json))
     }
 
-    private fun chaos(legacy: InterceptRuleEntity, warnings: MutableList<String>): ChaosConfig {
+    private fun chaos(legacy: LegacyInterceptRule, warnings: MutableList<String>): ChaosConfig {
         val json = parseObjectOrNull(legacy, warnings) ?: return ChaosConfig()
         val failRate = json.optDouble("failRate", 0.0).coerceIn(0.0, 1.0)
         val corruptBodyRate = json.optDouble("corruptBodyRate", 0.0).coerceIn(0.0, 1.0)
@@ -217,7 +215,7 @@ object LegacyRuleConverter {
         )
     }
 
-    private fun bodyCrypto(legacy: InterceptRuleEntity, direction: CryptoDirection, warnings: MutableList<String>): BodyCryptoConfig {
+    private fun bodyCrypto(legacy: LegacyInterceptRule, direction: CryptoDirection, warnings: MutableList<String>): BodyCryptoConfig {
         // RuleEnforcer.applyBodyCryptoWith: "REQUEST" -> request only, "RESPONSE" -> response only,
         // anything else (incl. "BOTH" and garbage) -> both. Normalise to the enum accordingly.
         val scope = when (legacy.cryptoScope.uppercase()) {
@@ -246,7 +244,7 @@ object LegacyRuleConverter {
     // ── helpers ───────────────────────────────────────────────────────────────────────────────
 
     /** Null for a blank config (a legitimate "no config" -- no warning) or a malformed one (warned). */
-    private fun parseObjectOrNull(legacy: InterceptRuleEntity, warnings: MutableList<String>): JSONObject? {
+    private fun parseObjectOrNull(legacy: LegacyInterceptRule, warnings: MutableList<String>): JSONObject? {
         val raw = legacy.replacementValue
         if (raw.isNullOrBlank()) return null
         return try {

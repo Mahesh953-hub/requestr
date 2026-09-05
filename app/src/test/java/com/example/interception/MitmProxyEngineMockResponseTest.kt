@@ -1,12 +1,13 @@
 package com.example.interception
 
+import com.example.interception.rules.legacyRuleDao
 import android.os.Build
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.CapturedTrafficEntity
-import com.example.data.local.InterceptRuleEntity
+import com.example.interception.rules.LegacyInterceptRule
 import com.example.data.local.RequestrDatabase
-import com.example.data.local.RuleAction
+import com.example.interception.rules.LegacyRuleAction
 import com.example.data.models.HttpMethod
 import com.example.interception.http.ParsedHttpMessage
 import java.io.ByteArrayOutputStream
@@ -52,11 +53,11 @@ class MitmProxyEngineMockResponseTest {
     }
 
     private fun insertMockRule(domain: String, replacementValue: String?) = runBlocking {
-        db.interceptRuleDao().insert(
-            InterceptRuleEntity(
+        db.legacyRuleDao().insert(
+            LegacyInterceptRule(
                 name = "mock",
                 domain = domain,
-                action = RuleAction.MOCK_RESPONSE,
+                action = LegacyRuleAction.MOCK_RESPONSE,
                 replacementValue = replacementValue,
             )
         )

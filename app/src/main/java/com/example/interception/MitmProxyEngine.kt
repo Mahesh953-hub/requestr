@@ -162,8 +162,7 @@ class MitmProxyEngine(
      */
     private val caTrustGate: CaTrustGate = CaTrustGate(),
     /**
-     * RNG every [RuleAction.CHAOS] roll ([RuleEnforcer.applyChaosToRequest] /
-     * [RuleEnforcer.applyChaosToResponse]) draws from. Test seam only -- production uses the
+     * RNG every CHAOS-stage roll ([com.example.interception.rules.stages.ChaosStage]) draws from. Test seam only -- production uses the
      * default so a `failRate` of 0.1 really is a 10% chance per matched exchange.
      */
     private val chaosRandom: kotlin.random.Random = kotlin.random.Random.Default,

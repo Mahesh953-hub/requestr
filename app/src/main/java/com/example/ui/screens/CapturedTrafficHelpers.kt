@@ -1,6 +1,6 @@
 package com.example.ui.screens
 
-import com.example.data.local.RuleAction
+import com.example.interception.rules.LegacyRuleAction
 import com.example.data.models.CapturedTrafficItem
 import com.example.ui.components.formatByteCount
 import org.json.JSONArray
@@ -256,57 +256,57 @@ fun computeReplaySchedule(
 //
 // [RulesConfigBottomSheet] previously rendered every non-BLOCK/LOG_ONLY action through a single
 // `else` branch -- harmless for the original 7-value enum (they all got the same generic
-// "secondary" color), but [RuleAction] has since grown two more values
-// ([RuleAction.BODY_ENCRYPT_AES]/[RuleAction.BODY_DECRYPT_AES]) that are meaningfully different
+// "secondary" color), but [LegacyRuleAction] has since grown two more values
+// ([LegacyRuleAction.BODY_ENCRYPT_AES]/[LegacyRuleAction.BODY_DECRYPT_AES]) that are meaningfully different
 // from a plain modifier and deserve their own visual identity, not a silent fallthrough. These
-// two functions are the single source of truth for every `RuleAction` label/color in the rules
-// UI -- exhaustive `when`s (no `else`), so adding a future `RuleAction` value is a compile error
+// two functions are the single source of truth for every `LegacyRuleAction` label/color in the rules
+// UI -- exhaustive `when`s (no `else`), so adding a future `LegacyRuleAction` value is a compile error
 // here until it's given a real label and color, rather than quietly falling back to something
 // generic.
 
-/** Human-readable label for a persisted [RuleAction], e.g. `"Body Encrypt (AES)"`. */
-fun ruleActionLabel(action: RuleAction): String = when (action) {
-    RuleAction.BLOCK -> "Block"
-    RuleAction.REDIRECT -> "Redirect"
-    RuleAction.MODIFY_REQUEST -> "Modify Request"
-    RuleAction.MODIFY_RESPONSE -> "Modify Response"
-    RuleAction.LOG_ONLY -> "Log Only"
-    RuleAction.FORCE_MITM -> "Force MITM"
-    RuleAction.MOCK_RESPONSE -> "Mock Response"
-    RuleAction.SCRIPT_REWRITE -> "Script Rewrite"
-    RuleAction.CHAOS -> "Chaos"
-    RuleAction.BODY_ENCRYPT_AES -> "Body Encrypt (AES)"
-    RuleAction.BODY_DECRYPT_AES -> "Body Decrypt (AES)"
+/** Human-readable label for a persisted [LegacyRuleAction], e.g. `"Body Encrypt (AES)"`. */
+fun ruleActionLabel(action: LegacyRuleAction): String = when (action) {
+    LegacyRuleAction.BLOCK -> "Block"
+    LegacyRuleAction.REDIRECT -> "Redirect"
+    LegacyRuleAction.MODIFY_REQUEST -> "Modify Request"
+    LegacyRuleAction.MODIFY_RESPONSE -> "Modify Response"
+    LegacyRuleAction.LOG_ONLY -> "Log Only"
+    LegacyRuleAction.FORCE_MITM -> "Force MITM"
+    LegacyRuleAction.MOCK_RESPONSE -> "Mock Response"
+    LegacyRuleAction.SCRIPT_REWRITE -> "Script Rewrite"
+    LegacyRuleAction.CHAOS -> "Chaos"
+    LegacyRuleAction.BODY_ENCRYPT_AES -> "Body Encrypt (AES)"
+    LegacyRuleAction.BODY_DECRYPT_AES -> "Body Decrypt (AES)"
 }
 
 /** ARGB color for [action]'s row/badge -- same `0xFF...` `Long` convention as [BadgePill]. */
-fun ruleActionColorHex(action: RuleAction): Long = when (action) {
-    RuleAction.BLOCK -> 0xFFEF4444
-    RuleAction.REDIRECT -> 0xFF8B5CF6
-    RuleAction.MODIFY_REQUEST -> 0xFF3B82F6
-    RuleAction.MODIFY_RESPONSE -> 0xFF6366F1
-    RuleAction.LOG_ONLY -> 0xFF64748B
-    RuleAction.FORCE_MITM -> 0xFFF59E0B
-    RuleAction.MOCK_RESPONSE -> 0xFF10B981
-    RuleAction.SCRIPT_REWRITE -> 0xFF14B8A6
-    RuleAction.CHAOS -> 0xFFEC4899
-    RuleAction.BODY_ENCRYPT_AES -> 0xFF06B6D4
-    RuleAction.BODY_DECRYPT_AES -> 0xFF0EA5E9
+fun ruleActionColorHex(action: LegacyRuleAction): Long = when (action) {
+    LegacyRuleAction.BLOCK -> 0xFFEF4444
+    LegacyRuleAction.REDIRECT -> 0xFF8B5CF6
+    LegacyRuleAction.MODIFY_REQUEST -> 0xFF3B82F6
+    LegacyRuleAction.MODIFY_RESPONSE -> 0xFF6366F1
+    LegacyRuleAction.LOG_ONLY -> 0xFF64748B
+    LegacyRuleAction.FORCE_MITM -> 0xFFF59E0B
+    LegacyRuleAction.MOCK_RESPONSE -> 0xFF10B981
+    LegacyRuleAction.SCRIPT_REWRITE -> 0xFF14B8A6
+    LegacyRuleAction.CHAOS -> 0xFFEC4899
+    LegacyRuleAction.BODY_ENCRYPT_AES -> 0xFF06B6D4
+    LegacyRuleAction.BODY_DECRYPT_AES -> 0xFF0EA5E9
 }
 
 /** Whether [action] is one of the two AES body-crypto actions that need a key alias/scope. */
-fun isBodyCryptoAction(action: RuleAction): Boolean =
-    action == RuleAction.BODY_ENCRYPT_AES || action == RuleAction.BODY_DECRYPT_AES
+fun isBodyCryptoAction(action: LegacyRuleAction): Boolean =
+    action == LegacyRuleAction.BODY_ENCRYPT_AES || action == LegacyRuleAction.BODY_DECRYPT_AES
 
 /**
- * The `InterceptRuleEntity.cryptoDirection` value implied by [action]. `RuleEnforcer.applyBodyCrypto`'s
+ * The `LegacyInterceptRule.cryptoDirection` value implied by [action]. `RuleEnforcer.applyBodyCrypto`'s
  * KDoc documents `cryptoDirection` as informational metadata only -- the actual encrypt-vs-decrypt
  * operation is driven by the `action` value itself -- so the rule editor derives (and keeps in
  * sync) this field from the selected action rather than exposing it as an independently
  * editable control that could silently drift out of sync with what the rule actually does.
  */
-fun impliedCryptoDirection(action: RuleAction): String =
-    if (action == RuleAction.BODY_DECRYPT_AES) "DECRYPT" else "ENCRYPT"
+fun impliedCryptoDirection(action: LegacyRuleAction): String =
+    if (action == LegacyRuleAction.BODY_DECRYPT_AES) "DECRYPT" else "ENCRYPT"
 
 /**
  * Whether [action]'s `replacementValue` is a message *body* (as opposed to REDIRECT's target URL
@@ -314,21 +314,21 @@ fun impliedCryptoDirection(action: RuleAction): String =
  * Use [replacementValueSpecFor] to ask the broader question of whether the action has a
  * replacement value at all.
  */
-fun supportsFileFixtureBody(action: RuleAction): Boolean = when (action) {
-    RuleAction.MOCK_RESPONSE, RuleAction.MODIFY_REQUEST, RuleAction.MODIFY_RESPONSE -> true
+fun supportsFileFixtureBody(action: LegacyRuleAction): Boolean = when (action) {
+    LegacyRuleAction.MOCK_RESPONSE, LegacyRuleAction.MODIFY_REQUEST, LegacyRuleAction.MODIFY_RESPONSE -> true
     else -> false
 }
 
 /**
  * Inline validation for a crypto rule's key alias -- returns a user-facing error string, or
- * `null` when [keyAlias] is fine. A blank alias on a [RuleAction.BODY_ENCRYPT_AES]/
- * [RuleAction.BODY_DECRYPT_AES] rule is a hard configuration error per
+ * `null` when [keyAlias] is fine. A blank alias on a [LegacyRuleAction.BODY_ENCRYPT_AES]/
+ * [LegacyRuleAction.BODY_DECRYPT_AES] rule is a hard configuration error per
  * [com.example.interception.RequestCryptoManager]'s fail-closed contract (it returns a
  * `CryptoResult.Failure` for a blank alias, never a silent pass-through) -- the rule editor must
  * block saving such a rule rather than let the user discover the failure only once the rule
  * actually fires in production traffic.
  */
-fun cryptoKeyAliasError(action: RuleAction, keyAlias: String): String? =
+fun cryptoKeyAliasError(action: LegacyRuleAction, keyAlias: String): String? =
     if (isBodyCryptoAction(action) && keyAlias.isBlank()) {
         "Key alias is required for ${ruleActionLabel(action)} -- a blank alias will fail at runtime."
     } else {

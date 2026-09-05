@@ -1,11 +1,12 @@
 package com.example.interception
 
+import com.example.interception.rules.legacyRuleDao
 import android.os.Build
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
-import com.example.data.local.InterceptRuleEntity
+import com.example.interception.rules.LegacyInterceptRule
 import com.example.data.local.RequestrDatabase
-import com.example.data.local.RuleAction
+import com.example.interception.rules.LegacyRuleAction
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -17,7 +18,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * Covers [ConnectControl.evaluate]'s mapping from [RuleAction] to [ConnectControl.Disposition]
+ * Covers [ConnectControl.evaluate]'s mapping from [LegacyRuleAction] to [ConnectControl.Disposition]
  * -- the single decision point every CONNECT call site (HttpProxyEngine, MitmProxyEngine,
  * GatewayEngine) now defers to instead of each re-implementing rule lookup.
  */
@@ -43,11 +44,11 @@ class ConnectControlTest {
 
     private fun insertRule(
         domain: String,
-        action: RuleAction,
+        action: LegacyRuleAction,
         replacementValue: String? = null,
     ) = runBlocking {
-        db.interceptRuleDao().insert(
-            InterceptRuleEntity(name = "test", domain = domain, action = action, replacementValue = replacementValue)
+        db.legacyRuleDao().insert(
+            LegacyInterceptRule(name = "test", domain = domain, action = action, replacementValue = replacementValue)
         )
         com.example.interception.rules.LegacyRuleTestSupport.syncSnapshotFromLegacy(db)
     }
@@ -60,7 +61,7 @@ class ConnectControlTest {
 
     @Test
     fun `BLOCK rule maps to Block with a reason`() {
-        insertRule("blocked.example", RuleAction.BLOCK)
+        insertRule("blocked.example", LegacyRuleAction.BLOCK)
         val disposition = ConnectControl.evaluate("blocked.example", 443)
         assertTrue(disposition is ConnectControl.Disposition.Block)
         assertTrue((disposition as ConnectControl.Disposition.Block).reason?.contains("blocked.example") == true)
@@ -68,14 +69,14 @@ class ConnectControlTest {
 
     @Test
     fun `FORCE_MITM rule maps to ForceMitm`() {
-        insertRule("mitm.example", RuleAction.FORCE_MITM)
+        insertRule("mitm.example", LegacyRuleAction.FORCE_MITM)
         val disposition = ConnectControl.evaluate("mitm.example", 443)
         assertTrue(disposition is ConnectControl.Disposition.ForceMitm)
     }
 
     @Test
     fun `REDIRECT rule with a replacementValue maps to Redirect`() {
-        insertRule("old.example", RuleAction.REDIRECT, replacementValue = "new.example:8443")
+        insertRule("old.example", LegacyRuleAction.REDIRECT, replacementValue = "new.example:8443")
         val disposition = ConnectControl.evaluate("old.example", 443)
         assertTrue(disposition is ConnectControl.Disposition.Redirect)
         assertEquals("new.example:8443", (disposition as ConnectControl.Disposition.Redirect).target)
@@ -83,16 +84,16 @@ class ConnectControlTest {
 
     @Test
     fun `REDIRECT rule with a blank replacementValue falls back to AllowOpaque`() {
-        insertRule("old.example", RuleAction.REDIRECT, replacementValue = "")
+        insertRule("old.example", LegacyRuleAction.REDIRECT, replacementValue = "")
         val disposition = ConnectControl.evaluate("old.example", 443)
         assertTrue(disposition is ConnectControl.Disposition.AllowOpaque)
     }
 
     @Test
     fun `LOG_ONLY REDIRECT and MODIFY rules with no CONNECT-level meaning fall back to AllowOpaque`() {
-        insertRule("a.example", RuleAction.LOG_ONLY)
-        insertRule("b.example", RuleAction.MODIFY_REQUEST)
-        insertRule("c.example", RuleAction.MODIFY_RESPONSE)
+        insertRule("a.example", LegacyRuleAction.LOG_ONLY)
+        insertRule("b.example", LegacyRuleAction.MODIFY_REQUEST)
+        insertRule("c.example", LegacyRuleAction.MODIFY_RESPONSE)
         assertTrue(ConnectControl.evaluate("a.example", 443) is ConnectControl.Disposition.AllowOpaque)
         assertTrue(ConnectControl.evaluate("b.example", 443) is ConnectControl.Disposition.AllowOpaque)
         assertTrue(ConnectControl.evaluate("c.example", 443) is ConnectControl.Disposition.AllowOpaque)
@@ -107,7 +108,7 @@ class ConnectControlTest {
 
     @Test
     fun `FORCE_MITM rule stays ForceMitm below the pinning-failure threshold`() {
-        insertRule("pinned.example", RuleAction.FORCE_MITM)
+        insertRule("pinned.example", LegacyRuleAction.FORCE_MITM)
         ConnectControl.PinningFailureRegistry.recordFailure("pinned.example", threshold = 3)
         ConnectControl.PinningFailureRegistry.recordFailure("pinned.example", threshold = 3)
         assertTrue(ConnectControl.evaluate("pinned.example", 443) is ConnectControl.Disposition.ForceMitm)
@@ -115,15 +116,15 @@ class ConnectControlTest {
 
     @Test
     fun `FORCE_MITM rule downgrades to AllowOpaque once the pinning-failure threshold trips`() {
-        insertRule("pinned.example", RuleAction.FORCE_MITM)
+        insertRule("pinned.example", LegacyRuleAction.FORCE_MITM)
         repeat(3) { ConnectControl.PinningFailureRegistry.recordFailure("pinned.example", threshold = 3) }
         assertTrue(ConnectControl.evaluate("pinned.example", 443) is ConnectControl.Disposition.AllowOpaque)
     }
 
     @Test
     fun `pinning bypass is host-scoped and case-insensitive, does not leak to other hosts`() {
-        insertRule("pinned.example", RuleAction.FORCE_MITM)
-        insertRule("other.example", RuleAction.FORCE_MITM)
+        insertRule("pinned.example", LegacyRuleAction.FORCE_MITM)
+        insertRule("other.example", LegacyRuleAction.FORCE_MITM)
         repeat(3) { ConnectControl.PinningFailureRegistry.recordFailure("Pinned.Example", threshold = 3) }
         assertTrue(ConnectControl.evaluate("pinned.example", 443) is ConnectControl.Disposition.AllowOpaque)
         assertTrue(ConnectControl.evaluate("other.example", 443) is ConnectControl.Disposition.ForceMitm)
@@ -131,8 +132,8 @@ class ConnectControlTest {
 
     @Test
     fun `pinning bypass does not affect BLOCK or REDIRECT dispositions`() {
-        insertRule("blocked.example", RuleAction.BLOCK)
-        insertRule("old.example", RuleAction.REDIRECT, replacementValue = "new.example:8443")
+        insertRule("blocked.example", LegacyRuleAction.BLOCK)
+        insertRule("old.example", LegacyRuleAction.REDIRECT, replacementValue = "new.example:8443")
         repeat(3) {
             ConnectControl.PinningFailureRegistry.recordFailure("blocked.example", threshold = 3)
             ConnectControl.PinningFailureRegistry.recordFailure("old.example", threshold = 3)

@@ -12,6 +12,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import org.json.JSONObject
+import com.example.data.local.InterceptorRuleEntity
+import com.example.interception.rules.RuleApiJson
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.ServerSocket
@@ -696,80 +698,44 @@ object LocalApiServer {
     }
 
     /**
-     * `GET /api/rules` — serializes every [com.example.data.local.InterceptRuleEntity] into the
-     * exact shape the MV3 extension's `enforcer.mjs` requires: `{ id, name, pattern, domain,
-     * action, enabled, replacementValue }` (see enforcer.mjs:9-11's own doc comment). FIX 2:
-     * previously this omitted `domain` (so `checkRules()`'s domain-only match branch could never
-     * fire) and `replacementValue` (so REDIRECT/MODIFY_REQUEST/MODIFY_RESPONSE rules had no
-     * configuration for `parseRequestModification()`/`parseResponseModification()` to parse).
-     * Also rebuilt on [JSONObject]/[JSONArray] rather than hand-rolled string interpolation with
-     * `.replace("\"","\\\"")`, which is not correct JSON escaping (breaks on backslashes,
-     * newlines, and control characters — all things a regex `pattern` or a JSON-valued
-     * `replacementValue` can legitimately contain). `replacementValue` is nullable on the entity,
-     * so it serializes as JSON `null` (via [JSONObject.put] with a null value), never the string
-     * `"null"`.
+     * `GET /api/rules` — S4 task 34: emits the typed `schemaVersion: 2` envelope
+     * (`{schemaVersion, rules: [...], folders: [...]}`, see [RuleApiJson]) built from
+     * `interceptor_rules` in evaluation order. Each rule also carries the v1 compatibility
+     * projection (`pattern`/`domain`/`action`/`replacementValue`, [com.example.interception.rules.LegacyRuleProjection])
+     * so the MV3 extension's `enforcer.mjs` -- which unwraps `json.rules` already -- keeps
+     * matching the rules it can express. Built on [JSONObject]/[JSONArray] rather than string
+     * interpolation, so regex patterns and JSON-valued configs are escaped correctly.
      */
     private suspend fun listRules(): Triple<Int, String, String> {
         return try {
-            val dao = db()?.interceptRuleDao() ?: return ok("[]")
-            val rules = dao.observeAll().first()
-            val arr = org.json.JSONArray()
-            for (rule in rules) {
-                arr.put(
-                    JSONObject()
-                        .put("id", rule.id)
-                        .put("name", rule.name)
-                        .put("pattern", rule.pattern)
-                        .put("domain", rule.domain)
-                        .put("action", rule.action.name)
-                        .put("enabled", rule.enabled)
-                        // org.json's JSONObject.put(key, null) REMOVES the key entirely rather
-                        // than serializing a JSON null -- JSONObject.NULL is the sentinel that
-                        // actually produces `"replacementValue":null` on the wire.
-                        .put("replacementValue", rule.replacementValue ?: JSONObject.NULL)
-                )
-            }
-            ok(arr.toString())
-        } catch (_: Exception) { ok("[]") }
+            val database = db() ?: return ok(RuleApiJson.envelope(emptyList()).toString())
+            val rules = database.interceptorRuleDao().getAllOrdered()
+            val folders = database.ruleFolderDao().getAll()
+            ok(RuleApiJson.envelope(rules, folders).toString())
+        } catch (_: Exception) { ok(RuleApiJson.envelope(emptyList()).toString()) }
     }
 
-    /** Serializes one [com.example.data.local.InterceptRuleEntity] with the exact same field set
-     *  [listRules] emits per-entry — shared so create/update responses match the GET shape. */
-    private fun ruleToJson(rule: com.example.data.local.InterceptRuleEntity): JSONObject =
-        JSONObject()
-            .put("id", rule.id)
-            .put("name", rule.name)
-            .put("pattern", rule.pattern)
-            .put("domain", rule.domain)
-            .put("action", rule.action.name)
-            .put("enabled", rule.enabled)
-            .put("replacementValue", rule.replacementValue ?: JSONObject.NULL)
-
     /**
-     * `POST /api/rules` — creates a new [com.example.data.local.InterceptRuleEntity]. Body:
-     * `{"name","pattern","domain","action","enabled","replacementValue"}`, all optional except
-     * `action` must be one of [com.example.data.local.RuleAction]'s names when present (defaults
-     * to `LOG_ONLY`, the same safe default the entity itself declares, when absent or
-     * unrecognized) — added for the LAN dashboard's rules editor (master plan §2.16) and for any
-     * other authenticated local caller.
+     * `POST /api/rules` — creates a typed rule. Accepts the v2 body (`{"name","stage","enabled",
+     * "matcher":{...},"config":{...}}`) or a v1 flat body (`{"name","pattern","domain","action",
+     * "replacementValue"}`), the latter converted through `LegacyRuleConverter` -- one converter
+     * shared with import and the v23 migration. The new rule is appended after the current tail
+     * (`sortOrder = max + 1`), validated by `RuleValidation` (400 on a problem) and echoed back in
+     * the v2 shape. Added for the LAN dashboard's rules editor (master plan §2.16).
      */
     private suspend fun createRule(body: String): Triple<Int, String, String> {
         return try {
-            val dao = db()?.interceptRuleDao() ?: return err(500, "db unavailable")
+            val database = db() ?: return err(500, "db unavailable")
+            val dao = database.interceptorRuleDao()
             val json = JSONObject(body)
-            val action = runCatching {
-                com.example.data.local.RuleAction.valueOf(json.optString("action", "LOG_ONLY").uppercase())
-            }.getOrDefault(com.example.data.local.RuleAction.LOG_ONLY)
-            val rule = com.example.data.local.InterceptRuleEntity(
-                name = json.optString("name", ""),
-                pattern = json.optString("pattern", ""),
-                domain = json.optString("domain", ""),
-                action = action,
-                enabled = json.optBoolean("enabled", true),
-                replacementValue = json.optNullableString("replacementValue"),
-            )
-            val id = dao.insert(rule)
-            ok(ruleToJson(rule.copy(id = id)).toString())
+            val parsed = RuleApiJson.parseNewRule(json, sortOrder = dao.maxSortOrder() + 1, enabledRules = dao.countEnabled())
+            when (parsed) {
+                is RuleApiJson.Parsed.Invalid -> err(400, parsed.message)
+                is RuleApiJson.Parsed.Ok -> {
+                    val id = dao.insert(InterceptorRuleEntity.fromDomain(parsed.rule))
+                    ok(RuleApiJson.ruleToJson(parsed.rule.copy(id = id)).toString())
+                }
+            }
         } catch (e: Exception) {
             err(400, e.message ?: "bad request")
         }
@@ -777,30 +743,26 @@ object LocalApiServer {
 
     /**
      * `PUT /api/rules/{id}` — partial update: every field in the JSON body overwrites the
-     * matching column, any field the caller omits keeps its existing stored value (so a
+     * matching stored value, any field the caller omits keeps its existing value (so a
      * dashboard "toggle enabled" click can PUT `{"enabled":false}` alone without having to
-     * resend the whole rule).
+     * resend the whole rule). Accepts v2 and v1 bodies exactly like [createRule].
      */
     private suspend fun updateRule(idRaw: String, body: String): Triple<Int, String, String> {
         val id = idRaw.toLongOrNull() ?: return err(400, "invalid id")
         return try {
-            val dao = db()?.interceptRuleDao() ?: return err(500, "db unavailable")
+            val database = db() ?: return err(500, "db unavailable")
+            val dao = database.interceptorRuleDao()
             val existing = dao.getById(id) ?: return err(404, "rule not found")
             val json = JSONObject(body)
-            val action = if (json.has("action")) {
-                runCatching { com.example.data.local.RuleAction.valueOf(json.getString("action").uppercase()) }
-                    .getOrDefault(existing.action)
-            } else existing.action
-            val updated = existing.copy(
-                name = if (json.has("name")) json.optString("name", existing.name) else existing.name,
-                pattern = if (json.has("pattern")) json.optString("pattern", existing.pattern) else existing.pattern,
-                domain = if (json.has("domain")) json.optString("domain", existing.domain) else existing.domain,
-                action = action,
-                enabled = if (json.has("enabled")) json.optBoolean("enabled", existing.enabled) else existing.enabled,
-                replacementValue = if (json.has("replacementValue")) json.optNullableString("replacementValue") else existing.replacementValue,
-            )
-            dao.update(updated)
-            ok(ruleToJson(updated).toString())
+            val enabledOthers = dao.countEnabled() - (if (existing.enabled) 1 else 0)
+            when (val parsed = RuleApiJson.applyUpdate(existing.toDomain(), json, enabledRules = enabledOthers)) {
+                is RuleApiJson.Parsed.Invalid -> err(400, parsed.message)
+                is RuleApiJson.Parsed.Ok -> {
+                    val updated = InterceptorRuleEntity.fromDomain(parsed.rule.copy(id = id))
+                    dao.update(updated)
+                    ok(RuleApiJson.ruleToJson(updated).toString())
+                }
+            }
         } catch (e: Exception) {
             err(400, e.message ?: "bad request")
         }
@@ -811,7 +773,7 @@ object LocalApiServer {
     private suspend fun deleteRule(idRaw: String): Triple<Int, String, String> {
         val id = idRaw.toLongOrNull() ?: return err(400, "invalid id")
         return try {
-            val dao = db()?.interceptRuleDao() ?: return err(500, "db unavailable")
+            val dao = db()?.interceptorRuleDao() ?: return err(500, "db unavailable")
             dao.deleteById(id)
             ok("""{"status":"deleted","id":$id}""")
         } catch (e: Exception) {

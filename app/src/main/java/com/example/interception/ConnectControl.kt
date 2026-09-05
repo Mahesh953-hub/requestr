@@ -34,7 +34,7 @@ object ConnectControl {
     /**
      * What to do with one CONNECT (or SOCKS/transparent) tunnel request. S4 task 26/27: produced
      * by [com.example.interception.rules.stages.AccessControlStage] from a [RuleDecision]; the
-     * legacy `RuleAction`-driven mapping is gone.
+     * legacy `LegacyRuleAction`-driven mapping is gone.
      */
     sealed class Disposition {
         /** Relay the tunnel opaquely (no decryption). The default when nothing constrains the flow. */

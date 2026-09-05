@@ -1,7 +1,5 @@
 package com.example.interception.rules
 
-import com.example.data.local.InterceptRuleEntity
-import com.example.data.local.RuleAction
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -232,7 +230,7 @@ class CompiledMatcherTest {
         val hosts = listOf("ads.example", "api.example.com", "aXb.net", "cdn.other", "example", "", "x")
         val urls = listOf("https://api.example.com/tracking/x", "http://cdn.other/track/", "https://aXb.net/", "", "https://ads.example:443/")
         for ((domain, pattern) in legacyRows) {
-            val spec = LegacyRuleConverter.matcherOf(InterceptRuleEntity(id = 1, name = "r", pattern = pattern, domain = domain, action = RuleAction.LOG_ONLY))
+            val spec = LegacyRuleConverter.matcherOf(LegacyInterceptRule(id = 1, name = "r", pattern = pattern, domain = domain, action = LegacyRuleAction.LOG_ONLY))
             val compiled = compile(spec)
             for (host in hosts) for (url in urls) {
                 assertEquals(

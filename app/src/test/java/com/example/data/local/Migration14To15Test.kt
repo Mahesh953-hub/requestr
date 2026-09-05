@@ -57,7 +57,7 @@ class Migration14To15Test {
 
         db = helper.runMigrationsAndValidate(testDbName, 15, false, RequestrDatabase.MIGRATION_14_15)
 
-        // Pre-existing intercept_rules row: crypto columns default to InterceptRuleEntity's Kotlin
+        // Pre-existing intercept_rules row: crypto columns default to LegacyInterceptRule's Kotlin
         // defaults; the pre-existing columns are untouched.
         var cursor = db.query("SELECT name, action, cryptoKeyAlias, cryptoAlgorithm, cryptoDirection, cryptoScope FROM intercept_rules WHERE id = 1")
         assertTrue(cursor.moveToFirst())

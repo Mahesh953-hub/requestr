@@ -1,10 +1,11 @@
 package com.example.interception
 
+import com.example.interception.rules.legacyRuleDao
 import android.os.Build
 import androidx.test.core.app.ApplicationProvider
-import com.example.data.local.InterceptRuleEntity
+import com.example.interception.rules.LegacyInterceptRule
 import com.example.data.local.RequestrDatabase
-import com.example.data.local.RuleAction
+import com.example.interception.rules.LegacyRuleAction
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -101,8 +102,8 @@ class HttpProxyEngineConnectTest {
     @Test
     fun `CONNECT to a BLOCK-ruled host is refused and persisted as BLOCKED`() {
         runBlocking {
-            RequestrDatabase.get(context).interceptRuleDao().insert(
-                InterceptRuleEntity(name = "test", domain = "blocked.example", action = RuleAction.BLOCK)
+            RequestrDatabase.get(context).legacyRuleDao().insert(
+                LegacyInterceptRule(name = "test", domain = "blocked.example", action = LegacyRuleAction.BLOCK)
             )
             com.example.interception.rules.LegacyRuleTestSupport.syncSnapshotFromLegacy(RequestrDatabase.get(context))
         }
@@ -117,8 +118,8 @@ class HttpProxyEngineConnectTest {
     @Test
     fun `CONNECT to a FORCE_MITM-ruled host is honestly refused, not silently opaque`() {
         runBlocking {
-            RequestrDatabase.get(context).interceptRuleDao().insert(
-                InterceptRuleEntity(name = "test", domain = "mitm.example", action = RuleAction.FORCE_MITM)
+            RequestrDatabase.get(context).legacyRuleDao().insert(
+                LegacyInterceptRule(name = "test", domain = "mitm.example", action = LegacyRuleAction.FORCE_MITM)
             )
             com.example.interception.rules.LegacyRuleTestSupport.syncSnapshotFromLegacy(RequestrDatabase.get(context))
         }
@@ -188,8 +189,8 @@ class HttpProxyEngineConnectTest {
     @Test
     fun `SOCKS5 CONNECT to a BLOCK-ruled host is refused with reply 0x02 and persisted as BLOCKED`() {
         runBlocking {
-            RequestrDatabase.get(context).interceptRuleDao().insert(
-                InterceptRuleEntity(name = "test", domain = "socks-blocked.example", action = RuleAction.BLOCK)
+            RequestrDatabase.get(context).legacyRuleDao().insert(
+                LegacyInterceptRule(name = "test", domain = "socks-blocked.example", action = LegacyRuleAction.BLOCK)
             )
             com.example.interception.rules.LegacyRuleTestSupport.syncSnapshotFromLegacy(RequestrDatabase.get(context))
         }

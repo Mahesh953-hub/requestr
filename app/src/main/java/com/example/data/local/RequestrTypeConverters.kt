@@ -37,13 +37,6 @@ class RequestrTypeConverters {
     fun nameToCaptureTier(value: String?): CaptureTier =
         runCatching { CaptureTier.valueOf(value ?: "") }.getOrNull() ?: CaptureTier.NONE
 
-    @TypeConverter
-    fun ruleActionToName(value: RuleAction?): String = (value ?: RuleAction.LOG_ONLY).name
-
-    @TypeConverter
-    fun nameToRuleAction(value: String?): RuleAction =
-        runCatching { RuleAction.valueOf(value ?: "") }.getOrNull() ?: RuleAction.LOG_ONLY
-
     // -- S4 task 24: typed rule stage (interceptor_rules.stage) ----------------------------------
 
     @TypeConverter

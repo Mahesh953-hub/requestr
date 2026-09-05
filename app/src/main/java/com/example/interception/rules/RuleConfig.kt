@@ -1,6 +1,5 @@
 package com.example.interception.rules
 
-import com.example.interception.RuleEnforcer
 import com.example.scripting.JsScriptEngine
 import com.squareup.moshi.JsonClass
 
@@ -277,7 +276,7 @@ data class ThrottleConfig(
 /**
  * Typed form of the legacy CHAOS `replacementValue`. The joint-probability semantics
  * (P(fail)=f, P(corrupt)=(1-f)*c, P(delay)=(1-f)*(1-c)) live in `ChaosInjector` and are unchanged.
- * Delay bounds are clamped to `[0, RuleEnforcer.MAX_CHAOS_DELAY_MS]` by the converter and validator.
+ * Delay bounds are clamped to `[0, RuleLimits.MAX_CHAOS_DELAY_MS]` by the converter and validator.
  */
 @JsonClass(generateAdapter = true)
 data class ChaosConfig(

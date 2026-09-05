@@ -15,6 +15,7 @@ import com.example.interception.rules.CryptoDirection
 import com.example.interception.rules.CryptoScope
 import com.example.interception.rules.GatewayConfig
 import com.example.interception.rules.GatewayMode
+import com.example.interception.rules.LegacyRuleAction
 import com.example.interception.rules.MatchCombine
 import com.example.interception.rules.MockConfig
 import com.example.interception.rules.Modification
@@ -36,7 +37,7 @@ import org.robolectric.RobolectricTestRunner
 
 /**
  * S4 task 24, v22 → v23. Seeds a v22 `intercept_rules` table with one row per legacy
- * [RuleAction] (plus ordering and edge cases), runs [MIGRATION_22_23] with Room schema validation,
+ * [LegacyRuleAction] (plus ordering and edge cases), runs [MIGRATION_22_23] with Room schema validation,
  * and asserts the typed rows: stage, decoded config, evaluation order → `sortOrder`, and the
  * `legacyRuleId` back-link. `intercept_rules` must be untouched (v24 drops it, not v23).
  */
@@ -60,7 +61,7 @@ class Migration22To23Test {
         db: SupportSQLiteDatabase,
         id: Long,
         name: String,
-        action: RuleAction,
+        action: LegacyRuleAction,
         createdAt: Long,
         domain: String = "",
         pattern: String = "",
@@ -113,24 +114,24 @@ class Migration22To23Test {
     fun `v23 backfills every legacy action into a typed rule in evaluation order`() {
         var db = helper.createDatabase(testDbName, 22)
         // Deliberately out of id order and with a createdAt tie so the ORDER BY contract is exercised.
-        insertLegacy(db, 11, "block ads", RuleAction.BLOCK, createdAt = 5_000, domain = "ads.example")
-        insertLegacy(db, 2, "force", RuleAction.FORCE_MITM, createdAt = 1_000, domain = "pinned.example")
-        insertLegacy(db, 3, "log", RuleAction.LOG_ONLY, createdAt = 1_000, pattern = "^https://log/", enabled = false)
-        insertLegacy(db, 4, "redirect", RuleAction.REDIRECT, createdAt = 2_000, domain = "prod.example", replacement = "https://staging.example/")
-        insertLegacy(db, 5, "mod req", RuleAction.MODIFY_REQUEST, createdAt = 2_500, pattern = "/api/",
+        insertLegacy(db, 11, "block ads", LegacyRuleAction.BLOCK, createdAt = 5_000, domain = "ads.example")
+        insertLegacy(db, 2, "force", LegacyRuleAction.FORCE_MITM, createdAt = 1_000, domain = "pinned.example")
+        insertLegacy(db, 3, "log", LegacyRuleAction.LOG_ONLY, createdAt = 1_000, pattern = "^https://log/", enabled = false)
+        insertLegacy(db, 4, "redirect", LegacyRuleAction.REDIRECT, createdAt = 2_000, domain = "prod.example", replacement = "https://staging.example/")
+        insertLegacy(db, 5, "mod req", LegacyRuleAction.MODIFY_REQUEST, createdAt = 2_500, pattern = "/api/",
             replacement = """{"addHeaders":{"x-debug":"1"},"removeHeaders":["cookie"],"bodyReplace":"file:///sdcard/f.json","variables":{"t":"1"}}""")
-        insertLegacy(db, 6, "mod resp", RuleAction.MODIFY_RESPONSE, createdAt = 3_000, domain = "api.example",
+        insertLegacy(db, 6, "mod resp", LegacyRuleAction.MODIFY_RESPONSE, createdAt = 3_000, domain = "api.example",
             replacement = """{"statusCode":500,"addHeaders":{"x-r":"y"},"bodyReplace":"oops","removeHeaders":["etag"]}""")
-        insertLegacy(db, 7, "mock", RuleAction.MOCK_RESPONSE, createdAt = 3_500, domain = "mock.example",
+        insertLegacy(db, 7, "mock", LegacyRuleAction.MOCK_RESPONSE, createdAt = 3_500, domain = "mock.example",
             replacement = """{"statusCode":201,"statusMessage":"Created","addHeaders":{"Content-Type":"text/plain"},"bodyReplace":"hi"}""")
-        insertLegacy(db, 8, "script", RuleAction.SCRIPT_REWRITE, createdAt = 4_000, domain = "js.example",
+        insertLegacy(db, 8, "script", LegacyRuleAction.SCRIPT_REWRITE, createdAt = 4_000, domain = "js.example",
             replacement = """{"script":"function onRequest(r){}"}""")
-        insertLegacy(db, 9, "chaos", RuleAction.CHAOS, createdAt = 4_500, domain = "chaos.example",
+        insertLegacy(db, 9, "chaos", LegacyRuleAction.CHAOS, createdAt = 4_500, domain = "chaos.example",
             replacement = """{"failRate":0.5,"delayMs":[100,200]}""")
-        insertLegacy(db, 10, "enc", RuleAction.BODY_ENCRYPT_AES, createdAt = 4_750, domain = "enc.example", alias = "k-enc", scope = "REQUEST")
-        insertLegacy(db, 1, "dec", RuleAction.BODY_DECRYPT_AES, createdAt = 6_000, domain = "dec.example", alias = "k-dec", direction = "DECRYPT", scope = "RESPONSE")
+        insertLegacy(db, 10, "enc", LegacyRuleAction.BODY_ENCRYPT_AES, createdAt = 4_750, domain = "enc.example", alias = "k-enc", scope = "REQUEST")
+        insertLegacy(db, 1, "dec", LegacyRuleAction.BODY_DECRYPT_AES, createdAt = 6_000, domain = "dec.example", alias = "k-dec", direction = "DECRYPT", scope = "RESPONSE")
         // Malformed JSON: legacy fail-open -> empty config, still converted.
-        insertLegacy(db, 12, "broken", RuleAction.MOCK_RESPONSE, createdAt = 7_000, domain = "b.example", replacement = "{nope")
+        insertLegacy(db, 12, "broken", LegacyRuleAction.MOCK_RESPONSE, createdAt = 7_000, domain = "b.example", replacement = "{nope")
         db.close()
 
         db = helper.runMigrationsAndValidate(testDbName, 23, true, MIGRATION_22_23)
@@ -198,8 +199,8 @@ class Migration22To23Test {
     @Test
     fun `migrated database opens through Room with the typed DAO reading the same rows`() {
         var db = helper.createDatabase(testDbName, 22)
-        insertLegacy(db, 1, "a", RuleAction.BLOCK, createdAt = 1, domain = "a.example")
-        insertLegacy(db, 2, "b", RuleAction.LOG_ONLY, createdAt = 2, domain = "b.example", enabled = false)
+        insertLegacy(db, 1, "a", LegacyRuleAction.BLOCK, createdAt = 1, domain = "a.example")
+        insertLegacy(db, 2, "b", LegacyRuleAction.LOG_ONLY, createdAt = 2, domain = "b.example", enabled = false)
         db.close()
         helper.runMigrationsAndValidate(testDbName, 23, true, MIGRATION_22_23).close()
 
@@ -220,8 +221,9 @@ class Migration22To23Test {
                 assertEquals(RuleStage.GATEWAY, domain.stage)
                 assertTrue(room.interceptorRuleDao().hasBlockRuleForDomain("a.example"))
                 assertFalse(room.interceptorRuleDao().hasBlockRuleForDomain("b.example"))
-                // Legacy DAO still answers -- the table is read-only until v24, not gone.
-                assertEquals(1, room.interceptRuleDao().getEnabledRules().size)
+                // ALL_MIGRATIONS carried the file on to v24, which dropped `intercept_rules`
+                // (MigrationRulesDropLegacyTest covers that step); the typed rows are what remain.
+                assertEquals(1, room.interceptorRuleDao().getEnabledOrdered().size)
             }
         } finally {
             room.close()

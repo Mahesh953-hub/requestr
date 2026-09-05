@@ -5,6 +5,8 @@ import android.database.sqlite.SQLiteDatabase
 import android.util.Log
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.example.interception.rules.LegacyInterceptRule
+import com.example.interception.rules.LegacyRuleAction
 import com.example.interception.rules.LegacyRuleConverter
 import com.example.interception.rules.RuleConfigJson
 
@@ -20,8 +22,8 @@ import com.example.interception.rules.RuleConfigJson
  *    no ORDER BY (rowid scan = `createdAt ASC, id ASC`), which becomes ascending `sortOrder`.
  *    `legacyRuleId` links each typed row to its source. Follows MIGRATION_16_17's data-carrying
  *    pattern (chat backfill).
- * 3. `intercept_rules` is **not** dropped or altered. It stays read-only until v24 (task 34) once
- *    the parity gate G16 is green -- see the plan's v24 row.
+ * 3. `intercept_rules` is **not** dropped or altered here. v24 ([MIGRATION_23_24], task 34) drops
+ *    it now that the parity gate G16 is green -- see the plan's v24 row.
  *
  * The backfill is idempotent by construction: a typed row whose `legacyRuleId` already exists is
  * skipped, so re-running [backfill] (or a v23 install that somehow re-enters the migration) never
@@ -145,8 +147,7 @@ object Migration22To23 {
             while (c.moveToNext()) already += c.getLong(0)
         }
 
-        val converters = RequestrTypeConverters()
-        val legacy = ArrayList<InterceptRuleEntity>()
+        val legacy = ArrayList<LegacyInterceptRule>()
         db.query(
             "SELECT id, name, pattern, domain, action, enabled, replacementValue, createdAt, " +
                 "cryptoKeyAlias, cryptoAlgorithm, cryptoDirection, cryptoScope " +
@@ -155,12 +156,12 @@ object Migration22To23 {
             while (c.moveToNext()) {
                 val id = c.getLong(0)
                 if (id in already) continue
-                legacy += InterceptRuleEntity(
+                legacy += LegacyInterceptRule(
                     id = id,
                     name = c.getString(1) ?: "",
                     pattern = c.getString(2) ?: "",
                     domain = c.getString(3) ?: "",
-                    action = converters.nameToRuleAction(c.getString(4)),
+                    action = LegacyRuleAction.fromNameOrLogOnly(c.getString(4)),
                     enabled = c.getInt(5) != 0,
                     replacementValue = if (c.isNull(6)) null else c.getString(6),
                     createdAt = c.getLong(7),

@@ -145,7 +145,6 @@ import com.example.data.interception.ShizukuState
 import com.example.data.interception.TrafficExporter
 import com.example.data.local.ConnectAttemptEntity
 import com.example.data.local.TlsSessionEntity
-import com.example.data.local.RuleAction as PersistedRuleAction
 import com.example.data.prefs.AppFilterMode
 import com.example.data.prefs.SettingsDataStore
 import com.example.interception.CapabilityProbe
@@ -155,8 +154,6 @@ import com.example.data.models.CapturedTrafficItem
 import com.example.data.models.HttpMethod
 import com.example.data.models.KeyValueItem
 import com.example.data.models.RequestBodyType
-import com.example.data.models.RuleAction
-import com.example.data.models.TrafficRuleItem
 import com.example.data.models.CertificateDetails
 import com.example.data.repository.ApiTestrRepository
 import com.example.data.repository.FridaScript
@@ -273,7 +270,6 @@ fun InterceptScreen(
     }.collectAsState(initial = emptyList())
 
     val installedApps by TrafficInterceptorRepository.installedApps.collectAsState()
-    val trafficRules by TrafficInterceptorRepository.trafficRules.collectAsState()
     // C8 follow-up: the INTERNET-permission prefilter lives in TrafficInterceptorRepository
     // (sibling-owned) — the app-picker dialog just reads/writes this single source of truth so
     // Settings' "VPN app picker" toggle and this dialog's own toggle never disagree.
@@ -1004,7 +1000,7 @@ fun InterceptScreen(
                             CaptureLogRepository.addRuleFromTransaction(
                                 context = screenContext,
                                 item = item,
-                                action = PersistedRuleAction.MODIFY_RESPONSE,
+                                stage = com.example.interception.rules.RuleStage.REWRITE,
                             )
                         }
                     }
@@ -3690,15 +3686,20 @@ fun RulesConfigBottomSheet(
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
-    val dao = remember { com.example.data.local.RequestrDatabase.get(context).interceptRuleDao() }
-    val rules by dao.observeAll().collectAsState(initial = emptyList())
+    // S4 task 34: the sheet lists the typed `interceptor_rules` table. The quick-add form below is
+    // still the flat v1 form (name/pattern/domain/action/...); on save it is converted through
+    // LegacyRuleConverter -- the same converter the v23 migration and the local API use -- so a
+    // rule added here is byte-for-byte the rule the migration would have produced. The fully
+    // typed per-stage editors are the rule-engine sub-plan's task 16.
+    val dao = remember { com.example.data.local.RequestrDatabase.get(context).interceptorRuleDao() }
+    val rules by dao.observeAllOrdered().collectAsState(initial = emptyList())
     var showAddForm by remember { mutableStateOf(false) }
 
     // Add Rule form state
     var ruleName by remember { mutableStateOf("") }
     var rulePattern by remember { mutableStateOf("") }
     var ruleDomain by remember { mutableStateOf("") }
-    var ruleAction by remember { mutableStateOf(com.example.data.local.RuleAction.BLOCK) }
+    var ruleAction by remember { mutableStateOf(com.example.interception.rules.LegacyRuleAction.BLOCK) }
     var ruleEnabled by remember { mutableStateOf(true) }
     // C11 (body crypto rules) / C13 (file-backed mock bodies): extra per-action fields that only
     // apply to a subset of RuleAction values -- see replacementValueSpecFor/isBodyCryptoAction.
@@ -3815,7 +3816,7 @@ fun RulesConfigBottomSheet(
                                 .horizontalScroll(rememberScrollState()),
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            com.example.data.local.RuleAction.values().forEach { action ->
+                            com.example.interception.rules.LegacyRuleAction.entries.forEach { action ->
                                 val selected = ruleAction == action
                                 FilterChip(
                                     selected = selected,
@@ -3907,7 +3908,7 @@ fun RulesConfigBottomSheet(
                         // §3 (C10): SCRIPT_REWRITE's own script config -- no other field in this
                         // form writes its `"script"` config key. Real pm.* API surface (see
                         // PmPrelude.kt), same engine ApiTestr's pre/post-request scripts use.
-                        if (ruleAction == com.example.data.local.RuleAction.SCRIPT_REWRITE) {
+                        if (ruleAction == com.example.interception.rules.LegacyRuleAction.SCRIPT_REWRITE) {
                             OutlinedTextField(
                                 value = ruleScriptField,
                                 onValueChange = { ruleScriptField = it },
@@ -3933,7 +3934,7 @@ fun RulesConfigBottomSheet(
                         // placeholder cheat sheet, and a live preview -- only for the actions
                         // that actually run their config through template expansion.
                         if (ruleActionUsesTemplating(ruleAction)) {
-                            val activeTemplateField = ruleAction == com.example.data.local.RuleAction.SCRIPT_REWRITE
+                            val activeTemplateField = ruleAction == com.example.interception.rules.LegacyRuleAction.SCRIPT_REWRITE
                             fun insertTemplateToken(token: String) {
                                 if (activeTemplateField) {
                                     val (newText, newCursor) = insertTextAtCursor(ruleScriptField.text, ruleScriptField.selection.start, token)
@@ -4155,25 +4156,27 @@ fun RulesConfigBottomSheet(
                                     val cryptoKeyAliasToSave = ruleCryptoKeyAlias.trim()
                                     val cryptoScopeToSave = ruleCryptoScope
                                     scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                                        dao.insert(
-                                            com.example.data.local.InterceptRuleEntity(
-                                                name = nameToSave,
-                                                pattern = patternToSave,
-                                                domain = domainToSave,
-                                                action = actionToSave,
-                                                enabled = enabledToSave,
-                                                replacementValue = replacementValueToSave,
-                                                cryptoKeyAlias = cryptoKeyAliasToSave,
-                                                cryptoDirection = impliedCryptoDirection(actionToSave),
-                                                cryptoScope = cryptoScopeToSave,
-                                            )
+                                        val legacy = com.example.interception.rules.LegacyInterceptRule(
+                                            name = nameToSave,
+                                            pattern = patternToSave,
+                                            domain = domainToSave,
+                                            action = actionToSave,
+                                            enabled = enabledToSave,
+                                            replacementValue = replacementValueToSave,
+                                            cryptoKeyAlias = cryptoKeyAliasToSave,
+                                            cryptoDirection = impliedCryptoDirection(actionToSave),
+                                            cryptoScope = cryptoScopeToSave,
                                         )
+                                        val converted = com.example.interception.rules.LegacyRuleConverter.convert(legacy, dao.maxSortOrder() + 1)
+                                        if (converted is com.example.interception.rules.LegacyRuleConverter.ConversionResult.Converted) {
+                                            dao.insert(com.example.data.local.InterceptorRuleEntity.fromDomain(converted.rule.copy(legacyRuleId = null)))
+                                        }
                                     }
                                     // Reset form
                                     ruleName = ""
                                     rulePattern = ""
                                     ruleDomain = ""
-                                    ruleAction = com.example.data.local.RuleAction.BLOCK
+                                    ruleAction = com.example.interception.rules.LegacyRuleAction.BLOCK
                                     ruleEnabled = true
                                     ruleReplacementValueField = androidx.compose.ui.text.input.TextFieldValue("")
                                     ruleScriptField = androidx.compose.ui.text.input.TextFieldValue("")
@@ -4225,7 +4228,10 @@ fun RulesConfigBottomSheet(
                         // pattern never compiles) is kept and shown -- never hidden or silently
                         // rewritten -- but flagged with the exact reason it does nothing, so it
                         // can't sit in the list looking like it works. Toggle/Delete stay live.
-                        val savedNoOpReason = remember(rule) { savedRuleConfigError(rule) }
+                        val savedNoOpReason = remember(rule) { savedTypedRuleProblem(rule) }
+                        val matcherSummary = remember(rule) { ruleMatcherSummary(rule) }
+                        val configDetail = remember(rule) { ruleConfigDetail(rule) }
+                        val usesFixture = remember(rule) { ruleUsesFileFixture(rule) }
                         GlassCard(
                             modifier = Modifier.fillMaxWidth(),
                             backgroundColor = if (rule.enabled) MaterialTheme.colorScheme.surfaceVariant
@@ -4250,23 +4256,16 @@ fun RulesConfigBottomSheet(
                                             Text("NO EFFECT", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.error)
                                         }
                                     }
-                                    Text(rule.pattern, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary, fontFamily = FontFamily.Monospace, maxLines = 1)
-                                    if (rule.domain.isNotBlank()) {
-                                        Text("Domain: ${rule.domain}", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    }
+                                    Text(matcherSummary, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary, fontFamily = FontFamily.Monospace, maxLines = 1)
                                     Text(
-                                        "Action: ${ruleActionLabel(rule.action)}",
+                                        "Stage: ${ruleStageLabel(rule.stage)}",
                                         fontSize = 10.sp,
-                                        color = Color(ruleActionColorHex(rule.action)),
+                                        color = Color(ruleStageColorHex(rule.stage)),
                                     )
-                                    if (isBodyCryptoAction(rule.action)) {
-                                        Text(
-                                            "Key: ${rule.cryptoKeyAlias.ifBlank { "(none set)" }} · scope: ${rule.cryptoScope}",
-                                            fontSize = 9.sp,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
+                                    if (configDetail != null) {
+                                        Text(configDetail, fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
-                                    if (com.example.interception.MockFixtureLoader.isFileFixtureReference(rule.replacementValue)) {
+                                    if (usesFixture) {
                                         Text(
                                             "Body from file fixture",
                                             fontSize = 9.sp,
@@ -4287,7 +4286,7 @@ fun RulesConfigBottomSheet(
                                         checked = rule.enabled,
                                         onCheckedChange = { newVal ->
                                             scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                                                dao.update(rule.copy(enabled = newVal))
+                                                dao.update(rule.copy(enabled = newVal, updatedAt = System.currentTimeMillis()))
                                             }
                                         },
                                         modifier = Modifier.height(24.dp)

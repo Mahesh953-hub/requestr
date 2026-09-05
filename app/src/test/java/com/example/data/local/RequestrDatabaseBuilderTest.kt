@@ -194,12 +194,12 @@ class RequestrDatabaseBuilderTest {
     }
 
     @Test
-    fun `ALL_MIGRATIONS array contains exactly 15 migrations`() {
-        assertEquals(15, RequestrDatabase.ALL_MIGRATIONS.size)
+    fun `ALL_MIGRATIONS array contains exactly 16 migrations`() {
+        assertEquals(16, RequestrDatabase.ALL_MIGRATIONS.size)
         assertEquals(8, RequestrDatabase.ALL_MIGRATIONS.first().startVersion)
         assertEquals(9, RequestrDatabase.ALL_MIGRATIONS.first().endVersion)
-        assertEquals(22, RequestrDatabase.ALL_MIGRATIONS.last().startVersion)
-        assertEquals(23, RequestrDatabase.ALL_MIGRATIONS.last().endVersion)
+        assertEquals(23, RequestrDatabase.ALL_MIGRATIONS.last().startVersion)
+        assertEquals(24, RequestrDatabase.ALL_MIGRATIONS.last().endVersion)
     }
 
     // ── MigrationTestHelper: all 15 migrations on support path ──────────────

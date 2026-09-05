@@ -38,7 +38,7 @@ enum class RuleStage {
     companion object {
         /**
          * Lenient name lookup: an unknown or null name decodes to [OBSERVE], mirroring the existing
-         * "unknown `RuleAction` decodes to `LOG_ONLY`" contract in `RequestrTypeConverters`.
+         * "unknown `LegacyRuleAction` decodes to `LOG_ONLY`" contract in `RequestrTypeConverters`.
          * A row written by a newer build (with a stage this build does not know) must never make the
          * snapshot compile fail or make the row unreadable -- it degrades to observe-only.
          */

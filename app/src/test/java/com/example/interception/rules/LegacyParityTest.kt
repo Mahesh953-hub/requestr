@@ -1,8 +1,6 @@
 package com.example.interception.rules
 
-import com.example.data.local.InterceptRuleEntity
 import com.example.data.local.InterceptorRuleEntity
-import com.example.data.local.RuleAction
 import com.example.data.models.HttpMethod
 import com.example.interception.RuleEnforcer
 import com.example.interception.http.ParsedHttpMessage
@@ -24,7 +22,7 @@ import javax.crypto.spec.SecretKeySpec
 import kotlin.random.Random
 
 /**
- * G16 (rule parity): for every one of the 11 legacy [RuleAction]s, the legacy `intercept_rules`
+ * G16 (rule parity): for every one of the 11 legacy [LegacyRuleAction]s, the legacy `intercept_rules`
  * row converted through [LegacyRuleConverter] and run through the S4 pipeline + stages must
  * produce a message identical to what [RuleEnforcer] produced from the same row -- every field
  * the serializers read (url, host, status, headers, body, bodyReplaced, isBodyBinary,
@@ -34,10 +32,10 @@ import kotlin.random.Random
 @RunWith(RobolectricTestRunner::class)
 class LegacyParityTest {
 
-    private fun legacy(action: RuleAction, replacementValue: String? = null, domain: String = "parity.example", name: String = "legacy") =
-        InterceptRuleEntity(id = 7, name = name, domain = domain, action = action, replacementValue = replacementValue)
+    private fun legacy(action: LegacyRuleAction, replacementValue: String? = null, domain: String = "parity.example", name: String = "legacy") =
+        LegacyInterceptRule(id = 7, name = name, domain = domain, action = action, replacementValue = replacementValue)
 
-    private fun decisionFor(rule: InterceptRuleEntity, request: ParsedHttpMessage): RuleDecision {
+    private fun decisionFor(rule: LegacyInterceptRule, request: ParsedHttpMessage): RuleDecision {
         val converted = LegacyRuleConverter.convert(rule, sortOrder = 0) as LegacyRuleConverter.ConversionResult.Converted
         val snapshot = RuleSnapshotCompiler.compile(listOf(InterceptorRuleEntity.fromDomain(converted.rule)), emptyList(), 1L)
         return RulePipeline.evaluate(
@@ -76,7 +74,7 @@ class LegacyParityTest {
 
     @Test
     fun `BLOCK -- legacy first-match BLOCK equals a blocking gateway decision`() {
-        val rule = legacy(RuleAction.BLOCK)
+        val rule = legacy(LegacyRuleAction.BLOCK)
         val decision = decisionFor(rule, request())
         assertTrue(decision.gateway.blocks)
         assertEquals(GatewayMode.BLOCK, decision.gateway.effectiveMode)
@@ -89,7 +87,7 @@ class LegacyParityTest {
 
     @Test
     fun `FORCE_MITM -- maps to FORCE_DECRYPT gateway`() {
-        val decision = decisionFor(legacy(RuleAction.FORCE_MITM), request())
+        val decision = decisionFor(legacy(LegacyRuleAction.FORCE_MITM), request())
         assertEquals(GatewayMode.FORCE_DECRYPT, decision.gateway.effectiveMode)
         assertFalse(decision.gateway.blocks)
     }
@@ -98,7 +96,7 @@ class LegacyParityTest {
 
     @Test
     fun `LOG_ONLY -- becomes an observe match that changes nothing`() {
-        val decision = decisionFor(legacy(RuleAction.LOG_ONLY), request())
+        val decision = decisionFor(legacy(LegacyRuleAction.LOG_ONLY), request())
         assertEquals(1, decision.observe.size)
         assertFalse(decision.mutates)
         val legacyMsg = request("body"); val newMsg = request("body")
@@ -111,7 +109,7 @@ class LegacyParityTest {
     @Test
     fun `REDIRECT -- url host and host header rewritten identically`() {
         val target = "https://staging.example:8443/v2/items?x=y"
-        val rule = legacy(RuleAction.REDIRECT, target)
+        val rule = legacy(LegacyRuleAction.REDIRECT, target)
         // Legacy MitmProxyEngine.handleParsedRequest REDIRECT branch, verbatim.
         val legacyMsg = request("b")
         legacyMsg.url = rule.replacementValue!!
@@ -128,7 +126,7 @@ class LegacyParityTest {
     @Test
     fun `REDIRECT -- blank target is a no-op both sides`() {
         val newMsg = request("b")
-        val decision = decisionFor(legacy(RuleAction.REDIRECT, "   "), newMsg)
+        val decision = decisionFor(legacy(LegacyRuleAction.REDIRECT, "   "), newMsg)
         assertFalse(decision.rewrite.hasRequestWork)
         assertParity(request("b"), newMsg)
     }
@@ -138,7 +136,7 @@ class LegacyParityTest {
     @Test
     fun `MODIFY_REQUEST -- addHeaders removeHeaders bodyReplace identical`() {
         val config = """{"addHeaders":{"X-Trace":"abc","authorization":"Bearer t"},"removeHeaders":["accept"],"bodyReplace":"{\"replaced\":true}"}"""
-        val rule = legacy(RuleAction.MODIFY_REQUEST, config)
+        val rule = legacy(LegacyRuleAction.MODIFY_REQUEST, config)
         val legacyMsg = request("orig")
         RuleEnforcer.applyRequestModification(legacyMsg, config)
         val newMsg = request("orig")
@@ -155,7 +153,7 @@ class LegacyParityTest {
         val legacyMsg = request("keep")
         RuleEnforcer.applyRequestModification(legacyMsg, config)
         val newMsg = request("keep")
-        RewriteStage.applyRequest(newMsg, decisionFor(legacy(RuleAction.MODIFY_REQUEST, config), newMsg).rewrite)
+        RewriteStage.applyRequest(newMsg, decisionFor(legacy(LegacyRuleAction.MODIFY_REQUEST, config), newMsg).rewrite)
         assertParity(legacyMsg, newMsg)
         assertFalse(newMsg.bodyReplaced)
     }
@@ -165,7 +163,7 @@ class LegacyParityTest {
     @Test
     fun `MODIFY_RESPONSE -- statusCode addHeaders bodyReplace identical`() {
         val config = """{"statusCode":418,"addHeaders":{"X-Mock":"true"},"bodyReplace":"teapot"}"""
-        val rule = legacy(RuleAction.MODIFY_RESPONSE, config)
+        val rule = legacy(LegacyRuleAction.MODIFY_RESPONSE, config)
         val legacyMsg = response()
         RuleEnforcer.applyResponseModification(legacyMsg, config)
         val newMsg = response()
@@ -189,7 +187,7 @@ class LegacyParityTest {
         )) {
             val req = request()
             val legacyMsg = RuleEnforcer.buildMockResponse(config, req.url)
-            val decision = decisionFor(legacy(RuleAction.MOCK_RESPONSE, config), req)
+            val decision = decisionFor(legacy(LegacyRuleAction.MOCK_RESPONSE, config), req)
             val newMsg = MockStage.build(decision.mock!!.config, req.url, req.method?.name, req.headers)
             assertEquals(config, fingerprint(legacyMsg), fingerprint(newMsg))
         }
@@ -204,7 +202,7 @@ class LegacyParityTest {
         val legacyReq = request("orig")
         assertNull(RuleEnforcer.applyScriptRewrite(legacyReq, requestConfig))
         val newReq = request("orig")
-        val decision = decisionFor(legacy(RuleAction.SCRIPT_REWRITE, requestConfig), newReq)
+        val decision = decisionFor(legacy(LegacyRuleAction.SCRIPT_REWRITE, requestConfig), newReq)
         val result = ScriptStage.apply(newReq, decision.scripts, FlowAuditTrail.Phase.REQUEST)
         assertTrue(result.changed); assertTrue(result.errors.isEmpty())
         assertParity(legacyReq, newReq)
@@ -215,7 +213,7 @@ class LegacyParityTest {
         val legacyResp = response()
         assertNull(RuleEnforcer.applyScriptRewrite(legacyResp, responseConfig))
         val newResp = response()
-        val decision2 = decisionFor(legacy(RuleAction.SCRIPT_REWRITE, responseConfig), request())
+        val decision2 = decisionFor(legacy(LegacyRuleAction.SCRIPT_REWRITE, responseConfig), request())
         ScriptStage.apply(newResp, decision2.scripts, FlowAuditTrail.Phase.RESPONSE)
         assertParity(legacyResp, newResp)
         assertEquals(202, newResp.statusCode)
@@ -224,7 +222,7 @@ class LegacyParityTest {
     @Test
     fun `SCRIPT_REWRITE -- a throwing script stamps the identical error header`() {
         val config = org.json.JSONObject().put("script", "throw new Error('boom');").toString()
-        val rule = legacy(RuleAction.SCRIPT_REWRITE, config, name = "js-rule")
+        val rule = legacy(LegacyRuleAction.SCRIPT_REWRITE, config, name = "js-rule")
         val legacyResp = response()
         val error = RuleEnforcer.applyScriptRewrite(legacyResp, config)
         assertNotNull(error)
@@ -247,7 +245,7 @@ class LegacyParityTest {
             """{"failRate":0.5,"corruptBodyRate":0.5,"delayMs":[10,500]}""",
         )
         for (config in configs) for (seed in 1..5) {
-            val rule = legacy(RuleAction.CHAOS, config, name = "flaky-api")
+            val rule = legacy(LegacyRuleAction.CHAOS, config, name = "flaky-api")
             val decision = decisionFor(rule, request())
             val chaos = decision.chaos!!
             // request leg
@@ -282,15 +280,15 @@ class LegacyParityTest {
         return SecretKeySpec(ByteArray(32).also { random.nextBytes(it) }, "AES")
     }
 
-    private fun cryptoLegacy(action: RuleAction, scope: String = "BOTH", alias: String = "k1") = InterceptRuleEntity(
+    private fun cryptoLegacy(action: LegacyRuleAction, scope: String = "BOTH", alias: String = "k1") = LegacyInterceptRule(
         id = 9, name = "crypto-rule", domain = "parity.example", action = action,
-        cryptoKeyAlias = alias, cryptoScope = scope, cryptoDirection = if (action == RuleAction.BODY_ENCRYPT_AES) "ENCRYPT" else "DECRYPT",
+        cryptoKeyAlias = alias, cryptoScope = scope, cryptoDirection = if (action == LegacyRuleAction.BODY_ENCRYPT_AES) "ENCRYPT" else "DECRYPT",
     )
 
     @Test
     fun `BODY_ENCRYPT_AES then BODY_DECRYPT_AES -- ciphertext from either engine decrypts identically in the other`() {
         val plaintext = """{"secret":"plaintext-value"}"""
-        val encRule = cryptoLegacy(RuleAction.BODY_ENCRYPT_AES)
+        val encRule = cryptoLegacy(LegacyRuleAction.BODY_ENCRYPT_AES)
         val encDecision = decisionFor(encRule, request())
         val encConfig = encDecision.bodyCrypto!!.config
         assertEquals(CryptoDirection.ENCRYPT, encConfig.direction)
@@ -308,7 +306,7 @@ class LegacyParityTest {
         assertEquals(legacyEnc.body, newEnc.body)
         assertEquals(legacyEnc.replacedBodyBytes!!.size, newEnc.replacedBodyBytes!!.size)
 
-        val decRule = cryptoLegacy(RuleAction.BODY_DECRYPT_AES)
+        val decRule = cryptoLegacy(LegacyRuleAction.BODY_DECRYPT_AES)
         val decConfig = decisionFor(decRule, request()).bodyCrypto!!.config
         fun inbound(cipher: ByteArray) = ParsedHttpMessage(
             isRequest = false, method = null, url = "https://parity.example/v1/items", host = "parity.example", statusCode = 200,
@@ -327,9 +325,9 @@ class LegacyParityTest {
 
     @Test
     fun `BODY crypto -- blank alias fails closed with an identical synthetic 502`() {
-        for (action in listOf(RuleAction.BODY_ENCRYPT_AES, RuleAction.BODY_DECRYPT_AES)) {
+        for (action in listOf(LegacyRuleAction.BODY_ENCRYPT_AES, LegacyRuleAction.BODY_DECRYPT_AES)) {
             val rule = cryptoLegacy(action, alias = "")
-            val encrypt = action == RuleAction.BODY_ENCRYPT_AES
+            val encrypt = action == LegacyRuleAction.BODY_ENCRYPT_AES
             val legacyMsg = request("plain")
             val legacyResult = RuleEnforcer.applyBodyCryptoWith(legacyMsg, rule, encrypt, ::keyFor) as RuleEnforcer.CryptoApplyResult.Failed
             val newMsg = request("plain")
@@ -346,7 +344,7 @@ class LegacyParityTest {
 
     @Test
     fun `BODY crypto -- scope REQUEST or RESPONSE skips the other message type identically`() {
-        val rule = cryptoLegacy(RuleAction.BODY_ENCRYPT_AES, scope = "REQUEST")
+        val rule = cryptoLegacy(LegacyRuleAction.BODY_ENCRYPT_AES, scope = "REQUEST")
         val config = decisionFor(rule, request()).bodyCrypto!!.config
         val resp = response()
         assertTrue(RuleEnforcer.applyBodyCryptoWith(resp, rule, encrypt = true, ::keyFor) is RuleEnforcer.CryptoApplyResult.NotApplicable)
@@ -358,14 +356,14 @@ class LegacyParityTest {
     @Test
     fun `every legacy action converts to exactly one typed stage`() {
         val expected = mapOf(
-            RuleAction.BLOCK to RuleStage.GATEWAY, RuleAction.FORCE_MITM to RuleStage.GATEWAY, RuleAction.LOG_ONLY to RuleStage.OBSERVE,
-            RuleAction.REDIRECT to RuleStage.REWRITE, RuleAction.MODIFY_REQUEST to RuleStage.REWRITE, RuleAction.MODIFY_RESPONSE to RuleStage.REWRITE,
-            RuleAction.MOCK_RESPONSE to RuleStage.MOCK, RuleAction.SCRIPT_REWRITE to RuleStage.SCRIPT, RuleAction.CHAOS to RuleStage.CHAOS,
-            RuleAction.BODY_ENCRYPT_AES to RuleStage.BODY_CRYPTO, RuleAction.BODY_DECRYPT_AES to RuleStage.BODY_CRYPTO,
+            LegacyRuleAction.BLOCK to RuleStage.GATEWAY, LegacyRuleAction.FORCE_MITM to RuleStage.GATEWAY, LegacyRuleAction.LOG_ONLY to RuleStage.OBSERVE,
+            LegacyRuleAction.REDIRECT to RuleStage.REWRITE, LegacyRuleAction.MODIFY_REQUEST to RuleStage.REWRITE, LegacyRuleAction.MODIFY_RESPONSE to RuleStage.REWRITE,
+            LegacyRuleAction.MOCK_RESPONSE to RuleStage.MOCK, LegacyRuleAction.SCRIPT_REWRITE to RuleStage.SCRIPT, LegacyRuleAction.CHAOS to RuleStage.CHAOS,
+            LegacyRuleAction.BODY_ENCRYPT_AES to RuleStage.BODY_CRYPTO, LegacyRuleAction.BODY_DECRYPT_AES to RuleStage.BODY_CRYPTO,
         )
-        assertEquals("all 11 legacy actions covered", RuleAction.entries.toSet(), expected.keys)
+        assertEquals("all 11 legacy actions covered", LegacyRuleAction.entries.toSet(), expected.keys)
         for ((action, stage) in expected) {
-            val row = if (stage == RuleStage.BODY_CRYPTO) cryptoLegacy(action) else legacy(action, replacementValue = if (action == RuleAction.SCRIPT_REWRITE) """{"script":"1"}""" else "https://x.example/")
+            val row = if (stage == RuleStage.BODY_CRYPTO) cryptoLegacy(action) else legacy(action, replacementValue = if (action == LegacyRuleAction.SCRIPT_REWRITE) """{"script":"1"}""" else "https://x.example/")
             val converted = LegacyRuleConverter.convert(row, 0) as LegacyRuleConverter.ConversionResult.Converted
             assertEquals(action.name, stage, converted.rule.stage)
         }

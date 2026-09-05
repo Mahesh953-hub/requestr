@@ -1,12 +1,13 @@
 package com.example.interception
 
+import com.example.interception.rules.legacyRuleDao
 import android.os.Build
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.CapturedTrafficEntity
-import com.example.data.local.InterceptRuleEntity
+import com.example.interception.rules.LegacyInterceptRule
 import com.example.data.local.RequestrDatabase
-import com.example.data.local.RuleAction
+import com.example.interception.rules.LegacyRuleAction
 import com.example.data.models.HttpMethod
 import com.example.interception.http.HttpBodyDecoder
 import com.example.interception.http.ParsedHttpMessage
@@ -62,11 +63,11 @@ class MitmProxyEngineChaosTest {
     }
 
     private fun insertChaosRule(config: String, name: String = "flaky-api") = runBlocking {
-        db.interceptRuleDao().insert(
-            InterceptRuleEntity(
+        db.legacyRuleDao().insert(
+            LegacyInterceptRule(
                 name = name,
                 domain = "chaos.example",
-                action = RuleAction.CHAOS,
+                action = LegacyRuleAction.CHAOS,
                 replacementValue = config,
             )
         )
@@ -331,11 +332,11 @@ class MitmProxyEngineChaosTest {
     // ── SCRIPT_REWRITE error visibility (same attribution mechanism) ─────
 
     private fun insertScriptRule(script: String) = runBlocking {
-        db.interceptRuleDao().insert(
-            InterceptRuleEntity(
+        db.legacyRuleDao().insert(
+            LegacyInterceptRule(
                 name = "js-rule",
                 domain = "chaos.example",
-                action = RuleAction.SCRIPT_REWRITE,
+                action = LegacyRuleAction.SCRIPT_REWRITE,
                 replacementValue = org.json.JSONObject().put("script", script).toString(),
             )
         )

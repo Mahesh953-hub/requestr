@@ -1,7 +1,7 @@
 package com.example.ui.screens
 
-import com.example.data.local.InterceptRuleEntity
-import com.example.data.local.RuleAction
+import com.example.interception.rules.LegacyInterceptRule
+import com.example.interception.rules.LegacyRuleAction
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -16,7 +16,7 @@ import org.json.JSONObject
  * untouched -- so an enabled rule with such a config is a silent no-op the user can never see.
  * The form must therefore refuse to save one, and the list must flag any that already exist.
  *
- * Engine evidence, per [RuleAction] (locate by symbol; line numbers drift):
+ * Engine evidence, per [LegacyRuleAction] (locate by symbol; line numbers drift):
  *
  * - `BLOCK` / `LOG_ONLY` / `FORCE_MITM` -- never read `replacementValue`
  *   (`CaptureEngine.persistTransaction`, `MitmProxyEngine.handleParsedRequest`, `ConnectControl`).
@@ -55,7 +55,7 @@ enum class ReplacementValueShape { URL, JSON_OBJECT }
 
 /**
  * Everything the Add-Rule form needs to render a self-describing `replacementValue` field for a
- * given [RuleAction] AND validate it before Save -- one source of truth so the label/placeholder/
+ * given [LegacyRuleAction] AND validate it before Save -- one source of truth so the label/placeholder/
  * supporting text/required-ness and [replacementValueError] can never disagree with each other.
  *
  * @property required When true, a blank value is rejected because the engine path skips the rule
@@ -79,14 +79,14 @@ data class ReplacementValueSpec(
 /**
  * The single source of truth for what [action]'s `replacementValue` field should look like in
  * the Add-Rule form, and what [replacementValueError] validates it against. Returns `null` for
- * every [RuleAction] that has no free-text `replacementValue` field in the form: `BLOCK`/`LOG_ONLY`/
+ * every [LegacyRuleAction] that has no free-text `replacementValue` field in the form: `BLOCK`/`LOG_ONLY`/
  * `FORCE_MITM` never read it, `BODY_ENCRYPT_AES`/`BODY_DECRYPT_AES` configure via `cryptoKeyAlias`/
  * `cryptoScope` instead, and `SCRIPT_REWRITE` gets its own dedicated "Script (JS)" field (its
  * `{"script": ...}` config JSON is built by [replacementValueToSave], and validated by
  * [replacementValueError]'s `SCRIPT_REWRITE` branch, not by a spec here).
  */
-fun replacementValueSpecFor(action: RuleAction): ReplacementValueSpec? = when (action) {
-    RuleAction.REDIRECT -> ReplacementValueSpec(
+fun replacementValueSpecFor(action: LegacyRuleAction): ReplacementValueSpec? = when (action) {
+    LegacyRuleAction.REDIRECT -> ReplacementValueSpec(
         shape = ReplacementValueShape.URL,
         label = "Redirect URL",
         placeholder = "https://api.example.com/v2/users",
@@ -94,7 +94,7 @@ fun replacementValueSpecFor(action: RuleAction): ReplacementValueSpec? = when (a
             "rewritten to before it's persisted/forwarded.",
         required = true,
     )
-    RuleAction.MODIFY_REQUEST -> ReplacementValueSpec(
+    LegacyRuleAction.MODIFY_REQUEST -> ReplacementValueSpec(
         shape = ReplacementValueShape.JSON_OBJECT,
         label = "Request modification (JSON)",
         placeholder = "{\"addHeaders\":{\"X-Trace\":\"{{traceId}}\"},\"bodyReplace\":\"{}\"}",
@@ -103,7 +103,7 @@ fun replacementValueSpecFor(action: RuleAction): ReplacementValueSpec? = when (a
         required = true,
         effectiveJsonKeys = setOf("addHeaders", "removeHeaders", "bodyReplace"),
     )
-    RuleAction.MODIFY_RESPONSE -> ReplacementValueSpec(
+    LegacyRuleAction.MODIFY_RESPONSE -> ReplacementValueSpec(
         shape = ReplacementValueShape.JSON_OBJECT,
         label = "Response modification (JSON)",
         placeholder = "{\"statusCode\":200,\"addHeaders\":{\"X-Mock\":\"true\"},\"bodyReplace\":\"{}\"}",
@@ -112,7 +112,7 @@ fun replacementValueSpecFor(action: RuleAction): ReplacementValueSpec? = when (a
         required = true,
         effectiveJsonKeys = setOf("statusCode", "addHeaders", "bodyReplace"),
     )
-    RuleAction.MOCK_RESPONSE -> ReplacementValueSpec(
+    LegacyRuleAction.MOCK_RESPONSE -> ReplacementValueSpec(
         shape = ReplacementValueShape.JSON_OBJECT,
         label = "Mock response (JSON, optional)",
         placeholder = "{\"statusCode\":200,\"addHeaders\":{\"Content-Type\":\"application/json\"},\"bodyReplace\":\"{}\"}",
@@ -121,7 +121,7 @@ fun replacementValueSpecFor(action: RuleAction): ReplacementValueSpec? = when (a
         required = false,
         effectiveJsonKeys = setOf("statusCode", "statusMessage", "addHeaders", "bodyReplace"),
     )
-    RuleAction.CHAOS -> ReplacementValueSpec(
+    LegacyRuleAction.CHAOS -> ReplacementValueSpec(
         shape = ReplacementValueShape.JSON_OBJECT,
         label = "Chaos config (JSON)",
         placeholder = "{\"failRate\":0.1,\"delayMs\":[200,800],\"corruptBodyRate\":0.05}",
@@ -146,11 +146,11 @@ fun isAbsoluteUrlWithHost(text: String): Boolean {
 
 /**
  * The per-action config the Add-Rule form has collected so far -- the raw text of every field
- * that ends up in the saved [InterceptRuleEntity], *before* any merging. [replacementValueToSave]
+ * that ends up in the saved [LegacyInterceptRule], *before* any merging. [replacementValueToSave]
  * turns it into the exact persisted `replacementValue`; [ruleConfigError] validates it.
  */
 data class RuleConfigDraft(
-    val action: RuleAction,
+    val action: LegacyRuleAction,
     /** Raw text of the `replacementValue` field (ignored for `SCRIPT_REWRITE`, which uses [scriptText]). */
     val replacementValueText: String = "",
     /** Raw text of the dedicated "Script (JS)" field -- only read for `SCRIPT_REWRITE`. */
@@ -165,7 +165,7 @@ data class RuleConfigDraft(
  * The exact `replacementValue` the Add-Rule form persists for [draft] -- the ONE builder both the
  * Save handler and [ruleConfigError] go through, so what gets validated is byte-for-byte what
  * gets saved. Returns `null` (not `""`) when there is nothing to persist, matching
- * [InterceptRuleEntity.replacementValue]'s nullable default.
+ * [LegacyInterceptRule.replacementValue]'s nullable default.
  *
  * - `SCRIPT_REWRITE`: `{"script": "<js>", "variables": {...}}` built from [RuleConfigDraft.scriptText]
  *   via [mergeScriptIntoConfigJson] + [mergeVariablesIntoConfigJson]; `null` only when both are empty.
@@ -177,7 +177,7 @@ data class RuleConfigDraft(
 fun replacementValueToSave(draft: RuleConfigDraft): String? {
     val raw = draft.replacementValueText.trim()
     return when {
-        draft.action == RuleAction.SCRIPT_REWRITE -> {
+        draft.action == LegacyRuleAction.SCRIPT_REWRITE -> {
             val script = draft.scriptText.trim()
             if (script.isBlank() && draft.variables.isEmpty()) {
                 null
@@ -204,7 +204,7 @@ fun replacementValueToSave(draft: RuleConfigDraft): String? {
  */
 fun ruleConfigError(draft: RuleConfigDraft): String? {
     cryptoKeyAliasError(draft.action, draft.cryptoKeyAlias)?.let { return it }
-    if (draft.action == RuleAction.SCRIPT_REWRITE && draft.scriptText.isBlank()) {
+    if (draft.action == LegacyRuleAction.SCRIPT_REWRITE && draft.scriptText.isBlank()) {
         return "Script (JS) is required for ${ruleActionLabel(draft.action)} -- with no script, every matched request/response passes through untouched."
     }
     val spec = replacementValueSpecFor(draft.action)
@@ -252,7 +252,7 @@ fun addRuleSaveBlocker(name: String, pattern: String, domain: String, draft: Rul
  * `RuleEnforcer.getMatchingRule` can never select the rule at all. (A non-blank `domain` matches
  * by substring on its own, so the pattern is only decisive when the domain is blank.)
  */
-fun savedRuleConfigError(rule: InterceptRuleEntity): String? {
+fun savedRuleConfigError(rule: LegacyInterceptRule): String? {
     if (rule.domain.isBlank()) rulePatternError(rule.pattern)?.let { return it }
     cryptoKeyAliasError(rule.action, rule.cryptoKeyAlias)?.let { return it }
     return replacementValueError(rule.action, rule.replacementValue)
@@ -268,9 +268,9 @@ fun savedRuleConfigError(rule: InterceptRuleEntity): String? {
  * [replacementValueSpecFor] has no field spec for it, so [savedRuleConfigError] can flag a saved
  * script rule with an empty script.
  */
-fun replacementValueError(action: RuleAction, rawText: String?): String? {
+fun replacementValueError(action: LegacyRuleAction, rawText: String?): String? {
     val trimmed = rawText?.trim().orEmpty()
-    if (action == RuleAction.SCRIPT_REWRITE) return scriptRewriteConfigError(trimmed)
+    if (action == LegacyRuleAction.SCRIPT_REWRITE) return scriptRewriteConfigError(trimmed)
     val spec = replacementValueSpecFor(action) ?: return null
     if (trimmed.isBlank()) {
         return if (spec.required) {
@@ -289,7 +289,7 @@ fun replacementValueError(action: RuleAction, rawText: String?): String? {
         ReplacementValueShape.JSON_OBJECT -> {
             val json = parseJsonObject(trimmed)
                 ?: return "${spec.label} must be a JSON object, e.g. ${spec.placeholder}"
-            if (action == RuleAction.CHAOS) chaosConfigError(json) else modifyOrMockConfigError(action, spec, json)
+            if (action == LegacyRuleAction.CHAOS) chaosConfigError(json) else modifyOrMockConfigError(action, spec, json)
         }
     }
 }
@@ -299,7 +299,7 @@ private fun parseJsonObject(text: String): JSONObject? = runCatching { JSONObjec
 /** `applyScriptRewrite`: blank config → return; `optString("script")` blank → return. */
 private fun scriptRewriteConfigError(trimmed: String): String? {
     if (trimmed.isBlank()) {
-        return "Script (JS) is required for ${ruleActionLabel(RuleAction.SCRIPT_REWRITE)} -- with no script, every matched request/response passes through untouched."
+        return "Script (JS) is required for ${ruleActionLabel(LegacyRuleAction.SCRIPT_REWRITE)} -- with no script, every matched request/response passes through untouched."
     }
     val json = parseJsonObject(trimmed)
         ?: return "Script config must be a JSON object of the form {\"script\":\"...\"} -- this rule's config is not, so the script never runs."
@@ -318,7 +318,7 @@ private fun scriptRewriteConfigError(trimmed: String): String? {
  * is the effect -- but an object carrying only keys the mock never reads is rejected, because
  * the user typed a config that would be silently ignored.
  */
-private fun modifyOrMockConfigError(action: RuleAction, spec: ReplacementValueSpec, json: JSONObject): String? {
+private fun modifyOrMockConfigError(action: LegacyRuleAction, spec: ReplacementValueSpec, json: JSONObject): String? {
     val presentKeys = spec.effectiveJsonKeys.filter { json.has(it) }
     for (key in presentKeys) {
         effectiveKeyShapeError(key, json)?.let { return it }
@@ -399,7 +399,7 @@ private fun chaosConfigError(json: JSONObject): String? {
 
 /**
  * Human-readable summary of a captured transaction's `x-requestr-chaos` response header
- * ([com.example.interception.RuleEnforcer.CHAOS_ATTRIBUTION_HEADER]) -- the marker
+ * ([com.example.interception.rules.RuleMetadataHeaders.CHAOS]) -- the marker
  * `MitmProxyEngine` stamps on every exchange a `CHAOS` rule actually touched, so the traffic
  * list and detail sheet can badge it as injected rather than let it pass for a real upstream
  * 503 / corrupted payload / slow server. Returns null when the header is absent (no chaos ran).
@@ -427,7 +427,7 @@ fun chaosAttributionSummary(responseHeaders: Map<String, String>): String? {
 
 /**
  * Human-readable summary of a captured transaction's `x-requestr-script-error` header
- * ([com.example.interception.RuleEnforcer.SCRIPT_ERROR_HEADER]) -- stamped by `MitmProxyEngine`
+ * ([com.example.interception.rules.RuleMetadataHeaders.SCRIPT_ERROR]) -- stamped by `MitmProxyEngine`
  * when a `SCRIPT_REWRITE` rule's JavaScript threw, on the request headers (request-leg failure,
  * never sent upstream) or the response headers (response-leg failure, also sent to the client).
  * Returns null when neither side carries it (the script ran cleanly or no such rule matched).

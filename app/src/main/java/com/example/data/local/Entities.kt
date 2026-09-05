@@ -232,66 +232,12 @@ data class CaptureSessionEntity(
     val errorText: String? = null,
 )
 
-/**
- * What a matching [InterceptRuleEntity] does to a transaction.
- *
- * [MOCK_RESPONSE] (master plan §1.5) is the only action that never dials the real upstream
- * server: every other action — including [MODIFY_RESPONSE], which rewrites only *after* the
- * real round trip completes — performs the network call first. Its `replacementValue` reuses
- * the existing `{"statusCode","addHeaders","bodyReplace"}` schema already understood by
- * [com.example.interception.RuleEnforcer.applyResponseModification].
- *
- * Persisted by name via [RequestrTypeConverters.ruleActionToName], so adding a member needs no
- * schema migration — unknown/legacy names decode to [LOG_ONLY].
- *
- * [SCRIPT_REWRITE] (master plan §1.11) runs a real JavaScript `pm.*` script -- via
- * [com.example.interception.RuleEnforcer.applyScriptRewrite] -- against the live request or
- * response, the same engine ApiTestr's pre/post scripts use
- * ([com.example.scripting.JsScriptEngine]/[com.example.scripting.PmPrelude]). Its
- * `replacementValue` is `{"script": "<js source>", "variables": {"key":"value"}}` rather than the
- * fixed `{"addHeaders",...}` schema [MODIFY_REQUEST]/[MODIFY_RESPONSE] use -- kept as a distinct
- * action (not a replacement for them) so existing fixed-modification rules keep working
- * unchanged for users who don't need scripting.
+/*
+ * S4 task 34 (v24): the legacy `intercept_rules` table, `InterceptRuleEntity` and `RuleAction`
+ * were dropped by MIGRATION_23_24. The v1 flat shape survives only as the input DTO
+ * `com.example.interception.rules.LegacyInterceptRule` (imports, v1 API bodies); typed rules live
+ * in `interceptor_rules` (RuleEntities.kt).
  */
-enum class RuleAction {
-    BLOCK, REDIRECT, MODIFY_REQUEST, MODIFY_RESPONSE, LOG_ONLY, FORCE_MITM, MOCK_RESPONSE, SCRIPT_REWRITE, CHAOS,
-    /** §2.14(b): AES/GCM-encrypt the matched request/response body in place -- see [RequestCryptoManager]. */
-    BODY_ENCRYPT_AES,
-    /** §2.14(b): AES/GCM-decrypt the matched request/response body in place -- see [RequestCryptoManager]. */
-    BODY_DECRYPT_AES,
-}
-
-/**
- * User-defined intercept rules. The "Block this domain" long-press action must be gated on a
- * real existence query against this table (APP_v2.md Bug 3.8) rather than a visual-only
- * disabled state.
- */
-@Entity(tableName = "intercept_rules", indices = [Index("domain")])
-data class InterceptRuleEntity(
-    @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val name: String = "",
-    /** Regex or glob matched against the request URL. */
-    val pattern: String = "",
-    /** Bare host this rule targets, used for fast block-existence checks. */
-    val domain: String = "",
-    val action: RuleAction = RuleAction.LOG_ONLY,
-    val enabled: Boolean = true,
-    val replacementValue: String? = null,
-    val createdAt: Long = System.currentTimeMillis(),
-    /**
-     * §2.14(b): AndroidKeyStore alias whose AES/GCM key material [BODY_ENCRYPT_AES]/
-     * [BODY_DECRYPT_AES] rules use -- see [RequestCryptoManager]. Empty (unset) for every other
-     * [RuleAction]; [RuleEnforcer] treats a blank alias on a crypto rule as a configuration error
-     * (surfaced, never silently skipped -- see [RequestCryptoManager]'s KDoc).
-     */
-    val cryptoKeyAlias: String = "",
-    /** Cipher transformation, e.g. `"AES/GCM/NoPadding"` -- the only one [RequestCryptoManager] implements today. */
-    val cryptoAlgorithm: String = "AES/GCM/NoPadding",
-    /** `"ENCRYPT"` or `"DECRYPT"` -- which [RequestCryptoManager] operation this rule applies. */
-    val cryptoDirection: String = "ENCRYPT",
-    /** `"REQUEST"`, `"RESPONSE"`, or `"BOTH"` -- which side(s) of the transaction this rule applies to. */
-    val cryptoScope: String = "BOTH",
-)
 
 /**
  * A user-saved API Testr request.

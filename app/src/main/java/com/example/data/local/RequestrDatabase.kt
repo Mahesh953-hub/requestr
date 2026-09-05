@@ -30,7 +30,6 @@ import kotlinx.coroutines.runBlocking
     entities = [
         CapturedTrafficEntity::class,
         CaptureSessionEntity::class,
-        InterceptRuleEntity::class,
         SavedApiRequestEntity::class,
         FlowNodeEntity::class,
         FlowConnectionEntity::class,
@@ -146,7 +145,11 @@ import kotlinx.coroutines.runBlocking
     // migration is data-carrying: every intercept_rules row is converted through
     // LegacyRuleConverter into a typed row (legacyRuleId links them). intercept_rules itself is
     // kept read-only until v24 (task 34) drops it once parity gate G16 is green. See Migration22To23.kt.
-    version = 23,
+    // S4 task 34 (v24): bumped 23 -> 24 -- legacy retirement. `intercept_rules` is dropped
+    // (MIGRATION_23_24), InterceptRuleEntity / RuleAction / InterceptRuleDao and their type
+    // converters leave the schema; every consumer now reads and writes interceptor_rules. The v1
+    // flat shape survives only as the input DTO LegacyInterceptRule. See Migration23To24.kt.
+    version = 24,
     exportSchema = true,
 )
 @TypeConverters(RequestrTypeConverters::class)
@@ -154,7 +157,6 @@ abstract class RequestrDatabase : RoomDatabase() {
 
     abstract fun capturedTrafficDao(): CapturedTrafficDao
     abstract fun captureSessionDao(): CaptureSessionDao
-    abstract fun interceptRuleDao(): InterceptRuleDao
     abstract fun savedApiRequestDao(): SavedApiRequestDao
     abstract fun flowNodeDao(): FlowNodeDao
     abstract fun flowConnectionDao(): FlowConnectionDao
@@ -195,7 +197,7 @@ abstract class RequestrDatabase : RoomDatabase() {
          * The current schema version declared in the [@Database] annotation above.
          * Kept in sync manually; a CI schema-drift check validates the exported JSON.
          */
-        const val SCHEMA_VERSION = 23
+        const val SCHEMA_VERSION = 24
 
         @Volatile
         private var INSTANCE: RequestrDatabase? = null
@@ -743,12 +745,12 @@ abstract class RequestrDatabase : RoomDatabase() {
             }
         }
 
-        /** All fifteen registered migrations v8→v23, exposed for tests and the builder. */
+        /** All sixteen registered migrations v8→v24, exposed for tests and the builder. */
         val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
             MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16,
             MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21,
-            MIGRATION_21_22, MIGRATION_22_23,
+            MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24,
         )
     }
 }

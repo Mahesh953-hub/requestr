@@ -554,3 +554,49 @@ Exported from the platform todo list at handoff time.
       selected uid, refused response rewrite forwards origin bytes with REFUSED_SAFETY provenance;
       201st rule rejected + excluded, 9th pause refused, 256th replay permit refused, 11 s script
       timeout rejected, constants aliased).
+  - S4 task 34 — done on `vorflux/interceptor-s4-rules`:
+    - Room v24 (`RequestrDatabase.SCHEMA_VERSION = 24`, `ALL_MIGRATIONS` = 16 entries): `Migration23To24.kt`
+      re-runs `Migration22To23.backfill` (idempotent by `legacyRuleId`, carries any straggler rows an install
+      parked on v23 still wrote) and then `DROP TABLE IF EXISTS intercept_rules`. `InterceptRuleEntity`,
+      `InterceptRuleDao`, the `RuleAction` Room enum and its type converters are gone from `data/local`;
+      `app/schemas/.../24.json` committed, schema-drift check clean.
+    - `interception/rules/LegacyInterceptRule.kt`: non-Room DTO (`LegacyInterceptRule` + `LegacyRuleAction`
+      with `fromNameOrLogOnly`/`fromNameOrNull`, `toJson()`, `isLegacyShape(json)`, `fromJson`) -- the ONLY
+      remaining v1 vocabulary, used as converter input by the v23 backfill, v1 workspace imports, v1 flat
+      API bodies and the (still flat) quick-add form.
+    - `interception/rules/RuleApiJson.kt`: the `schemaVersion: 2` envelope `{schemaVersion, rules[], folders[]}`
+      shared by `LocalApiServer`, `LanDashboardServer` and `WorkspaceExporter`; `parseNewRule` accepts a v1 flat
+      body (→ `LegacyRuleConverter`) or a typed body; `applyUpdate` merges partial PUTs for both dialects.
+      Each rule JSON also carries the v1 projection (`domain`/`pattern`/`action`/`replacementValue`,
+      `LegacyRuleProjection.kt`) so the MV3 extension (`channel.mjs` already unwraps `json.rules`) and the LAN
+      dashboard page keep working; stages with no v1 equivalent project `action = <stage>` (fail-open no-op
+      for v1 readers).
+    - `LocalApiServer` GET/POST/PUT/DELETE `/api/rules` and `LanDashboardServer` `/dash/rules` cut over to
+      `InterceptorRuleDao` + `RuleApiJson` (sortOrder = max + 1, `RuleValidation` with `countEnabled`);
+      dashboard JS unwraps the envelope and shows the stage.
+    - `WorkspaceExporter`: exports `schemaVersion: 2`, `interceptorRules` (every rule, typed) + `ruleFolders`;
+      import accepts v2 (folders first, `folderId` remapped) and v1 (`interceptRules` → `LegacyRuleConverter`);
+      the crypto-alias import gate now keys off `BodyCryptoConfig.keyAlias` (imported disabled + warning);
+      `ImportResult.foldersImported` added (defaulted, summary says "in N folders").
+    - `CaptureLogRepository`: `observeHasBlockRule`/`hasBlockRule` → `InterceptorRuleDao.*HasBlockRuleForDomain`;
+      `addBlockRule`, `addRuleFromTransaction(stage = REWRITE)` and `seedDefaultRules` write typed rules
+      (GATEWAY/BLOCK with `*domain*` + escaped-URL matcher, OBSERVE for the log seeds) -- identical to what the
+      v23 backfill produces for the old defaults.
+    - UI: dead `data/models/AppModels.kt` `RuleAction`/`TrafficRuleItem` and `TrafficInterceptorRepository`'s
+      in-memory rule list deleted. `RulesConfigBottomSheet` lists `interceptor_rules` (stage badge, matcher
+      summary, config detail, NO EFFECT via `RuleValidation`; new `ui/screens/TypedRuleUiHelpers.kt`); its
+      quick-add form stays flat and saves through `LegacyRuleConverter` until sub-plan task 16 lands the typed
+      editors. `CapturedTrafficHelpers`/`ReplacementValueUiHelpers`/`RuleTemplateUiHelpers` take
+      `LegacyRuleAction`.
+    - `RuleEnforcer.kt` removed from `app/src/main`; a frozen copy (minus the DB readers) lives at
+      `app/src/test/java/com/example/interception/RuleEnforcer.kt` as the G16 parity oracle used by
+      `LegacyParityTest`/`CompiledMatcherTest`. The six `RuleEnforcer*Test` classes were deleted -- their
+      behaviours are covered by the `rules/stages/*StageTest` suites and the parity test.
+    - Tests: `MigrationRulesDropLegacyTest` (4: v18 → 24 in one hop with schema validation and no data loss,
+      straggler carry without duplicates, empty drop, Room opens a v18 file at v24 and `hasBlockRuleForDomain`
+      answers); `LocalApiServerObserveAndRulesTest` (+2: v1 flat and v2 typed POST both come back typed; partial
+      PUT toggles, DELETE removes, 404 after); `WorkspaceExporterTest` (+2: typed field-drift round trip, v1 file
+      imports identically to the v23 migration, folders round-trip and re-file); `RequestrDatabaseBuilderTest`/
+      `RecoverySemanticsTest` pins bumped to v24/16 migrations; engine tests seed through the test-only
+      `LegacyRuleTestDao` (`db.legacyRuleDao()` in `LegacyRuleTestSupport.kt`) which converts and writes to
+      `interceptor_rules`.

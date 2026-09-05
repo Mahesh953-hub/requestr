@@ -1,59 +1,32 @@
 package com.example.interception
 
 import android.util.Log
-import com.example.data.local.InterceptRuleEntity
-import com.example.data.local.RequestrDatabase
-import com.example.data.local.RuleAction
+import com.example.interception.rules.LegacyInterceptRule
+import com.example.interception.rules.LegacyRuleAction
 import com.example.data.prefs.SecureKeyStore
 import com.example.interception.http.HttpBodyDecoder
 import com.example.interception.http.ParsedHttpMessage
 import com.example.scripting.JsScriptEngine
 import com.example.scripting.PmBridgeBase
 import com.example.scripting.PmPrelude
-import kotlinx.coroutines.runBlocking
 
 /**
- * Shared intercept-rule engine used by every capture path (CaptureEngine's tun
- * pipeline and MitmProxyEngine's decrypted TLS stream) so BLOCK / REDIRECT /
- * MODIFY_REQUEST / MODIFY_RESPONSE / LOG_ONLY behave identically no matter
- * which engine parsed the transaction.
+ * S4 task 34 -- **frozen test oracle**, not production code.
  *
- * Rule matching: `domain` is a case-insensitive substring match against the
- * host; `pattern` is a case-insensitive regex matched against the full URL.
- * The first matching enabled rule wins.
+ * This is the retired v1 rule engine (`interception/RuleEnforcer.kt`, deleted from `main` in v24)
+ * moved verbatim into the test source set, minus its two `intercept_rules` DAO readers
+ * (`checkRules` / `getMatchingRule`, whose predicate `CompiledMatcherTest` re-implements and
+ * checks over a grid). It exists for exactly one reason: parity gate G16 (`LegacyParityTest`)
+ * asserts that every one of the eleven legacy actions, converted through `LegacyRuleConverter`
+ * and run through the S4 stages, produces a message byte-identical to what this engine produced
+ * from the same flat rule. Keeping the oracle as code (rather than hand-copied golden bytes)
+ * keeps that assertion honest across all its inputs -- seeds, bodies, encodings, key material.
+ *
+ * Do not add features here. Do not reference it from `app/src/main`.
  */
 object RuleEnforcer {
 
     private const val TAG = "RuleEnforcer"
-
-    /**
-     * Check enabled intercept rules against a request URL/host.
-     * Returns the first matching rule's action, or [RuleAction.LOG_ONLY] when
-     * no rule matches.
-     */
-    fun checkRules(db: RequestrDatabase, url: String, host: String): RuleAction {
-        return getMatchingRule(db, url, host)?.action ?: RuleAction.LOG_ONLY
-    }
-
-    /** Returns the first matching enabled rule entity (for accessing replacementValue). */
-    fun getMatchingRule(db: RequestrDatabase, url: String, host: String): InterceptRuleEntity? {
-        val rules: List<InterceptRuleEntity> = runCatching {
-            runBlocking { db.interceptRuleDao().getEnabledRules() }
-        }.getOrDefault(emptyList())
-
-        for (rule in rules) {
-            val matchesDomain = rule.domain.isNotEmpty() && host.contains(rule.domain, ignoreCase = true)
-            val matchesPattern = rule.pattern.isNotEmpty() && runCatching {
-                Regex(rule.pattern, RegexOption.IGNORE_CASE).containsMatchIn(url)
-            }.getOrDefault(false)
-
-            if (matchesDomain || matchesPattern) {
-                Log.d(TAG, "Rule '${rule.name}' matched: action=${rule.action.name}")
-                return rule
-            }
-        }
-        return null
-    }
 
     /**
      * Applies request modifications from a rule's replacementValue (JSON config).
@@ -141,7 +114,7 @@ object RuleEnforcer {
     }
 
     /**
-     * §2.14(b) -- [RuleAction.BODY_ENCRYPT_AES]/[RuleAction.BODY_DECRYPT_AES]: transforms
+     * §2.14(b) -- [LegacyRuleAction.BODY_ENCRYPT_AES]/[LegacyRuleAction.BODY_DECRYPT_AES]: transforms
      * [message]'s body in place via [RequestCryptoManager], gated by [rule]'s `cryptoScope`
      * (`"REQUEST"`/`"RESPONSE"`/`"BOTH"`, case-insensitive; anything else fails open to
      * applying, matching [applyRequestModification]/[applyResponseModification]'s lenient
@@ -149,7 +122,7 @@ object RuleEnforcer {
      *
      * [encrypt] -- true for `BODY_ENCRYPT_AES`, false for `BODY_DECRYPT_AES` -- is the caller's
      * responsibility to derive from `rule.action`; this function never reads
-     * [InterceptRuleEntity.cryptoDirection] (informational metadata only, kept in sync by the
+     * [LegacyInterceptRule.cryptoDirection] (informational metadata only, kept in sync by the
      * UI, never a second source of truth that could disagree with the action that actually
      * matched).
      *
@@ -176,11 +149,11 @@ object RuleEnforcer {
      * kept forwarding, silently, as a successful-looking transaction. [message] is deliberately
      * left unmodified here too (the caller must not forward it at all on [CryptoApplyResult.Failed]
      * -- see [MitmProxyEngine.handleParsedRequest]/[MitmProxyEngine.handleParsedResponse], which
-     * now substitute a visibly-failed synthetic response instead, exactly like [RuleAction.BLOCK]).
+     * now substitute a visibly-failed synthetic response instead, exactly like [LegacyRuleAction.BLOCK]).
      * [result]'s `reason` string comes only from [RequestCryptoManager] (never the key or the
      * plaintext/ciphertext bytes themselves), so logging it here is safe.
      */
-    fun applyBodyCrypto(message: ParsedHttpMessage, rule: InterceptRuleEntity, encrypt: Boolean): CryptoApplyResult =
+    fun applyBodyCrypto(message: ParsedHttpMessage, rule: LegacyInterceptRule, encrypt: Boolean): CryptoApplyResult =
         applyBodyCryptoWith(message, rule, encrypt, SecureKeyStore::getOrCreateAesGcmKey)
 
     /**
@@ -192,7 +165,7 @@ object RuleEnforcer {
      */
     internal fun applyBodyCryptoWith(
         message: ParsedHttpMessage,
-        rule: InterceptRuleEntity,
+        rule: LegacyInterceptRule,
         encrypt: Boolean,
         keyProvider: (String) -> javax.crypto.SecretKey,
     ): CryptoApplyResult {
@@ -253,7 +226,7 @@ object RuleEnforcer {
 
     /** Outcome of [applyBodyCrypto]. */
     sealed interface CryptoApplyResult {
-        /** [InterceptRuleEntity.cryptoScope] excluded this message (e.g. a REQUEST-only rule seeing a response). */
+        /** [LegacyInterceptRule.cryptoScope] excluded this message (e.g. a REQUEST-only rule seeing a response). */
         data object NotApplicable : CryptoApplyResult
         /** Transformed successfully; [ParsedHttpMessage.replacedBodyBytes] is set. */
         data object Applied : CryptoApplyResult
@@ -265,7 +238,7 @@ object RuleEnforcer {
      * Security audit fix (fail-open AES crypto): the synthetic response a caller must substitute
      * for the real one when [applyBodyCrypto] returns [CryptoApplyResult.Failed] -- for a
      * REQUEST-side failure this replaces the response the client would otherwise have gotten
-     * from upstream (the real request is never sent, same as [RuleAction.BLOCK]); for a
+     * from upstream (the real request is never sent, same as [LegacyRuleAction.BLOCK]); for a
      * RESPONSE-side failure this replaces what upstream actually sent back, since forwarding it
      * untransformed would leak the exact plaintext/ciphertext the rule was supposed to act on.
      * [reason] is [RequestCryptoManager]'s own diagnosable failure string -- never key material
@@ -292,7 +265,7 @@ object RuleEnforcer {
     }
 
     /**
-     * Master plan §1.11 — [RuleAction.SCRIPT_REWRITE]: runs a real `pm.*` JavaScript against a
+     * Master plan §1.11 — [LegacyRuleAction.SCRIPT_REWRITE]: runs a real `pm.*` JavaScript against a
      * single live [message] (request or response, dispatched on [ParsedHttpMessage.isRequest])
      * in place, via the same [JsScriptEngine]/[PmPrelude] engine ApiTestr's pre/post scripts use
      * (`com.example.scripting.ApiTestrScriptRunner`). Deliberately additive, not a replacement
@@ -391,7 +364,7 @@ object RuleEnforcer {
     }
 
     /**
-     * Header the live engine stamps onto a captured exchange whose [RuleAction.SCRIPT_REWRITE]
+     * Header the live engine stamps onto a captured exchange whose [LegacyRuleAction.SCRIPT_REWRITE]
      * script threw ([applyScriptRewrite] returned non-null). Sibling of [CHAOS_ATTRIBUTION_HEADER]:
      * requestr's own metadata, persisted even when header logging is off, read by the traffic
      * list / detail sheet. On the response leg it also goes on the wire to the client; on the
@@ -440,7 +413,7 @@ object RuleEnforcer {
     }
 
     /**
-     * Master plan §1.5 — builds the synthesized response a [RuleAction.MOCK_RESPONSE] rule
+     * Master plan §1.5 — builds the synthesized response a [LegacyRuleAction.MOCK_RESPONSE] rule
      * answers with, from the rule's `replacementValue`.
      *
      * Reuses the exact same `{"statusCode","addHeaders","bodyReplace"}` schema
@@ -597,13 +570,13 @@ object RuleEnforcer {
     }
 
     /**
-     * Master plan §3 LOW-ADD — [RuleAction.CHAOS], request leg. Called by
+     * Master plan §3 LOW-ADD — [LegacyRuleAction.CHAOS], request leg. Called by
      * [com.example.interception.MitmProxyEngine.handleParsedRequest] BEFORE the upstream
      * connection is dialed; rolls ONLY the `failRate` die. A [ChaosApplyResult.Fail] means
      * "the server is unreachable": the caller answers the client with [ChaosApplyResult.Fail.failureResponse]
      * (503 by default, tunable via `failStatusCode`/`failStatusMessage`/`failBody`) and never
-     * sends the request upstream -- same short-circuit shape as [RuleAction.BLOCK] and
-     * [RuleAction.MOCK_RESPONSE], so a chaos failure cannot cause a real backend side effect.
+     * sends the request upstream -- same short-circuit shape as [LegacyRuleAction.BLOCK] and
+     * [LegacyRuleAction.MOCK_RESPONSE], so a chaos failure cannot cause a real backend side effect.
      *
      * The single [ChaosInjector.decide] roll is split across the two legs (fail here,
      * corrupt/delay in [applyChaosToResponse]) with identical joint probabilities:
@@ -612,7 +585,7 @@ object RuleEnforcer {
      * parsing/deciding, fails open to [ChaosApplyResult.PassThrough].
      */
     fun applyChaosToRequest(
-        rule: InterceptRuleEntity,
+        rule: LegacyInterceptRule,
         random: kotlin.random.Random = kotlin.random.Random.Default,
     ): ChaosApplyResult {
         val config = rule.replacementValue
@@ -630,7 +603,7 @@ object RuleEnforcer {
     }
 
     /**
-     * Master plan §3 LOW-ADD — [RuleAction.CHAOS], response leg. Called by
+     * Master plan §3 LOW-ADD — [LegacyRuleAction.CHAOS], response leg. Called by
      * [com.example.interception.MitmProxyEngine.handleParsedResponse] on the real upstream
      * response, only for exchanges whose request leg ([applyChaosToRequest]) passed through.
      * Rolls `corruptBodyRate` then `delayMs` (never `failRate`, already rolled).
@@ -649,7 +622,7 @@ object RuleEnforcer {
      */
     fun applyChaosToResponse(
         message: ParsedHttpMessage,
-        rule: InterceptRuleEntity,
+        rule: LegacyInterceptRule,
         random: kotlin.random.Random = kotlin.random.Random.Default,
     ): ChaosApplyResult {
         val config = rule.replacementValue
@@ -695,7 +668,7 @@ object RuleEnforcer {
     }
 
     /**
-     * Parses a [RuleAction.CHAOS] rule's `replacementValue` into a [ChaosInjector.ChaosConfig].
+     * Parses a [LegacyRuleAction.CHAOS] rule's `replacementValue` into a [ChaosInjector.ChaosConfig].
      * `delayMs` is a two-element `[min, max]` array (inclusive); a single-element or missing
      * array is treated as no delay. Every field is optional and clamped/defaulted so a partial
      * or malformed config degrades to an all-zero (always-[ChaosInjector.ChaosOutcome.PassThrough])
