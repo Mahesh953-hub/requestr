@@ -77,6 +77,16 @@
                 android:value="Local VPN used to intercept and inspect this device's own HTTP(S) traffic for debugging and security analysis." />
         </service>
 
+        <!--
+          S4 task 32: isolated JavaScript host for SCRIPT rules. Runs in its own process so a
+          hanging or memory-hungry script can be killed without touching the VPN/relay process
+          (gate G20). Bound only from inside this app; flag `scriptHost`.
+        -->
+        <service
+            android:name=".scripting.host.ScriptHostService"
+            android:exported="false"
+            android:process=":scripthost" />
+
         <!-- Shizuku provider, for the Shizuku capture tier. -->
         <provider
             android:name="rikka.shizuku.ShizukuProvider"

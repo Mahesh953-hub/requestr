@@ -459,3 +459,54 @@ Exported from the platform todo list at handoff time.
       paused, the other completes and the paused one auto-resumes with byte-identical forwarding;
       Replace with recomputed Content-Length; Abort answers 499 without dialling; response-phase
       breakpoint + rewrite + throttle in one decision; flag off; client close invalidates).
+  - S4 task 32 — done on `vorflux/interceptor-s4-rules`:
+    - `AndroidManifest.xml`: `.scripting.host.ScriptHostService` declared with
+      `android:process=":scripthost"`, `android:exported="false"`.
+    - `scripting/host/ScriptContract.kt`: Moshi envelopes (`ScriptRequestEnvelope { phase, flowId,
+      scriptId, source, timeoutMs, maxInstructions, variables, shared, globals, message,
+      responseTimeMs }`, `ScriptResponseEnvelope { ok, aborted, message, shared, globals, console,
+      tests, error, pid }`, `MessageDto` with text `body` / base64 `bodyBase64` and
+      `bodyTruncated` at `MAX_SCRIPT_BODY_BYTES` = 2 MiB), Messenger keys, and the one pure
+      `execute(envelope)` both sides share (Rhino `optimizationLevel = -1`,
+      `isJavaPrimitiveWrap = false` via `JsScriptEngine`). `MessageDto.applyTo` refuses a body
+      mutation against a truncated body (fail-closed on the body, fail-open on the flow).
+    - `scripting/host/ScriptHostService.kt`: `Messenger` over a `HandlerThread`, 4 worker threads,
+      `MSG_HELLO` (pid) / `MSG_RUN` -> `MSG_RESULT` correlated by call id.
+    - `scripting/host/ScriptHostClient.kt`: `Transport` seam (`MessengerTransport` binds lazily with
+      `BIND_AUTO_CREATE`, correlates replies, unbinds + `Process.killProcess(remotePid)` on `kill`);
+      per-call deadline = `timeoutMs` (ceiling 10 s) + 500 ms IPC grace; a missed deadline or dead
+      binder kills the host and the flow continues unmodified with a FAILED audit record; circuit
+      breaker opens after 3 consecutive host failures (`reset()` closes it); `killSwitch()`.
+    - `ScriptStage`: `ScriptRunner.run(ScriptCall)` -> `ScriptOutcome(error, aborted)`;
+      `apply(..., flowId, shared)` runs scripts in list order, a `null` return from
+      `onRequest`/`onResponse` aborts the flow (`Result.abortedBy`, `abortResponse` = 499
+      `Aborted By Script` with `x-requestr-script-error: aborted by script; rule="<name>"`);
+      `HostRunner(client)` builds the envelope, applies the reply, writes `context.shared` back and
+      mirrors `pm.globals`; the in-process runner stays as the fallback (flag `scriptHost` off).
+    - `PmPrelude`: `context.shared` (seeded from `__bridge.sharedJson()`), `__phase`, and the
+      `EPILOGUE` that dispatches `onRequest(context, request)` / `onResponse(context, response)`
+      and reports `ABORT` for a `null` return. `JsScriptEngine.eval(..., epilogue)` returns the
+      epilogue value in `EvalResult.value`. `PmBridgeBase` gains `phase`, `seedShared`,
+      `sharedJson`, `sharedPut`, `sharedContext`.
+    - `MitmProxyEngine`: `PendingExchange.scriptShared` + `flowId` thread the shared context from
+      the request leg into the response leg; script abort short-circuits (request) or replaces the
+      emitted response (response) and skips crypto/chaos; `start()` installs `HostRunner` when
+      `InterceptorFlags.scriptHost`, `stop()` restores the in-process runner; constructor seam
+      `scriptHostClient`.
+    - `scripting/ScriptConsoleLog.kt`: bounded ring buffer (500) of `ScriptLogEntry(flowId,
+      scriptId, level, message, backtrace, atMs)` fed by both runners.
+    - G6: `interception/rules/bench/BenchmarkStats.kt` (nearest-rank percentiles) +
+      `RuleSnapshotBenchmark` (200-rule mixed snapshot, 1,000 warm-up + 5,000 sampled).
+      `RuleEvaluationBenchmarkTest` measured p95 = 0.038 ms on the dev box (budget 1 ms);
+      androidTest `RuleEvaluationDeviceBenchmark` runs the identical harness on device.
+    - Tests: `ScriptEnvelopesTest` (10 -- round trip, base64 binary byte-exact, truncation flag,
+      execute mutations / untouched body / refused truncated mutation, lifecycle + shared, globals
+      round trip, script error, runaway loop cut by the engine deadline), `ScriptHostTimeoutTest`
+      (9 -- hanging host returns within the deadline and is killed, 10 s ceiling, breaker after 3,
+      healthy call resets the count, kill switch, dead binder, real infinite loop, HostRunner
+      fail-open / mutate + shared), `ScriptStageTest` (8 -- list order, shared request->response,
+      phase gating, null aborts and stops the list, error stamps + continues, runner seam),
+      `JsScriptEngineTest` +4 (epilogue), `MitmProxyEngineScriptTest` (3, real MITM tunnel -- G20:
+      mutating lifecycle script byte-correct on both legs with shared context; hanging host cut at
+      the deadline on both legs with the concurrent flow unaffected and FAILED audit records;
+      aborting hook answers 499 without dialling the origin), `RuleEvaluationBenchmarkTest` (3).

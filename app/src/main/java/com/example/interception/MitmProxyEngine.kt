@@ -39,6 +39,7 @@ import com.example.interception.breakpoint.BreakpointRegistry
 import com.example.interception.rules.stages.MockStage
 import com.example.interception.rules.stages.RewriteStage
 import com.example.interception.rules.stages.ScriptStage
+import com.example.scripting.host.ScriptHostClient
 import com.example.interception.http.WebSocketParser
 import com.example.interception.http.WsMessageAssembler
 import com.example.interception.gateway.GatewaySessionHandler
@@ -180,6 +181,11 @@ class MitmProxyEngine(
      */
     private val breakpoints: BreakpointRegistry = BreakpointRegistry.shared,
     /**
+     * S4 task 32: the isolated `:scripthost` client SCRIPT rules run through when the `scriptHost`
+     * flag is on. Production shares the process-wide client; tests inject one over a fake transport.
+     */
+    private val scriptHostClient: (Context) -> ScriptHostClient = { ScriptHostClient.get(it) },
+    /**
      * S4 task 26: where every rule decision reads its immutable [RuleSnapshot] from. Production
      * reads the process-wide [RuleSnapshotStore]; tests inject a fixed snapshot. Nothing on the
      * hot path touches a DAO.
@@ -272,6 +278,8 @@ class MitmProxyEngine(
             protocolChildren = flags.protocolChildren
             h2Terminate = flags.h2Terminate
             breakpointsEnabled = flags.breakpoints
+            // S4 task 32: SCRIPT rules run in the isolated :scripthost process unless the flag is off.
+            ScriptStage.runner = if (flags.scriptHost) ScriptStage.HostRunner(scriptHostClient(context.applicationContext)) else ScriptStage.ScriptRunner { ScriptStage.runInProcess(it) }
         }
 
         // Pre-warm the CA material off the caller's thread (S1 task 7: no runBlocking on the
@@ -306,6 +314,8 @@ class MitmProxyEngine(
         running.set(false)
         gateway?.stop()
         gateway = null
+        // Scripts outside a running engine (ApiTestr, exports, tests) stay in-process.
+        ScriptStage.runner = ScriptStage.ScriptRunner { ScriptStage.runInProcess(it) }
         Log.i(TAG, "MITM proxy stopped")
     }
 
@@ -1241,6 +1251,10 @@ class MitmProxyEngine(
         val trail: FlowAuditTrail = FlowAuditTrail(),
         /** S4 task 28: the connection's mirror plan, so the response can be attributed to it. */
         val mirror: MirrorStage.Plan? = null,
+        /** S4 task 32: `context.shared` written by `onRequest`, read back by `onResponse` of the same flow. */
+        val scriptShared: MutableMap<String, String> = LinkedHashMap(),
+        /** S4 task 32: one id per flow for script audit/console records. */
+        val flowId: String = java.util.UUID.randomUUID().toString(),
     ) {
         @Volatile var decision: RuleDecision? = decision
     }
@@ -1366,8 +1380,14 @@ class MitmProxyEngine(
         }
         // 3. Scripts: pm.request.* mutations. The error header (if any) is stamped AFTER
         //    serialization so it reaches the captured row but never the origin server.
-        val scripts = ScriptStage.apply(request, decision.scripts, phase, trail, stampErrorHeader = false)
+        val scriptShared = LinkedHashMap<String, String>()
+        val flowId = java.util.UUID.randomUUID().toString()
+        val scripts = ScriptStage.apply(request, decision.scripts, phase, trail, stampErrorHeader = false, flowId = flowId, shared = scriptShared)
         if (scripts.changed) modified = true
+        scripts.abortedBy?.let { ruleName ->
+            shortCircuit(ScriptStage.abortResponse(ruleName, request.version), "ABORTED by script")
+            return
+        }
         // 4. Mock: short-circuit with a synthesized response; upstream is never dialed.
         decision.mock?.let { mock ->
             val mockResponse = MockStage.build(mock.config, request.url, request.method?.name, request.headers)
@@ -1421,7 +1441,7 @@ class MitmProxyEngine(
         if (!modified && decision.isEmpty) Log.d(TAG, "FORWARD (decrypted): $what")
         val upstreamOut = connectOrThrow(db, upstream, host, port)
         val sendStartedAt = System.currentTimeMillis()
-        pending.add(PendingExchange(request, sendStartedAt, decision, trail, mirror))
+        pending.add(PendingExchange(request, sendStartedAt, decision, trail, mirror, scriptShared, flowId))
         upstreamOut.write(bytesToForward)
         upstreamOut.flush()
         // S2 task 18: request fully written -> the send phase ends and the wait phase begins.
@@ -1523,8 +1543,13 @@ class MitmProxyEngine(
             // On the wire AND persisted: the client under test can see the rewrite did not
             // happen, and the traffic list badges the row instead of logcat-only.
             val scripts = if (aborted) ScriptStage.Result.NONE
-            else ScriptStage.apply(response, decision.scripts, phase, trail, responseTimeMs)
+            else ScriptStage.apply(response, decision.scripts, phase, trail, responseTimeMs, flowId = exchange.flowId, shared = exchange.scriptShared)
             if (scripts.changed) modified = true
+            scripts.abortedBy?.let { ruleName ->
+                responseToEmit = ScriptStage.abortResponse(ruleName, response.version)
+                modified = true
+                aborted = true
+            }
             if (aborted) cryptoFailed = true // skip crypto + chaos below: nothing of the origin's body is forwarded
             decision.bodyCrypto?.takeIf { !aborted }?.let { crypto ->
                 when (val result = BodyCryptoStage.apply(response, crypto.config, crypto.rule.name)) {

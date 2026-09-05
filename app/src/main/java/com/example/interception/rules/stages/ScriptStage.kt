@@ -8,7 +8,11 @@ import com.example.interception.rules.RuleMetadataHeaders
 import com.example.interception.rules.ScriptConfig
 import com.example.scripting.JsScriptEngine
 import com.example.scripting.PmBridgeBase
+import com.example.scripting.GlobalVariableStore
 import com.example.scripting.PmPrelude
+import com.example.scripting.ScriptConsoleLog
+import com.example.scripting.host.ScriptContract
+import com.example.scripting.host.ScriptHostClient
 
 /**
  * S4 task 26: the SCRIPT slot. Runs every matching script in list order against the message.
@@ -21,27 +25,51 @@ import com.example.scripting.PmPrelude
 object ScriptStage {
     private const val TAG = "ScriptStage"
 
-    /** Executes one script against [message]; returns the error text, or null on success. */
-    fun interface ScriptRunner {
-        fun run(message: ParsedHttpMessage, config: ScriptConfig, ruleName: String, responseTimeMs: Long): String?
+    /** One script invocation: the message, the rule, and the per-flow lifecycle state. */
+    class ScriptCall(
+        val message: ParsedHttpMessage,
+        val config: ScriptConfig,
+        val ruleName: String,
+        val responseTimeMs: Long,
+        val phase: FlowAuditTrail.Phase,
+        val flowId: String,
+        /** `context.shared`: mutated in place so the response leg sees what the request leg stored. */
+        val shared: MutableMap<String, String>,
+    ) {
+        val phaseName: String get() = if (phase == FlowAuditTrail.Phase.RESPONSE) PmPrelude.PHASE_RESPONSE else PmPrelude.PHASE_REQUEST
     }
 
-    /** The default runner; task 32 swaps this for the isolated host when the flag is on. */
-    @Volatile
-    var runner: ScriptRunner = ScriptRunner { message, config, ruleName, responseTimeMs -> runInProcess(message, config, ruleName, responseTimeMs) }
+    /** [error] null = the script ran; [aborted] = its lifecycle hook returned `null` (drop the flow). */
+    data class ScriptOutcome(val error: String?, val aborted: Boolean = false)
 
-    data class Result(val ran: Int, val errors: List<Pair<String, String>>) {
+    /** Executes one script against the call's message. */
+    fun interface ScriptRunner {
+        fun run(call: ScriptCall): ScriptOutcome
+    }
+
+    /** The default runner (in-process Rhino); [MitmProxyEngine.start] swaps in [HostRunner] when `scriptHost` is on. */
+    @Volatile
+    var runner: ScriptRunner = ScriptRunner { call -> runInProcess(call) }
+
+    data class Result(
+        val ran: Int,
+        val errors: List<Pair<String, String>>,
+        /** S4 task 32: a lifecycle hook returned `null` -- the caller must not forward this flow. */
+        val abortedBy: String? = null,
+    ) {
         val changed: Boolean get() = ran > 0
+        val aborted: Boolean get() = abortedBy != null
         companion object {
             val NONE = Result(0, emptyList())
         }
     }
 
     /**
-     * Applies every script in [scripts]. A failing script stamps [RuleMetadataHeaders.SCRIPT_ERROR]
-     * on the message (`<error>; rule="<name>"`), which the caller keeps off the wire for requests
-     * (added after serialization) and forwards on responses, exactly as the legacy engine did.
-     * [stampErrorHeader] false lets the request leg stamp after serializing.
+     * Applies every script in [scripts] in list order. A failing script stamps
+     * [RuleMetadataHeaders.SCRIPT_ERROR] on the message (`<error>; rule="<name>"`), which the
+     * caller keeps off the wire for requests (added after serialization) and forwards on
+     * responses, exactly as the legacy engine did. [stampErrorHeader] false lets the request leg
+     * stamp after serializing. An abort stops the list and is reported through [Result.abortedBy].
      */
     fun apply(
         message: ParsedHttpMessage,
@@ -50,6 +78,8 @@ object ScriptStage {
         trail: FlowAuditTrail? = null,
         responseTimeMs: Long = 0L,
         stampErrorHeader: Boolean = true,
+        flowId: String = "",
+        shared: MutableMap<String, String> = LinkedHashMap(),
     ): Result {
         if (scripts.isEmpty()) return Result.NONE
         var ran = 0
@@ -58,8 +88,13 @@ object ScriptStage {
             val config = matched.config
             if (config.source.isBlank()) continue
             ran++
-            val error = runner.run(message, config, matched.rule.name, responseTimeMs)
+            val outcome = runner.run(ScriptCall(message, config, matched.rule.name, responseTimeMs, phase, flowId, shared))
+            val error = outcome.error
             if (error == null) {
+                if (outcome.aborted) {
+                    trail?.applied(matched.rule, phase, "script aborted the flow")
+                    return Result(ran, errors, abortedBy = matched.rule.name)
+                }
                 trail?.applied(matched.rule, phase, "script ok")
             } else {
                 errors += error to matched.rule.name
@@ -79,21 +114,79 @@ object ScriptStage {
         return "$folded; ${RuleMetadataHeaders.ruleAttribution(ruleName)}"
     }
 
+    /** The synthetic reply the client gets when a script's lifecycle hook aborted the flow. */
+    fun abortResponse(ruleName: String, version: String = "HTTP/1.1"): ParsedHttpMessage = ParsedHttpMessage(
+        isRequest = false, method = null, version = version.ifEmpty { "HTTP/1.1" },
+        statusCode = ABORT_STATUS, statusMessage = ABORT_STATUS_MESSAGE,
+        headers = mapOf(
+            "content-type" to "text/plain; charset=utf-8",
+            "connection" to "close",
+            RuleMetadataHeaders.SCRIPT_ERROR to errorHeaderValue("aborted by script", ruleName),
+        ),
+        body = "requestr: flow aborted by script rule \"$ruleName\"", contentType = "text/plain", bodyReplaced = true,
+    )
+
+    const val ABORT_STATUS = 499
+    const val ABORT_STATUS_MESSAGE = "Aborted By Script"
+
     /** Legacy-parity in-process runner: Rhino, `optimizationLevel = -1`, `isJavaPrimitiveWrap = false`. */
-    fun runInProcess(message: ParsedHttpMessage, config: ScriptConfig, ruleName: String, responseTimeMs: Long = 0L): String? {
-        if (config.source.isBlank()) return null
+    fun runInProcess(call: ScriptCall): ScriptOutcome {
+        val config = call.config
+        if (config.source.isBlank()) return ScriptOutcome(null)
         return runCatching {
-            val bridge = bridgeFor(message, config.variables, responseTimeMs)
-            val result = JsScriptEngine.eval(config.source, PmPrelude.SOURCE, bridge, config.timeoutMs, config.maxInstructions)
+            val bridge = bridgeFor(call.message, config.variables, call.responseTimeMs)
+            bridge.phase = call.phaseName
+            bridge.seedShared(call.shared)
+            val result = JsScriptEngine.eval(config.source, PmPrelude.SOURCE, bridge, config.timeoutMs, config.maxInstructions, epilogue = PmPrelude.EPILOGUE)
+            call.shared.clear(); call.shared.putAll(bridge.sharedContext)
+            ScriptConsoleLog.shared.appendAll(call.flowId, call.ruleName, bridge.consoleOutput, result.error)
             if (!result.ok) {
-                Log.w(TAG, "script rule '$ruleName' error: ${result.error}")
-                result.error ?: "script failed without an error message"
+                Log.w(TAG, "script rule '${call.ruleName}' error: ${result.error}")
+                ScriptOutcome(result.error ?: "script failed without an error message")
             } else {
-                null
+                ScriptOutcome(null, aborted = result.value == "ABORT")
             }
         }.getOrElse {
-            Log.w(TAG, "Failed to run script rule '$ruleName': ${it.message}")
-            "invalid script config: ${it.message}"
+            Log.w(TAG, "Failed to run script rule '${call.ruleName}': ${it.message}")
+            ScriptOutcome("invalid script config: ${it.message}")
+        }
+    }
+
+    /** Convenience for tests and single-shot callers: no flow state, request phase inferred from the message. */
+    fun runInProcess(message: ParsedHttpMessage, config: ScriptConfig, ruleName: String, responseTimeMs: Long = 0L): String? =
+        runInProcess(
+            ScriptCall(
+                message, config, ruleName, responseTimeMs,
+                if (message.isRequest) FlowAuditTrail.Phase.REQUEST else FlowAuditTrail.Phase.RESPONSE, "", LinkedHashMap(),
+            ),
+        ).error
+
+    /**
+     * S4 task 32: runs scripts in the isolated `:scripthost` process through [ScriptHostClient].
+     * Host failures (deadline, dead binder, open circuit) are reported as script errors so the flow
+     * continues unmodified with a FAILED audit record and the error badge -- never a hang.
+     */
+    class HostRunner(private val client: ScriptHostClient) : ScriptRunner {
+        override fun run(call: ScriptCall): ScriptOutcome {
+            val original = ScriptContract.MessageDto.fromMessage(call.message)
+            val envelope = ScriptContract.ScriptRequestEnvelope(
+                phase = call.phaseName, flowId = call.flowId, scriptId = call.ruleName, source = call.config.source,
+                timeoutMs = call.config.timeoutMs, maxInstructions = call.config.maxInstructions,
+                variables = call.config.variables, shared = call.shared.toMap(), globals = GlobalVariableStore.snapshot(),
+                message = original, responseTimeMs = call.responseTimeMs,
+            )
+            return when (val outcome = client.run(envelope)) {
+                is ScriptHostClient.Outcome.HostFailure -> ScriptOutcome(outcome.reason)
+                is ScriptHostClient.Outcome.Ok -> {
+                    val response = outcome.response
+                    call.shared.clear(); call.shared.putAll(response.shared)
+                    response.globals.forEach { (k, v) -> GlobalVariableStore.set(k, v) }
+                    ScriptConsoleLog.shared.appendAll(call.flowId, call.ruleName, response.console, response.error)
+                    if (!response.ok) return ScriptOutcome(response.error ?: "script failed without an error message")
+                    val refused = response.message?.applyTo(call.message, original)
+                    if (refused != null) ScriptOutcome(refused) else ScriptOutcome(null, aborted = response.aborted)
+                }
+            }
         }
     }
 
