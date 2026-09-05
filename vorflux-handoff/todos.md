@@ -365,3 +365,29 @@ Exported from the platform todo list at handoff time.
       `handleConnectAttempt`, pool still free afterwards), `MitmProxyEngineGatewayBlockTest` (4:
       legacy 403 bytes hidden by default, `showBlockedInList` row + `gateway:<id>` badge, ALLOW_ONLY
       implied block vs allow-listed dial, BLOCK > FORCE_DECRYPT and BYPASS > BLOCK).
+  - S4 task 28 — done on `vorflux/interceptor-s4-rules`:
+    - `interception/rules/stages/MirrorStage.kt`: `plan(connectHost, connectPort, clientSni,
+      config, rule)` -> `Plan(dialHost, dialPort, sniName, hostHeader?, certAuthority, certPort,
+      certSni)` from the three independent `NamePolicy` axes (PRESERVE / USE_CONNECT_ADDRESS /
+      USE_MIRROR_ADDRESS); `applyHostHeader(request, plan, trail)` (case-preserving, leaves
+      `request.host`/`url` = the client's view); `stampAttribution(response, plan)` ->
+      `x-requestr-mirror: rule="<name>"; target=<host:port>`.
+    - `MitmProxyEngine` CONNECT path: the plan is resolved once after the ClientHello peek and
+      before leaf issuance. `CertificateEngine.Request(connectAuthority/port/sni)` takes the plan's
+      cert inputs, so the leaf is signed for the name the policy dictates and the cert cache is
+      keyed on that resolved identity (`identity:port|mode|tag`) -- mirrored and direct flows never
+      share an entry unless they resolve to the same CN, and `USE_MIRROR_ADDRESS` + upstream sniffing
+      fetches the *mirror's* leaf (`RemoteCertificateMirror` unchanged). `LazyUpstreamConnection`
+      gained `tlsServerName` (SNI + hostname the upstream chain is verified against; defaults to the
+      dial host) and dials `plan.dialHost:dialPort`. `inspectClientToServer` ->
+      `handleParsedRequest(mirror)` applies the Host policy before rewrites; `PendingExchange.mirror`
+      lets the response leg stamp the attribution header and the provenance row.
+      `persistMitmTlsSession`/`persistFailedMitmTlsSession` keep the CONNECT host:port.
+    - Without FORCE_DECRYPT the MIRROR disposition stays an opaque relay to the mirror
+      (`HttpProxyShared`/`GatewayEngine`, persisted as REDIRECTED) -- there is no TLS to re-point.
+    - Tests: `MirrorStageTest` (8; all 27 policy combinations, SNI fallback, authority formatting,
+      Host header application + trail, attribution), `MitmProxyEngineMirrorTest` (4, real sockets +
+      requestr CA like `MitmProxyEngineLazyUpstreamTest`: client CONNECTs `app.example`, leaf CN per
+      policy, mirror loopback server records SNI + Host per policy, bytes round-trip, captured row
+      carries `x-requestr-mirror`; plus a direct `LazyUpstreamConnection(tlsServerName)` SNI check
+      since SunJSSE omits server_name for single-label names like `localhost`).

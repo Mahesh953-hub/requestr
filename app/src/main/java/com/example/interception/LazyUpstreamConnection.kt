@@ -68,7 +68,17 @@ internal class LazyUpstreamConnection(
     private val keyManagers: Array<KeyManager>? = null,
     /** S1 task 8: how the upstream chain is judged; default accepts and records the outcome. */
     private val trustPolicy: UpstreamTrustPolicy = UpstreamTrustPolicy.AcceptAllRecording(),
+    /**
+     * S4 task 28: the name sent as TLS `server_name` and verified against the upstream chain.
+     * Defaults to [host]; a MIRROR rule with `sniPolicy != USE_MIRROR_ADDRESS` dials the mirror
+     * while presenting the original host's SNI.
+     */
+    tlsServerName: String? = null,
 ) {
+    private val tlsServerName: String = tlsServerName?.takeIf { it.isNotBlank() } ?: host
+
+    /** The TLS `server_name` this leg presents (see the constructor parameter). */
+    val serverName: String get() = tlsServerName
 
     class Connected(
         val socket: Socket,
@@ -141,8 +151,8 @@ internal class LazyUpstreamConnection(
                     throw t
                 }
                 val sslSocket = SSLContext.getInstance("TLS").apply {
-                    init(keyManagers, arrayOf(trustPolicy.trustManager(host)), SecureRandom())
-                }.socketFactory.createSocket(socket, host, port, true) as SSLSocket
+                    init(keyManagers, arrayOf(trustPolicy.trustManager(tlsServerName)), SecureRandom())
+                }.socketFactory.createSocket(socket, tlsServerName, port, true) as SSLSocket
                 // Offer the same ALPN protocol the client-facing leg negotiated (§4 ALPN
                 // negotiation) -- see the KDoc on [preferredAlpnProtocols]. Best-effort: an
                 // upstream server that doesn't understand ALPN, or a platform too old to expose

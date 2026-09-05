@@ -31,6 +31,7 @@ import com.example.interception.rules.RuleSnapshot
 import com.example.interception.rules.RuleSnapshotStore
 import com.example.interception.rules.stages.BodyCryptoStage
 import com.example.interception.rules.stages.ChaosStage
+import com.example.interception.rules.stages.MirrorStage
 import com.example.interception.rules.stages.MockStage
 import com.example.interception.rules.stages.RewriteStage
 import com.example.interception.rules.stages.ScriptStage
@@ -523,11 +524,24 @@ class MitmProxyEngine(
             val clientHello: TlsClientHello? = peeked.clientHello
             client = peeked.socket
 
+            // S4 task 28: a MIRROR rule on a decrypted flow re-points the upstream dial at the
+            // mirror host and decides, per NamePolicy, which name the leaf, the upstream SNI and
+            // the Host header carry. Resolved once here, before issuance, so the leaf is signed
+            // for the name the client expects and the cert cache is keyed on that resolved name.
+            val mirrorPlan = verdict.decision.mirror?.let { mirror ->
+                MirrorStage.plan(host, port, clientHello?.sni, mirror.config, mirror.rule).also {
+                    verdict.trail.applied(mirror.rule, FlowAuditTrail.Phase.CONNECT, "mirror -> ${it.target}")
+                    Log.i(TAG, "MIRROR by rule ${mirror.rule.name}: $host:$port -> ${it.target} (sni=${it.sniName}, cn=${it.certAuthority})")
+                }
+            }
+
             val issuance = try {
                 certificateEngine.issue(
                     context,
                     CertificateEngine.Request(
-                        connectAuthority = host, port = port, sni = clientHello?.sni,
+                        connectAuthority = mirrorPlan?.certAuthority ?: host,
+                        port = mirrorPlan?.certPort ?: port,
+                        sni = if (mirrorPlan != null) mirrorPlan.certSni else clientHello?.sni,
                         preferUpstreamSniff = mirrorEnabled,
                     ),
                 )
@@ -639,7 +653,8 @@ class MitmProxyEngine(
             // server picks that (Http2ProxyConnection). An HTTP/1.x client keeps the mirrored
             // single offer so both legs of the HTTP/1.x relay agree on framing.
             val upstream = LazyUpstreamConnection(
-                host, port,
+                mirrorPlan?.dialHost ?: host, mirrorPlan?.dialPort ?: port,
+                tlsServerName = mirrorPlan?.sniName,
                 preferredAlpnProtocols = when (negotiatedAlpn) {
                     "h2" -> listOf("h2", "http/1.1")
                     null -> emptyList()
@@ -773,7 +788,8 @@ class MitmProxyEngine(
                 val wsState = ConnectionProtocolState()
                 clientToUpstream = {
                     inspectClientToServer(db, decryptedInput, upstream, decryptedOutput,
-                        clientWriteLock, host, port, pending, sent, logRequests, logResponses, wsState, timing)
+                        clientWriteLock, host, port, pending, sent, logRequests, logResponses, wsState, timing,
+                        mirror = mirrorPlan)
                 }
                 upstreamToClient = {
                     inspectServerToClient(
@@ -963,6 +979,7 @@ class MitmProxyEngine(
         logResponses: Boolean,
         wsState: ConnectionProtocolState,
         timing: ConnectionTimingTracker? = null,
+        mirror: MirrorStage.Plan? = null,
     ) {
         val buffer = ByteArrayOutputStream()
         val wsBuffer = ByteArrayOutputStream()
@@ -1023,7 +1040,7 @@ class MitmProxyEngine(
                         bytes = bytes.copyOfRange(parsed.consumedBytes, bytes.size)
                         handleParsedRequest(
                             db, parsed, raw, upstream, clientOut, clientWriteLock, pending,
-                            host, port, logRequests, logResponses, timing,
+                            host, port, logRequests, logResponses, timing, mirror,
                         )
                         buffer.reset()
                         buffer.write(bytes)
@@ -1187,6 +1204,8 @@ class MitmProxyEngine(
         val sentAt: Long,
         decision: RuleDecision? = null,
         val trail: FlowAuditTrail = FlowAuditTrail(),
+        /** S4 task 28: the connection's mirror plan, so the response can be attributed to it. */
+        val mirror: MirrorStage.Plan? = null,
     ) {
         @Volatile var decision: RuleDecision? = decision
     }
@@ -1227,6 +1246,7 @@ class MitmProxyEngine(
         logRequests: Boolean,
         logResponses: Boolean,
         timing: ConnectionTimingTracker? = null,
+        mirror: MirrorStage.Plan? = null,
     ) {
         val decision = RulePipeline.evaluate(ruleSnapshot(), flowKeyFor(request, host, port))
         val trail = FlowAuditTrail()
@@ -1281,6 +1301,11 @@ class MitmProxyEngine(
         }
 
         var modified = false
+        // S4 task 28: MIRROR hostPolicy -- present the mirror's (or the CONNECT) authority in
+        // `Host:` before any rewrite, so a rewrite that sets Host explicitly still wins.
+        if (mirror != null && MirrorStage.applyHostHeader(request, mirror, trail)) {
+            modified = true
+        }
         // 2. Rewrite: redirection → whole-message replacement → modifications, in rule order.
         if (decision.rewrite.hasRequestWork) {
             RewriteStage.applyRequest(request, decision.rewrite, trail)
@@ -1337,7 +1362,7 @@ class MitmProxyEngine(
         if (!modified && decision.isEmpty) Log.d(TAG, "FORWARD (decrypted): $what")
         val upstreamOut = connectOrThrow(db, upstream, host, port)
         val sendStartedAt = System.currentTimeMillis()
-        pending.add(PendingExchange(request, sendStartedAt, decision, trail))
+        pending.add(PendingExchange(request, sendStartedAt, decision, trail, mirror))
         upstreamOut.write(bytesToForward)
         upstreamOut.flush()
         // S2 task 18: request fully written -> the send phase ends and the wait phase begins.
@@ -1404,6 +1429,12 @@ class MitmProxyEngine(
             val what = "${request.method?.name} ${request.url.take(80)}"
             var modified = false
             var cryptoFailed = false
+            // S4 task 28: attribute a mirrored exchange (persisted row + client see the target).
+            exchange.mirror?.let { plan ->
+                MirrorStage.stampAttribution(response, plan)
+                trail.applied(plan.rule, phase, "mirrored from ${plan.target}")
+                modified = true
+            }
             if (decision.rewrite.hasResponseWork) {
                 RewriteStage.applyResponse(response, decision.rewrite, trail)
                 Log.i(TAG, "REWRITE response (decrypted): $what")
