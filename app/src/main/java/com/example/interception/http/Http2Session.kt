@@ -1,7 +1,6 @@
 package com.example.interception.http
 
 import android.util.Log
-import com.example.data.models.HttpMethod
 import com.example.interception.grpc.GrpcDetector
 import java.io.ByteArrayOutputStream
 
@@ -371,71 +370,12 @@ internal class Http2Session(
             .onFailure { e -> Log.w(TAG, "h2 transaction callback failed: ${e.message}") }
     }
 
-    private fun buildRequestMessage(
-        headers: Http2Parser.H2Headers,
-        bodyBytes: ByteArray,
-        trailers: Http2Parser.H2Headers? = null,
-    ): ParsedHttpMessage {
-        val all = headers.all
-        val authority = all[":authority"] ?: ""
-        val path = all[":path"] ?: "/"
-        val scheme = all[":scheme"] ?: "https"
-        val contentEncoding = headerValue(all, "content-encoding")
-        val decoded = HttpBodyDecoder.decode(bodyBytes, contentEncoding)
-        return ParsedHttpMessage(
-            isRequest = true,
-            method = parseH2Method(all[":method"]),
-            url = "$scheme://$authority$path",
-            path = path,
-            host = authority,
-            version = "h2",
-            headers = headers.regularHeaders,
-            headerLines = headers.regularEntries,
-            trailers = trailers?.regularEntries ?: emptyList(),
-            body = decoded.text,
-            isBodyBinary = decoded.isBinary,
-            rawBodyBytes = bodyBytes,
-            contentType = headerValue(all, "content-type") ?: "",
-        )
-    }
+    /** S4 task 35: the builders moved to [Http2Messages] so the rule path sees the same model. */
+    private fun buildRequestMessage(headers: Http2Parser.H2Headers, bodyBytes: ByteArray, trailers: Http2Parser.H2Headers? = null): ParsedHttpMessage =
+        Http2Messages.request(headers, bodyBytes, trailers)
 
-    private fun buildResponseMessage(
-        headers: Http2Parser.H2Headers,
-        bodyBytes: ByteArray,
-        trailers: Http2Parser.H2Headers? = null,
-    ): ParsedHttpMessage {
-        val all = headers.all
-        val status = all[":status"]?.toIntOrNull() ?: 0
-        val contentEncoding = headerValue(all, "content-encoding")
-        val decoded = HttpBodyDecoder.decode(bodyBytes, contentEncoding)
-        return ParsedHttpMessage(
-            isRequest = false,
-            method = null,
-            statusCode = status,
-            version = "h2",
-            headers = headers.regularHeaders,
-            headerLines = headers.regularEntries,
-            trailers = trailers?.regularEntries ?: emptyList(),
-            body = decoded.text,
-            isBodyBinary = decoded.isBinary,
-            rawBodyBytes = bodyBytes,
-            contentType = headerValue(all, "content-type") ?: "",
-        )
-    }
-
-    private fun headerValue(all: Map<String, String>, name: String): String? =
-        all.entries.firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
-
-    private fun parseH2Method(method: String?): HttpMethod? = when (method?.uppercase()) {
-        "GET" -> HttpMethod.GET
-        "POST" -> HttpMethod.POST
-        "PUT" -> HttpMethod.PUT
-        "DELETE" -> HttpMethod.DELETE
-        "PATCH" -> HttpMethod.PATCH
-        "HEAD" -> HttpMethod.HEAD
-        "OPTIONS" -> HttpMethod.OPTIONS
-        else -> null
-    }
+    private fun buildResponseMessage(headers: Http2Parser.H2Headers, bodyBytes: ByteArray, trailers: Http2Parser.H2Headers? = null): ParsedHttpMessage =
+        Http2Messages.response(headers, bodyBytes, trailers)
 
     companion object {
         private const val TAG = "Http2Session"

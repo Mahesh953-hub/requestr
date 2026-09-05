@@ -778,27 +778,41 @@ class MitmProxyEngine(
                 // or HTTP/1.1 upstream by that leg's ALPN (Http2ProxyConnection). Every frame on
                 // the client connection, read or written, is replayed into Http2Session so the
                 // rows, gRPC events and timings are produced exactly as before; nothing is
-                // forwarded verbatim any more. Rules on translated h2 messages are task 35.
+                // forwarded verbatim any more.
+                //
+                // S4 task 35: rules run on the translated messages through Http2RuleInterceptor --
+                // the same staged pipeline as the HTTP/1.x relay (runRequestStages /
+                // runResponseStages), with the safety gate and the connection's mirror plan.
+                // What the session observes on the client side is what we actually framed, so
+                // the persisted response is the post-rule one; the request row is overridden with
+                // the rules' (stamped) view and the audit trail rides along per stream.
                 val grpcCalls = GrpcCallTable()
+                val h2ConnectionKey = "h2-" + Integer.toHexString(System.identityHashCode(grpcCalls))
+                val h2Rules = Http2RuleInterceptor(this, host, port, mirrorPlan, safetyUid, h2ConnectionKey)
                 val h2Session = Http2Session(
                     onTransaction = { tx ->
-                        val handle = emitTransaction(
-                            tx.request, tx.response, tx.latencyMs, "$host:$port", logRequests, logResponses,
-                            timings = h2Timings(tx, timing),
-                            headers = ProtocolRows.headerRows(
-                                tx.request, tx.response, logRequests, logResponses,
-                                h2Request = tx.requestHeaders, h2Response = tx.responseHeaders,
-                                h2RequestTrailers = tx.requestTrailers, h2ResponseTrailers = tx.responseTrailers,
-                                metadataKeys = RuleMetadataHeaders.KEYS,
-                            ),
-                        )
-                        if (handle != null && tx.frameEvents.isNotEmpty()) {
-                            sink?.http2StreamEvents(handle, ProtocolRows.http2StreamEvents(tx.frameEvents, "$host:$port"))
+                        val record = h2Rules.take(tx.requestHeaders?.streamId)
+                        if (record?.suppressed != true) {
+                            val request = record?.request ?: tx.request
+                            val handle = emitTransaction(
+                                request, tx.response, tx.latencyMs, "$host:$port", logRequests, logResponses,
+                                timings = h2Timings(tx, timing),
+                                headers = ProtocolRows.headerRows(
+                                    request, tx.response, logRequests, logResponses,
+                                    h2Request = record?.forwardedHeaders ?: tx.requestHeaders, h2Response = tx.responseHeaders,
+                                    h2RequestTrailers = tx.requestTrailers, h2ResponseTrailers = tx.responseTrailers,
+                                    metadataKeys = RuleMetadataHeaders.KEYS,
+                                ),
+                                appliedRules = record?.trail,
+                            )
+                            if (handle != null && tx.frameEvents.isNotEmpty()) {
+                                sink?.http2StreamEvents(handle, ProtocolRows.http2StreamEvents(tx.frameEvents, "$host:$port"))
+                            }
                         }
                     },
                     onGrpcMessage = { event -> emitGrpcMessage(event, host, port, logRequests, logResponses, grpcCalls) },
                     onGrpcCallStarted = { start -> emitGrpcCallStart(start, host, port, logRequests, grpcCalls) },
-                    onGrpcCallEnded = { end -> emitGrpcCallEnd(end, host, port, logRequests, logResponses, grpcCalls) },
+                    onGrpcCallEnded = { end -> emitGrpcCallEnd(end, host, port, logRequests, logResponses, grpcCalls, appliedRules = h2Rules.take(end.streamId)?.trail) },
                 )
                 val h2 = Http2ProxyConnection(
                     clientInput = decryptedInput,
@@ -818,9 +832,15 @@ class MitmProxyEngine(
                     bytesFromClient = sent,
                     bytesFromUpstream = received,
                     name = "h2 $host:$port",
+                    interceptor = h2Rules,
                 )
                 clientToUpstream = {
-                    try { h2.runClientLeg() } finally { upstream.giveUp(); h2Session.close() }
+                    try { h2.runClientLeg() } finally {
+                        upstream.giveUp()
+                        h2Session.close()
+                        // S4 task 31: a flow still parked at a breakpoint has nobody to go to.
+                        breakpoints.invalidateConnection(h2ConnectionKey, "client closed while paused")
+                    }
                 }
                 upstreamToClient = {
                     try { h2.runUpstreamLeg() } finally { h2Session.close() }
@@ -1325,14 +1345,7 @@ class MitmProxyEngine(
         clientUid: Int? = null,
     ) {
         val trail = FlowAuditTrail()
-        val phase = FlowAuditTrail.Phase.REQUEST
-        // S4 task 33 (D3): the gate runs before any stage -- a refused flow keeps only its
-        // gateway/throttle/observe slots and carries a REFUSED_SAFETY record per mutating rule.
-        val decision = safetyGate.screen(
-            RulePipeline.evaluate(ruleSnapshot(), flowKeyFor(request, host, port)),
-            phase, trail, clientUid = clientUid,
-        )
-        trail.recordDecision(decision, phase)
+        val decision = evaluateRequestDecision(request, host, port, trail, clientUid)
         val what = "${request.method?.name} ${request.url.take(80)}"
 
         /** Serve a synthetic response ourselves, never dialing upstream, and persist the pair. */
@@ -1348,6 +1361,97 @@ class MitmProxyEngine(
                 appliedRules = trail,
             )
         }
+
+        val flow = FlowContext()
+        when (val outcome = runRequestStages(request, decision, trail, mirror, flow, connectionKeyOf(pending), host, port)) {
+            is RequestStages.Respond -> {
+                if (outcome.persist) {
+                    shortCircuit(outcome.response, outcome.logLine)
+                } else {
+                    // Legacy BLOCK parity: answered, never persisted.
+                    synchronized(clientWriteLock) {
+                        clientOut.write(serializeResponse(outcome.response))
+                        clientOut.flush()
+                    }
+                }
+                return
+            }
+            is RequestStages.Forward -> {
+                val bytesToForward = if (outcome.modified) serializeRequest(request) else raw
+                // Persist-only: the script-error badge / breakpoint stamp must not leak to the origin.
+                outcome.stampPersistOnly(request)
+                val upstreamOut = connectOrThrow(db, upstream, host, port)
+                val sendStartedAt = System.currentTimeMillis()
+                pending.add(PendingExchange(request, sendStartedAt, decision, trail, mirror, flow.scriptShared, flow.flowId))
+                upstreamOut.write(bytesToForward)
+                upstreamOut.flush()
+                // S2 task 18: request fully written -> the send phase ends and the wait phase begins.
+                timing?.onRequestSent(request, sendStartedAt)
+            }
+        }
+    }
+
+    // ── S4 task 35: transport-agnostic stage sequence (HTTP/1.x relay + terminated h2) ──────
+
+    /** Per-flow state the request leg creates and the response leg of the same flow reads back. */
+    internal class FlowContext(
+        /** S4 task 32: one id per flow for script audit/console records. */
+        val flowId: String = java.util.UUID.randomUUID().toString(),
+        /** S4 task 32: `context.shared` written by `onRequest`, read back by `onResponse` of the same flow. */
+        val scriptShared: MutableMap<String, String> = LinkedHashMap(),
+    )
+
+    /** What the request leg decided, independent of how the message is framed on the wire. */
+    internal sealed class RequestStages {
+        /**
+         * Forward to the origin. [modified] means the message must be re-serialized; the
+         * persist-only badges (script errors, breakpoint stamp) are applied by [stampPersistOnly]
+         * AFTER serialization so they reach the captured row but never the origin.
+         */
+        class Forward(val modified: Boolean, private val stamps: List<(ParsedHttpMessage) -> Unit>) : RequestStages() {
+            fun stampPersistOnly(request: ParsedHttpMessage) = stamps.forEach { it(request) }
+        }
+
+        /** Answer [response] ourselves; the origin is never dialed. [persist] false = legacy BLOCK parity. */
+        class Respond(val response: ParsedHttpMessage, val logLine: String, val persist: Boolean = true) : RequestStages()
+    }
+
+    /** What the response leg decided; [chaosDelayMs] is served by the caller before writing. */
+    internal class ResponseStages(val responseToEmit: ParsedHttpMessage, val modified: Boolean, val chaosDelayMs: Long)
+
+    /**
+     * S4 task 33 (D3): evaluate the snapshot for [request] and run the safety gate before any
+     * stage -- a refused flow keeps only its gateway/throttle/observe slots and carries a
+     * REFUSED_SAFETY record per mutating rule. The decision is recorded on [trail].
+     */
+    internal fun evaluateRequestDecision(request: ParsedHttpMessage, host: String, port: Int, trail: FlowAuditTrail, clientUid: Int?): RuleDecision {
+        val phase = FlowAuditTrail.Phase.REQUEST
+        val decision = safetyGate.screen(
+            RulePipeline.evaluate(ruleSnapshot(), flowKeyFor(request, host, port)),
+            phase, trail, clientUid = clientUid,
+        )
+        trail.recordDecision(decision, phase)
+        return decision
+    }
+
+    /**
+     * S4 task 26/35: the request-leg pipeline over ONE [RuleDecision]:
+     * gateway BLOCK → mirror host header → rewrite (redirect → replacement → modifications) →
+     * breakpoint → scripts → mock → body crypto → chaos fail die → forward. Every step records
+     * what it did on [trail]. Identical for HTTP/1.x and translated h2 -- only framing differs.
+     */
+    internal fun runRequestStages(
+        request: ParsedHttpMessage,
+        decision: RuleDecision,
+        trail: FlowAuditTrail,
+        mirror: MirrorStage.Plan?,
+        flow: FlowContext,
+        connectionKey: String,
+        host: String,
+        port: Int,
+    ): RequestStages {
+        val phase = FlowAuditTrail.Phase.REQUEST
+        val what = "${request.method?.name} ${request.url.take(80)}"
 
         // 1. Gateway: an HTTP-level BLOCK (or the implied block of an ALLOW_ONLY set that
         //    nothing matched) answers 403 and never dials upstream. Legacy BLOCK parity: the
@@ -1370,15 +1474,7 @@ class MitmProxyEngine(
                 version = "HTTP/1.1", statusCode = 403, statusMessage = "Blocked by requestr",
                 headers = mapOf("Content-Length" to "0"), body = "",
             )
-            if (showInList) {
-                shortCircuit(blocked, "BLOCKED")
-            } else {
-                synchronized(clientWriteLock) {
-                    clientOut.write("HTTP/1.1 403 Blocked by requestr\r\nContent-Length: 0\r\n\r\n".toByteArray())
-                    clientOut.flush()
-                }
-            }
-            return
+            return RequestStages.Respond(blocked, "BLOCKED", persist = showInList)
         }
 
         var modified = false
@@ -1398,35 +1494,30 @@ class MitmProxyEngine(
         //     the 8-slot queue is full.
         var breakpointStamp: Pair<RuleRef, String>? = null
         decision.breakpoint?.takeIf { breakpointsEnabled && BreakpointStage.applies(it.config, phase) }?.let { bp ->
-            when (val outcome = BreakpointStage.pause(breakpoints, bp.rule, bp.config, phase, request, host, trail, connectionKey = connectionKeyOf(pending))) {
+            when (val outcome = BreakpointStage.pause(breakpoints, bp.rule, bp.config, phase, request, host, trail, connectionKey = connectionKey)) {
                 is BreakpointStage.Outcome.Forward -> {
                     if (outcome.changed) modified = true
                     breakpointStamp = bp.rule to outcome.actionName // persisted row only, stamped after serialization
                 }
-                is BreakpointStage.Outcome.Aborted -> {
-                    shortCircuit(BreakpointStage.abortResponse(bp.rule, outcome.reason, request.version), "ABORTED at breakpoint")
-                    return
-                }
+                is BreakpointStage.Outcome.Aborted ->
+                    return RequestStages.Respond(BreakpointStage.abortResponse(bp.rule, outcome.reason, request.version), "ABORTED at breakpoint")
                 is BreakpointStage.Outcome.Skipped -> Unit
             }
         }
         // 3. Scripts: pm.request.* mutations. The error header (if any) is stamped AFTER
         //    serialization so it reaches the captured row but never the origin server.
-        val scriptShared = LinkedHashMap<String, String>()
-        val flowId = java.util.UUID.randomUUID().toString()
-        val scripts = ScriptStage.apply(request, decision.scripts, phase, trail, stampErrorHeader = false, flowId = flowId, shared = scriptShared)
+        val scripts = ScriptStage.apply(request, decision.scripts, phase, trail, stampErrorHeader = false, flowId = flow.flowId, shared = flow.scriptShared)
         if (scripts.changed) modified = true
+        fun stampScriptErrors() = scripts.errors.forEach { (error, ruleName) -> ScriptStage.stampError(request, error, ruleName) }
         scripts.abortedBy?.let { ruleName ->
-            shortCircuit(ScriptStage.abortResponse(ruleName, request.version), "ABORTED by script")
-            return
+            return RequestStages.Respond(ScriptStage.abortResponse(ruleName, request.version), "ABORTED by script")
         }
         // 4. Mock: short-circuit with a synthesized response; upstream is never dialed.
         decision.mock?.let { mock ->
             val mockResponse = MockStage.build(mock.config, request.url, request.method?.name, request.headers)
             trail.applied(mock.rule, phase, "mock ${mockResponse.statusCode}")
-            scripts.errors.forEach { (error, ruleName) -> ScriptStage.stampError(request, error, ruleName) }
-            shortCircuit(mockResponse, "MOCKED ${mockResponse.statusCode}")
-            return
+            stampScriptErrors()
+            return RequestStages.Respond(mockResponse, "MOCKED ${mockResponse.statusCode}")
         }
         // 5. Body crypto: fail closed -- a rule that cannot transform the body answers 502
         //    itself rather than forwarding plaintext the rule was supposed to protect.
@@ -1438,12 +1529,11 @@ class MitmProxyEngine(
                 }
                 is BodyCryptoStage.Result.Failed -> {
                     trail.failed(crypto.rule, phase, result.reason)
-                    scripts.errors.forEach { (error, ruleName) -> ScriptStage.stampError(request, error, ruleName) }
-                    shortCircuit(
+                    stampScriptErrors()
+                    return RequestStages.Respond(
                         BodyCryptoStage.failureResponse(crypto.rule.name, crypto.config.direction, result.reason),
                         "BLOCKED (${crypto.config.direction.name.lowercase()} failed: ${result.reason})",
                     )
-                    return
                 }
                 BodyCryptoStage.Result.NotApplicable -> Unit
             }
@@ -1454,9 +1544,8 @@ class MitmProxyEngine(
             val roll = ChaosStage.applyToRequest(chaos.config, chaos.rule.name, chaosRandom)
             if (roll is ChaosStage.Result.Fail) {
                 trail.applied(chaos.rule, phase, "fail ${roll.failureResponse.statusCode}")
-                scripts.errors.forEach { (error, ruleName) -> ScriptStage.stampError(request, error, ruleName) }
-                shortCircuit(roll.failureResponse, "CHAOS fail ${roll.failureResponse.statusCode}")
-                return
+                stampScriptErrors()
+                return RequestStages.Respond(roll.failureResponse, "CHAOS fail ${roll.failureResponse.statusCode}")
             }
         }
 
@@ -1466,19 +1555,124 @@ class MitmProxyEngine(
             val shape = ThrottleStage.resolve(throttle.config)
             if (!shape.isNoop) trail.applied(throttle.rule, phase, "throttle ${shape.describe()}")
         }
-        val bytesToForward = if (modified) serializeRequest(request) else raw
-        // Persist-only: the script-error badge must not leak to the origin.
-        scripts.errors.forEach { (error, ruleName) -> ScriptStage.stampError(request, error, ruleName) }
-        breakpointStamp?.let { (rule, action) -> BreakpointStage.stamp(request, rule, action) }
+        val stamps = ArrayList<(ParsedHttpMessage) -> Unit>(scripts.errors.size + 1)
+        scripts.errors.forEach { (error, ruleName) -> stamps += { m -> ScriptStage.stampError(m, error, ruleName) } }
+        breakpointStamp?.let { (rule, action) -> stamps += { m -> BreakpointStage.stamp(m, rule, action) } }
         if (!modified && decision.isEmpty) Log.d(TAG, "FORWARD (decrypted): $what")
-        val upstreamOut = connectOrThrow(db, upstream, host, port)
-        val sendStartedAt = System.currentTimeMillis()
-        pending.add(PendingExchange(request, sendStartedAt, decision, trail, mirror, scriptShared, flowId))
-        upstreamOut.write(bytesToForward)
-        upstreamOut.flush()
-        // S2 task 18: request fully written -> the send phase ends and the wait phase begins.
-        timing?.onRequestSent(request, sendStartedAt)
+        return RequestStages.Forward(modified, stamps)
     }
+
+    /**
+     * S4 task 26/35: the response leg applies the SAME decision the request leg evaluated
+     * (mirror attribution → rewrite → breakpoint → scripts → body crypto → chaos) and appends to
+     * the same audit trail. [responseTimeMs] feeds `pm.response.responseTime`.
+     */
+    internal fun runResponseStages(
+        response: ParsedHttpMessage,
+        request: ParsedHttpMessage,
+        decision: RuleDecision,
+        trail: FlowAuditTrail,
+        mirror: MirrorStage.Plan?,
+        flow: FlowContext,
+        responseTimeMs: Long,
+        connectionKey: String,
+        host: String,
+    ): ResponseStages {
+        val phase = FlowAuditTrail.Phase.RESPONSE
+        val what = "${request.method?.name} ${request.url.take(80)}"
+        var modified = false
+        var cryptoFailed = false
+        var chaosDelayMs = 0L
+        // Security audit fix (fail-open AES crypto): what actually gets persisted/shown in the
+        // UI for this transaction. Defaults to the real [response]; overridden below to a
+        // synthetic failure response when a body-crypto rule fails, so the client and the
+        // captured-traffic list both see a visibly-failed transaction rather than the
+        // untransformed body forwarded as if it had succeeded.
+        var responseToEmit = response
+        // S4 task 28: attribute a mirrored exchange (persisted row + client see the target).
+        mirror?.let { plan ->
+            MirrorStage.stampAttribution(response, plan)
+            trail.applied(plan.rule, phase, "mirrored from ${plan.target}")
+            modified = true
+        }
+        if (decision.rewrite.hasResponseWork) {
+            RewriteStage.applyResponse(response, decision.rewrite, trail)
+            Log.i(TAG, "REWRITE response (decrypted): $what")
+            modified = true
+        }
+        // S4 task 31: response-side pause point (after rewrite, before scripts). An abort
+        // here answers the client with the synthetic 499 instead of the origin's response.
+        var aborted = false
+        decision.breakpoint?.takeIf { breakpointsEnabled && BreakpointStage.applies(it.config, phase) }?.let { bp ->
+            when (val outcome = BreakpointStage.pause(breakpoints, bp.rule, bp.config, phase, response, host, trail, connectionKey = connectionKey)) {
+                is BreakpointStage.Outcome.Forward -> {
+                    BreakpointStage.stamp(response, bp.rule, outcome.actionName)
+                    modified = true
+                }
+                is BreakpointStage.Outcome.Aborted -> {
+                    Log.i(TAG, "ABORTED at breakpoint (decrypted): $what")
+                    responseToEmit = BreakpointStage.abortResponse(bp.rule, outcome.reason, response.version)
+                    modified = true
+                    aborted = true
+                }
+                is BreakpointStage.Outcome.Skipped -> Unit
+            }
+        }
+        // On the wire AND persisted: the client under test can see the rewrite did not
+        // happen, and the traffic list badges the row instead of logcat-only.
+        val scripts = if (aborted) ScriptStage.Result.NONE
+        else ScriptStage.apply(response, decision.scripts, phase, trail, responseTimeMs, flowId = flow.flowId, shared = flow.scriptShared)
+        if (scripts.changed) modified = true
+        scripts.abortedBy?.let { ruleName ->
+            responseToEmit = ScriptStage.abortResponse(ruleName, response.version)
+            modified = true
+            aborted = true
+        }
+        if (aborted) cryptoFailed = true // skip crypto + chaos below: nothing of the origin's body is forwarded
+        decision.bodyCrypto?.takeIf { !aborted }?.let { crypto ->
+            when (val result = BodyCryptoStage.apply(response, crypto.config, crypto.rule.name)) {
+                BodyCryptoStage.Result.Applied -> {
+                    trail.applied(crypto.rule, phase, crypto.config.direction.name.lowercase())
+                    modified = true
+                }
+                is BodyCryptoStage.Result.Failed -> {
+                    // The real request already went out and a real response came back -- that
+                    // round trip cannot be undone. What can still be stopped is forwarding the
+                    // untransformed response body to the client: for DECRYPT that would be the
+                    // raw ciphertext the rule was supposed to decrypt, silently passed through
+                    // looking like a normal successful response.
+                    trail.failed(crypto.rule, phase, result.reason)
+                    responseToEmit = BodyCryptoStage.failureResponse(crypto.rule.name, crypto.config.direction, result.reason)
+                    modified = true
+                    cryptoFailed = true
+                }
+                BodyCryptoStage.Result.NotApplicable -> Unit
+            }
+        }
+        if (!cryptoFailed) {
+            decision.chaos?.let { chaos ->
+                when (val roll = ChaosStage.applyToResponse(response, chaos.config, chaos.rule.name, chaosRandom)) {
+                    ChaosStage.Result.Applied -> {
+                        Log.i(TAG, "CHAOS corrupt-body (decrypted): $what")
+                        trail.applied(chaos.rule, phase, "corrupt-body")
+                        modified = true
+                    }
+                    is ChaosStage.Result.Delay -> {
+                        Log.i(TAG, "CHAOS delay ${roll.millis}ms (decrypted): $what")
+                        trail.applied(chaos.rule, phase, "delay ${roll.millis}ms")
+                        chaosDelayMs = roll.millis
+                        modified = true // carries the x-requestr-chaos header
+                    }
+                    // Fail is only ever produced on the request leg; PassThrough forwards raw.
+                    is ChaosStage.Result.Fail, ChaosStage.Result.PassThrough -> Unit
+                }
+            }
+        }
+        return ResponseStages(responseToEmit, modified, chaosDelayMs)
+    }
+
+    /** Serves a CHAOS delay on the calling thread (test seam: see the `chaosSleep` constructor param). */
+    internal fun serveChaosDelay(millis: Long) { if (millis > 0L) chaosSleep(millis) }
 
     /**
      * `internal` (not `private`), same rationale as [handleParsedRequest]/[emitTransaction]:
@@ -1538,94 +1732,16 @@ class MitmProxyEngine(
                     exchange.decision = it
                     exchange.trail.recordDecision(it, FlowAuditTrail.Phase.REQUEST)
                 }
-            val trail = exchange.trail
-            val phase = FlowAuditTrail.Phase.RESPONSE
-            val what = "${request.method?.name} ${request.url.take(80)}"
-            var modified = false
-            var cryptoFailed = false
-            // S4 task 28: attribute a mirrored exchange (persisted row + client see the target).
-            exchange.mirror?.let { plan ->
-                MirrorStage.stampAttribution(response, plan)
-                trail.applied(plan.rule, phase, "mirrored from ${plan.target}")
-                modified = true
-            }
-            if (decision.rewrite.hasResponseWork) {
-                RewriteStage.applyResponse(response, decision.rewrite, trail)
-                Log.i(TAG, "REWRITE response (decrypted): $what")
-                modified = true
-            }
-            // S4 task 31: response-side pause point (after rewrite, before scripts). An abort
-            // here answers the client with the synthetic 499 instead of the origin's response.
-            var aborted = false
-            decision.breakpoint?.takeIf { breakpointsEnabled && BreakpointStage.applies(it.config, phase) }?.let { bp ->
-                when (val outcome = BreakpointStage.pause(breakpoints, bp.rule, bp.config, phase, response, host, trail, connectionKey = connectionKeyOf(pending))) {
-                    is BreakpointStage.Outcome.Forward -> {
-                        BreakpointStage.stamp(response, bp.rule, outcome.actionName)
-                        modified = true
-                    }
-                    is BreakpointStage.Outcome.Aborted -> {
-                        Log.i(TAG, "ABORTED at breakpoint (decrypted): $what")
-                        responseToEmit = BreakpointStage.abortResponse(bp.rule, outcome.reason, response.version)
-                        modified = true
-                        aborted = true
-                    }
-                    is BreakpointStage.Outcome.Skipped -> Unit
-                }
-            }
             // Task 32 wiring: pm.response.responseTime is the measured wait+receive when the
             // timing tracker observed it, else wall-clock since the request was sent.
             val responseTimeMs = measured?.totalMs ?: (System.currentTimeMillis() - exchange.sentAt)
-            // On the wire AND persisted: the client under test can see the rewrite did not
-            // happen, and the traffic list badges the row instead of logcat-only.
-            val scripts = if (aborted) ScriptStage.Result.NONE
-            else ScriptStage.apply(response, decision.scripts, phase, trail, responseTimeMs, flowId = exchange.flowId, shared = exchange.scriptShared)
-            if (scripts.changed) modified = true
-            scripts.abortedBy?.let { ruleName ->
-                responseToEmit = ScriptStage.abortResponse(ruleName, response.version)
-                modified = true
-                aborted = true
-            }
-            if (aborted) cryptoFailed = true // skip crypto + chaos below: nothing of the origin's body is forwarded
-            decision.bodyCrypto?.takeIf { !aborted }?.let { crypto ->
-                when (val result = BodyCryptoStage.apply(response, crypto.config, crypto.rule.name)) {
-                    BodyCryptoStage.Result.Applied -> {
-                        trail.applied(crypto.rule, phase, crypto.config.direction.name.lowercase())
-                        modified = true
-                    }
-                    is BodyCryptoStage.Result.Failed -> {
-                        // The real request already went out and a real response came back -- that
-                        // round trip cannot be undone. What can still be stopped is forwarding the
-                        // untransformed response body to the client: for DECRYPT that would be the
-                        // raw ciphertext the rule was supposed to decrypt, silently passed through
-                        // looking like a normal successful response.
-                        trail.failed(crypto.rule, phase, result.reason)
-                        responseToEmit = BodyCryptoStage.failureResponse(crypto.rule.name, crypto.config.direction, result.reason)
-                        modified = true
-                        cryptoFailed = true
-                    }
-                    BodyCryptoStage.Result.NotApplicable -> Unit
-                }
-            }
-            if (!cryptoFailed) {
-                decision.chaos?.let { chaos ->
-                    when (val roll = ChaosStage.applyToResponse(response, chaos.config, chaos.rule.name, chaosRandom)) {
-                        ChaosStage.Result.Applied -> {
-                            Log.i(TAG, "CHAOS corrupt-body (decrypted): $what")
-                            trail.applied(chaos.rule, phase, "corrupt-body")
-                            modified = true
-                        }
-                        is ChaosStage.Result.Delay -> {
-                            Log.i(TAG, "CHAOS delay ${roll.millis}ms (decrypted): $what")
-                            trail.applied(chaos.rule, phase, "delay ${roll.millis}ms")
-                            chaosDelayMs = roll.millis
-                            modified = true // carries the x-requestr-chaos header
-                        }
-                        // Fail is only ever produced on the request leg; PassThrough forwards raw.
-                        is ChaosStage.Result.Fail, ChaosStage.Result.PassThrough -> Unit
-                    }
-                }
-            }
-            if (modified) out = serializeResponse(responseToEmit)
+            val stages = runResponseStages(
+                response, request, decision, exchange.trail, exchange.mirror,
+                FlowContext(exchange.flowId, exchange.scriptShared), responseTimeMs, connectionKeyOf(pending), host,
+            )
+            responseToEmit = stages.responseToEmit
+            chaosDelayMs = stages.chaosDelayMs
+            if (stages.modified) out = serializeResponse(responseToEmit)
         }
         if (chaosDelayMs > 0L) chaosSleep(chaosDelayMs)
         synchronized(clientWriteLock) {
@@ -1950,6 +2066,8 @@ class MitmProxyEngine(
         logRequests: Boolean,
         logResponses: Boolean,
         table: GrpcCallTable,
+        /** S4 task 35: the stream's rule provenance, when a rule matched the call. */
+        appliedRules: FlowAuditTrail? = null,
     ) {
         val target = sink ?: return
         val entry = table.byStream.remove(end.streamId) ?: return
@@ -1970,6 +2088,7 @@ class MitmProxyEngine(
         runCatching {
             target.patchExchange(entry.parent, patch, headers)
             target.grpcCall(entry.parent, ProtocolRows.grpcCall(end.call, end.streamId, end.grpcStatus, end.grpcMessage))
+            if (appliedRules != null && !appliedRules.isEmpty) target.appliedRules(entry.parent, appliedRules.toEntities())
             if (end.frameEvents.isNotEmpty()) {
                 target.http2StreamEvents(entry.parent, ProtocolRows.http2StreamEvents(end.frameEvents, "$host:$port"))
             }

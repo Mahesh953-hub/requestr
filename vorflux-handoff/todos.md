@@ -600,3 +600,38 @@ Exported from the platform todo list at handoff time.
       `RecoverySemanticsTest` pins bumped to v24/16 migrations; engine tests seed through the test-only
       `LegacyRuleTestDao` (`db.legacyRuleDao()` in `LegacyRuleTestSupport.kt`) which converts and writes to
       `interceptor_rules`.
+  - S4 task 35 — done on `vorflux/interceptor-s4-rules`:
+    - `Http2StreamInterceptor` (new seam in `interception/http`): `plan(streamId, headers)` returns `null` for
+      frame-by-frame passthrough (observe-only, throttle-only, safety-refused, empty decision -- gRPC/SSE keep
+      streaming) or a `Plan` whose `onRequest` (per-connection single-thread rule executor, never the client
+      reader) yields `Forward(request)`/`Respond(response)` and whose `onResponse` (upstream reader thread) rewrites
+      the whole origin message. `Plan.interceptsResponse` keeps request-only work from buffering the response.
+    - `Http2ProxyConnection`: held streams are collected as `InterceptedStream` (FlowBuffer, cap →
+      `RST ENHANCE_YOUR_CALM` + `onAbandoned`), re-framed with fresh HEADERS/DATA/trailers toward either
+      upstream; client↔upstream stream-id mapping (`upstreamIds`/`clientIds`, `openUpstream`/`forgetUpstream`)
+      so a stream released after a later passthrough stream gets a fresh, monotonically increasing upstream id
+      (ids coincide when nothing is intercepted); `Http1UpstreamBridge.submit(streamId, request, responseHook)`
+      collects the h1 response before the hook runs; client RST/upstream RST/connection close abandon the plan.
+    - `Http2Messages` (new codec): `request`/`response` (moved from `Http2Session`), `encodeRequest`/
+      `encodeResponse` -- `reconcile` keeps untouched repeated fields, collapses edited names, drops removed,
+      appends new lower-cased; recomputes `content-length` from the framed body after every mutation; drops
+      connection-specific fields; a rule-set `Host` becomes `:authority` while redirects with preserveHost keep
+      the original authority; bodyless responses (HEAD/204/304/1xx) keep the declared length and frame no body.
+    - `Http2RuleInterceptor` (new): evaluates `RulePipeline` + `InterceptorSafetyGate` on the probe request,
+      drives `MitmProxyEngine.runRequestStages`/`runResponseStages` (extracted from `handleParsedRequest`/
+      `handleParsedResponse` so h1 and h2 share one stage sequence: gateway, mirror Host, rewrite, breakpoint,
+      script, mock, body-crypto, chaos, throttle attribution; response: mirror stamp, rewrite, breakpoint, script,
+      body-crypto fail-closed, chaos delay) and hands the engine a per-stream `Record` (audit trail, decision,
+      rules' request view, `suppressed` for BLOCK without `showBlockedInList`) consumed by the h2 branch's
+      `Http2Session.onTransaction`/`emitGrpcCallEnd(appliedRules)`. Breakpoints on h2 use the connection key
+      `h2-<id>` and are invalidated when the client leg closes.
+    - `RewriteStage.SetHeader`/`RemoveHeader` now match header names case-insensitively as their KDoc promised
+      (h1 maps are lower-cased, h2 keeps wire casing; the h2 parity test caught the exact-key removal).
+    - Tests: `Http2MessagesTest` (12), `Http2ProxyConnectionRulesTest` (7: Respond without dialing, Forward with
+      recomputed Content-Length over h1, h1 response hook over chunked origin, held-stream id remap over h2,
+      h2 response hook with DATA+trailers, client reset abandons, throwing plan → RST INTERNAL_ERROR),
+      `MitmProxyEngineH2RulesTest` (6, Robolectric, real engine: BLOCK 403 not persisted / persisted with trail
+      when `showBlockedInList`, MOCK body + content-length, REWRITE request+response re-framed and persisted
+      post-rule, safety-gate refusal leaves the flow untouched with `REFUSED_SAFETY`, unmatched → passthrough);
+      shared fixtures in `http/Http2TestOrigins.kt` (`H2ClientRecorder`, `FakeH1Origin`, `FakeH2Origin`,
+      `H2ProxyHarness`). No observe-only h2 forwarding remains: every terminated h2 stream goes through `plan()`.

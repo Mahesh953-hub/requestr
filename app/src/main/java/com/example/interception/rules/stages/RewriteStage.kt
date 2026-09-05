@@ -174,13 +174,16 @@ object RewriteStage {
             runCatching {
                 when (mod) {
                     is Modification.SetHeader -> {
+                        // Case-insensitive match keeps the existing key's casing (h1 maps are
+                        // lower-cased, h2 keeps wire casing); a miss adds the rule's spelling.
                         val mutable = message.headers.toMutableMap()
-                        mutable[mod.name] = tmpl(mod.value)
+                        val key = mutable.keys.firstOrNull { it.equals(mod.name, ignoreCase = true) } ?: mod.name
+                        mutable[key] = tmpl(mod.value)
                         message.headers = mutable
                     }
                     is Modification.RemoveHeader -> {
                         val mutable = message.headers.toMutableMap()
-                        mutable.remove(mod.name)
+                        mutable.keys.removeAll { it.equals(mod.name, ignoreCase = true) }
                         message.headers = mutable
                     }
                     is Modification.RegexHeader -> {
