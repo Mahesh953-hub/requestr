@@ -188,9 +188,14 @@ object GatewayEngine {
                     }
                     val (host, connectPort) = HttpProxyShared.parseHostPort(rawUrl, 443)
                     val db = RequestrDatabase.get(ctx)
-                    val rawDisposition = com.example.interception.ConnectControl.evaluate(
+                    val verdict = com.example.interception.ConnectControl.decide(
                         host, connectPort, sourceIp = if (isRemote) clientIp else null,
                     )
+                    val rawDisposition = verdict.disposition
+                    // S4 task 30: a THROTTLE rule paces this tunnel's two copy loops.
+                    val throttle = verdict.decision.throttle?.let {
+                        com.example.interception.rules.stages.ThrottleStage.shaperFor(it.rule, it.config, verdict.trail)
+                    }
                     // FORCE_MITM is not supported for gateway clients — no channel to install
                     // requestr's CA on the remote device — so it always falls back to Block.
                     val disposition = if (rawDisposition is com.example.interception.ConnectControl.Disposition.ForceMitm) {
@@ -217,6 +222,7 @@ object GatewayEngine {
                     HttpProxyShared.handleConnectAttempt(
                         sock, rawUrl, disposition, output,
                         networkCondition = networkCondition,
+                        throttle = throttle,
                     ) { sentBytes, recvBytes ->
                         runCatching {
                             RequestrDatabase.get(ctx).connectAttemptDao().insert(

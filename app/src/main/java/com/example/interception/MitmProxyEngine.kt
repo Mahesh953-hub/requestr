@@ -32,6 +32,10 @@ import com.example.interception.rules.RuleSnapshotStore
 import com.example.interception.rules.stages.BodyCryptoStage
 import com.example.interception.rules.stages.ChaosStage
 import com.example.interception.rules.stages.MirrorStage
+import com.example.interception.rules.stages.ThrottleStage
+import com.example.interception.rules.stages.BreakpointStage
+import com.example.interception.rules.RuleRef
+import com.example.interception.breakpoint.BreakpointRegistry
 import com.example.interception.rules.stages.MockStage
 import com.example.interception.rules.stages.RewriteStage
 import com.example.interception.rules.stages.ScriptStage
@@ -171,6 +175,11 @@ class MitmProxyEngine(
     /** S1 task 7: bounded relay pool whose dispatcher runs both copy legs of every tunnel. */
     private val relayPool: RelayPool = RelayPool.shared(),
     /**
+     * S4 task 31: where BREAKPOINT rules park a flow (max 8, mandatory auto-resume, G21).
+     * Production shares [BreakpointRegistry.shared] with the API/UI; tests inject their own.
+     */
+    private val breakpoints: BreakpointRegistry = BreakpointRegistry.shared,
+    /**
      * S4 task 26: where every rule decision reads its immutable [RuleSnapshot] from. Production
      * reads the process-wide [RuleSnapshotStore]; tests inject a fixed snapshot. Nothing on the
      * hot path touches a DAO.
@@ -211,6 +220,8 @@ class MitmProxyEngine(
      * h2 path any more (D7 cutover).
      */
     @Volatile internal var h2Terminate: Boolean = true
+    /** S4 task 31: `InterceptorFlags.breakpoints`, sampled at [start]. `false` = stage is a no-op. */
+    @Volatile internal var breakpointsEnabled: Boolean = true
     private val injectedCertificateEngine = certificateEngine
     /**
      * S1 task 8: one issuer for every leaf (see [CertificateEngine]); its internal
@@ -260,6 +271,7 @@ class MitmProxyEngine(
         InterceptorFlags.get(context).let { flags ->
             protocolChildren = flags.protocolChildren
             h2Terminate = flags.h2Terminate
+            breakpointsEnabled = flags.breakpoints
         }
 
         // Pre-warm the CA material off the caller's thread (S1 task 7: no runBlocking on the
@@ -348,6 +360,9 @@ class MitmProxyEngine(
                 snapshot = ruleSnapshot(),
             )
             val disposition = verdict.disposition
+            // S4 task 30: one pacing state per connection, shared by both the opaque and the MITM
+            // paths below (bandwidth on the copy loops, latency/loss on the upstream dial).
+            val throttleShaper = verdict.decision.throttle?.let { ThrottleStage.shaperFor(it.rule, it.config, verdict.trail) }
             // §3 (C2) -- read fresh per CONNECT for the non-MITM (opaque tunnel) paths below.
             // The MITM path re-reads this itself just before dialing upstream (see
             // `networkCondition` a few lines further down, passed into LazyUpstreamConnection).
@@ -367,6 +382,7 @@ class MitmProxyEngine(
                     HttpProxyShared.handleConnectAttempt(
                         client, disposition.target, ConnectControl.Disposition.AllowOpaque, output,
                         networkCondition = opaqueNetworkCondition,
+                        throttle = throttleShaper,
                         replies = replies,
                     ) { sent, recv ->
                         persistConnectAttempt(
@@ -384,6 +400,7 @@ class MitmProxyEngine(
                     HttpProxyShared.handleConnectAttempt(
                         client, disposition.target, disposition, output,
                         networkCondition = opaqueNetworkCondition,
+                        throttle = throttleShaper,
                         replies = replies,
                     ) { sent, recv ->
                         persistConnectAttempt(
@@ -412,6 +429,7 @@ class MitmProxyEngine(
                     HttpProxyShared.handleConnectAttempt(
                         client, target, ConnectControl.Disposition.AllowOpaque, output,
                         networkCondition = opaqueNetworkCondition,
+                        throttle = throttleShaper,
                         replies = replies,
                     ) { sent, recv ->
                         persistConnectAttempt(
@@ -438,6 +456,7 @@ class MitmProxyEngine(
                         HttpProxyShared.handleConnectAttempt(
                             client, target, ConnectControl.Disposition.AllowOpaque, output,
                             networkCondition = opaqueNetworkCondition,
+                            throttle = throttleShaper,
                             replies = replies,
                         ) { sent, recv ->
                             persistConnectAttempt(
@@ -490,6 +509,7 @@ class MitmProxyEngine(
                     HttpProxyShared.handleConnectAttempt(
                         replaying, target, ConnectControl.Disposition.AllowOpaque, output,
                         networkCondition = opaqueNetworkCondition,
+                        throttle = throttleShaper,
                         replies = HttpProxyShared.ConnectReplies({}, {}, {}),
                     ) { sent, recv ->
                         persistConnectAttempt(
@@ -561,6 +581,7 @@ class MitmProxyEngine(
                     HttpProxyShared.handleConnectAttempt(
                         client, target, ConnectControl.Disposition.AllowOpaque, output,
                         networkCondition = opaqueNetworkCondition,
+                        throttle = throttleShaper,
                         replies = HttpProxyShared.ConnectReplies({}, {}, {}),
                     ) { sent, recv ->
                         persistConnectAttempt(
@@ -617,7 +638,9 @@ class MitmProxyEngine(
             }.getOrNull()
 
             val decryptedInput = sslSocket.getInputStream()
-            val decryptedOutput = sslSocket.getOutputStream()
+            // S4 task 30: every byte written back to the client -- parsed responses, mocks,
+            // blind relay, WebSocket frames, h2 frames -- goes through the downlink bucket.
+            val decryptedOutput = throttleShaper?.toClient(sslSocket.getOutputStream()) ?: sslSocket.getOutputStream()
 
             // MUST-FIX (§1.5 correctness): the upstream TCP+TLS connection to the real server
             // used to be dialed and handshaked right here, unconditionally, *before* the first
@@ -655,12 +678,13 @@ class MitmProxyEngine(
             val upstream = LazyUpstreamConnection(
                 mirrorPlan?.dialHost ?: host, mirrorPlan?.dialPort ?: port,
                 tlsServerName = mirrorPlan?.sniName,
+                wrapOutput = { out -> throttleShaper?.toUpstream(out) ?: out },
                 preferredAlpnProtocols = when (negotiatedAlpn) {
                     "h2" -> listOf("h2", "http/1.1")
                     null -> emptyList()
                     else -> listOf(negotiatedAlpn)
                 },
-                networkCondition = networkCondition,
+                networkCondition = throttleShaper?.networkCondition(networkCondition) ?: networkCondition,
                 keyManagers = upstreamKeyManagers,
                 onFirstConnect = { connected ->
                 // S2 task 18: the upstream leg's DNS/connect/TLS phases belong to the first
@@ -724,6 +748,7 @@ class MitmProxyEngine(
             machine.transition(ConnectionStateMachine.State.RELAYING)
             val clientToUpstream: () -> Unit
             val upstreamToClient: () -> Unit
+            var connectionKey: String? = null
             if (negotiatedAlpn == "h2") {
                 // §3/§5 + S3 task 57 (D7 cutover): HTTP/2 is decided once, upfront, from the ALPN
                 // result, and this connection is *terminated* -- requestr is the app's h2 peer
@@ -784,12 +809,19 @@ class MitmProxyEngine(
                 // ConnectionProtocolState. Genuinely unrecognized protocols still fall back to
                 // the pre-existing blind relay inside inspectClientToServer/inspectServerToClient.
                 val pending = ConcurrentLinkedQueue<PendingExchange>()
+                connectionKey = connectionKeyOf(pending)
                 val clientWriteLock = Any()
                 val wsState = ConnectionProtocolState()
                 clientToUpstream = {
-                    inspectClientToServer(db, decryptedInput, upstream, decryptedOutput,
-                        clientWriteLock, host, port, pending, sent, logRequests, logResponses, wsState, timing,
-                        mirror = mirrorPlan)
+                    try {
+                        inspectClientToServer(db, decryptedInput, upstream, decryptedOutput,
+                            clientWriteLock, host, port, pending, sent, logRequests, logResponses, wsState, timing,
+                            mirror = mirrorPlan)
+                    } finally {
+                        // S4 task 31: the client is gone (EOF/error on its leg) -- a response still
+                        // parked at a breakpoint for this connection has nobody to go to.
+                        breakpoints.invalidateConnection(connectionKeyOf(pending), "client closed while paused")
+                    }
                 }
                 upstreamToClient = {
                     inspectServerToClient(
@@ -807,10 +839,13 @@ class MitmProxyEngine(
                     runCatching { sslSocket.close() }
                     runCatching { upstream.giveUp() }
                     runCatching { upstream.closeQuietly() }
+                    // S4 task 31: a flow still paused on a half-dead connection must not outlive it.
+                    connectionKey?.let { breakpoints.invalidateConnection(it, "connection closed while paused") }
                 },
                 clientToUpstream = clientToUpstream,
                 upstreamToClient = upstreamToClient,
             )
+            connectionKey?.let { breakpoints.invalidateConnection(it, "connection closed while paused") }
             relayPool.metrics.addBytesToUpstream(sent.get())
             relayPool.metrics.addBytesToClient(received.get())
 
@@ -1312,6 +1347,23 @@ class MitmProxyEngine(
             Log.i(TAG, "REWRITE request (decrypted): $what")
             modified = true
         }
+        // 2b. Breakpoint (S4 task 31): park THIS flow on its own relay thread until the operator
+        //     resumes / edits / aborts it, or the rule's timeout auto-resumes it. Fail-open when
+        //     the 8-slot queue is full.
+        var breakpointStamp: Pair<RuleRef, String>? = null
+        decision.breakpoint?.takeIf { breakpointsEnabled && BreakpointStage.applies(it.config, phase) }?.let { bp ->
+            when (val outcome = BreakpointStage.pause(breakpoints, bp.rule, bp.config, phase, request, host, trail, connectionKey = connectionKeyOf(pending))) {
+                is BreakpointStage.Outcome.Forward -> {
+                    if (outcome.changed) modified = true
+                    breakpointStamp = bp.rule to outcome.actionName // persisted row only, stamped after serialization
+                }
+                is BreakpointStage.Outcome.Aborted -> {
+                    shortCircuit(BreakpointStage.abortResponse(bp.rule, outcome.reason, request.version), "ABORTED at breakpoint")
+                    return
+                }
+                is BreakpointStage.Outcome.Skipped -> Unit
+            }
+        }
         // 3. Scripts: pm.request.* mutations. The error header (if any) is stamped AFTER
         //    serialization so it reaches the captured row but never the origin server.
         val scripts = ScriptStage.apply(request, decision.scripts, phase, trail, stampErrorHeader = false)
@@ -1356,9 +1408,16 @@ class MitmProxyEngine(
             }
         }
 
+        // S4 task 30: the connection-level shaper (built at CONNECT from the same decision) paces
+        // this exchange's bytes; attribute it on the persisted row too, not only the connect trail.
+        decision.throttle?.let { throttle ->
+            val shape = ThrottleStage.resolve(throttle.config)
+            if (!shape.isNoop) trail.applied(throttle.rule, phase, "throttle ${shape.describe()}")
+        }
         val bytesToForward = if (modified) serializeRequest(request) else raw
         // Persist-only: the script-error badge must not leak to the origin.
         scripts.errors.forEach { (error, ruleName) -> ScriptStage.stampError(request, error, ruleName) }
+        breakpointStamp?.let { (rule, action) -> BreakpointStage.stamp(request, rule, action) }
         if (!modified && decision.isEmpty) Log.d(TAG, "FORWARD (decrypted): $what")
         val upstreamOut = connectOrThrow(db, upstream, host, port)
         val sendStartedAt = System.currentTimeMillis()
@@ -1440,14 +1499,34 @@ class MitmProxyEngine(
                 Log.i(TAG, "REWRITE response (decrypted): $what")
                 modified = true
             }
+            // S4 task 31: response-side pause point (after rewrite, before scripts). An abort
+            // here answers the client with the synthetic 499 instead of the origin's response.
+            var aborted = false
+            decision.breakpoint?.takeIf { breakpointsEnabled && BreakpointStage.applies(it.config, phase) }?.let { bp ->
+                when (val outcome = BreakpointStage.pause(breakpoints, bp.rule, bp.config, phase, response, host, trail, connectionKey = connectionKeyOf(pending))) {
+                    is BreakpointStage.Outcome.Forward -> {
+                        BreakpointStage.stamp(response, bp.rule, outcome.actionName)
+                        modified = true
+                    }
+                    is BreakpointStage.Outcome.Aborted -> {
+                        Log.i(TAG, "ABORTED at breakpoint (decrypted): $what")
+                        responseToEmit = BreakpointStage.abortResponse(bp.rule, outcome.reason, response.version)
+                        modified = true
+                        aborted = true
+                    }
+                    is BreakpointStage.Outcome.Skipped -> Unit
+                }
+            }
             // Task 32 wiring: pm.response.responseTime is the measured wait+receive when the
             // timing tracker observed it, else wall-clock since the request was sent.
             val responseTimeMs = measured?.totalMs ?: (System.currentTimeMillis() - exchange.sentAt)
             // On the wire AND persisted: the client under test can see the rewrite did not
             // happen, and the traffic list badges the row instead of logcat-only.
-            val scripts = ScriptStage.apply(response, decision.scripts, phase, trail, responseTimeMs)
+            val scripts = if (aborted) ScriptStage.Result.NONE
+            else ScriptStage.apply(response, decision.scripts, phase, trail, responseTimeMs)
             if (scripts.changed) modified = true
-            decision.bodyCrypto?.let { crypto ->
+            if (aborted) cryptoFailed = true // skip crypto + chaos below: nothing of the origin's body is forwarded
+            decision.bodyCrypto?.takeIf { !aborted }?.let { crypto ->
                 when (val result = BodyCryptoStage.apply(response, crypto.config, crypto.rule.name)) {
                     BodyCryptoStage.Result.Applied -> {
                         trail.applied(crypto.rule, phase, crypto.config.direction.name.lowercase())
@@ -1921,6 +2000,14 @@ class MitmProxyEngine(
         sb.append("\r\n")
         return sb.toString().toByteArray(Charsets.ISO_8859_1) + bodyBytes
     }
+
+    /**
+     * S4 task 31: identity of one decrypted HTTP/1.x connection for [BreakpointRegistry]
+     * bookkeeping -- the per-connection `pending` queue is the one object both legs and the
+     * teardown path already share, so its identity is the key.
+     */
+    internal fun connectionKeyOf(pending: ConcurrentLinkedQueue<PendingExchange>): String =
+        "conn-" + Integer.toHexString(System.identityHashCode(pending))
 
     /** See [serializeRequest]'s KDoc for why this is `internal` and how body bytes are chosen. */
     internal fun serializeResponse(response: ParsedHttpMessage): ByteArray {

@@ -74,6 +74,11 @@ internal class LazyUpstreamConnection(
      * while presenting the original host's SNI.
      */
     tlsServerName: String? = null,
+    /**
+     * S4 task 30: wraps the upstream-bound [OutputStream] once the leg exists (a THROTTLE
+     * rule's uplink pacing). Identity by default.
+     */
+    private val wrapOutput: (OutputStream) -> OutputStream = { it },
 ) {
     private val tlsServerName: String = tlsServerName?.takeIf { it.isNotBlank() } ?: host
 
@@ -181,7 +186,7 @@ internal class LazyUpstreamConnection(
                     } else null
                 }.getOrNull()
                 val result = Connected(
-                    socket, sslSocket, sslSocket.getInputStream(), sslSocket.getOutputStream(),
+                    socket, sslSocket, sslSocket.getInputStream(), wrapOutput(sslSocket.getOutputStream()),
                     setupTimings = com.example.interception.relay.UpstreamSetupTimings(dnsMs, connectMs, tlsMs),
                     alpn = negotiated,
                 )

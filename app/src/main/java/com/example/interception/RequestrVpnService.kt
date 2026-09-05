@@ -93,6 +93,8 @@ class RequestrVpnService : VpnService() {
     internal var lifecycleStepRecorder: (String) -> Unit = {}
     private var sessionId: Long? = null
     private var healthJob: Job? = null
+    /** S4 task 31: Room mirror of the paused-flow queue for this capture session. */
+    private var breakpointPersistence: com.example.interception.breakpoint.BreakpointPersistence? = null
     private var foregroundStarted = false
 
     /**
@@ -197,6 +199,12 @@ class RequestrVpnService : VpnService() {
             ACTION_STOP -> {
                 stopCapture("Stopped by user")
                 return START_NOT_STICKY
+            }
+            // S4 task 31: notification action -- every flow parked at a BREAKPOINT proceeds.
+            ACTION_RESUME_ALL_BREAKPOINTS -> {
+                val n = com.example.interception.breakpoint.BreakpointRegistry.shared.resumeAll()
+                Log.i(TAG, "resume-all: $n paused flow(s) resumed from the notification")
+                return if (tunInterface == null) START_NOT_STICKY else START_STICKY
             }
             else -> {
                 // S1 task 11: promote to foreground synchronously, *before* the first suspending
@@ -420,6 +428,9 @@ class RequestrVpnService : VpnService() {
                     udpAssociationHandler = udpPolicyRouter,
                 )
                 val mitmPort = mitmEngine.start(applicationContext, 0, socks5Credentials = gatewayCredentials)
+                // S4 task 31: mirror paused flows into `breakpoint_paused_flows` (stale rows swept).
+                breakpointPersistence = com.example.interception.breakpoint.BreakpointPersistence(db.pausedFlowDao(), scope)
+                    .also { it.attach(com.example.interception.breakpoint.BreakpointRegistry.shared) }
                 // MitmProxyEngine.start() unconditionally calls
                 // InterceptionStateRepository.markActive(tier = PROXY, method = MITM_PROXY,
                 // ...) itself before returning -- correct that transient global-state stomp
@@ -706,6 +717,11 @@ class RequestrVpnService : VpnService() {
         unregisterNetworkCallback()
         healthJob?.cancel()
         healthJob = null
+        // S4 task 31: nothing may stay parked once capture stops; the Room mirror is detached
+        // after the registry drained so the last onReleased deletes land.
+        com.example.interception.breakpoint.BreakpointRegistry.shared.resumeAll()
+        breakpointPersistence?.detach(com.example.interception.breakpoint.BreakpointRegistry.shared)
+        breakpointPersistence = null
         pumpJob?.cancel()
         pumpJob = null
         // Task 4: stop the relay's selector loop and close every open upstream socket
@@ -841,6 +857,9 @@ class RequestrVpnService : VpnService() {
         if (lost > 0) parts += "$lost writes lost"
         if (persist.capturePaused != null) parts += "capture paused: quota"
         if (networkHandoff?.isDegraded == true) parts += "no network -- waiting"
+        // S4 task 31: surface the breakpoint queue so an operator never wonders why a flow hangs.
+        val pausedFlows = com.example.interception.breakpoint.BreakpointRegistry.shared.pausedCount
+        if (pausedFlows > 0) parts += "$pausedFlows paused at breakpoint"
         return parts.joinToString(" \u00b7 ").ifEmpty { "VPN active" }
     }
 
@@ -1003,7 +1022,7 @@ class RequestrVpnService : VpnService() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("requestr is capturing traffic")
             .setContentText(if (port != null) "Port $port \u00b7 $health" else health)
             .setSmallIcon(android.R.drawable.ic_menu_view)
@@ -1012,7 +1031,17 @@ class RequestrVpnService : VpnService() {
             .setContentIntent(openApp)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stop)
             .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build()
+        // S4 task 31: "Resume all" only while something is actually paused (G21 kill switch).
+        if (com.example.interception.breakpoint.BreakpointRegistry.shared.pausedCount > 0) {
+            val resumeAll = PendingIntent.getService(
+                this,
+                2,
+                Intent(this, RequestrVpnService::class.java).setAction(ACTION_RESUME_ALL_BREAKPOINTS),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            builder.addAction(android.R.drawable.ic_media_play, "Resume all", resumeAll)
+        }
+        return builder.build()
     }
 
     @Suppress("DEPRECATION")
@@ -1066,6 +1095,8 @@ class RequestrVpnService : VpnService() {
         private const val TUN_PREFIX_V6 = 64
 
         const val ACTION_STOP = "com.example.interception.STOP"
+        /** S4 task 31: notification action that calls `BreakpointRegistry.resumeAll()`. */
+        const val ACTION_RESUME_ALL_BREAKPOINTS = "com.example.interception.RESUME_ALL_BREAKPOINTS"
 
         /** Task 14 bridge -- see [activePump]'s doc for why this exists. Null whenever no
          * capture is running; the UI must treat null as "relay down", not as "loading". */

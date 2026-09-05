@@ -409,3 +409,53 @@ Exported from the platform todo list at handoff time.
     - Hardening found by the tests: `BodyCryptoStage.applyWith` now catches *any* exception from
       the key provider / cipher (a locked AndroidKeyStore throws runtime exceptions) and returns
       `Failed` instead of propagating -- a crypto rule never forwards an untransformed body.
+  - S4 task 30 — done on `vorflux/interceptor-s4-rules`:
+    - `interception/rules/stages/TokenBucket.kt`: debt-based token bucket (`rateBytesPerSecond`,
+      `capacityBytes` = rate/10 clamped to 1 KiB..256 KiB, injectable clock/sleep) and
+      `ThrottledOutputStream` that slices writes into capacity-sized takes and flushes between them.
+    - `interception/rules/stages/ThrottleStage.kt`: `NetworkConditionPresets` (GPRS / 2G / 3G / 4G /
+      5G / custom, bits-per-second), `ThrottleStage.resolve` (explicit numbers win over `presetKey`),
+      `Shaper` (downlink/uplink buckets + latency/jitter/loss override of the global dial condition),
+      `shaperFor(rule, config, trail)` records APPLIED `throttle <desc>` or SKIPPED_PRECEDENCE for an
+      all-zero config.
+    - Wiring: `HttpProxyShared.handleConnectAttempt(throttle=)` wraps both `StructuredRelay.copy`
+      legs and uses the shaper's dial condition for AllowOpaque/Redirect/Mirror;
+      `MitmProxyEngine.handleClient` wraps `decryptedOutput` (client leg) and
+      `LazyUpstreamConnection.wrapOutput` (upstream leg); `GatewayEngine` now goes through
+      `ConnectControl.decide` so plaintext/opaque tunnels are shaped too;
+      `NetworkCondition.downlinkBps/uplinkBps` added. The exchange trail also gets the throttle
+      attribution so the persisted row shows it.
+    - Tests: `ThrottleStageTest` (15 -- G7 ±20 % on a 10 MB virtual-clock download per preset, a
+      real-clock 1 MB run, slicing, presets), `ThrottleRelayTest` (2 -- real loopback relay paced at
+      4 Mbit/s within tolerance; uplink unaffected by a downlink-only shaper), `ChaosStageTest` (12).
+  - S4 task 31 — done on `vorflux/interceptor-s4-rules`:
+    - `interception/breakpoint/BreakpointRegistry.kt`: `Semaphore(MAX_PAUSED_FLOWS = 8)` acquired
+      before pausing, `SLOT_WAIT_MS = 250` fail-open (`PauseResult.Skipped` -> the stage records
+      SKIPPED_PRECEDENCE and forwards unchanged), one `CompletableFuture<BreakpointAction>` per flow
+      awaited on the flow's own relay thread, mandatory auto-resume at `BreakpointConfig.timeoutMs`,
+      `resume/replace/abort`, `invalidate(flowId)` + `invalidateConnection(key)` (client leg EOF and
+      relay drain deadline), `resumeAll()` (kill switch / notification), `Listener` hooks.
+      `BreakpointAction { Resume, Replace(message), Abort(reason), AutoResume }`.
+    - `interception/breakpoint/BreakpointPersistence.kt`: mirrors the queue into
+      `breakpoint_paused_flows` (`PausedFlowDao`; startup `deleteAll()` sweep; bounded snapshot).
+    - `interception/rules/stages/BreakpointStage.kt`: phase gating (`REQUEST`/`RESPONSE`/`BOTH`),
+      `pause(...)` -> `Forward(action, changed, actionName)` / `Aborted` / `Skipped`,
+      `applyReplacement` (url/host/status/headers/body, `bodyReplaced = true` so the serializer
+      recomputes Content-Length), `abortResponse` (499 `Aborted At Breakpoint`, `connection: close`),
+      `stamp` = `x-requestr-breakpoint: rule="<name>"; action=<resumed|auto-resumed|replaced|aborted>`.
+    - `MitmProxyEngine`: pause points after rewrite / before scripts on both legs; request-leg stamp is
+      applied AFTER serialization (persisted row only, never leaks to the origin); response-leg stamp
+      reaches the client; Abort short-circuits (request) or replaces the emitted response (response)
+      and skips scripts/crypto/chaos; constructor seam `breakpoints: BreakpointRegistry`;
+      `breakpointsEnabled` sampled from `InterceptorFlags.breakpoints` at `start()`.
+    - `InterceptorFlags.breakpoints` (+ `scriptHost` for task 32), default true.
+    - `RequestrVpnService`: health line shows `N paused at breakpoint`, notification gains a
+      "Resume all" action (`ACTION_RESUME_ALL_BREAKPOINTS`) while anything is paused, `stopCapture`
+      resumes everything and detaches the Room mirror.
+    - Tests: `BreakpointRegistryTest` (9 -- slot exhaustion fail-open, auto-resume, Abort releases
+      slot, invalidation completes exactly once, per-connection invalidation, resumeAll drains,
+      Replace hand-off, listener counts, ordering), `BreakpointStageTest` (7),
+      `MitmProxyEngineBreakpointTest` (6, real MITM tunnel -- G21: two concurrent flows with one
+      paused, the other completes and the paused one auto-resumes with byte-identical forwarding;
+      Replace with recomputed Content-Length; Abort answers 499 without dialling; response-phase
+      breakpoint + rewrite + throttle in one decision; flag off; client close invalidates).
