@@ -57,10 +57,17 @@ object BodyCryptoStage {
             return Result.Failed(reason)
         }
         val inputBytes = message.decodedBodyBytes ?: message.rawBodyBytes ?: message.body.toByteArray(Charsets.UTF_8)
-        val result = if (encrypt) {
-            RequestCryptoManager.encryptWith(config.keyAlias, inputBytes, config.algorithm, keyProvider)
-        } else {
-            RequestCryptoManager.decryptWith(config.keyAlias, inputBytes, config.algorithm, keyProvider)
+        // Fail closed on *anything* the key provider or cipher throws (a locked/absent
+        // AndroidKeyStore surfaces as runtime exceptions, not just GeneralSecurityException):
+        // a crypto rule must never let the untransformed body through by accident.
+        val result = try {
+            if (encrypt) {
+                RequestCryptoManager.encryptWith(config.keyAlias, inputBytes, config.algorithm, keyProvider)
+            } else {
+                RequestCryptoManager.decryptWith(config.keyAlias, inputBytes, config.algorithm, keyProvider)
+            }
+        } catch (e: Exception) {
+            RequestCryptoManager.CryptoResult.Failure("$op failed: ${e.message ?: e.javaClass.simpleName}")
         }
         return when (result) {
             is RequestCryptoManager.CryptoResult.Success -> {

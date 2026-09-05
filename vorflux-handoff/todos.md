@@ -391,3 +391,21 @@ Exported from the platform todo list at handoff time.
       policy, mirror loopback server records SNI + Host per policy, bytes round-trip, captured row
       carries `x-requestr-mirror`; plus a direct `LazyUpstreamConnection(tlsServerName)` SNI check
       since SunJSSE omits server_name for single-label names like `localhost`).
+  - S4 task 29 — done on `vorflux/interceptor-s4-rules`:
+    - Stage code (`RewriteStage`/`MockStage`/`BodyCryptoStage`) landed with task 26; this task adds
+      the dedicated suites: `RewriteStageTest` (23: no-op paths, ordered Set/Remove/Regex header
+      mods with `$1`/`${name}` capture groups written back under the original key, query-param
+      set/remove/encode with fragment kept, RegexBody + ReplaceBody text/empty/binary `file://`,
+      broken fixture and invalid regex fail only their step, replacement before modifications,
+      redirect url/host/Host + `preserveHost` + `directoryMatch`, multi-rule snapshot order with
+      per-rule variables and `{{request.*}}` built-ins, wire-level Content-Length recompute and
+      stale Content-Encoding/Transfer-Encoding dropped via the engine serializer),
+      `MockStageTest` (10: lower-cased headers, JSON/text/octet-stream inference, UTF-8 byte
+      length, templating with request built-ins, text/binary fixtures byte-exact, broken fixture
+      -> empty body, serialized mock re-parses), `BodyCryptoStageTest` (12: scope gating, GCM
+      IV+tag layout, cipher over the *inflated* gzip body with identity output, decrypt restores
+      text + inflates gzip'd ciphertext, wrong key/garbage/blank alias/undecodable `br` fail
+      closed leaving the message untouched, 502 failure response, two-rule round trip).
+    - Hardening found by the tests: `BodyCryptoStage.applyWith` now catches *any* exception from
+      the key provider / cipher (a locked AndroidKeyStore throws runtime exceptions) and returns
+      `Failed` instead of propagating -- a crypto rule never forwards an untransformed body.
