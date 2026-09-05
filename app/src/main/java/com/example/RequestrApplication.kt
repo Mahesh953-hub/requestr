@@ -2,6 +2,7 @@ package com.example
 
 import android.app.Application
 import com.example.data.local.RequestrDatabase
+import com.example.interception.rules.RuleSnapshotStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -27,6 +28,9 @@ class RequestrApplication : Application() {
         // blocking the main thread with file I/O.
         appScope.launch {
             RequestrDatabase.initAsync(this@RequestrApplication)
+            // S4 task 25: keep the compiled rule snapshot warm for the whole process lifetime so
+            // the first intercepted flow (task 26 pipeline) never waits on a compile.
+            RuleSnapshotStore.startFromApplication(appScope, RequestrDatabase.get(this@RequestrApplication))
         }
     }
 }

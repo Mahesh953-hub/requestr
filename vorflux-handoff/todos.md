@@ -263,3 +263,42 @@ Exported from the platform todo list at handoff time.
       unknown-stage degrade, FK cascade). `tools/ci/check-schema-drift.sh` green with `23.json`.
     - Not in this task: nothing reads `interceptor_rules` at runtime yet -- `RuleEnforcer` +
       `intercept_rules` remain the live path until task 26 cuts the engines over to `RulePipeline`.
+  - S4 task 25 — done on `vorflux/interceptor-s4-rules`:
+    - `RuleSnapshotStore` (process singleton, `com.example.interception.rules`): `@Volatile current:
+      RuleSnapshot` (one load, no lock, no allocation on relay threads) + `snapshots: StateFlow` for
+      UI/diagnostics. `start(scope, db)` combines `InterceptorRuleDao.observeEnabledOrdered()` with
+      `RuleFolderDao.observeAll()`, `distinctUntilChanged`, recompiles on `Dispatchers.Default` and
+      publishes with the next `revision`. Idempotent `start`, `stop`, generation guard so a
+      stopped collector can never publish a stale revision, `publish(rules, folders)` for imports,
+      `replaceForTest` / `resetForTest` seams. Started from `RequestrApplication.onCreate` via
+      `startFromApplication` right after `RequestrDatabase.initAsync`, so the snapshot is warm
+      before task 26's pipeline runs. `startFromApplication` is a no-op once `resetForTest` has run:
+      Robolectric instantiates `RequestrApplication` for every test, and its collector (bound to the
+      real on-disk DB) raced test collectors for the singleton -- that race was the cause of the
+      intermittent `RuleSnapshotStoreTest` timeouts seen while landing this task, not Room
+      invalidation.
+    - `RuleSnapshotCompiler.compile(rules, folders, revision)` -> immutable `RuleSnapshot`
+      (`rules` in `sortOrder ASC, id ASC`, `byStage`/`forStage`, `findById`, `issues`,
+      `compileDurationNanos`; `RuleSnapshot.EMPTY` at revision 0). Folder semantics: disabled folder
+      excludes its rules; dangling `folderId` excludes + `SnapshotIssue`. Undecodable
+      `configJson`/`matcherJson` -> excluded + issue (never crashes). Stage taken from the config.
+      `CompiledRule` carries a `RuleRef(id, name, stage)` for audit rows.
+    - `CompiledMatcher.compile(spec)`: one predicate per constrained dimension; `ALL` = every
+      predicate (none = catch-all), `ANY` = at least one (none = matches nothing). Host globs
+      (`HostGlob`: `*`/`?`, literal otherwise, case-insensitive, anchored), `urlRegex`
+      `containsMatchIn` IGNORE_CASE, methods upper-cased, inclusive port range, `CidrBlock`
+      (IPv4/IPv6, bare address = full prefix, literal-only -- never resolves a hostname; matched
+      against `upstreamIp` else `sourceIp`), header matchers all-of (name case-insensitive,
+      presence-only when regex null), app packages exact. Invalid regex/CIDR -> always-false
+      predicate + `errors` (reproduces legacy `runCatching { Regex(...) }.getOrDefault(false)`, so a
+      backfilled row with a broken `pattern` still matches on `domain` under `ANY`).
+    - Tests: `CompiledMatcherTest` (13, pure JVM; includes a grid parity check of converted legacy
+      matchers against a re-implementation of `RuleEnforcer.getMatchingRule`'s predicate incl. an
+      invalid regex), `RuleSnapshotStoreTest` (11: compiler ordering/bucketing, folder enablement +
+      dangling folder, broken regex kept / undecodable dropped, stage from config; store reactivity
+      over StateFlow-backed fake DAOs whose every other method throws -- revision bump on every
+      emission, `distinctUntilChanged` coalescing, idempotent start, stop, folder toggles republish;
+      Room in-memory: compiles the live table on start, evaluation with the DB closed,
+      `replaceForTest` then live revisions move past it; `startFromApplication` disarmed; `publish`).
+    - Not in this task: nothing evaluates against the snapshot yet (task 26); `RuleLimits`
+      enforcement at compile time is task 33.
