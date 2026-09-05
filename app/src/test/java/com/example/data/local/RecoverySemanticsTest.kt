@@ -121,7 +121,7 @@ class RecoverySemanticsTest {
 
         val snap = PersistenceHealth.snapshot()
         assertEquals(MigrationEvent.BACKED_UP, snap.migration)
-        assertEquals("v18 → v22", snap.migrationDetail)
+        assertEquals("v18 → v23", snap.migrationDetail)
         assertNull("BACKED_UP is informational, not a headline", snap.headline)
         assertFalse(snap.hasDataLoss)
 
@@ -147,7 +147,7 @@ class RecoverySemanticsTest {
         assertEquals(MigrationEvent.DESTRUCTIVE_WIPE, snap.migration)
         assertTrue(snap.hasDataLoss)
         assertTrue(snap.headline!!.startsWith("Database was reset"))
-        assertTrue(snap.headline!!.contains("v99 → v22"))
+        assertTrue(snap.headline!!.contains("v99 → v23"))
 
         val backup = DbBackup(context)
         assertEquals(listOf("backed_up", "destructive_wipe"), backup.readRecoveryEvents().map { it.kind })
@@ -221,7 +221,7 @@ class RecoverySemanticsTest {
         assertEquals(MigrationEvent.DESTRUCTIVE_WIPE, PersistenceHealth.snapshot().migration)
         PersistenceHealth.recordMigration(MigrationEvent.NONE)
         assertEquals(MigrationEvent.NONE, PersistenceHealth.snapshot().migration)
-        PersistenceHealth.recordMigration(MigrationEvent.BACKUP_FAILED, "v18 → v22")
+        PersistenceHealth.recordMigration(MigrationEvent.BACKUP_FAILED, "v18 → v23")
         assertTrue(PersistenceHealth.snapshot().headline!!.startsWith("Pre-upgrade backup failed"))
         assertFalse(PersistenceHealth.snapshot().hasDataLoss)
     }

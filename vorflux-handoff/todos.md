@@ -220,3 +220,46 @@ Exported from the platform todo list at handoff time.
       mitmproxy side-by-side comparator still pending the device lane; `Http2Session` merges
       CONTINUATION after HEADERS padding (pre-existing, endpoint strips padding first so the
       observer is unaffected on the terminated path).
+  - S4 task 24 — done on `vorflux/interceptor-s4-rules` (interceptor plan §4 v23):
+    - Room v23 (`Migration22To23` + test, schema `23.json`, `SCHEMA_VERSION = 23`, 15 migrations):
+      new tables `interceptor_rules` (stage-keyed `configJson`, `matcherJson`, explicit
+      `sortOrder`, optional `folderId`, `legacyRuleId` back-link), `rule_folders`,
+      `breakpoint_paused_flows` (task 31), `replay_jobs` + `replay_results` (S5 task 39; results
+      CASCADE with their job). DDL hand-written to match the exported schema column-for-column.
+    - Data-carrying backfill inside the migration transaction: every `intercept_rules` row is read
+      via cursor, converted by `LegacyRuleConverter`, inserted typed. Evaluation order preserved
+      (legacy `getEnabledRules()` had no ORDER BY = rowid scan = `createdAt ASC, id ASC` ->
+      ascending `sortOrder`). Idempotent by `legacyRuleId`; unconvertible rows are logged and left
+      in place. `intercept_rules` is NOT dropped/altered -- read-only until v24 (task 34, after G16).
+    - Typed model (`com.example.interception.rules`): `RuleStage` (declaration order = pipeline
+      order GATEWAY -> MIRROR -> REWRITE -> BREAKPOINT -> SCRIPT -> MOCK -> BODY_CRYPTO -> THROTTLE
+      -> CHAOS, + OBSERVE; unknown name -> OBSERVE, `MUTATING` set for D3), `InterceptorRule`,
+      `RuleFolder`, `RuleMatcherSpec` (host globs, url regex, methods, port range, CIDRs, header
+      matchers, app packages, `combine` ALL|ANY -- ANY exists only for legacy OR parity),
+      `FlowKey`, sealed `RuleConfig` per stage (`GatewayConfig` ALLOW_ONLY/BYPASS/BLOCK/SUSPEND/
+      FORCE_DECRYPT, `MirrorConfig` with independent Host/SNI/CN `NamePolicy`, `RewriteConfig`
+      redirection -> replacement -> ordered `Modification` steps, `BreakpointConfig`,
+      `ScriptConfig`, `MockConfig`, `BodyCryptoConfig`, `ThrottleConfig`, `ChaosConfig`,
+      `ObserveConfig`), `BodySource` Empty/Text/File(`file://`).
+    - `RuleConfigJson`: Moshi codegen leaves + three hand-written polymorphic envelopes (`stage`,
+      `type`, `kind`). Unknown/missing stage -> `ObserveConfig` (a newer build's row never breaks
+      snapshot compile); known stage with malformed body -> `JsonDataException` (hard error).
+    - `LegacyRuleConverter` (shared by migration, import, local API): one mapping per legacy
+      `RuleAction`, matcher `domain` -> `*domain*` glob + `pattern` -> `urlRegex`, OR-combined.
+      Parity notes encoded as warnings, not silent changes: MODIFY_RESPONSE `removeHeaders` was
+      never applied by `RuleEnforcer` (not converted, warned); REDIRECT is a bare URL not JSON;
+      CHAOS clamps identical to `parseChaosConfig`; crypto direction from the ACTION (column is
+      informational); malformed `replacementValue` -> stage's empty config (legacy fail-open).
+    - DAOs: `InterceptorRuleDao` (every ordered query `ORDER BY sortOrder ASC, id ASC`;
+      `getEnabledOrdered`/`observeEnabledOrdered` feed the task-25 snapshot; `reorderAll`,
+      `setEnabled`, `disableStages` kill switch for task 33, `moveToFolder`, typed
+      `hasBlockRuleForDomain` for the task-34 UI repoint), `RuleFolderDao` (`deleteAndUnfile`),
+      `PausedFlowDao`, `ReplayJobDao`, `ReplayResultDao`. `RequestrTypeConverters`:
+      `ruleStageToName`/`nameToRuleStage`.
+    - Tests: `RuleConfigJsonTest` (14), `LegacyRuleConverterTest` (16: one per action, malformed
+      paths, `file://`, ordering, removeHeaders warning), `Migration22To23Test` (3: all 11 actions
+      seeded on v22, order/stage/config/legacyRuleId asserted, idempotent re-run, Room reopen +
+      legacy DAO still answers), `InterceptorRuleDaoTest` (10: ordering, folders, kill switch,
+      unknown-stage degrade, FK cascade). `tools/ci/check-schema-drift.sh` green with `23.json`.
+    - Not in this task: nothing reads `interceptor_rules` at runtime yet -- `RuleEnforcer` +
+      `intercept_rules` remain the live path until task 26 cuts the engines over to `RulePipeline`.

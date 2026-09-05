@@ -60,6 +60,12 @@ import kotlinx.coroutines.runBlocking
         Http2StreamEventEntity::class,
         // S3 task 22 (v22): saved traffic searches. The FTS5 index itself is raw SQL (FtsSchema).
         SearchPresetEntity::class,
+        // S4 task 24 (v23): typed rule library + breakpoint/replay tables. See RuleEntities.kt.
+        InterceptorRuleEntity::class,
+        RuleFolderEntity::class,
+        PausedFlowEntity::class,
+        ReplayJobEntity::class,
+        ReplayResultEntity::class,
     ],
     // v3.5: bumped 4 -> 5 for FlowNodeEntity + FlowConnectionEntity (Flow persistence).
     // v5.6 (M1): bumped 5 -> 6 to register TcpConnectionEntity/UdpFlowEntity/QuicConnectionEntity,
@@ -134,7 +140,13 @@ import kotlinx.coroutines.runBlocking
     // table (Room entity) and the traffic_fts FTS5 index + sync triggers, which are raw SQL
     // created best-effort by Migration21To22 and on every open by FtsSchema.roomCallback because
     // FTS5 is only guaranteed on the bundled driver. See Migration21To22.kt / FtsSchema.kt.
-    version = 22,
+    // S4 task 24 (interceptor plan §4 v23): bumped 22 -> 23 for the typed rule library --
+    // interceptor_rules (stage-keyed JSON config, explicit sortOrder) + rule_folders,
+    // breakpoint_paused_flows (task 31) and replay_jobs / replay_results (S5 task 39). The
+    // migration is data-carrying: every intercept_rules row is converted through
+    // LegacyRuleConverter into a typed row (legacyRuleId links them). intercept_rules itself is
+    // kept read-only until v24 (task 34) drops it once parity gate G16 is green. See Migration22To23.kt.
+    version = 23,
     exportSchema = true,
 )
 @TypeConverters(RequestrTypeConverters::class)
@@ -170,6 +182,11 @@ abstract class RequestrDatabase : RoomDatabase() {
     abstract fun http2StreamEventDao(): Http2StreamEventDao
     abstract fun trafficFtsDao(): com.example.data.search.TrafficFtsDao
     abstract fun searchPresetDao(): com.example.data.search.SearchPresetDao
+    abstract fun interceptorRuleDao(): InterceptorRuleDao
+    abstract fun ruleFolderDao(): RuleFolderDao
+    abstract fun pausedFlowDao(): PausedFlowDao
+    abstract fun replayJobDao(): ReplayJobDao
+    abstract fun replayResultDao(): ReplayResultDao
 
     companion object {
         private const val TAG = "RequestrDatabase"
@@ -178,7 +195,7 @@ abstract class RequestrDatabase : RoomDatabase() {
          * The current schema version declared in the [@Database] annotation above.
          * Kept in sync manually; a CI schema-drift check validates the exported JSON.
          */
-        const val SCHEMA_VERSION = 22
+        const val SCHEMA_VERSION = 23
 
         @Volatile
         private var INSTANCE: RequestrDatabase? = null
@@ -726,12 +743,12 @@ abstract class RequestrDatabase : RoomDatabase() {
             }
         }
 
-        /** All fourteen registered migrations v8→v22, exposed for tests and the builder. */
+        /** All fifteen registered migrations v8→v23, exposed for tests and the builder. */
         val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
             MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16,
             MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21,
-            MIGRATION_21_22,
+            MIGRATION_21_22, MIGRATION_22_23,
         )
     }
 }
