@@ -345,3 +345,23 @@ Exported from the platform todo list at handoff time.
       no-op (CDP resumes the response instead of re-fulfilling it); `CdpFetchAdapterTest` updated.
     - Not in this task: throttle/breakpoint/script-host stages (30-32), the safety gate (33), legacy
       table drop + `LocalApiServer`/dashboard/exporter/UI cut-over (34), h2 event rules (35).
+  - S4 task 27 — done on `vorflux/interceptor-s4-rules`:
+    - `AccessControlStage.disposition(decision, host, port, trail, pinningBypass)` turns the CONNECT
+      decision into a `ConnectControl.Disposition`: `Block` (gateway BLOCK, or ALLOW_ONLY implied
+      block "Blocked: <host> is not in the allow-list"), `Suspend(timeoutMs, ruleName)` (parks the
+      flow, no relay permit, socket closed after the rule's `suspendTimeoutMs`), `ForceMitm` (refused
+      with `REFUSED_SAFETY` when the host is on the pinning bypass list), `Mirror` (task 28's
+      target + `NamePolicy` triple, default port 443), `Redirect` (URL or host:port target), else
+      `AllowOpaque`. Precedence is the pipeline's (`ALLOW_ONLY > BYPASS > BLOCK > SUSPEND >
+      FORCE_DECRYPT`; block > mirror > redirect across stages). `ConnectControl.decide` ->
+      `Verdict(decision, disposition, trail)`; `evaluate` keeps the old shape minus `db`.
+    - Wired in `HttpProxyEngine`, `GatewayEngine` (persists SUSPENDED / REDIRECTED) and
+      `MitmProxyEngine.handleClient`; `HttpProxyShared.suspendFlow(client, timeoutMs, sleep)` runs
+      on the CONNECT's own thread. Request-phase BLOCK in `MitmProxyEngine` answers the legacy
+      `403 Blocked by requestr` bytes, never dials, never enqueues; `showBlockedInList` persists
+      the 403 with provenance.
+    - Tests: `AccessControlStageTest` (12), `HttpProxySharedSuspendTest` (5: sleep + close without
+      writing, zero timeout, close on interrupt, no relay permit / no dial through
+      `handleConnectAttempt`, pool still free afterwards), `MitmProxyEngineGatewayBlockTest` (4:
+      legacy 403 bytes hidden by default, `showBlockedInList` row + `gateway:<id>` badge, ALLOW_ONLY
+      implied block vs allow-listed dial, BLOCK > FORCE_DECRYPT and BYPASS > BLOCK).
