@@ -1,7 +1,12 @@
 package com.example.interception
 
-import com.example.data.local.RequestrDatabase
-import com.example.data.local.RuleAction
+import com.example.interception.rules.FlowAuditTrail
+import com.example.interception.rules.NamePolicy
+import com.example.interception.rules.RuleDecision
+import com.example.interception.rules.RulePipeline
+import com.example.interception.rules.RuleSnapshot
+import com.example.interception.rules.RuleSnapshotStore
+import com.example.interception.rules.stages.AccessControlStage
 import java.net.InetSocketAddress
 import java.net.Socket
 
@@ -26,69 +31,77 @@ import java.net.Socket
  *    single attempt forever -- see [PinningFailureRegistry]'s kdoc.
  */
 object ConnectControl {
+    /**
+     * What to do with one CONNECT (or SOCKS/transparent) tunnel request. S4 task 26/27: produced
+     * by [com.example.interception.rules.stages.AccessControlStage] from a [RuleDecision]; the
+     * legacy `LegacyRuleAction`-driven mapping is gone.
+     */
     sealed class Disposition {
-        /** No rule (or a rule with no CONNECT-level meaning) matched: tunnel opaquely. */
+        /** Relay the tunnel opaquely (no decryption). The default when nothing constrains the flow. */
         data object AllowOpaque : Disposition()
 
-        /** A FORCE_MITM rule matched: the caller should terminate TLS itself when it can. */
+        /** Terminate TLS and inspect (FORCE_DECRYPT). */
         data object ForceMitm : Disposition()
 
+        /** Refuse the tunnel (BLOCK, or an ALLOW_ONLY allow-list this host is not on). */
         data class Block(val reason: String? = null) : Disposition()
 
-        /** [target] is `"host:port"` -- the upstream to tunnel/dial to instead of the original. */
+        /** Re-point the opaque tunnel at `host:port` (legacy CONNECT REDIRECT parity). */
         data class Redirect(val target: String) : Disposition()
+
+        /**
+         * S4 task 27: park the flow -- no relay permit, no bytes either way -- until [timeoutMs]
+         * elapses, then close it. Only this flow stalls; the client sees a hung connection.
+         */
+        data class Suspend(val timeoutMs: Long, val ruleName: String) : Disposition()
+
+        /**
+         * S4 task 28: MIRROR host A → B. Dial [targetHost]:[targetPort] instead of the CONNECT
+         * authority; the Host header / SNI / issued-cert CN follow the three [NamePolicy]s.
+         */
+        data class Mirror(
+            val targetHost: String,
+            val targetPort: Int,
+            val hostPolicy: NamePolicy,
+            val sniPolicy: NamePolicy,
+            val cnPolicy: NamePolicy,
+            val ruleName: String,
+        ) : Disposition() {
+            val target: String get() = "$targetHost:$targetPort"
+        }
     }
 
+    /** The pipeline decision and its CONNECT-level translation, for callers that need both. */
+    class Verdict(val decision: RuleDecision, val disposition: Disposition, val trail: FlowAuditTrail)
+
     /**
-     * Evaluates CONNECT rules for [host]:[port]. [clientUid]/[sourceIp] are accepted so callers
-     * can pass them straight through to [com.example.data.local.ConnectAttemptEntity] persistence
-     * without a second lookup; this function itself does not use them for rule matching (rules
-     * match on host/URL only, same as [RuleEnforcer.checkRules] everywhere else in the codebase).
-     *
-     * A [Disposition.ForceMitm] result is automatically downgraded to [Disposition.AllowOpaque]
-     * when [PinningFailureRegistry] has already recorded enough recent pinning-shaped failures
-     * for [host] to trip its bypass -- see that object's kdoc. BLOCK/REDIRECT/AllowOpaque results
-     * are never touched by the registry: bypassing MITM is only meaningful when MITM was the
-     * thing about to be forced.
+     * Evaluates the current [RuleSnapshotStore] snapshot for a CONNECT to [host]:[port]. Zero
+     * database access: the store keeps the compiled snapshot hot (S4 task 25).
      */
     fun evaluate(
-        db: RequestrDatabase,
         host: String,
         port: Int,
         clientUid: Int? = null,
         sourceIp: String? = null,
-    ): Disposition {
-        val action = RuleEnforcer.checkRules(db, "https://$host:$port/", host)
-        return when (action) {
-            RuleAction.BLOCK -> Disposition.Block("Blocked by rule for $host")
-            RuleAction.FORCE_MITM ->
-                if (PinningFailureRegistry.shouldBypass(host)) Disposition.AllowOpaque else Disposition.ForceMitm
-            RuleAction.REDIRECT -> {
-                val rule = RuleEnforcer.getMatchingRule(db, "https://$host:$port/", host)
-                val target = rule?.replacementValue?.takeIf { it.isNotBlank() }
-                    ?: return Disposition.AllowOpaque
-                Disposition.Redirect(target)
-            }
-            // LOG_ONLY, MODIFY_REQUEST, MODIFY_RESPONSE have no CONNECT-level meaning (they
-            // apply to parsed HTTP requests/responses inside a tunnel, not the tunnel itself) --
-            // fall through to an opaque tunnel, which is the pre-existing default behavior.
-            else -> Disposition.AllowOpaque
-        }
+        appPackage: String? = null,
+        snapshot: RuleSnapshot = RuleSnapshotStore.current,
+    ): Disposition = decide(host, port, clientUid, sourceIp, appPackage, snapshot).disposition
+
+    fun decide(
+        host: String,
+        port: Int,
+        clientUid: Int? = null,
+        sourceIp: String? = null,
+        appPackage: String? = null,
+        snapshot: RuleSnapshot = RuleSnapshotStore.current,
+    ): Verdict {
+        val decision = RulePipeline.evaluateConnect(snapshot, host, port, clientUid, appPackage, sourceIp)
+        val trail = FlowAuditTrail()
+        trail.recordDecision(decision, FlowAuditTrail.Phase.CONNECT)
+        val disposition = AccessControlStage.disposition(decision, host, port, trail)
+        return Verdict(decision, disposition, trail)
     }
 
-    /**
-     * Non-root UID attribution for [client], a CONNECT's already-accepted local [Socket].
-     *
-     * Delegates to [ProcNetUidResolver], which reads the `uid` column `/proc/net/tcp`/`tcp6`
-     * already stamp on every row -- no `su`, no walking `/proc/\<pid\>/fd` for an inode, and no
-     * API-level floor (unlike `ConnectivityManager.getConnectionOwnerUid`, which is API 29+ and
-     * only resolves while requestr itself is the active VPN). The tradeoff is the SELinux
-     * per-app socket-visibility restriction Android has applied to `/proc/net/tcp*` since Nougat:
-     * on a stock, unrooted, N+ device a non-VPN, non-system app generally can only see its own
-     * sockets there, so this will legitimately return null for another app's connection in that
-     * configuration -- same as the existing `ConnectivityManager` path returning null when it
-     * doesn't apply. Never throws.
-     */
     fun resolveClientUid(client: Socket): Int? {
         val local = client.localSocketAddress as? InetSocketAddress ?: return null
         val remote = client.remoteSocketAddress as? InetSocketAddress ?: return null

@@ -1,6 +1,7 @@
 package com.example.data.local
 
 import androidx.room.TypeConverter
+import com.example.interception.rules.RuleStage
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.Types
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
@@ -36,12 +37,14 @@ class RequestrTypeConverters {
     fun nameToCaptureTier(value: String?): CaptureTier =
         runCatching { CaptureTier.valueOf(value ?: "") }.getOrNull() ?: CaptureTier.NONE
 
-    @TypeConverter
-    fun ruleActionToName(value: RuleAction?): String = (value ?: RuleAction.LOG_ONLY).name
+    // -- S4 task 24: typed rule stage (interceptor_rules.stage) ----------------------------------
 
     @TypeConverter
-    fun nameToRuleAction(value: String?): RuleAction =
-        runCatching { RuleAction.valueOf(value ?: "") }.getOrNull() ?: RuleAction.LOG_ONLY
+    fun ruleStageToName(value: RuleStage?): String = (value ?: RuleStage.OBSERVE).name
+
+    /** Unknown/legacy names degrade to OBSERVE -- a rule that does nothing rather than a crash. */
+    @TypeConverter
+    fun nameToRuleStage(value: String?): RuleStage = RuleStage.fromNameOrObserve(value)
 
     // -- Item 1: per-row capture method (see CaptureRowMethod's KDoc) -------------------------
 

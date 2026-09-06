@@ -323,11 +323,11 @@ class CapturedTrafficHelpersTest {
         assertEquals("database record", stripDataUriPrefix("database record"))
     }
 
-    // ── ruleActionLabel / ruleActionColorHex (exhaustive over every RuleAction) ──────────
+    // ── ruleActionLabel / ruleActionColorHex (exhaustive over every LegacyRuleAction) ──────────
 
     @Test
-    fun `ruleActionLabel and ruleActionColorHex are defined for every RuleAction value`() {
-        com.example.data.local.RuleAction.values().forEach { action ->
+    fun `ruleActionLabel and ruleActionColorHex are defined for every LegacyRuleAction value`() {
+        com.example.interception.rules.LegacyRuleAction.values().forEach { action ->
             assertTrue(ruleActionLabel(action).isNotBlank())
             // 0xFF... literals decode as negative Long via the sign bit -- just assert it's a
             // real, distinct-looking ARGB literal rather than the accidental default 0.
@@ -337,15 +337,15 @@ class CapturedTrafficHelpersTest {
 
     @Test
     fun `ruleActionLabel gives the two new crypto actions distinct human-readable labels`() {
-        assertEquals("Body Encrypt (AES)", ruleActionLabel(com.example.data.local.RuleAction.BODY_ENCRYPT_AES))
-        assertEquals("Body Decrypt (AES)", ruleActionLabel(com.example.data.local.RuleAction.BODY_DECRYPT_AES))
+        assertEquals("Body Encrypt (AES)", ruleActionLabel(com.example.interception.rules.LegacyRuleAction.BODY_ENCRYPT_AES))
+        assertEquals("Body Decrypt (AES)", ruleActionLabel(com.example.interception.rules.LegacyRuleAction.BODY_DECRYPT_AES))
     }
 
     @Test
     fun `ruleActionColorHex gives the two new crypto actions distinct colors from each other`() {
         assertTrue(
-            ruleActionColorHex(com.example.data.local.RuleAction.BODY_ENCRYPT_AES) !=
-                ruleActionColorHex(com.example.data.local.RuleAction.BODY_DECRYPT_AES)
+            ruleActionColorHex(com.example.interception.rules.LegacyRuleAction.BODY_ENCRYPT_AES) !=
+                ruleActionColorHex(com.example.interception.rules.LegacyRuleAction.BODY_DECRYPT_AES)
         )
     }
 
@@ -353,44 +353,44 @@ class CapturedTrafficHelpersTest {
 
     @Test
     fun `isBodyCryptoAction is true only for the two AES actions`() {
-        assertTrue(isBodyCryptoAction(com.example.data.local.RuleAction.BODY_ENCRYPT_AES))
-        assertTrue(isBodyCryptoAction(com.example.data.local.RuleAction.BODY_DECRYPT_AES))
-        assertFalse(isBodyCryptoAction(com.example.data.local.RuleAction.BLOCK))
-        assertFalse(isBodyCryptoAction(com.example.data.local.RuleAction.MOCK_RESPONSE))
+        assertTrue(isBodyCryptoAction(com.example.interception.rules.LegacyRuleAction.BODY_ENCRYPT_AES))
+        assertTrue(isBodyCryptoAction(com.example.interception.rules.LegacyRuleAction.BODY_DECRYPT_AES))
+        assertFalse(isBodyCryptoAction(com.example.interception.rules.LegacyRuleAction.BLOCK))
+        assertFalse(isBodyCryptoAction(com.example.interception.rules.LegacyRuleAction.MOCK_RESPONSE))
     }
 
     @Test
     fun `impliedCryptoDirection matches ENCRYPT DECRYPT actions and defaults ENCRYPT otherwise`() {
-        assertEquals("ENCRYPT", impliedCryptoDirection(com.example.data.local.RuleAction.BODY_ENCRYPT_AES))
-        assertEquals("DECRYPT", impliedCryptoDirection(com.example.data.local.RuleAction.BODY_DECRYPT_AES))
-        assertEquals("ENCRYPT", impliedCryptoDirection(com.example.data.local.RuleAction.BLOCK))
+        assertEquals("ENCRYPT", impliedCryptoDirection(com.example.interception.rules.LegacyRuleAction.BODY_ENCRYPT_AES))
+        assertEquals("DECRYPT", impliedCryptoDirection(com.example.interception.rules.LegacyRuleAction.BODY_DECRYPT_AES))
+        assertEquals("ENCRYPT", impliedCryptoDirection(com.example.interception.rules.LegacyRuleAction.BLOCK))
     }
 
     @Test
     fun `supportsFileFixtureBody is true only for the three body-replacement actions`() {
-        assertTrue(supportsFileFixtureBody(com.example.data.local.RuleAction.MOCK_RESPONSE))
-        assertTrue(supportsFileFixtureBody(com.example.data.local.RuleAction.MODIFY_REQUEST))
-        assertTrue(supportsFileFixtureBody(com.example.data.local.RuleAction.MODIFY_RESPONSE))
-        assertFalse(supportsFileFixtureBody(com.example.data.local.RuleAction.BLOCK))
-        assertFalse(supportsFileFixtureBody(com.example.data.local.RuleAction.BODY_ENCRYPT_AES))
+        assertTrue(supportsFileFixtureBody(com.example.interception.rules.LegacyRuleAction.MOCK_RESPONSE))
+        assertTrue(supportsFileFixtureBody(com.example.interception.rules.LegacyRuleAction.MODIFY_REQUEST))
+        assertTrue(supportsFileFixtureBody(com.example.interception.rules.LegacyRuleAction.MODIFY_RESPONSE))
+        assertFalse(supportsFileFixtureBody(com.example.interception.rules.LegacyRuleAction.BLOCK))
+        assertFalse(supportsFileFixtureBody(com.example.interception.rules.LegacyRuleAction.BODY_ENCRYPT_AES))
     }
 
     // ── cryptoKeyAliasError ──────────────────────────────────────────────────────────────
 
     @Test
     fun `cryptoKeyAliasError flags a blank alias on a crypto action`() {
-        val error = cryptoKeyAliasError(com.example.data.local.RuleAction.BODY_ENCRYPT_AES, "")
+        val error = cryptoKeyAliasError(com.example.interception.rules.LegacyRuleAction.BODY_ENCRYPT_AES, "")
         assertTrue(error != null && error.contains("Key alias"))
     }
 
     @Test
     fun `cryptoKeyAliasError is null for a non-blank alias on a crypto action`() {
-        assertEquals(null, cryptoKeyAliasError(com.example.data.local.RuleAction.BODY_DECRYPT_AES, "my-alias"))
+        assertEquals(null, cryptoKeyAliasError(com.example.interception.rules.LegacyRuleAction.BODY_DECRYPT_AES, "my-alias"))
     }
 
     @Test
     fun `cryptoKeyAliasError is null for a blank alias on a non-crypto action`() {
-        assertEquals(null, cryptoKeyAliasError(com.example.data.local.RuleAction.BLOCK, ""))
+        assertEquals(null, cryptoKeyAliasError(com.example.interception.rules.LegacyRuleAction.BLOCK, ""))
     }
 
     // ── classifyBodyStorageState / exceededCapMessage ───────────────────────────────────

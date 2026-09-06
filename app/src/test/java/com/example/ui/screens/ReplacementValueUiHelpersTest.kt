@@ -1,8 +1,8 @@
 package com.example.ui.screens
 
 import android.os.Build
-import com.example.data.local.InterceptRuleEntity
-import com.example.data.local.RuleAction
+import com.example.interception.rules.LegacyInterceptRule
+import com.example.interception.rules.LegacyRuleAction
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -32,21 +32,21 @@ class ReplacementValueUiHelpersTest {
 
     @Test
     fun `replacementValueSpecFor is null for actions that never read replacementValue`() {
-        assertNull(replacementValueSpecFor(RuleAction.BLOCK))
-        assertNull(replacementValueSpecFor(RuleAction.LOG_ONLY))
-        assertNull(replacementValueSpecFor(RuleAction.FORCE_MITM))
-        assertNull(replacementValueSpecFor(RuleAction.BODY_ENCRYPT_AES))
-        assertNull(replacementValueSpecFor(RuleAction.BODY_DECRYPT_AES))
+        assertNull(replacementValueSpecFor(LegacyRuleAction.BLOCK))
+        assertNull(replacementValueSpecFor(LegacyRuleAction.LOG_ONLY))
+        assertNull(replacementValueSpecFor(LegacyRuleAction.FORCE_MITM))
+        assertNull(replacementValueSpecFor(LegacyRuleAction.BODY_ENCRYPT_AES))
+        assertNull(replacementValueSpecFor(LegacyRuleAction.BODY_DECRYPT_AES))
     }
 
     @Test
     fun `replacementValueSpecFor is null for SCRIPT_REWRITE which has its own dedicated field`() {
-        assertNull(replacementValueSpecFor(RuleAction.SCRIPT_REWRITE))
+        assertNull(replacementValueSpecFor(LegacyRuleAction.SCRIPT_REWRITE))
     }
 
     @Test
     fun `replacementValueSpecFor marks REDIRECT as a required URL`() {
-        val spec = replacementValueSpecFor(RuleAction.REDIRECT)
+        val spec = replacementValueSpecFor(LegacyRuleAction.REDIRECT)
         assertNotNull(spec)
         assertEquals(ReplacementValueShape.URL, spec!!.shape)
         assertTrue(spec.required)
@@ -54,22 +54,22 @@ class ReplacementValueUiHelpersTest {
 
     @Test
     fun `replacementValueSpecFor requires MODIFY_REQUEST MODIFY_RESPONSE and CHAOS but not MOCK_RESPONSE`() {
-        val modifyRequest = replacementValueSpecFor(RuleAction.MODIFY_REQUEST)!!
+        val modifyRequest = replacementValueSpecFor(LegacyRuleAction.MODIFY_REQUEST)!!
         assertEquals(ReplacementValueShape.JSON_OBJECT, modifyRequest.shape)
         assertTrue(modifyRequest.required)
         assertEquals(setOf("addHeaders", "removeHeaders", "bodyReplace"), modifyRequest.effectiveJsonKeys)
 
-        val modifyResponse = replacementValueSpecFor(RuleAction.MODIFY_RESPONSE)!!
+        val modifyResponse = replacementValueSpecFor(LegacyRuleAction.MODIFY_RESPONSE)!!
         assertEquals(ReplacementValueShape.JSON_OBJECT, modifyResponse.shape)
         assertTrue(modifyResponse.required)
         assertEquals(setOf("statusCode", "addHeaders", "bodyReplace"), modifyResponse.effectiveJsonKeys)
 
-        val mockResponse = replacementValueSpecFor(RuleAction.MOCK_RESPONSE)!!
+        val mockResponse = replacementValueSpecFor(LegacyRuleAction.MOCK_RESPONSE)!!
         assertEquals(ReplacementValueShape.JSON_OBJECT, mockResponse.shape)
         assertFalse("blank MOCK_RESPONSE is the documented empty 200 OK", mockResponse.required)
         assertEquals(setOf("statusCode", "statusMessage", "addHeaders", "bodyReplace"), mockResponse.effectiveJsonKeys)
 
-        val chaos = replacementValueSpecFor(RuleAction.CHAOS)!!
+        val chaos = replacementValueSpecFor(LegacyRuleAction.CHAOS)!!
         assertEquals(ReplacementValueShape.JSON_OBJECT, chaos.shape)
         assertTrue(chaos.required)
         assertEquals(setOf("failRate", "delayMs", "corruptBodyRate"), chaos.effectiveJsonKeys)
@@ -77,7 +77,7 @@ class ReplacementValueUiHelpersTest {
 
     @Test
     fun `every JSON-shaped spec's effectiveJsonKeys never includes variables`() {
-        listOf(RuleAction.MODIFY_REQUEST, RuleAction.MODIFY_RESPONSE, RuleAction.MOCK_RESPONSE, RuleAction.CHAOS)
+        listOf(LegacyRuleAction.MODIFY_REQUEST, LegacyRuleAction.MODIFY_RESPONSE, LegacyRuleAction.MOCK_RESPONSE, LegacyRuleAction.CHAOS)
             .forEach { action ->
                 val spec = replacementValueSpecFor(action)!!
                 assertFalse("variables" in spec.effectiveJsonKeys)
@@ -110,7 +110,7 @@ class ReplacementValueUiHelpersTest {
 
     @Test
     fun `replacementValueError is always null for BLOCK LOG_ONLY FORCE_MITM regardless of text`() {
-        listOf(RuleAction.BLOCK, RuleAction.LOG_ONLY, RuleAction.FORCE_MITM).forEach { action ->
+        listOf(LegacyRuleAction.BLOCK, LegacyRuleAction.LOG_ONLY, LegacyRuleAction.FORCE_MITM).forEach { action ->
             assertNull(replacementValueError(action, null))
             assertNull(replacementValueError(action, ""))
             assertNull(replacementValueError(action, "anything at all"))
@@ -119,99 +119,99 @@ class ReplacementValueUiHelpersTest {
 
     @Test
     fun `replacementValueError is null for the AES crypto actions which are configured via cryptoKeyAlias instead`() {
-        assertNull(replacementValueError(RuleAction.BODY_ENCRYPT_AES, null))
-        assertNull(replacementValueError(RuleAction.BODY_DECRYPT_AES, "ignored"))
+        assertNull(replacementValueError(LegacyRuleAction.BODY_ENCRYPT_AES, null))
+        assertNull(replacementValueError(LegacyRuleAction.BODY_DECRYPT_AES, "ignored"))
     }
 
     // ── replacementValueError -- REDIRECT ───────────────────────────────────────────────
 
     @Test
     fun `replacementValueError rejects a blank or null REDIRECT value as required`() {
-        val error = replacementValueError(RuleAction.REDIRECT, "")
+        val error = replacementValueError(LegacyRuleAction.REDIRECT, "")
         assertNotNull(error)
         assertTrue(error!!.contains("required"))
-        assertNotNull(replacementValueError(RuleAction.REDIRECT, null))
+        assertNotNull(replacementValueError(LegacyRuleAction.REDIRECT, null))
     }
 
     @Test
     fun `replacementValueError rejects a relative or scheme-less REDIRECT value`() {
-        assertNotNull(replacementValueError(RuleAction.REDIRECT, "/v2/users"))
-        assertNotNull(replacementValueError(RuleAction.REDIRECT, "api.example.com/v2/users"))
+        assertNotNull(replacementValueError(LegacyRuleAction.REDIRECT, "/v2/users"))
+        assertNotNull(replacementValueError(LegacyRuleAction.REDIRECT, "api.example.com/v2/users"))
     }
 
     @Test
     fun `replacementValueError accepts a valid absolute REDIRECT URL`() {
-        assertNull(replacementValueError(RuleAction.REDIRECT, "https://api.example.com/v2/users"))
+        assertNull(replacementValueError(LegacyRuleAction.REDIRECT, "https://api.example.com/v2/users"))
     }
 
     // ── replacementValueError -- MODIFY_REQUEST / MODIFY_RESPONSE ───────────────────────
 
     @Test
     fun `replacementValueError names the field and action when a required JSON config is blank`() {
-        val error = replacementValueError(RuleAction.MODIFY_REQUEST, "")!!
+        val error = replacementValueError(LegacyRuleAction.MODIFY_REQUEST, "")!!
         assertTrue(error, error.contains("Request modification (JSON)"))
         assertTrue(error, error.contains("Modify Request"))
-        val responseError = replacementValueError(RuleAction.MODIFY_RESPONSE, null)!!
+        val responseError = replacementValueError(LegacyRuleAction.MODIFY_RESPONSE, null)!!
         assertTrue(responseError, responseError.contains("Response modification (JSON)"))
     }
 
     @Test
     fun `replacementValueError rejects non-JSON text for a JSON-shaped action`() {
-        val error = replacementValueError(RuleAction.MODIFY_REQUEST, "literal body text")
+        val error = replacementValueError(LegacyRuleAction.MODIFY_REQUEST, "literal body text")
         assertNotNull(error)
         assertTrue(error!!.contains("JSON object"))
     }
 
     @Test
     fun `replacementValueError rejects a JSON array where an object is expected`() {
-        assertNotNull(replacementValueError(RuleAction.MODIFY_REQUEST, "[1,2,3]"))
+        assertNotNull(replacementValueError(LegacyRuleAction.MODIFY_REQUEST, "[1,2,3]"))
     }
 
     @Test
     fun `replacementValueError rejects an empty object and a variables-only object for MODIFY_REQUEST`() {
-        assertTrue(replacementValueError(RuleAction.MODIFY_REQUEST, "{}")!!.contains("no effect"))
-        val error = replacementValueError(RuleAction.MODIFY_REQUEST, """{"variables":{"traceId":"abc"}}""")
+        assertTrue(replacementValueError(LegacyRuleAction.MODIFY_REQUEST, "{}")!!.contains("no effect"))
+        val error = replacementValueError(LegacyRuleAction.MODIFY_REQUEST, """{"variables":{"traceId":"abc"}}""")
         assertNotNull(error)
         assertTrue(error!!.contains("no effect"))
     }
 
     @Test
     fun `replacementValueError accepts MODIFY_REQUEST configs with any single effective key`() {
-        assertNull(replacementValueError(RuleAction.MODIFY_REQUEST, """{"addHeaders":{"X-Trace":"1"}}"""))
-        assertNull(replacementValueError(RuleAction.MODIFY_REQUEST, """{"removeHeaders":["Authorization"]}"""))
-        assertNull(replacementValueError(RuleAction.MODIFY_REQUEST, """{"bodyReplace":"{}"}"""))
+        assertNull(replacementValueError(LegacyRuleAction.MODIFY_REQUEST, """{"addHeaders":{"X-Trace":"1"}}"""))
+        assertNull(replacementValueError(LegacyRuleAction.MODIFY_REQUEST, """{"removeHeaders":["Authorization"]}"""))
+        assertNull(replacementValueError(LegacyRuleAction.MODIFY_REQUEST, """{"bodyReplace":"{}"}"""))
     }
 
     @Test
     fun `replacementValueError treats an empty bodyReplace as effective because the engine clears the body`() {
         // MockFixtureLoader.resolve("") -> Resolution.Text("") -> applyTo replaces the body with "".
-        assertNull(replacementValueError(RuleAction.MODIFY_REQUEST, """{"bodyReplace":""}"""))
+        assertNull(replacementValueError(LegacyRuleAction.MODIFY_REQUEST, """{"bodyReplace":""}"""))
     }
 
     @Test
     fun `replacementValueError rejects present-but-empty addHeaders and removeHeaders as no-ops`() {
         // applyRequestModification iterates addHeaders' keys / removeHeaders' entries -- zero
         // iterations, request untouched.
-        val emptyHeaders = replacementValueError(RuleAction.MODIFY_REQUEST, """{"addHeaders":{}}""")!!
+        val emptyHeaders = replacementValueError(LegacyRuleAction.MODIFY_REQUEST, """{"addHeaders":{}}""")!!
         assertTrue(emptyHeaders, emptyHeaders.contains("addHeaders") && emptyHeaders.contains("empty"))
-        val bothEmpty = replacementValueError(RuleAction.MODIFY_REQUEST, """{"addHeaders":{},"removeHeaders":[]}""")!!
+        val bothEmpty = replacementValueError(LegacyRuleAction.MODIFY_REQUEST, """{"addHeaders":{},"removeHeaders":[]}""")!!
         assertTrue(bothEmpty, bothEmpty.contains("addHeaders") && bothEmpty.contains("removeHeaders"))
     }
 
     @Test
     fun `replacementValueError accepts an empty addHeaders when another key does the work`() {
-        assertNull(replacementValueError(RuleAction.MODIFY_REQUEST, """{"addHeaders":{},"bodyReplace":"x"}"""))
+        assertNull(replacementValueError(LegacyRuleAction.MODIFY_REQUEST, """{"addHeaders":{},"bodyReplace":"x"}"""))
     }
 
     @Test
     fun `replacementValueError rejects an addHeaders that is not an object because getJSONObject throws in the engine`() {
-        val error = replacementValueError(RuleAction.MODIFY_REQUEST, """{"addHeaders":"X-Trace: 1"}""")!!
+        val error = replacementValueError(LegacyRuleAction.MODIFY_REQUEST, """{"addHeaders":"X-Trace: 1"}""")!!
         assertTrue(error, error.contains("addHeaders") && error.contains("JSON object"))
     }
 
     @Test
     fun `replacementValueError rejects a removeHeaders that is not an array`() {
-        val error = replacementValueError(RuleAction.MODIFY_REQUEST, """{"removeHeaders":"Authorization"}""")!!
+        val error = replacementValueError(LegacyRuleAction.MODIFY_REQUEST, """{"removeHeaders":"Authorization"}""")!!
         assertTrue(error, error.contains("removeHeaders") && error.contains("array"))
     }
 
@@ -219,24 +219,24 @@ class ReplacementValueUiHelpersTest {
     fun `replacementValueError rejects a wrong-typed key even when another key is effective`() {
         // The engine's runCatching aborts the whole modification on the first throw, so a
         // broken key breaks the rule regardless of the good keys next to it.
-        assertNotNull(replacementValueError(RuleAction.MODIFY_REQUEST, """{"bodyReplace":"x","addHeaders":42}"""))
+        assertNotNull(replacementValueError(LegacyRuleAction.MODIFY_REQUEST, """{"bodyReplace":"x","addHeaders":42}"""))
     }
 
     @Test
     fun `replacementValueError accepts MODIFY_RESPONSE configs with any single effective key`() {
-        assertNull(replacementValueError(RuleAction.MODIFY_RESPONSE, """{"statusCode":204}"""))
-        assertNull(replacementValueError(RuleAction.MODIFY_RESPONSE, """{"addHeaders":{"X-Mock":"true"}}"""))
-        assertNull(replacementValueError(RuleAction.MODIFY_RESPONSE, """{"bodyReplace":"{}"}"""))
+        assertNull(replacementValueError(LegacyRuleAction.MODIFY_RESPONSE, """{"statusCode":204}"""))
+        assertNull(replacementValueError(LegacyRuleAction.MODIFY_RESPONSE, """{"addHeaders":{"X-Mock":"true"}}"""))
+        assertNull(replacementValueError(LegacyRuleAction.MODIFY_RESPONSE, """{"bodyReplace":"{}"}"""))
     }
 
     @Test
     fun `replacementValueError accepts a numeric-string statusCode because getInt coerces it`() {
-        assertNull(replacementValueError(RuleAction.MODIFY_RESPONSE, """{"statusCode":"204"}"""))
+        assertNull(replacementValueError(LegacyRuleAction.MODIFY_RESPONSE, """{"statusCode":"204"}"""))
     }
 
     @Test
     fun `replacementValueError rejects an out-of-range statusCode for MODIFY_RESPONSE and MOCK_RESPONSE`() {
-        for (action in listOf(RuleAction.MODIFY_RESPONSE, RuleAction.MOCK_RESPONSE)) {
+        for (action in listOf(LegacyRuleAction.MODIFY_RESPONSE, LegacyRuleAction.MOCK_RESPONSE)) {
             for (code in listOf(0, 99, 600, 1000, -1)) {
                 val error = replacementValueError(action, """{"statusCode":$code}""")
                     ?: throw AssertionError("$action must reject statusCode $code")
@@ -247,7 +247,7 @@ class ReplacementValueUiHelpersTest {
 
     @Test
     fun `replacementValueError accepts the statusCode range boundaries`() {
-        for (action in listOf(RuleAction.MODIFY_RESPONSE, RuleAction.MOCK_RESPONSE)) {
+        for (action in listOf(LegacyRuleAction.MODIFY_RESPONSE, LegacyRuleAction.MOCK_RESPONSE)) {
             for (code in listOf(100, 200, 418, 503, 599)) {
                 assertNull("$action must accept statusCode $code", replacementValueError(action, """{"statusCode":$code}"""))
             }
@@ -256,20 +256,20 @@ class ReplacementValueUiHelpersTest {
 
     @Test
     fun `an out-of-range statusCode blocks the Add-Rule save even with other effective keys present`() {
-        val draft = RuleConfigDraft(RuleAction.MODIFY_RESPONSE, replacementValueText = """{"statusCode":999,"bodyReplace":"x"}""")
+        val draft = RuleConfigDraft(LegacyRuleAction.MODIFY_RESPONSE, replacementValueText = """{"statusCode":999,"bodyReplace":"x"}""")
         val blocker = addRuleSaveBlocker("r", ".*", "", draft) ?: throw AssertionError("must block")
         assertTrue(blocker, blocker.contains("statusCode 999"))
     }
 
     @Test
     fun `replacementValueError rejects a non-integer statusCode`() {
-        val error = replacementValueError(RuleAction.MODIFY_RESPONSE, """{"statusCode":"teapot"}""")!!
+        val error = replacementValueError(LegacyRuleAction.MODIFY_RESPONSE, """{"statusCode":"teapot"}""")!!
         assertTrue(error, error.contains("statusCode") && error.contains("integer"))
     }
 
     @Test
     fun `replacementValueError rejects a MODIFY_RESPONSE config with an unrelated key only`() {
-        val error = replacementValueError(RuleAction.MODIFY_RESPONSE, """{"foo":"bar"}""")
+        val error = replacementValueError(LegacyRuleAction.MODIFY_RESPONSE, """{"foo":"bar"}""")
         assertNotNull(error)
         assertTrue(error!!.contains("no effect"))
     }
@@ -278,106 +278,106 @@ class ReplacementValueUiHelpersTest {
 
     @Test
     fun `replacementValueError keeps blank null and whitespace MOCK_RESPONSE valid`() {
-        assertNull(replacementValueError(RuleAction.MOCK_RESPONSE, null))
-        assertNull(replacementValueError(RuleAction.MOCK_RESPONSE, ""))
-        assertNull(replacementValueError(RuleAction.MOCK_RESPONSE, "   "))
+        assertNull(replacementValueError(LegacyRuleAction.MOCK_RESPONSE, null))
+        assertNull(replacementValueError(LegacyRuleAction.MOCK_RESPONSE, ""))
+        assertNull(replacementValueError(LegacyRuleAction.MOCK_RESPONSE, "   "))
     }
 
     @Test
     fun `replacementValueError treats an empty object and a variables-only object as the default 200 OK mock`() {
-        assertNull(replacementValueError(RuleAction.MOCK_RESPONSE, "{}"))
-        assertNull(replacementValueError(RuleAction.MOCK_RESPONSE, """{"variables":{"id":"1"}}"""))
+        assertNull(replacementValueError(LegacyRuleAction.MOCK_RESPONSE, "{}"))
+        assertNull(replacementValueError(LegacyRuleAction.MOCK_RESPONSE, """{"variables":{"id":"1"}}"""))
     }
 
     @Test
     fun `replacementValueError accepts MOCK_RESPONSE configs with statusMessage alone`() {
-        assertNull(replacementValueError(RuleAction.MOCK_RESPONSE, """{"statusMessage":"Teapot"}"""))
+        assertNull(replacementValueError(LegacyRuleAction.MOCK_RESPONSE, """{"statusMessage":"Teapot"}"""))
     }
 
     @Test
     fun `replacementValueError rejects a MOCK_RESPONSE config with keys the mock never reads`() {
-        val error = replacementValueError(RuleAction.MOCK_RESPONSE, """{"status":418}""")!!
+        val error = replacementValueError(LegacyRuleAction.MOCK_RESPONSE, """{"status":418}""")!!
         assertTrue(error, error.contains("status") && error.contains("200 OK"))
     }
 
     @Test
     fun `replacementValueError still rejects malformed MOCK_RESPONSE JSON`() {
-        assertNotNull(replacementValueError(RuleAction.MOCK_RESPONSE, "{not json"))
+        assertNotNull(replacementValueError(LegacyRuleAction.MOCK_RESPONSE, "{not json"))
     }
 
     // ── replacementValueError -- CHAOS ──────────────────────────────────────────────────
 
     @Test
     fun `replacementValueError accepts CHAOS configs with any single trigger above zero`() {
-        assertNull(replacementValueError(RuleAction.CHAOS, """{"failRate":0.1}"""))
-        assertNull(replacementValueError(RuleAction.CHAOS, """{"delayMs":[200,800]}"""))
-        assertNull(replacementValueError(RuleAction.CHAOS, """{"corruptBodyRate":0.05}"""))
+        assertNull(replacementValueError(LegacyRuleAction.CHAOS, """{"failRate":0.1}"""))
+        assertNull(replacementValueError(LegacyRuleAction.CHAOS, """{"delayMs":[200,800]}"""))
+        assertNull(replacementValueError(LegacyRuleAction.CHAOS, """{"corruptBodyRate":0.05}"""))
     }
 
     @Test
     fun `replacementValueError accepts a single-element delayMs above zero and a rate above one because the engine clamps them`() {
-        assertNull(replacementValueError(RuleAction.CHAOS, """{"delayMs":[500]}"""))
-        assertNull(replacementValueError(RuleAction.CHAOS, """{"failRate":5}"""))
+        assertNull(replacementValueError(LegacyRuleAction.CHAOS, """{"delayMs":[500]}"""))
+        assertNull(replacementValueError(LegacyRuleAction.CHAOS, """{"failRate":5}"""))
     }
 
     @Test
     fun `replacementValueError rejects CHAOS configs whose triggers are all zero`() {
-        assertTrue(replacementValueError(RuleAction.CHAOS, """{"failRate":0}""")!!.contains("no effect"))
-        assertTrue(replacementValueError(RuleAction.CHAOS, """{"delayMs":[0,0]}""")!!.contains("no effect"))
-        assertTrue(replacementValueError(RuleAction.CHAOS, """{"failRate":-1,"corruptBodyRate":0}""")!!.contains("no effect"))
-        assertTrue(replacementValueError(RuleAction.CHAOS, "{}")!!.contains("no effect"))
+        assertTrue(replacementValueError(LegacyRuleAction.CHAOS, """{"failRate":0}""")!!.contains("no effect"))
+        assertTrue(replacementValueError(LegacyRuleAction.CHAOS, """{"delayMs":[0,0]}""")!!.contains("no effect"))
+        assertTrue(replacementValueError(LegacyRuleAction.CHAOS, """{"failRate":-1,"corruptBodyRate":0}""")!!.contains("no effect"))
+        assertTrue(replacementValueError(LegacyRuleAction.CHAOS, "{}")!!.contains("no effect"))
     }
 
     @Test
     fun `replacementValueError rejects a CHAOS config with only the failure-shaping keys`() {
         // failStatusCode/failStatusMessage/failBody only shape a Fail outcome -- they can never
         // by themselves cause one, so a config with only these is still a no-op.
-        val error = replacementValueError(RuleAction.CHAOS, """{"failStatusCode":503,"failBody":"oops"}""")
+        val error = replacementValueError(LegacyRuleAction.CHAOS, """{"failStatusCode":503,"failBody":"oops"}""")
         assertNotNull(error)
         assertTrue(error!!.contains("no effect"))
     }
 
     @Test
     fun `replacementValueError rejects a non-numeric CHAOS rate rather than letting optDouble zero it`() {
-        val error = replacementValueError(RuleAction.CHAOS, """{"failRate":"often"}""")!!
+        val error = replacementValueError(LegacyRuleAction.CHAOS, """{"failRate":"often"}""")!!
         assertTrue(error, error.contains("failRate") && error.contains("number"))
     }
 
     @Test
     fun `replacementValueError rejects a delayMs that is not an array`() {
-        val error = replacementValueError(RuleAction.CHAOS, """{"delayMs":500}""")!!
+        val error = replacementValueError(LegacyRuleAction.CHAOS, """{"delayMs":500}""")!!
         assertTrue(error, error.contains("delayMs") && error.contains("array"))
     }
 
     @Test
     fun `replacementValueError rejects malformed JSON for CHAOS`() {
-        assertNotNull(replacementValueError(RuleAction.CHAOS, "{not valid json"))
+        assertNotNull(replacementValueError(LegacyRuleAction.CHAOS, "{not valid json"))
     }
 
     // ── replacementValueError -- SCRIPT_REWRITE (persisted shape) ───────────────────────
 
     @Test
     fun `replacementValueError rejects a null blank non-JSON or script-less SCRIPT_REWRITE config`() {
-        assertNotNull(replacementValueError(RuleAction.SCRIPT_REWRITE, null))
-        assertNotNull(replacementValueError(RuleAction.SCRIPT_REWRITE, ""))
-        assertNotNull(replacementValueError(RuleAction.SCRIPT_REWRITE, "not json either"))
-        assertNotNull(replacementValueError(RuleAction.SCRIPT_REWRITE, """{"variables":{"a":"b"}}"""))
-        assertNotNull(replacementValueError(RuleAction.SCRIPT_REWRITE, """{"script":"   "}"""))
+        assertNotNull(replacementValueError(LegacyRuleAction.SCRIPT_REWRITE, null))
+        assertNotNull(replacementValueError(LegacyRuleAction.SCRIPT_REWRITE, ""))
+        assertNotNull(replacementValueError(LegacyRuleAction.SCRIPT_REWRITE, "not json either"))
+        assertNotNull(replacementValueError(LegacyRuleAction.SCRIPT_REWRITE, """{"variables":{"a":"b"}}"""))
+        assertNotNull(replacementValueError(LegacyRuleAction.SCRIPT_REWRITE, """{"script":"   "}"""))
     }
 
     @Test
     fun `replacementValueError accepts a SCRIPT_REWRITE config with a non-blank script`() {
-        assertNull(replacementValueError(RuleAction.SCRIPT_REWRITE, """{"script":"pm.request.headers.set('X','1');"}"""))
+        assertNull(replacementValueError(LegacyRuleAction.SCRIPT_REWRITE, """{"script":"pm.request.headers.set('X','1');"}"""))
     }
 
     // ── replacementValueToSave ──────────────────────────────────────────────────────────
 
     @Test
     fun `replacementValueToSave returns null for a blank field and the trimmed text otherwise`() {
-        assertNull(replacementValueToSave(RuleConfigDraft(RuleAction.MODIFY_REQUEST, replacementValueText = "  ")))
+        assertNull(replacementValueToSave(RuleConfigDraft(LegacyRuleAction.MODIFY_REQUEST, replacementValueText = "  ")))
         assertEquals(
             """{"addHeaders":{"X":"1"}}""",
-            replacementValueToSave(RuleConfigDraft(RuleAction.MODIFY_REQUEST, replacementValueText = """ {"addHeaders":{"X":"1"}} """)),
+            replacementValueToSave(RuleConfigDraft(LegacyRuleAction.MODIFY_REQUEST, replacementValueText = """ {"addHeaders":{"X":"1"}} """)),
         )
     }
 
@@ -386,11 +386,11 @@ class ReplacementValueUiHelpersTest {
         val variables = mapOf("traceId" to "abc")
         assertEquals(
             "https://api.example.com",
-            replacementValueToSave(RuleConfigDraft(RuleAction.REDIRECT, replacementValueText = "https://api.example.com", variables = variables)),
+            replacementValueToSave(RuleConfigDraft(LegacyRuleAction.REDIRECT, replacementValueText = "https://api.example.com", variables = variables)),
         )
         assertEquals(
             """{"failRate":0.1}""",
-            replacementValueToSave(RuleConfigDraft(RuleAction.CHAOS, replacementValueText = """{"failRate":0.1}""", variables = variables)),
+            replacementValueToSave(RuleConfigDraft(LegacyRuleAction.CHAOS, replacementValueText = """{"failRate":0.1}""", variables = variables)),
         )
     }
 
@@ -398,7 +398,7 @@ class ReplacementValueUiHelpersTest {
     fun `replacementValueToSave merges variables into a templating action's JSON without losing keys`() {
         val saved = replacementValueToSave(
             RuleConfigDraft(
-                RuleAction.MODIFY_REQUEST,
+                LegacyRuleAction.MODIFY_REQUEST,
                 replacementValueText = """{"addHeaders":{"X-Trace":"{{traceId}}"}}""",
                 variables = mapOf("traceId" to "abc"),
             ),
@@ -412,7 +412,7 @@ class ReplacementValueUiHelpersTest {
     fun `replacementValueToSave builds SCRIPT_REWRITE's config from the script field and ignores the replacement field`() {
         val saved = replacementValueToSave(
             RuleConfigDraft(
-                RuleAction.SCRIPT_REWRITE,
+                LegacyRuleAction.SCRIPT_REWRITE,
                 replacementValueText = "this field is not the script",
                 scriptText = "pm.request.headers.set('X','1');",
                 variables = mapOf("traceId" to "abc"),
@@ -421,37 +421,37 @@ class ReplacementValueUiHelpersTest {
         val json = JSONObject(saved)
         assertEquals("pm.request.headers.set('X','1');", json.getString("script"))
         assertEquals("abc", json.getJSONObject("variables").getString("traceId"))
-        assertNull(replacementValueToSave(RuleConfigDraft(RuleAction.SCRIPT_REWRITE, scriptText = "")))
+        assertNull(replacementValueToSave(RuleConfigDraft(LegacyRuleAction.SCRIPT_REWRITE, scriptText = "")))
     }
 
     // ── ruleConfigError -- the form-level predicate ─────────────────────────────────────
 
     @Test
     fun `ruleConfigError is null for BLOCK LOG_ONLY FORCE_MITM with everything blank`() {
-        listOf(RuleAction.BLOCK, RuleAction.LOG_ONLY, RuleAction.FORCE_MITM).forEach { action ->
+        listOf(LegacyRuleAction.BLOCK, LegacyRuleAction.LOG_ONLY, LegacyRuleAction.FORCE_MITM).forEach { action ->
             assertNull(action.name, ruleConfigError(RuleConfigDraft(action)))
         }
     }
 
     @Test
     fun `ruleConfigError rejects a blank draft for every action whose engine path needs a config`() {
-        listOf(RuleAction.REDIRECT, RuleAction.MODIFY_REQUEST, RuleAction.MODIFY_RESPONSE, RuleAction.CHAOS, RuleAction.SCRIPT_REWRITE)
+        listOf(LegacyRuleAction.REDIRECT, LegacyRuleAction.MODIFY_REQUEST, LegacyRuleAction.MODIFY_RESPONSE, LegacyRuleAction.CHAOS, LegacyRuleAction.SCRIPT_REWRITE)
             .forEach { action -> assertNotNull(action.name, ruleConfigError(RuleConfigDraft(action))) }
     }
 
     @Test
     fun `ruleConfigError keeps a blank MOCK_RESPONSE draft valid`() {
-        assertNull(ruleConfigError(RuleConfigDraft(RuleAction.MOCK_RESPONSE)))
-        assertNull(ruleConfigError(RuleConfigDraft(RuleAction.MOCK_RESPONSE, variables = mapOf("id" to "1"))))
+        assertNull(ruleConfigError(RuleConfigDraft(LegacyRuleAction.MOCK_RESPONSE)))
+        assertNull(ruleConfigError(RuleConfigDraft(LegacyRuleAction.MOCK_RESPONSE, variables = mapOf("id" to "1"))))
     }
 
     @Test
     fun `ruleConfigError names the Script field for a blank SCRIPT_REWRITE script`() {
-        val error = ruleConfigError(RuleConfigDraft(RuleAction.SCRIPT_REWRITE, scriptText = "  "))!!
+        val error = ruleConfigError(RuleConfigDraft(LegacyRuleAction.SCRIPT_REWRITE, scriptText = "  "))!!
         assertTrue(error, error.contains("Script (JS)"))
         // Variables alone do not rescue it -- the persisted {"variables":{...}} has no script.
-        assertNotNull(ruleConfigError(RuleConfigDraft(RuleAction.SCRIPT_REWRITE, variables = mapOf("a" to "b"))))
-        assertNull(ruleConfigError(RuleConfigDraft(RuleAction.SCRIPT_REWRITE, scriptText = "pm.test('x', () => {});")))
+        assertNotNull(ruleConfigError(RuleConfigDraft(LegacyRuleAction.SCRIPT_REWRITE, variables = mapOf("a" to "b"))))
+        assertNull(ruleConfigError(RuleConfigDraft(LegacyRuleAction.SCRIPT_REWRITE, scriptText = "pm.test('x', () => {});")))
     }
 
     @Test
@@ -459,41 +459,41 @@ class ReplacementValueUiHelpersTest {
         // mergeVariablesIntoConfigJson discards unparseable base text, so validating only the
         // merged value would mis-report this as "no effective key".
         val error = ruleConfigError(
-            RuleConfigDraft(RuleAction.MODIFY_REQUEST, replacementValueText = "garbage", variables = mapOf("a" to "b")),
+            RuleConfigDraft(LegacyRuleAction.MODIFY_REQUEST, replacementValueText = "garbage", variables = mapOf("a" to "b")),
         )!!
         assertTrue(error, error.contains("JSON object"))
     }
 
     @Test
     fun `ruleConfigError rejects a blank MODIFY_REQUEST field even when variables are present`() {
-        val error = ruleConfigError(RuleConfigDraft(RuleAction.MODIFY_REQUEST, variables = mapOf("traceId" to "abc")))
+        val error = ruleConfigError(RuleConfigDraft(LegacyRuleAction.MODIFY_REQUEST, variables = mapOf("traceId" to "abc")))
         assertNotNull("a variables-only merged config must still be rejected as a no-op", error)
     }
 
     @Test
     fun `ruleConfigError gates the AES actions on a key alias`() {
-        assertNotNull(ruleConfigError(RuleConfigDraft(RuleAction.BODY_ENCRYPT_AES)))
-        assertNull(ruleConfigError(RuleConfigDraft(RuleAction.BODY_DECRYPT_AES, cryptoKeyAlias = "my-key")))
+        assertNotNull(ruleConfigError(RuleConfigDraft(LegacyRuleAction.BODY_ENCRYPT_AES)))
+        assertNull(ruleConfigError(RuleConfigDraft(LegacyRuleAction.BODY_DECRYPT_AES, cryptoKeyAlias = "my-key")))
     }
 
     @Test
     fun `ruleConfigError re-evaluates when only the action changes on an otherwise identical draft`() {
         // Same typed text, different action chip: what is a valid mock body is not a valid
         // chaos config, and a blank field flips between valid and invalid purely by action.
-        val mockJson = RuleConfigDraft(RuleAction.MOCK_RESPONSE, replacementValueText = """{"statusCode":418}""")
+        val mockJson = RuleConfigDraft(LegacyRuleAction.MOCK_RESPONSE, replacementValueText = """{"statusCode":418}""")
         assertNull(ruleConfigError(mockJson))
-        assertNotNull(ruleConfigError(mockJson.copy(action = RuleAction.CHAOS)))
-        assertNull(ruleConfigError(mockJson.copy(action = RuleAction.MODIFY_RESPONSE)))
-        assertNotNull("MODIFY_REQUEST never reads statusCode", ruleConfigError(mockJson.copy(action = RuleAction.MODIFY_REQUEST)))
-        assertNotNull(ruleConfigError(mockJson.copy(action = RuleAction.REDIRECT)))
-        assertNull(ruleConfigError(mockJson.copy(action = RuleAction.BLOCK)))
+        assertNotNull(ruleConfigError(mockJson.copy(action = LegacyRuleAction.CHAOS)))
+        assertNull(ruleConfigError(mockJson.copy(action = LegacyRuleAction.MODIFY_RESPONSE)))
+        assertNotNull("MODIFY_REQUEST never reads statusCode", ruleConfigError(mockJson.copy(action = LegacyRuleAction.MODIFY_REQUEST)))
+        assertNotNull(ruleConfigError(mockJson.copy(action = LegacyRuleAction.REDIRECT)))
+        assertNull(ruleConfigError(mockJson.copy(action = LegacyRuleAction.BLOCK)))
 
-        val blank = RuleConfigDraft(RuleAction.BLOCK)
+        val blank = RuleConfigDraft(LegacyRuleAction.BLOCK)
         assertNull(ruleConfigError(blank))
-        assertNotNull(ruleConfigError(blank.copy(action = RuleAction.MODIFY_REQUEST)))
-        assertNull(ruleConfigError(blank.copy(action = RuleAction.MOCK_RESPONSE)))
-        assertNotNull(ruleConfigError(blank.copy(action = RuleAction.SCRIPT_REWRITE)))
-        assertNull(ruleConfigError(blank.copy(action = RuleAction.LOG_ONLY)))
+        assertNotNull(ruleConfigError(blank.copy(action = LegacyRuleAction.MODIFY_REQUEST)))
+        assertNull(ruleConfigError(blank.copy(action = LegacyRuleAction.MOCK_RESPONSE)))
+        assertNotNull(ruleConfigError(blank.copy(action = LegacyRuleAction.SCRIPT_REWRITE)))
+        assertNull(ruleConfigError(blank.copy(action = LegacyRuleAction.LOG_ONLY)))
     }
 
     // ── rulePatternError ────────────────────────────────────────────────────────────────
@@ -512,7 +512,7 @@ class ReplacementValueUiHelpersTest {
 
     @Test
     fun `addRuleSaveBlocker reports name then pattern then config in form order`() {
-        val draft = RuleConfigDraft(RuleAction.MODIFY_REQUEST)
+        val draft = RuleConfigDraft(LegacyRuleAction.MODIFY_REQUEST)
         assertEquals("Rule Name is required.", addRuleSaveBlocker("", ".*", "", draft))
         assertTrue(addRuleSaveBlocker("Ads", "", "", draft)!!.contains("URL Pattern"))
         assertTrue(addRuleSaveBlocker("Ads", ".*", "", draft)!!.contains("Request modification (JSON)"))
@@ -520,66 +520,66 @@ class ReplacementValueUiHelpersTest {
 
     @Test
     fun `addRuleSaveBlocker is null for a complete valid rule and for a blank MOCK_RESPONSE`() {
-        assertNull(addRuleSaveBlocker("Ads", ".*ads.*", "", RuleConfigDraft(RuleAction.BLOCK)))
-        assertNull(addRuleSaveBlocker("Mock", ".*api.*", "", RuleConfigDraft(RuleAction.MOCK_RESPONSE)))
+        assertNull(addRuleSaveBlocker("Ads", ".*ads.*", "", RuleConfigDraft(LegacyRuleAction.BLOCK)))
+        assertNull(addRuleSaveBlocker("Mock", ".*api.*", "", RuleConfigDraft(LegacyRuleAction.MOCK_RESPONSE)))
         assertNull(
             addRuleSaveBlocker(
                 "Trace",
                 ".*",
                 "",
-                RuleConfigDraft(RuleAction.MODIFY_REQUEST, replacementValueText = """{"addHeaders":{"X-Trace":"1"}}"""),
+                RuleConfigDraft(LegacyRuleAction.MODIFY_REQUEST, replacementValueText = """{"addHeaders":{"X-Trace":"1"}}"""),
             ),
         )
     }
 
     @Test
     fun `addRuleSaveBlocker lets a domain-only rule skip the blank pattern requirement`() {
-        val mo = RuleConfigDraft(RuleAction.MODIFY_REQUEST, replacementValueText = """{"addHeaders":{"X-Trace":"1"}}""")
+        val mo = RuleConfigDraft(LegacyRuleAction.MODIFY_REQUEST, replacementValueText = """{"addHeaders":{"X-Trace":"1"}}""")
         // Mirrors getMatchingRule: a non-blank domain matches by substring on its own, so a
         // blank/non-compiling pattern is not decisive and must not block saving.
         assertNull(addRuleSaveBlocker("Ads", "", "ads.example.com", mo))
-        assertNull(addRuleSaveBlocker("Ads", "(", "ads.example.com", RuleConfigDraft(RuleAction.BLOCK)))
-        assertTrue(addRuleSaveBlocker("Ads", "", "", RuleConfigDraft(RuleAction.BLOCK))!!.contains("URL Pattern"))
+        assertNull(addRuleSaveBlocker("Ads", "(", "ads.example.com", RuleConfigDraft(LegacyRuleAction.BLOCK)))
+        assertTrue(addRuleSaveBlocker("Ads", "", "", RuleConfigDraft(LegacyRuleAction.BLOCK))!!.contains("URL Pattern"))
     }
 
     // ── savedRuleConfigError -- pre-existing rules ──────────────────────────────────────
 
     @Test
     fun `savedRuleConfigError flags legacy no-op rules saved before the form refused them`() {
-        assertNotNull(savedRuleConfigError(InterceptRuleEntity(name = "r", pattern = ".*", action = RuleAction.MODIFY_REQUEST, replacementValue = null)))
-        assertNotNull(savedRuleConfigError(InterceptRuleEntity(name = "r", pattern = ".*", action = RuleAction.MODIFY_RESPONSE, replacementValue = "")))
-        assertNotNull(savedRuleConfigError(InterceptRuleEntity(name = "r", pattern = ".*", action = RuleAction.CHAOS, replacementValue = """{"failRate":0}""")))
-        assertNotNull(savedRuleConfigError(InterceptRuleEntity(name = "r", pattern = ".*", action = RuleAction.SCRIPT_REWRITE, replacementValue = null)))
-        assertNotNull(savedRuleConfigError(InterceptRuleEntity(name = "r", pattern = ".*", action = RuleAction.SCRIPT_REWRITE, replacementValue = """{"variables":{"a":"b"}}""")))
-        assertNotNull(savedRuleConfigError(InterceptRuleEntity(name = "r", pattern = ".*", action = RuleAction.REDIRECT, replacementValue = "/relative")))
-        assertNotNull(savedRuleConfigError(InterceptRuleEntity(name = "r", pattern = ".*", action = RuleAction.BODY_ENCRYPT_AES, cryptoKeyAlias = "")))
+        assertNotNull(savedRuleConfigError(LegacyInterceptRule(name = "r", pattern = ".*", action = LegacyRuleAction.MODIFY_REQUEST, replacementValue = null)))
+        assertNotNull(savedRuleConfigError(LegacyInterceptRule(name = "r", pattern = ".*", action = LegacyRuleAction.MODIFY_RESPONSE, replacementValue = "")))
+        assertNotNull(savedRuleConfigError(LegacyInterceptRule(name = "r", pattern = ".*", action = LegacyRuleAction.CHAOS, replacementValue = """{"failRate":0}""")))
+        assertNotNull(savedRuleConfigError(LegacyInterceptRule(name = "r", pattern = ".*", action = LegacyRuleAction.SCRIPT_REWRITE, replacementValue = null)))
+        assertNotNull(savedRuleConfigError(LegacyInterceptRule(name = "r", pattern = ".*", action = LegacyRuleAction.SCRIPT_REWRITE, replacementValue = """{"variables":{"a":"b"}}""")))
+        assertNotNull(savedRuleConfigError(LegacyInterceptRule(name = "r", pattern = ".*", action = LegacyRuleAction.REDIRECT, replacementValue = "/relative")))
+        assertNotNull(savedRuleConfigError(LegacyInterceptRule(name = "r", pattern = ".*", action = LegacyRuleAction.BODY_ENCRYPT_AES, cryptoKeyAlias = "")))
     }
 
     @Test
     fun `savedRuleConfigError keeps a blank MOCK_RESPONSE and every effective rule clean`() {
-        assertNull(savedRuleConfigError(InterceptRuleEntity(name = "r", pattern = ".*", action = RuleAction.MOCK_RESPONSE, replacementValue = null)))
-        assertNull(savedRuleConfigError(InterceptRuleEntity(name = "r", pattern = ".*", action = RuleAction.BLOCK)))
-        assertNull(savedRuleConfigError(InterceptRuleEntity(name = "r", pattern = ".*", action = RuleAction.LOG_ONLY)))
-        assertNull(savedRuleConfigError(InterceptRuleEntity(name = "r", pattern = ".*", action = RuleAction.MODIFY_REQUEST, replacementValue = """{"removeHeaders":["Cookie"]}""")))
-        assertNull(savedRuleConfigError(InterceptRuleEntity(name = "r", pattern = ".*", action = RuleAction.SCRIPT_REWRITE, replacementValue = """{"script":"pm.test('a',()=>{})"}""")))
-        assertNull(savedRuleConfigError(InterceptRuleEntity(name = "r", pattern = ".*", action = RuleAction.BODY_DECRYPT_AES, cryptoKeyAlias = "k")))
+        assertNull(savedRuleConfigError(LegacyInterceptRule(name = "r", pattern = ".*", action = LegacyRuleAction.MOCK_RESPONSE, replacementValue = null)))
+        assertNull(savedRuleConfigError(LegacyInterceptRule(name = "r", pattern = ".*", action = LegacyRuleAction.BLOCK)))
+        assertNull(savedRuleConfigError(LegacyInterceptRule(name = "r", pattern = ".*", action = LegacyRuleAction.LOG_ONLY)))
+        assertNull(savedRuleConfigError(LegacyInterceptRule(name = "r", pattern = ".*", action = LegacyRuleAction.MODIFY_REQUEST, replacementValue = """{"removeHeaders":["Cookie"]}""")))
+        assertNull(savedRuleConfigError(LegacyInterceptRule(name = "r", pattern = ".*", action = LegacyRuleAction.SCRIPT_REWRITE, replacementValue = """{"script":"pm.test('a',()=>{})"}""")))
+        assertNull(savedRuleConfigError(LegacyInterceptRule(name = "r", pattern = ".*", action = LegacyRuleAction.BODY_DECRYPT_AES, cryptoKeyAlias = "k")))
     }
 
     @Test
     fun `savedRuleConfigError flags a rule that can never match but not one that matches by domain`() {
         // getMatchingRule: domain substring OR compiled pattern -- with a blank domain a broken
         // pattern means the rule is never selected at all.
-        assertNotNull(savedRuleConfigError(InterceptRuleEntity(name = "r", pattern = "(", domain = "", action = RuleAction.BLOCK)))
-        assertNotNull(savedRuleConfigError(InterceptRuleEntity(name = "r", pattern = "", domain = "", action = RuleAction.BLOCK)))
-        assertNull(savedRuleConfigError(InterceptRuleEntity(name = "r", pattern = "(", domain = "ads.example.com", action = RuleAction.BLOCK)))
+        assertNotNull(savedRuleConfigError(LegacyInterceptRule(name = "r", pattern = "(", domain = "", action = LegacyRuleAction.BLOCK)))
+        assertNotNull(savedRuleConfigError(LegacyInterceptRule(name = "r", pattern = "", domain = "", action = LegacyRuleAction.BLOCK)))
+        assertNull(savedRuleConfigError(LegacyInterceptRule(name = "r", pattern = "(", domain = "ads.example.com", action = LegacyRuleAction.BLOCK)))
     }
 
     @Test
     fun `savedRuleConfigError never throws on garbage persisted values`() {
-        RuleAction.values().forEach { action ->
+        LegacyRuleAction.values().forEach { action ->
             listOf(null, "", "{", "[]", "\u0000", "{\"addHeaders\":null,\"delayMs\":{}}").forEach { value ->
                 // Result may be null or a message; the only failure mode is an exception.
-                savedRuleConfigError(InterceptRuleEntity(name = "r", pattern = ".*", action = action, replacementValue = value, cryptoKeyAlias = "k"))
+                savedRuleConfigError(LegacyInterceptRule(name = "r", pattern = ".*", action = action, replacementValue = value, cryptoKeyAlias = "k"))
             }
         }
     }

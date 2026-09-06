@@ -1,7 +1,7 @@
 package com.example.ui.screens
 
 import android.os.Build
-import com.example.data.local.RuleAction
+import com.example.interception.rules.LegacyRuleAction
 import com.example.interception.RuleTemplateExpander
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -25,17 +25,17 @@ class RuleTemplateUiHelpersTest {
 
     @Test
     fun `templating affordances show only for the four templatable actions`() {
-        assertTrue(ruleActionUsesTemplating(RuleAction.MODIFY_REQUEST))
-        assertTrue(ruleActionUsesTemplating(RuleAction.MODIFY_RESPONSE))
-        assertTrue(ruleActionUsesTemplating(RuleAction.MOCK_RESPONSE))
-        assertTrue(ruleActionUsesTemplating(RuleAction.SCRIPT_REWRITE))
-        assertFalse(ruleActionUsesTemplating(RuleAction.BLOCK))
-        assertFalse(ruleActionUsesTemplating(RuleAction.REDIRECT))
-        assertFalse(ruleActionUsesTemplating(RuleAction.LOG_ONLY))
-        assertFalse(ruleActionUsesTemplating(RuleAction.FORCE_MITM))
-        assertFalse(ruleActionUsesTemplating(RuleAction.CHAOS))
-        assertFalse(ruleActionUsesTemplating(RuleAction.BODY_ENCRYPT_AES))
-        assertFalse(ruleActionUsesTemplating(RuleAction.BODY_DECRYPT_AES))
+        assertTrue(ruleActionUsesTemplating(LegacyRuleAction.MODIFY_REQUEST))
+        assertTrue(ruleActionUsesTemplating(LegacyRuleAction.MODIFY_RESPONSE))
+        assertTrue(ruleActionUsesTemplating(LegacyRuleAction.MOCK_RESPONSE))
+        assertTrue(ruleActionUsesTemplating(LegacyRuleAction.SCRIPT_REWRITE))
+        assertFalse(ruleActionUsesTemplating(LegacyRuleAction.BLOCK))
+        assertFalse(ruleActionUsesTemplating(LegacyRuleAction.REDIRECT))
+        assertFalse(ruleActionUsesTemplating(LegacyRuleAction.LOG_ONLY))
+        assertFalse(ruleActionUsesTemplating(LegacyRuleAction.FORCE_MITM))
+        assertFalse(ruleActionUsesTemplating(LegacyRuleAction.CHAOS))
+        assertFalse(ruleActionUsesTemplating(LegacyRuleAction.BODY_ENCRYPT_AES))
+        assertFalse(ruleActionUsesTemplating(LegacyRuleAction.BODY_DECRYPT_AES))
     }
 
     // ── insertTextAtCursor ───────────────────────────────────────────────────────────────────

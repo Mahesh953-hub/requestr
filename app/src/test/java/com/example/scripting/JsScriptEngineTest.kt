@@ -94,4 +94,65 @@ class JsScriptEngineTest {
         )
         assertFalse(result.ok)
     }
+
+    // ── S4 task 32: epilogue + lifecycle entry points ─────────────────────────────────────────
+
+    @Test
+    fun `eval runs the epilogue after the script in the same scope and returns its value`() {
+        val result = JsScriptEngine.eval(
+            script = "var marker = 'from-script';",
+            prelude = "",
+            bridge = Any(),
+            epilogue = "marker + '!'",
+        )
+        assertTrue(result.ok)
+        assertEquals("from-script!", result.value)
+    }
+
+    @Test
+    fun `an epilogue that yields undefined leaves value null`() {
+        val result = JsScriptEngine.eval(script = "1;", prelude = "", bridge = Any(), epilogue = "var y = 2;")
+        assertTrue(result.ok)
+        assertNull(result.value)
+    }
+
+    @Test
+    fun `an epilogue is not run when the script itself failed`() {
+        val result = JsScriptEngine.eval(script = "throw new Error('first');", prelude = "", bridge = Any(), epilogue = "'reached'")
+        assertFalse(result.ok)
+        assertNull(result.value)
+        assertTrue(result.error!!.contains("first"))
+    }
+
+    @Test
+    fun `PmPrelude EPILOGUE dispatches onRequest or onResponse by phase and reports ABORT for a null return`() {
+        class Bridge {
+            var phase = "onRequest"
+            var stored: String? = null
+            fun phaseName() = phase
+            fun sharedJson() = "{\"seed\":\"1\"}"
+            fun sharedPut(json: String) { stored = json }
+        }
+        val prelude = "var context = { shared: JSON.parse(__bridge.sharedJson()) }; var __phase = __bridge.phaseName(); var pm = { request: {u: 'req'}, response: {u: 'resp'} };"
+        val bridge = Bridge()
+        val ok = JsScriptEngine.eval(
+            script = "var seen = []; function onRequest(c, r) { seen.push(r.u); c.shared.x = c.shared.seed + '2'; } function onResponse(c, r) { seen.push('WRONG'); }",
+            prelude = prelude, bridge = bridge, epilogue = PmPrelude.EPILOGUE,
+        )
+        assertTrue(ok.error, ok.ok)
+        assertEquals("OK", ok.value)
+        assertTrue(bridge.stored!!.contains("\"x\":\"12\""))
+
+        bridge.phase = "onResponse"
+        val abort = JsScriptEngine.eval(
+            script = "function onResponse(c, r) { if (r.u !== 'resp') throw new Error('wrong object'); return null; }",
+            prelude = prelude, bridge = bridge, epilogue = PmPrelude.EPILOGUE,
+        )
+        assertTrue(abort.error, abort.ok)
+        assertEquals("ABORT", abort.value)
+
+        val noHook = JsScriptEngine.eval(script = "var z = 1;", prelude = prelude, bridge = bridge, epilogue = PmPrelude.EPILOGUE)
+        assertTrue(noHook.ok)
+        assertEquals("OK", noHook.value)
+    }
 }

@@ -10,7 +10,7 @@ import kotlin.random.Random
  * decision half: given a [ChaosConfig], [decide] returns what a caller *should* do, and
  * [corrupt]/[corruptBytes] are the pure body transforms for the [ChaosOutcome.CorruptBody] case.
  *
- * Live wiring (the half that actually does it): a [com.example.data.local.RuleAction.CHAOS] rule's
+ * Live wiring (the half that actually does it): a [com.example.interception.rules.LegacyRuleAction.CHAOS] rule's
  * `replacementValue` (`{"failRate":0.1,"delayMs":[100,3000],"corruptBodyRate":0.05,...}`) is
  * parsed by [RuleEnforcer.parseChaosConfig] and dispatched by
  * [com.example.interception.MitmProxyEngine] on the TLS-MITM path in two legs --

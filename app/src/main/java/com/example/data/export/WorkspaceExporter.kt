@@ -1,6 +1,7 @@
 package com.example.data.export
 
 import android.content.Context
+import com.example.data.local.InterceptorRuleEntity
 import com.example.data.local.RequestrDatabase
 import com.example.data.local.toApiRequestItem
 import com.example.data.local.toEntity
@@ -14,13 +15,19 @@ import com.example.data.models.ChainExtractionRule
 import com.example.data.models.HttpMethod
 import com.example.data.models.KeyValueItem
 import com.example.data.models.RequestBodyType
+import com.example.interception.rules.BodyCryptoConfig
+import com.example.interception.rules.InterceptorRule
+import com.example.interception.rules.LegacyInterceptRule
+import com.example.interception.rules.LegacyRuleConverter
+import com.example.interception.rules.RuleApiJson
+import com.example.interception.rules.RuleValidation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Workspace system — exports/imports the app's intercept rules, saved API requests, and every
+ * Workspace system — exports/imports the app's typed intercept rules (+ folders), saved API requests, and every
  * flow (pipeline metadata + nodes + connections, across all flows, not just the "default" one)
  * as a single JSON file.
  *
@@ -42,32 +49,18 @@ object WorkspaceExporter {
         root.put("exportedAt", System.currentTimeMillis())
         root.put("appVersion", com.example.BuildConfig.VERSION_NAME)
 
-        // Intercept rules
-        val rules = db.interceptRuleDao().getEnabledRules()
+        // Intercept rules -- S4 task 34: the typed rule library (every rule, enabled or not, in
+        // evaluation order) plus its folders, in the same `schemaVersion: 2` shape LocalApiServer
+        // emits (RuleApiJson). `schemaVersion` at the root tells import which dialect it is
+        // reading; a file without it is a v1 export whose flat `interceptRules` array is
+        // converted through LegacyRuleConverter on the way in.
+        root.put("schemaVersion", RuleApiJson.SCHEMA_VERSION)
         val rulesArray = JSONArray()
-        rules.forEach { rule ->
-            rulesArray.put(JSONObject().apply {
-                put("name", rule.name)
-                put("pattern", rule.pattern)
-                put("domain", rule.domain)
-                put("action", rule.action.name)
-                put("enabled", rule.enabled)
-                put("replacementValue", rule.replacementValue)
-                put("createdAt", rule.createdAt)
-                // §2.14(b) crypto fields -- these four were added for BODY_ENCRYPT_AES/
-                // BODY_DECRYPT_AES and were previously missing here entirely: exporting and
-                // re-importing a crypto rule silently reconstructed it *enabled*, with a blank
-                // alias, which cannot perform the transformation the user configured. See
-                // importWorkspace()'s crypto-rule gate for how import now handles an alias that
-                // is blank or doesn't exist on this device (AndroidKeyStore aliases never travel
-                // with an export).
-                put("cryptoKeyAlias", rule.cryptoKeyAlias)
-                put("cryptoAlgorithm", rule.cryptoAlgorithm)
-                put("cryptoDirection", rule.cryptoDirection)
-                put("cryptoScope", rule.cryptoScope)
-            })
-        }
-        root.put("interceptRules", rulesArray)
+        db.interceptorRuleDao().getAllOrdered().forEach { rulesArray.put(RuleApiJson.ruleToJson(it)) }
+        root.put("interceptorRules", rulesArray)
+        val foldersArray = JSONArray()
+        db.ruleFolderDao().getAll().forEach { foldersArray.put(RuleApiJson.folderToJson(it)) }
+        root.put("ruleFolders", foldersArray)
 
         // Saved API requests
         //
@@ -173,6 +166,7 @@ object WorkspaceExporter {
         val db = RequestrDatabase.get(context)
         val root = JSONObject(json)
         var rulesImported = 0
+        var foldersImported = 0
         var requestsImported = 0
         var pipelinesImported = 0
         var nodesImported = 0
@@ -180,74 +174,103 @@ object WorkspaceExporter {
         val errors = mutableListOf<String>()
         val warnings = mutableListOf<String>()
 
-        // Import rules
+        // Import rules (S4 task 34). Two dialects:
+        //  - v2 (`schemaVersion: 2`, `interceptorRules` + `ruleFolders`): typed rules imported as
+        //    they are, folders first so `folderId`s can be remapped onto the ids this device hands
+        //    out;
+        //  - v1 (no `schemaVersion`, flat `interceptRules`): each entry is parsed into a
+        //    LegacyInterceptRule and converted through LegacyRuleConverter -- the one converter
+        //    shared with the v23 migration and the local API -- so a v1 file exported by the
+        //    previous release imports with identical behaviour.
+        // Both paths append after the current tail (sortOrder = max + 1, ...) so imported rules
+        // evaluate after the rules already on the device, and both run RuleValidation.
+        val ruleDao = db.interceptorRuleDao()
+        val folderDao = db.ruleFolderDao()
+        val nowMs = System.currentTimeMillis()
+        var nextSortOrder = ruleDao.maxSortOrder() + 1
+        val folderIdMap = HashMap<Long, Long>()
+        root.optJSONArray("ruleFolders")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                try {
+                    val f = arr.getJSONObject(i)
+                    val entity = RuleApiJson.folderFromJson(f, nowMs)
+                    val newId = folderDao.insert(entity)
+                    if (f.has("id")) folderIdMap[f.optLong("id")] = newId
+                    foldersImported++
+                } catch (e: Exception) { errors.add("Folder $i: ${e.message}") }
+            }
+        }
+
+        // Crypto-rule import gate: a key alias names an AndroidKeyStore entry, which by design
+        // never travels with an export (it's per-device key material, not exportable data) -- so
+        // a blank alias, or an alias that simply doesn't exist yet on *this* device, is the
+        // normal case for an imported crypto rule, not an edge case. Importing such a rule
+        // *enabled* would have it fail closed on every matched body (BodyCryptoStage refuses to
+        // forward plaintext the user believes is encrypted), which is safe but surprising.
+        // Instead: import it (never silently drop the user's configuration) but force it
+        // disabled, and record a warning so this is discoverable at import time.
+        fun cryptoGateReason(keyAlias: String): String? = when {
+            keyAlias.isBlank() -> "no key alias was set when this rule was exported"
+            !hasKeyAlias(keyAlias) ->
+                "key alias '$keyAlias' does not exist on this device (Keystore aliases never travel with an export)"
+            else -> null
+        }
+        suspend fun insertTyped(rule: InterceptorRule, label: String, index: Int) {
+            var toInsert = rule
+            val config = rule.config
+            if (config is BodyCryptoConfig && rule.enabled) {
+                val reason = cryptoGateReason(config.keyAlias)
+                if (reason != null) {
+                    toInsert = toInsert.copy(enabled = false)
+                    warnings.add(
+                        "Rule '${rule.name.ifBlank { "(unnamed)" }}': imported disabled -- $reason. " +
+                            "Edit the rule and set a valid key alias, then re-enable it.",
+                    )
+                }
+            }
+            val problems = RuleValidation.validate(toInsert, enabledRules = 0, acknowledged = true)
+            if (problems.isNotEmpty()) {
+                errors.add("$label $index: " + problems.joinToString("; ") { "${it.field}: ${it.message}" })
+                return
+            }
+            ruleDao.insert(InterceptorRuleEntity.fromDomain(toInsert))
+            nextSortOrder = toInsert.sortOrder + 1
+            rulesImported++
+        }
+
+        root.optJSONArray("interceptorRules")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                try {
+                    val r = arr.getJSONObject(i)
+                    val body = JSONObject(r.toString()).apply { remove("id"); remove("sortOrder"); remove("folderId") }
+                    when (val parsed = RuleApiJson.parseNewRule(body, sortOrder = nextSortOrder, nowMs = nowMs)) {
+                        is RuleApiJson.Parsed.Invalid -> errors.add("Rule $i: ${parsed.message}")
+                        is RuleApiJson.Parsed.Ok -> {
+                            val folderId = if (r.has("folderId") && !r.isNull("folderId")) folderIdMap[r.optLong("folderId")] else null
+                            insertTyped(parsed.rule.copy(folderId = folderId, legacyRuleId = null), "Rule", i)
+                        }
+                    }
+                } catch (e: Exception) { errors.add("Rule $i: ${e.message}") }
+            }
+        }
+
         root.optJSONArray("interceptRules")?.let { arr ->
             for (i in 0 until arr.length()) {
                 try {
                     val r = arr.getJSONObject(i)
-                    val name = r.optString("name", "")
-                    // A workspace exported by an older build won't know FORCE_MITM (or any
-                    // future action) yet -- fall back to LOG_ONLY rather than failing the
-                    // whole rule import on an unrecognized action name.
-                    val action = runCatching {
-                        com.example.data.local.RuleAction.valueOf(r.optString("action", "LOG_ONLY"))
-                    }.getOrDefault(com.example.data.local.RuleAction.LOG_ONLY)
-                    var enabled = r.optBoolean("enabled", true)
-                    // §2.14(b) crypto fields -- round-tripped since MUST-FIX (data-loss bug):
-                    // export used to omit all four, so re-importing a crypto rule always
-                    // reconstructed it enabled with a blank alias.
-                    val cryptoKeyAlias = r.optString("cryptoKeyAlias", "")
-                    val cryptoAlgorithm = r.optString("cryptoAlgorithm", "AES/GCM/NoPadding")
-                    val cryptoDirection = r.optString("cryptoDirection", "ENCRYPT")
-                    val cryptoScope = r.optString("cryptoScope", "BOTH")
-
-                    // Crypto-rule import gate: a `cryptoKeyAlias` names an AndroidKeyStore
-                    // entry, which by design never travels with an export (it's per-device key
-                    // material, not exportable data) -- so a blank alias, or an alias that
-                    // simply doesn't exist yet on *this* device, is the normal case for an
-                    // imported crypto rule, not an edge case. RuleEnforcer's crypto path fails
-                    // open (leaves the body untouched) on a bad key, so importing this rule
-                    // *enabled* would silently start forwarding traffic in plaintext that the
-                    // user believes is encrypted -- the one option that's definitely wrong.
-                    // Instead: import it (never silently drop the user's configuration) but
-                    // force it disabled, and record a warning so this is discoverable at import
-                    // time rather than only when live traffic goes out unprotected.
-                    val isCryptoAction = action == com.example.data.local.RuleAction.BODY_ENCRYPT_AES ||
-                        action == com.example.data.local.RuleAction.BODY_DECRYPT_AES
-                    if (isCryptoAction && enabled) {
-                        val reason = when {
-                            cryptoKeyAlias.isBlank() ->
-                                "no key alias was set when this rule was exported"
-                            !hasKeyAlias(cryptoKeyAlias) ->
-                                "key alias '$cryptoKeyAlias' does not exist on this device " +
-                                    "(Keystore aliases never travel with an export)"
-                            else -> null
-                        }
-                        if (reason != null) {
-                            enabled = false
-                            warnings.add(
-                                "Rule '${name.ifBlank { "(unnamed)" }}': imported disabled -- $reason. " +
-                                    "Edit the rule and set a valid key alias, then re-enable it.",
-                            )
+                    val legacy = LegacyInterceptRule.fromJson(r, nowMs)
+                    when (val converted = LegacyRuleConverter.convert(legacy, nextSortOrder)) {
+                        is LegacyRuleConverter.ConversionResult.Unconvertible -> errors.add("Rule $i: ${converted.reason}")
+                        is LegacyRuleConverter.ConversionResult.Converted -> {
+                            // The converter's own blank-alias note is superseded by the import gate
+                            // below (which also disables the rule); keep every other parity note.
+                            for (w in converted.warnings) {
+                                if (w.contains("blank key alias")) continue
+                                warnings.add("Rule '${legacy.name.ifBlank { "(unnamed)" }}': $w")
+                            }
+                            insertTyped(converted.rule.copy(legacyRuleId = null), "Rule", i)
                         }
                     }
-
-                    db.interceptRuleDao().insert(
-                        com.example.data.local.InterceptRuleEntity(
-                            name = name,
-                            pattern = r.optString("pattern", ""),
-                            domain = r.optString("domain", ""),
-                            action = action,
-                            enabled = enabled,
-                            replacementValue = r.optString("replacementValue").takeIf { it.isNotBlank() },
-                            createdAt = if (r.has("createdAt")) r.optLong("createdAt", System.currentTimeMillis()) else System.currentTimeMillis(),
-                            cryptoKeyAlias = cryptoKeyAlias,
-                            cryptoAlgorithm = cryptoAlgorithm,
-                            cryptoDirection = cryptoDirection,
-                            cryptoScope = cryptoScope,
-                        )
-                    )
-                    rulesImported++
                 } catch (e: Exception) { errors.add("Rule $i: ${e.message}") }
             }
         }
@@ -337,7 +360,7 @@ object WorkspaceExporter {
             }
         }
 
-        ImportResult(rulesImported, requestsImported, pipelinesImported, nodesImported, connsImported, errors, warnings)
+        ImportResult(rulesImported, requestsImported, pipelinesImported, nodesImported, connsImported, errors, warnings, foldersImported)
     }
 
     // ── Full-fidelity saved-request JSON (§1.6(b)) ───────────────────────────────────────────
@@ -524,10 +547,13 @@ object WorkspaceExporter {
          * without needing its own change.
          */
         val warnings: List<String> = emptyList(),
+        /** S4 task 34: how many typed rule folders (`ruleFolders`, v2 exports only) were imported. */
+        val foldersImported: Int = 0,
     ) {
         val summary: String
             get() {
-                val base = "Imported $rulesImported rules, $requestsImported requests, $pipelinesImported flows, $nodesImported nodes, $connsImported connections"
+                val folderPart = if (foldersImported > 0) " in $foldersImported folders" else ""
+                val base = "Imported $rulesImported rules$folderPart, $requestsImported requests, $pipelinesImported flows, $nodesImported nodes, $connsImported connections"
                 val notes = buildList {
                     if (warnings.isNotEmpty()) add("${warnings.size} warning(s): ${warnings.joinToString("; ")}")
                     if (errors.isNotEmpty()) add("${errors.size} error(s)")

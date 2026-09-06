@@ -356,6 +356,10 @@ class PersistenceQueue internal constructor(
         timings: TransactionTimingEntity?,
     ): RowHandle = insertTransaction(entity, headers, timings)
 
+    override fun appliedRules(parent: RowHandle, rules: List<AppliedRuleEntity>) {
+        if (rules.isNotEmpty()) appendAppliedRules(parent, rules)
+    }
+
     override fun patchExchange(target: RowHandle, patch: CapturedTrafficEntity, headers: List<TransactionHeaderEntity>?) {
         patchDecodedExchange(target, patch, headers = headers)
     }

@@ -288,6 +288,12 @@ object PmPrelude {
             }
           }
 
+          // ---- S4 task 32: lifecycle context -----------------------------------------------
+          // `context.shared` is a plain object seeded by the host and written back after the run
+          // (see PmPrelude.EPILOGUE); it is the only state that survives onRequest -> onResponse.
+          global.context = { shared: JSON.parse(__bridge.sharedJson()) };
+          global.__phase = __bridge.phaseName();
+
           global.pm = {
             environment: environment,
             globals: globals,
@@ -306,4 +312,27 @@ object PmPrelude {
           };
         })(this);
     """.trimIndent()
+
+    /**
+     * S4 task 32: evaluated after the user script (same scope, same budget). Dispatches the
+     * optional `onRequest(context, request)` / `onResponse(context, response)` lifecycle hook for
+     * the phase in `__phase`, persists `context.shared`, and reports `"ABORT"` when the hook
+     * returned `null` (drop this flow), else `"OK"`. Legacy scripts that define no hook still run
+     * to completion as plain statements against `pm.*` -- nothing about them changes.
+     */
+    val EPILOGUE: String = """
+        (function (global) {
+          var phase = global.__phase;
+          var hook = phase === 'onRequest' ? global.onRequest : (phase === 'onResponse' ? global.onResponse : undefined);
+          var result;
+          if (typeof hook === 'function') {
+            result = hook(global.context, phase === 'onRequest' ? global.pm.request : global.pm.response);
+          }
+          try { __bridge.sharedPut(JSON.stringify(global.context && global.context.shared ? global.context.shared : {})); } catch (e) {}
+          return result === null ? 'ABORT' : 'OK';
+        })(this);
+    """.trimIndent()
+
+    const val PHASE_REQUEST = "onRequest"
+    const val PHASE_RESPONSE = "onResponse"
 }

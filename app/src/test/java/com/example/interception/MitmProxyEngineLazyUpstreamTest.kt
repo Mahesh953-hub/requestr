@@ -1,12 +1,13 @@
 package com.example.interception
 
+import com.example.interception.rules.legacyRuleDao
 import android.content.Context
 import android.os.Build
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.CapturedTrafficEntity
-import com.example.data.local.InterceptRuleEntity
+import com.example.interception.rules.LegacyInterceptRule
 import com.example.data.local.RequestrDatabase
-import com.example.data.local.RuleAction
+import com.example.interception.rules.LegacyRuleAction
 import java.io.BufferedReader
 import java.io.File
 import java.math.BigInteger
@@ -111,7 +112,7 @@ class MitmProxyEngineLazyUpstreamTest {
         // SupportSQLiteOpenHelper.Factory was configured with Room"), which is the shipped
         // production path since the DbDriverFlag rollout -- go through the DAO instead.
         runBlocking {
-            val dao = RequestrDatabase.get(context).interceptRuleDao()
+            val dao = RequestrDatabase.get(context).legacyRuleDao()
             dao.observeAll().first().forEach { dao.delete(it) }
         }
 
@@ -128,14 +129,16 @@ class MitmProxyEngineLazyUpstreamTest {
         // job -- forcing MITM at CONNECT time -- without also winning the decrypted-phase match
         // that the MOCK_RESPONSE rules in these tests need to win instead.
         runBlocking {
-            RequestrDatabase.get(context).interceptRuleDao().insert(
-                InterceptRuleEntity(name = "mitm local", pattern = "^https://localhost:\\d+/$", action = RuleAction.FORCE_MITM)
+            RequestrDatabase.get(context).legacyRuleDao().insert(
+                LegacyInterceptRule(name = "mitm local", pattern = "^https://localhost:\\d+/$", action = LegacyRuleAction.FORCE_MITM)
             )
+            com.example.interception.rules.LegacyRuleTestSupport.syncSnapshotFromLegacy(RequestrDatabase.get(context))
         }
     }
 
     @After
     fun tearDown() {
+        com.example.interception.rules.LegacyRuleTestSupport.clear()
         engine.stop()
         CertificateAuthority.passwordProviderForTest = null
         File(context.filesDir, CertificateAuthority.KEYSTORE_FILE).delete()
@@ -145,12 +148,13 @@ class MitmProxyEngineLazyUpstreamTest {
         name: String,
         domain: String = "",
         pattern: String = "",
-        action: RuleAction,
+        action: LegacyRuleAction,
         replacementValue: String? = null,
     ) = runBlocking {
-        RequestrDatabase.get(context).interceptRuleDao().insert(
-            InterceptRuleEntity(name = name, domain = domain, pattern = pattern, action = action, replacementValue = replacementValue)
+        RequestrDatabase.get(context).legacyRuleDao().insert(
+            LegacyInterceptRule(name = name, domain = domain, pattern = pattern, action = action, replacementValue = replacementValue)
         )
+        com.example.interception.rules.LegacyRuleTestSupport.syncSnapshotFromLegacy(RequestrDatabase.get(context))
     }
 
     private fun generateSelfSignedCert(host: String): Pair<X509Certificate, KeyPair> {
@@ -312,7 +316,7 @@ class MitmProxyEngineLazyUpstreamTest {
         // so it wins the decrypted-phase match for every request without shadowing FORCE_MITM's
         // CONNECT-phase decision (see setUp's comment).
         insertRule(
-            "mock all", pattern = "^https://localhost/", action = RuleAction.MOCK_RESPONSE,
+            "mock all", pattern = "^https://localhost/", action = LegacyRuleAction.MOCK_RESPONSE,
             replacementValue = """{"statusCode":200,"bodyReplace":"mocked-body"}""",
         )
 
@@ -324,6 +328,8 @@ class MitmProxyEngineLazyUpstreamTest {
         engine = MitmProxyEngine(
             onDecryptedTransaction = { entity -> captured.add(entity); latch.countDown() },
             caTrustGate = CaTrustGate(probe = { true }),
+            // S4 task 33: pin a permissive safety policy; a started engine otherwise follows settings.
+            safetyGate = com.example.interception.rules.InterceptorSafetyGate(followSettings = false),
         )
         val proxyPort = engine.start(context, 0)
 
@@ -355,6 +361,8 @@ class MitmProxyEngineLazyUpstreamTest {
         engine = MitmProxyEngine(
             onDecryptedTransaction = { entity -> synchronized(captured) { captured.add(entity) } },
             caTrustGate = CaTrustGate(probe = { true }),
+            // S4 task 33: pin a permissive safety policy; a started engine otherwise follows settings.
+            safetyGate = com.example.interception.rules.InterceptorSafetyGate(followSettings = false),
         )
         val proxyPort = engine.start(context, 0)
 
@@ -388,7 +396,7 @@ class MitmProxyEngineLazyUpstreamTest {
         // this proves the lazy connect can trigger mid-connection, on a later request, after an
         // earlier request on the very same connection never needed it.
         insertRule(
-            "mock one path", pattern = "/mock-path", action = RuleAction.MOCK_RESPONSE,
+            "mock one path", pattern = "/mock-path", action = LegacyRuleAction.MOCK_RESPONSE,
             replacementValue = """{"statusCode":200,"bodyReplace":"mocked-body"}""",
         )
 
@@ -399,6 +407,8 @@ class MitmProxyEngineLazyUpstreamTest {
         engine = MitmProxyEngine(
             onDecryptedTransaction = { entity -> synchronized(captured) { captured.add(entity) } },
             caTrustGate = CaTrustGate(probe = { true }),
+            // S4 task 33: pin a permissive safety policy; a started engine otherwise follows settings.
+            safetyGate = com.example.interception.rules.InterceptorSafetyGate(followSettings = false),
         )
         val proxyPort = engine.start(context, 0)
 

@@ -354,43 +354,6 @@ interface CaptureSessionDao {
     suspend fun deleteById(id: Long)
 }
 
-@Dao
-interface InterceptRuleDao {
-
-    @Query("SELECT * FROM intercept_rules ORDER BY createdAt DESC")
-    fun observeAll(): Flow<List<InterceptRuleEntity>>
-
-    @Query("SELECT * FROM intercept_rules WHERE enabled = 1")
-    suspend fun getEnabledRules(): List<InterceptRuleEntity>
-
-    /** Single-row lookup backing the LAN dashboard's/local API's rules CRUD (PUT/DELETE by id). */
-    @Query("SELECT * FROM intercept_rules WHERE id = :id")
-    suspend fun getById(id: Long): InterceptRuleEntity?
-
-    /**
-     * Real existence check backing the "Block this domain" long-press action.
-     * The UI must call this to decide whether the action is genuinely disabled
-     * (APP_v2.md Bug 3.8) instead of just dimming it visually.
-     */
-    @Query("SELECT COUNT(*) > 0 FROM intercept_rules WHERE domain = :domain AND action = 'BLOCK' AND enabled = 1")
-    suspend fun hasBlockRuleForDomain(domain: String): Boolean
-
-    @Query("SELECT COUNT(*) > 0 FROM intercept_rules WHERE domain = :domain AND action = 'BLOCK' AND enabled = 1")
-    fun observeHasBlockRuleForDomain(domain: String): Flow<Boolean>
-
-    @Insert(onConflict = OnConflictStrategy.ABORT)
-    suspend fun insert(rule: InterceptRuleEntity): Long
-
-    @Update
-    suspend fun update(rule: InterceptRuleEntity)
-
-    @Delete
-    suspend fun delete(rule: InterceptRuleEntity)
-
-    @Query("DELETE FROM intercept_rules WHERE id = :id")
-    suspend fun deleteById(id: Long)
-}
-
 /**
  * Real persistence for API Testr's Save/Star actions (v3.1 fix A4). Previously these lived only
  * in an in-memory `MutableStateFlow`, so a saved/favorited request vanished on process death.

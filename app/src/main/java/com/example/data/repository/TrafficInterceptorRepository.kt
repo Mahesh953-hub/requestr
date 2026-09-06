@@ -1,7 +1,6 @@
 package com.example.data.repository
 
 import com.example.data.models.AppPackageItem
-import com.example.data.models.TrafficRuleItem
 import com.example.data.models.resolveAppDisplayLabel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -138,28 +137,8 @@ object TrafficInterceptorRepository {
 
     // ── traffic rules (in-memory mirror) ───────────────────────────────
 
-    // No seed rules by design.
-    //
-    // v2.1 shipped three fabricated rules ("Mock Login Token", "Block Ad Trackers",
-    // "Inspect API Headers") that were never applied to any traffic, so the Rules screen
-    // looked configured on a fresh install (APP_v2.md Bug 1.6). Rules now start empty and
-    // real ones are persisted to the intercept_rules Room table.
-    private val _trafficRules = MutableStateFlow<List<TrafficRuleItem>>(emptyList())
-    val trafficRules: StateFlow<List<TrafficRuleItem>> = _trafficRules.asStateFlow()
-
-    fun addRule(rule: TrafficRuleItem) {
-        _trafficRules.value = listOf(rule) + _trafficRules.value
-    }
-
-    fun toggleRule(ruleId: String) {
-        _trafficRules.value = _trafficRules.value.map {
-            if (it.id == ruleId) it.copy(isEnabled = !it.isEnabled) else it
-        }
-    }
-
-    fun deleteRule(ruleId: String) {
-        _trafficRules.value = _trafficRules.value.filter { it.id != ruleId }
-    }
+    // Rules live in the typed `interceptor_rules` Room table (RuleSnapshotStore / InterceptorRuleDao);
+    // this repository no longer mirrors them in memory (S4 task 34 removed the dead TrafficRuleItem list).
 
     // ── Frida reference-script library ─────────────────────────────────
 

@@ -10,7 +10,7 @@ import javax.crypto.spec.GCMParameterSpec
 
 /**
  * §2.14(b) — per-URL AES request/response body encryption/decryption, driven by the
- * `BODY_ENCRYPT_AES`/`BODY_DECRYPT_AES` [com.example.data.local.RuleAction] values.
+ * `BODY_ENCRYPT_AES`/`BODY_DECRYPT_AES` [com.example.interception.rules.LegacyRuleAction] values.
  *
  * Modeled directly on [SecureKeyStore] (same AndroidKeyStore-backed AES-256/GCM key material,
  * via [SecureKeyStore.getOrCreateAesGcmKey]) rather than inventing a second key-management

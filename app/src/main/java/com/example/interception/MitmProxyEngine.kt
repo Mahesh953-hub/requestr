@@ -10,7 +10,6 @@ import com.example.data.local.CaptureRowMethod
 import com.example.data.local.CapturedTrafficEntity
 import com.example.data.local.ConnectAttemptEntity
 import com.example.data.local.RequestrDatabase
-import com.example.data.local.RuleAction
 import com.example.data.models.HttpMethod
 import com.example.data.prefs.SettingsDataStore
 import com.example.interception.grpc.GrpcDetector
@@ -22,6 +21,26 @@ import com.example.interception.http.Http2Session
 import com.example.interception.http.Http2Transaction
 import com.example.interception.http.HttpParser
 import com.example.interception.http.ParsedHttpMessage
+import com.example.interception.rules.FlowAuditTrail
+import com.example.interception.rules.FlowKey
+import com.example.interception.rules.GatewayOutcome
+import com.example.interception.rules.RuleDecision
+import com.example.interception.rules.RuleMetadataHeaders
+import com.example.interception.rules.InterceptorSafetyGate
+import com.example.interception.rules.RulePipeline
+import com.example.interception.rules.RuleSnapshot
+import com.example.interception.rules.RuleSnapshotStore
+import com.example.interception.rules.stages.BodyCryptoStage
+import com.example.interception.rules.stages.ChaosStage
+import com.example.interception.rules.stages.MirrorStage
+import com.example.interception.rules.stages.ThrottleStage
+import com.example.interception.rules.stages.BreakpointStage
+import com.example.interception.rules.RuleRef
+import com.example.interception.breakpoint.BreakpointRegistry
+import com.example.interception.rules.stages.MockStage
+import com.example.interception.rules.stages.RewriteStage
+import com.example.interception.rules.stages.ScriptStage
+import com.example.scripting.host.ScriptHostClient
 import com.example.interception.http.WebSocketParser
 import com.example.interception.http.WsMessageAssembler
 import com.example.interception.gateway.GatewaySessionHandler
@@ -143,8 +162,7 @@ class MitmProxyEngine(
      */
     private val caTrustGate: CaTrustGate = CaTrustGate(),
     /**
-     * RNG every [RuleAction.CHAOS] roll ([RuleEnforcer.applyChaosToRequest] /
-     * [RuleEnforcer.applyChaosToResponse]) draws from. Test seam only -- production uses the
+     * RNG every CHAOS-stage roll ([com.example.interception.rules.stages.ChaosStage]) draws from. Test seam only -- production uses the
      * default so a `failRate` of 0.1 really is a 10% chance per matched exchange.
      */
     private val chaosRandom: kotlin.random.Random = kotlin.random.Random.Default,
@@ -157,6 +175,28 @@ class MitmProxyEngine(
     private val chaosSleep: (Long) -> Unit = { millis -> Thread.sleep(millis) },
     /** S1 task 7: bounded relay pool whose dispatcher runs both copy legs of every tunnel. */
     private val relayPool: RelayPool = RelayPool.shared(),
+    /**
+     * S4 task 31: where BREAKPOINT rules park a flow (max 8, mandatory auto-resume, G21).
+     * Production shares [BreakpointRegistry.shared] with the API/UI; tests inject their own.
+     */
+    private val breakpoints: BreakpointRegistry = BreakpointRegistry.shared,
+    /**
+     * S4 task 32: the isolated `:scripthost` client SCRIPT rules run through when the `scriptHost`
+     * flag is on. Production shares the process-wide client; tests inject one over a fake transport.
+     */
+    private val scriptHostClient: (Context) -> ScriptHostClient = { ScriptHostClient.get(it) },
+    /**
+     * S4 task 33 (D3): acknowledgement + capture-selection gate in front of every mutating stage.
+     * Production shares [InterceptorSafetyGate.shared], which [start] binds to settings; tests
+     * inject a fixed policy.
+     */
+    internal val safetyGate: InterceptorSafetyGate = InterceptorSafetyGate.shared,
+    /**
+     * S4 task 26: where every rule decision reads its immutable [RuleSnapshot] from. Production
+     * reads the process-wide [RuleSnapshotStore]; tests inject a fixed snapshot. Nothing on the
+     * hot path touches a DAO.
+     */
+    private val ruleSnapshot: () -> RuleSnapshot = { RuleSnapshotStore.current },
     /**
      * S1 task 8: the single leaf issuer (SNI-first identity, upstream sniffing, hardened EC
      * leaves, per-domain overrides, mTLS key managers). Null means "build the default engine
@@ -192,6 +232,8 @@ class MitmProxyEngine(
      * h2 path any more (D7 cutover).
      */
     @Volatile internal var h2Terminate: Boolean = true
+    /** S4 task 31: `InterceptorFlags.breakpoints`, sampled at [start]. `false` = stage is a no-op. */
+    @Volatile internal var breakpointsEnabled: Boolean = true
     private val injectedCertificateEngine = certificateEngine
     /**
      * S1 task 8: one issuer for every leaf (see [CertificateEngine]); its internal
@@ -241,7 +283,13 @@ class MitmProxyEngine(
         InterceptorFlags.get(context).let { flags ->
             protocolChildren = flags.protocolChildren
             h2Terminate = flags.h2Terminate
+            breakpointsEnabled = flags.breakpoints
+            // S4 task 32: SCRIPT rules run in the isolated :scripthost process unless the flag is off.
+            ScriptStage.runner = if (flags.scriptHost) ScriptStage.HostRunner(scriptHostClient(context.applicationContext)) else ScriptStage.ScriptRunner { ScriptStage.runInProcess(it) }
         }
+        // S4 task 33 (D3): the safety policy follows settings for the engine's lifetime.
+        safetyGate.unbind(safetyBinding)
+        safetyBinding = safetyGate.bind(context, scope)
 
         // Pre-warm the CA material off the caller's thread (S1 task 7: no runBlocking on the
         // start path); the first MITM'd connection awaits the same suspend getOrCreate.
@@ -275,6 +323,10 @@ class MitmProxyEngine(
         running.set(false)
         gateway?.stop()
         gateway = null
+        safetyGate.unbind(safetyBinding)
+        safetyBinding = null
+        // Scripts outside a running engine (ApiTestr, exports, tests) stay in-process.
+        ScriptStage.runner = ScriptStage.ScriptRunner { ScriptStage.runInProcess(it) }
         Log.i(TAG, "MITM proxy stopped")
     }
 
@@ -322,7 +374,17 @@ class MitmProxyEngine(
             val replies = HttpProxyShared.ConnectReplies.forSession(session)
 
             val db = RequestrDatabase.get(context)
-            val disposition = ConnectControl.evaluate(db, host, port)
+            val safetyUid = clientUidForSafety(context, client, session.origin)
+            // S4 task 26: one immutable-snapshot decision for the CONNECT; no DAO on this path.
+            val verdict = ConnectControl.decide(
+                host, port,
+                sourceIp = client.inetAddress?.hostAddress,
+                snapshot = ruleSnapshot(),
+            )
+            val disposition = verdict.disposition
+            // S4 task 30: one pacing state per connection, shared by both the opaque and the MITM
+            // paths below (bandwidth on the copy loops, latency/loss on the upstream dial).
+            val throttleShaper = verdict.decision.throttle?.let { ThrottleStage.shaperFor(it.rule, it.config, verdict.trail) }
             // §3 (C2) -- read fresh per CONNECT for the non-MITM (opaque tunnel) paths below.
             // The MITM path re-reads this itself just before dialing upstream (see
             // `networkCondition` a few lines further down, passed into LazyUpstreamConnection).
@@ -342,6 +404,7 @@ class MitmProxyEngine(
                     HttpProxyShared.handleConnectAttempt(
                         client, disposition.target, ConnectControl.Disposition.AllowOpaque, output,
                         networkCondition = opaqueNetworkCondition,
+                        throttle = throttleShaper,
                         replies = replies,
                     ) { sent, recv ->
                         persistConnectAttempt(
@@ -352,6 +415,35 @@ class MitmProxyEngine(
                     }
                     return
                 }
+                is ConnectControl.Disposition.Mirror -> {
+                    // S4 task 26/28: a MIRROR rule re-points this CONNECT at another host. With no
+                    // FORCE_DECRYPT rule there is nothing to terminate, so the tunnel is opaque to
+                    // the mirror target (the MITM-side mirror with the Host/SNI/CN triple is task 28).
+                    HttpProxyShared.handleConnectAttempt(
+                        client, disposition.target, disposition, output,
+                        networkCondition = opaqueNetworkCondition,
+                        throttle = throttleShaper,
+                        replies = replies,
+                    ) { sent, recv ->
+                        persistConnectAttempt(
+                            context, client, db, host, port, "REDIRECTED",
+                            redirectTarget = disposition.target, bytesToUpstream = sent, bytesToClient = recv,
+                            origin = session.origin,
+                        )
+                    }
+                    return
+                }
+                is ConnectControl.Disposition.Suspend -> {
+                    // S4 task 27: SUSPEND parks the flow -- the client is neither answered nor
+                    // relayed until the rule's timeout elapses, and no relay permit is taken.
+                    Log.i(TAG, "SUSPENDED by rule ${disposition.ruleName}: $host for ${disposition.timeoutMs}ms")
+                    HttpProxyShared.suspendFlow(client, disposition.timeoutMs)
+                    persistConnectAttempt(
+                        context, client, db, host, port, "SUSPENDED",
+                        failureReason = "Suspended by rule ${disposition.ruleName}", origin = session.origin,
+                    )
+                    return
+                }
                 is ConnectControl.Disposition.AllowOpaque -> {
                     // No FORCE_MITM rule matched — tunnel opaquely rather than terminate TLS,
                     // even though this engine is capable of MITM.
@@ -359,6 +451,7 @@ class MitmProxyEngine(
                     HttpProxyShared.handleConnectAttempt(
                         client, target, ConnectControl.Disposition.AllowOpaque, output,
                         networkCondition = opaqueNetworkCondition,
+                        throttle = throttleShaper,
                         replies = replies,
                     ) { sent, recv ->
                         persistConnectAttempt(
@@ -385,6 +478,7 @@ class MitmProxyEngine(
                         HttpProxyShared.handleConnectAttempt(
                             client, target, ConnectControl.Disposition.AllowOpaque, output,
                             networkCondition = opaqueNetworkCondition,
+                            throttle = throttleShaper,
                             replies = replies,
                         ) { sent, recv ->
                             persistConnectAttempt(
@@ -437,6 +531,7 @@ class MitmProxyEngine(
                     HttpProxyShared.handleConnectAttempt(
                         replaying, target, ConnectControl.Disposition.AllowOpaque, output,
                         networkCondition = opaqueNetworkCondition,
+                        throttle = throttleShaper,
                         replies = HttpProxyShared.ConnectReplies({}, {}, {}),
                     ) { sent, recv ->
                         persistConnectAttempt(
@@ -471,11 +566,24 @@ class MitmProxyEngine(
             val clientHello: TlsClientHello? = peeked.clientHello
             client = peeked.socket
 
+            // S4 task 28: a MIRROR rule on a decrypted flow re-points the upstream dial at the
+            // mirror host and decides, per NamePolicy, which name the leaf, the upstream SNI and
+            // the Host header carry. Resolved once here, before issuance, so the leaf is signed
+            // for the name the client expects and the cert cache is keyed on that resolved name.
+            val mirrorPlan = verdict.decision.mirror?.let { mirror ->
+                MirrorStage.plan(host, port, clientHello?.sni, mirror.config, mirror.rule).also {
+                    verdict.trail.applied(mirror.rule, FlowAuditTrail.Phase.CONNECT, "mirror -> ${it.target}")
+                    Log.i(TAG, "MIRROR by rule ${mirror.rule.name}: $host:$port -> ${it.target} (sni=${it.sniName}, cn=${it.certAuthority})")
+                }
+            }
+
             val issuance = try {
                 certificateEngine.issue(
                     context,
                     CertificateEngine.Request(
-                        connectAuthority = host, port = port, sni = clientHello?.sni,
+                        connectAuthority = mirrorPlan?.certAuthority ?: host,
+                        port = mirrorPlan?.certPort ?: port,
+                        sni = if (mirrorPlan != null) mirrorPlan.certSni else clientHello?.sni,
                         preferUpstreamSniff = mirrorEnabled,
                     ),
                 )
@@ -495,6 +603,7 @@ class MitmProxyEngine(
                     HttpProxyShared.handleConnectAttempt(
                         client, target, ConnectControl.Disposition.AllowOpaque, output,
                         networkCondition = opaqueNetworkCondition,
+                        throttle = throttleShaper,
                         replies = HttpProxyShared.ConnectReplies({}, {}, {}),
                     ) { sent, recv ->
                         persistConnectAttempt(
@@ -551,7 +660,9 @@ class MitmProxyEngine(
             }.getOrNull()
 
             val decryptedInput = sslSocket.getInputStream()
-            val decryptedOutput = sslSocket.getOutputStream()
+            // S4 task 30: every byte written back to the client -- parsed responses, mocks,
+            // blind relay, WebSocket frames, h2 frames -- goes through the downlink bucket.
+            val decryptedOutput = throttleShaper?.toClient(sslSocket.getOutputStream()) ?: sslSocket.getOutputStream()
 
             // MUST-FIX (§1.5 correctness): the upstream TCP+TLS connection to the real server
             // used to be dialed and handshaked right here, unconditionally, *before* the first
@@ -587,13 +698,15 @@ class MitmProxyEngine(
             // server picks that (Http2ProxyConnection). An HTTP/1.x client keeps the mirrored
             // single offer so both legs of the HTTP/1.x relay agree on framing.
             val upstream = LazyUpstreamConnection(
-                host, port,
+                mirrorPlan?.dialHost ?: host, mirrorPlan?.dialPort ?: port,
+                tlsServerName = mirrorPlan?.sniName,
+                wrapOutput = { out -> throttleShaper?.toUpstream(out) ?: out },
                 preferredAlpnProtocols = when (negotiatedAlpn) {
                     "h2" -> listOf("h2", "http/1.1")
                     null -> emptyList()
                     else -> listOf(negotiatedAlpn)
                 },
-                networkCondition = networkCondition,
+                networkCondition = throttleShaper?.networkCondition(networkCondition) ?: networkCondition,
                 keyManagers = upstreamKeyManagers,
                 onFirstConnect = { connected ->
                 // S2 task 18: the upstream leg's DNS/connect/TLS phases belong to the first
@@ -657,6 +770,7 @@ class MitmProxyEngine(
             machine.transition(ConnectionStateMachine.State.RELAYING)
             val clientToUpstream: () -> Unit
             val upstreamToClient: () -> Unit
+            var connectionKey: String? = null
             if (negotiatedAlpn == "h2") {
                 // §3/§5 + S3 task 57 (D7 cutover): HTTP/2 is decided once, upfront, from the ALPN
                 // result, and this connection is *terminated* -- requestr is the app's h2 peer
@@ -664,27 +778,41 @@ class MitmProxyEngine(
                 // or HTTP/1.1 upstream by that leg's ALPN (Http2ProxyConnection). Every frame on
                 // the client connection, read or written, is replayed into Http2Session so the
                 // rows, gRPC events and timings are produced exactly as before; nothing is
-                // forwarded verbatim any more. Rules on translated h2 messages are task 35.
+                // forwarded verbatim any more.
+                //
+                // S4 task 35: rules run on the translated messages through Http2RuleInterceptor --
+                // the same staged pipeline as the HTTP/1.x relay (runRequestStages /
+                // runResponseStages), with the safety gate and the connection's mirror plan.
+                // What the session observes on the client side is what we actually framed, so
+                // the persisted response is the post-rule one; the request row is overridden with
+                // the rules' (stamped) view and the audit trail rides along per stream.
                 val grpcCalls = GrpcCallTable()
+                val h2ConnectionKey = "h2-" + Integer.toHexString(System.identityHashCode(grpcCalls))
+                val h2Rules = Http2RuleInterceptor(this, host, port, mirrorPlan, safetyUid, h2ConnectionKey)
                 val h2Session = Http2Session(
                     onTransaction = { tx ->
-                        val handle = emitTransaction(
-                            tx.request, tx.response, tx.latencyMs, "$host:$port", logRequests, logResponses,
-                            timings = h2Timings(tx, timing),
-                            headers = ProtocolRows.headerRows(
-                                tx.request, tx.response, logRequests, logResponses,
-                                h2Request = tx.requestHeaders, h2Response = tx.responseHeaders,
-                                h2RequestTrailers = tx.requestTrailers, h2ResponseTrailers = tx.responseTrailers,
-                                metadataKeys = RuleEnforcer.METADATA_HEADER_KEYS,
-                            ),
-                        )
-                        if (handle != null && tx.frameEvents.isNotEmpty()) {
-                            sink?.http2StreamEvents(handle, ProtocolRows.http2StreamEvents(tx.frameEvents, "$host:$port"))
+                        val record = h2Rules.take(tx.requestHeaders?.streamId)
+                        if (record?.suppressed != true) {
+                            val request = record?.request ?: tx.request
+                            val handle = emitTransaction(
+                                request, tx.response, tx.latencyMs, "$host:$port", logRequests, logResponses,
+                                timings = h2Timings(tx, timing),
+                                headers = ProtocolRows.headerRows(
+                                    request, tx.response, logRequests, logResponses,
+                                    h2Request = record?.forwardedHeaders ?: tx.requestHeaders, h2Response = tx.responseHeaders,
+                                    h2RequestTrailers = tx.requestTrailers, h2ResponseTrailers = tx.responseTrailers,
+                                    metadataKeys = RuleMetadataHeaders.KEYS,
+                                ),
+                                appliedRules = record?.trail,
+                            )
+                            if (handle != null && tx.frameEvents.isNotEmpty()) {
+                                sink?.http2StreamEvents(handle, ProtocolRows.http2StreamEvents(tx.frameEvents, "$host:$port"))
+                            }
                         }
                     },
                     onGrpcMessage = { event -> emitGrpcMessage(event, host, port, logRequests, logResponses, grpcCalls) },
                     onGrpcCallStarted = { start -> emitGrpcCallStart(start, host, port, logRequests, grpcCalls) },
-                    onGrpcCallEnded = { end -> emitGrpcCallEnd(end, host, port, logRequests, logResponses, grpcCalls) },
+                    onGrpcCallEnded = { end -> emitGrpcCallEnd(end, host, port, logRequests, logResponses, grpcCalls, appliedRules = h2Rules.take(end.streamId)?.trail) },
                 )
                 val h2 = Http2ProxyConnection(
                     clientInput = decryptedInput,
@@ -704,9 +832,15 @@ class MitmProxyEngine(
                     bytesFromClient = sent,
                     bytesFromUpstream = received,
                     name = "h2 $host:$port",
+                    interceptor = h2Rules,
                 )
                 clientToUpstream = {
-                    try { h2.runClientLeg() } finally { upstream.giveUp(); h2Session.close() }
+                    try { h2.runClientLeg() } finally {
+                        upstream.giveUp()
+                        h2Session.close()
+                        // S4 task 31: a flow still parked at a breakpoint has nobody to go to.
+                        breakpoints.invalidateConnection(h2ConnectionKey, "client closed while paused")
+                    }
                 }
                 upstreamToClient = {
                     try { h2.runUpstreamLeg() } finally { h2Session.close() }
@@ -716,12 +850,20 @@ class MitmProxyEngine(
                 // upgrade response is observed -- see handleParsedResponse and
                 // ConnectionProtocolState. Genuinely unrecognized protocols still fall back to
                 // the pre-existing blind relay inside inspectClientToServer/inspectServerToClient.
-                val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>()
+                val pending = ConcurrentLinkedQueue<PendingExchange>()
+                connectionKey = connectionKeyOf(pending)
                 val clientWriteLock = Any()
                 val wsState = ConnectionProtocolState()
                 clientToUpstream = {
-                    inspectClientToServer(db, decryptedInput, upstream, decryptedOutput,
-                        clientWriteLock, host, port, pending, sent, logRequests, logResponses, wsState, timing)
+                    try {
+                        inspectClientToServer(db, decryptedInput, upstream, decryptedOutput,
+                            clientWriteLock, host, port, pending, sent, logRequests, logResponses, wsState, timing,
+                            mirror = mirrorPlan, clientUid = safetyUid)
+                    } finally {
+                        // S4 task 31: the client is gone (EOF/error on its leg) -- a response still
+                        // parked at a breakpoint for this connection has nobody to go to.
+                        breakpoints.invalidateConnection(connectionKeyOf(pending), "client closed while paused")
+                    }
                 }
                 upstreamToClient = {
                     inspectServerToClient(
@@ -739,10 +881,13 @@ class MitmProxyEngine(
                     runCatching { sslSocket.close() }
                     runCatching { upstream.giveUp() }
                     runCatching { upstream.closeQuietly() }
+                    // S4 task 31: a flow still paused on a half-dead connection must not outlive it.
+                    connectionKey?.let { breakpoints.invalidateConnection(it, "connection closed while paused") }
                 },
                 clientToUpstream = clientToUpstream,
                 upstreamToClient = upstreamToClient,
             )
+            connectionKey?.let { breakpoints.invalidateConnection(it, "connection closed while paused") }
             relayPool.metrics.addBytesToUpstream(sent.get())
             relayPool.metrics.addBytesToClient(received.get())
 
@@ -839,6 +984,19 @@ class MitmProxyEngine(
     }
 
     private val injectedUidAttributor = uidAttributor
+    @Volatile private var safetyBinding: kotlinx.coroutines.Job? = null
+
+    /**
+     * S4 task 33: the client uid for the safety gate's selection check, resolved once per
+     * connection and only when the policy actually restricts to a selection (attribution reads
+     * /proc or ConnectivityManager). Null when unknown -- the gate treats that as allowed.
+     */
+    private fun clientUidForSafety(context: Context, client: Socket, origin: ClientOrigin?): Int? {
+        if (!safetyGate.policy.value.restrictToSelection) return null
+        return runCatching {
+            uidAttributor(context).attribute(UidAttributor.Flow(origin = origin, clientSocket = client, destination = null)).uidOrNull
+        }.getOrNull()
+    }
     private fun uidAttributor(context: Context): UidAttributor = injectedUidAttributor ?: UidAttributor.shared(context)
 
     // ── WebSocket mode switch (§4/§5) ────────────────────────────────────
@@ -905,12 +1063,14 @@ class MitmProxyEngine(
         clientWriteLock: Any,
         host: String,
         port: Int,
-        pending: ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>,
+        pending: ConcurrentLinkedQueue<PendingExchange>,
         bytesSentToUpstream: AtomicLong,
         logRequests: Boolean,
         logResponses: Boolean,
         wsState: ConnectionProtocolState,
         timing: ConnectionTimingTracker? = null,
+        mirror: MirrorStage.Plan? = null,
+        clientUid: Int? = null,
     ) {
         val buffer = ByteArrayOutputStream()
         val wsBuffer = ByteArrayOutputStream()
@@ -971,7 +1131,7 @@ class MitmProxyEngine(
                         bytes = bytes.copyOfRange(parsed.consumedBytes, bytes.size)
                         handleParsedRequest(
                             db, parsed, raw, upstream, clientOut, clientWriteLock, pending,
-                            host, port, logRequests, logResponses, timing,
+                            host, port, logRequests, logResponses, timing, mirror, clientUid,
                         )
                         buffer.reset()
                         buffer.write(bytes)
@@ -1025,7 +1185,7 @@ class MitmProxyEngine(
         upstream: LazyUpstreamConnection,
         clientOut: OutputStream,
         clientWriteLock: Any,
-        pending: ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>,
+        pending: ConcurrentLinkedQueue<PendingExchange>,
         host: String,
         port: Int,
         bytesReceivedFromUpstream: AtomicLong,
@@ -1085,8 +1245,8 @@ class MitmProxyEngine(
                 while (!waitingForMore && bytes.isNotEmpty()) {
                     val response = HttpParser.tryParseResponse(
                         bytes,
-                        pending.peek()?.first?.url,
-                        pending.peek()?.first?.method,
+                        pending.peek()?.request?.url,
+                        pending.peek()?.request?.method,
                     )
                     if (response == null) {
                         if (!couldBecomeHttpResponse(bytes) || bytes.size > relayPool.buffers.flowCapBytes) {
@@ -1121,11 +1281,52 @@ class MitmProxyEngine(
     // ── Rule enforcement (post-parse) ───────────────────────────────────
 
     /**
-     * `internal` (not `private`), same rationale as [emitTransaction]: this is where
-     * MOCK_RESPONSE's short-circuit (§1.5) actually happens, and asserting "never dials
-     * upstream / never enqueues into `pending`" needs direct access to a fake/instrumented
+     * S4 task 26: one in-flight exchange on an HTTP/1.x MITM connection -- the parsed request,
+     * when it was sent upstream, and the [RuleDecision] the request leg evaluated ONCE against
+     * the immutable [RuleSnapshot]. The response leg reuses that decision (never re-evaluates,
+     * never touches a DAO) and appends its own records to the same [FlowAuditTrail], so the
+     * persisted `applied_rules` rows tell the whole story of the flow in one place.
+     *
+     * `decision` is nullable purely as a test seam: a test that drives only the response leg
+     * enqueues a bare exchange and the response leg evaluates lazily on first use.
+     */
+    class PendingExchange(
+        val request: ParsedHttpMessage,
+        val sentAt: Long,
+        decision: RuleDecision? = null,
+        val trail: FlowAuditTrail = FlowAuditTrail(),
+        /** S4 task 28: the connection's mirror plan, so the response can be attributed to it. */
+        val mirror: MirrorStage.Plan? = null,
+        /** S4 task 32: `context.shared` written by `onRequest`, read back by `onResponse` of the same flow. */
+        val scriptShared: MutableMap<String, String> = LinkedHashMap(),
+        /** S4 task 32: one id per flow for script audit/console records. */
+        val flowId: String = java.util.UUID.randomUUID().toString(),
+    ) {
+        @Volatile var decision: RuleDecision? = decision
+    }
+
+    /** The matcher input for a parsed HTTP/1.x message on a `host:port` MITM connection. */
+    private fun flowKeyFor(request: ParsedHttpMessage, host: String, port: Int): FlowKey = FlowKey(
+        host = request.host.ifEmpty { host },
+        port = port,
+        url = request.url,
+        method = request.method?.name,
+        headers = request.headers,
+    )
+
+    /**
+     * `internal` (not `private`), same rationale as [emitTransaction]: this is where a MOCK
+     * rule's short-circuit (§1.5) actually happens, and asserting "never dials upstream /
+     * never enqueues into `pending`" needs direct access to a fake/instrumented
      * [LazyUpstreamConnection] and `pending` without standing up a real TLS/socket pair
      * end-to-end.
+     *
+     * S4 task 26: rules are applied as an ordered pipeline over ONE [RuleDecision] (see
+     * [RulePipeline]) instead of a single first-match legacy action:
+     * gateway BLOCK → rewrite (redirect → replacement → modifications) → scripts → mock →
+     * body crypto → chaos fail die → forward. Every step records what it did in the flow's
+     * [FlowAuditTrail]; the trail rides along in [PendingExchange] and is persisted as
+     * `applied_rules` rows with the transaction.
      */
     internal fun handleParsedRequest(
         db: RequestrDatabase,
@@ -1134,141 +1335,353 @@ class MitmProxyEngine(
         upstream: LazyUpstreamConnection,
         clientOut: OutputStream,
         clientWriteLock: Any,
-        pending: ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>,
+        pending: ConcurrentLinkedQueue<PendingExchange>,
         host: String,
         port: Int,
         logRequests: Boolean,
         logResponses: Boolean,
         timing: ConnectionTimingTracker? = null,
+        mirror: MirrorStage.Plan? = null,
+        clientUid: Int? = null,
     ) {
-        val rule = RuleEnforcer.getMatchingRule(db, request.url, request.host)
-        val bytesToForward: ByteArray = when (rule?.action ?: RuleAction.LOG_ONLY) {
-            RuleAction.BLOCK -> {
-                Log.i(TAG, "BLOCKED (decrypted): ${request.method?.name} ${request.url.take(80)}")
-                synchronized(clientWriteLock) {
-                    clientOut.write(
-                        "HTTP/1.1 403 Blocked by requestr\r\nContent-Length: 0\r\n\r\n".toByteArray()
-                    )
-                    clientOut.flush()
-                }
-                // Dropped: never forwarded upstream, never enqueued for pairing. Returns here
-                // rather than falling through to the shared forward tail below -- this is the
-                // real exception to that otherwise-identical connect/enqueue/write/flush path.
-                return
+        val trail = FlowAuditTrail()
+        val decision = evaluateRequestDecision(request, host, port, trail, clientUid)
+        val what = "${request.method?.name} ${request.url.take(80)}"
+
+        /** Serve a synthetic response ourselves, never dialing upstream, and persist the pair. */
+        fun shortCircuit(response: ParsedHttpMessage, logLine: String) {
+            synchronized(clientWriteLock) {
+                clientOut.write(serializeResponse(response))
+                clientOut.flush()
             }
-            RuleAction.MOCK_RESPONSE -> {
-                // §1.5: short-circuit here, same shape as BLOCK above -- never dials upstream,
-                // never enqueues into `pending` (there is no real response coming to pair with
-                // it), and writes a synthesized response straight back to the client instead.
-                // RuleEnforcer.buildMockResponse is shared with the CDP fetch-interception path
-                // (CdpFetchAdapter) -- same replacementValue schema, one config format either way.
-                val mockResponse = RuleEnforcer.buildMockResponse(rule?.replacementValue, request.url)
-                synchronized(clientWriteLock) {
-                    clientOut.write(serializeResponse(mockResponse))
-                    clientOut.flush()
-                }
-                Log.i(TAG, "MOCKED (decrypted): ${request.method?.name} ${request.url.take(80)} -> ${mockResponse.statusCode}")
-                // Still surfaced as a captured transaction (0ms latency -- no real round trip
-                // happened) so a mocked request is not invisible in the traffic list.
-                emitTransaction(request, mockResponse, 0L, "$host:$port", logRequests, logResponses)
-                // Same reasoning as BLOCK above: return here rather than reaching the shared
-                // forward tail, since this path never forwards anything upstream.
-                return
-            }
-            RuleAction.CHAOS -> {
-                // Master plan §3 LOW-ADD: the `failRate` die is rolled HERE, before upstream is
-                // ever dialed, so an injected failure really behaves like an unreachable server
-                // -- the request never reaches the backend (no real side effect), the client gets
-                // the synthetic 503 (or the rule's failStatusCode), and the exchange is still
-                // persisted (0ms, stamped x-requestr-chaos) so it is not invisible in the list.
-                // Same short-circuit shape as BLOCK / MOCK_RESPONSE above. The corrupt/delay dice
-                // are rolled on the real response in handleParsedResponse.
-                val chaos = rule?.let { RuleEnforcer.applyChaosToRequest(it, chaosRandom) }
-                if (chaos is RuleEnforcer.ChaosApplyResult.Fail) {
-                    synchronized(clientWriteLock) {
-                        clientOut.write(serializeResponse(chaos.failureResponse))
-                        clientOut.flush()
-                    }
-                    Log.i(TAG, "CHAOS fail (decrypted): ${request.method?.name} ${request.url.take(80)} -> ${chaos.failureResponse.statusCode}")
-                    emitTransaction(request, chaos.failureResponse, 0L, "$host:$port", logRequests, logResponses)
-                    return
-                }
-                raw
-            }
-            RuleAction.REDIRECT -> {
-                if (rule?.replacementValue?.isNotBlank() == true) {
-                    request.url = rule.replacementValue!!
-                    runCatching { java.net.URI(request.url).host?.let { request.host = it } }
-                    val headers = request.headers.toMutableMap()
-                    headers["host"] = request.host
-                    request.headers = headers
-                }
-                serializeRequest(request)
-            }
-            RuleAction.MODIFY_REQUEST -> {
-                rule?.replacementValue?.let { RuleEnforcer.applyRequestModification(request, it) }
-                serializeRequest(request)
-            }
-            RuleAction.SCRIPT_REWRITE -> {
-                val scriptError = RuleEnforcer.applyScriptRewrite(request, rule?.replacementValue)
-                val bytes = serializeRequest(request)
-                if (scriptError != null && rule != null) {
-                    // Added AFTER serialization on purpose: this diagnostic must reach the
-                    // persisted row (emitTransaction keeps x-requestr-* request headers even with
-                    // request logging off) but must never be sent to the origin server.
-                    request.headers = request.headers +
-                        (RuleEnforcer.SCRIPT_ERROR_HEADER to RuleEnforcer.scriptErrorHeaderValue(scriptError, rule.name))
-                }
-                bytes
-            }
-            RuleAction.BODY_ENCRYPT_AES, RuleAction.BODY_DECRYPT_AES -> {
-                val cryptoResult = rule?.let {
-                    RuleEnforcer.applyBodyCrypto(request, it, encrypt = it.action == RuleAction.BODY_ENCRYPT_AES)
-                }
-                if (cryptoResult is RuleEnforcer.CryptoApplyResult.Failed) {
-                    // Security audit fix (fail-open AES crypto): never forward the
-                    // untransformed request -- for BODY_ENCRYPT_AES that would be exactly the
-                    // plaintext the rule was supposed to encrypt. Same short-circuit shape as
-                    // BLOCK above: the real request never reaches upstream, and the client (and
-                    // the captured-traffic UI) see a visibly-failed transaction rather than one
-                    // that looks like it succeeded.
-                    val failureResponse = RuleEnforcer.buildCryptoFailureResponse(
-                        ruleName = rule!!.name,
-                        encrypt = rule.action == RuleAction.BODY_ENCRYPT_AES,
-                        reason = cryptoResult.reason,
-                    )
-                    synchronized(clientWriteLock) {
-                        clientOut.write(serializeResponse(failureResponse))
-                        clientOut.flush()
-                    }
-                    Log.w(TAG, "BLOCKED (crypto failure): ${request.method?.name} ${request.url.take(80)}")
-                    emitTransaction(request, failureResponse, 0L, "$host:$port", logRequests, logResponses)
-                    return
-                }
-                serializeRequest(request)
-            }
-            else -> raw // LOG_ONLY / response-only actions — forward the exact original bytes
+            Log.i(TAG, "$logLine (decrypted): $what")
+            emitTransaction(
+                request, response, 0L, "$host:$port", logRequests, logResponses,
+                headers = ProtocolRows.headerRows(request, response, logRequests, logResponses, metadataKeys = RuleMetadataHeaders.KEYS),
+                appliedRules = trail,
+            )
         }
 
-        // §1.5 MUST-FIX: connect (or reuse) lazily -- this is the first point in the whole
-        // client→server pipeline where a REDIRECT/MODIFY_REQUEST/LOG_ONLY request actually
-        // needs the network. BLOCK and MOCK_RESPONSE both `return` above without ever reaching
-        // this shared tail -- they are the real exceptions to it, not just two more branches
-        // that happen to look similar.
-        val upstreamOut = connectOrThrow(db, upstream, host, port)
-        val sendStartedAt = System.currentTimeMillis()
-        pending.add(request to sendStartedAt)
-        upstreamOut.write(bytesToForward)
-        upstreamOut.flush()
-        // S2 task 18: sendMs is exactly the write+flush above; the response leg measures the rest.
-        timing?.onRequestSent(request, sendStartedAt)
+        val flow = FlowContext()
+        when (val outcome = runRequestStages(request, decision, trail, mirror, flow, connectionKeyOf(pending), host, port)) {
+            is RequestStages.Respond -> {
+                if (outcome.persist) {
+                    shortCircuit(outcome.response, outcome.logLine)
+                } else {
+                    // Legacy BLOCK parity: answered, never persisted.
+                    synchronized(clientWriteLock) {
+                        clientOut.write(serializeResponse(outcome.response))
+                        clientOut.flush()
+                    }
+                }
+                return
+            }
+            is RequestStages.Forward -> {
+                val bytesToForward = if (outcome.modified) serializeRequest(request) else raw
+                // Persist-only: the script-error badge / breakpoint stamp must not leak to the origin.
+                outcome.stampPersistOnly(request)
+                val upstreamOut = connectOrThrow(db, upstream, host, port)
+                val sendStartedAt = System.currentTimeMillis()
+                pending.add(PendingExchange(request, sendStartedAt, decision, trail, mirror, flow.scriptShared, flow.flowId))
+                upstreamOut.write(bytesToForward)
+                upstreamOut.flush()
+                // S2 task 18: request fully written -> the send phase ends and the wait phase begins.
+                timing?.onRequestSent(request, sendStartedAt)
+            }
+        }
+    }
+
+    // ── S4 task 35: transport-agnostic stage sequence (HTTP/1.x relay + terminated h2) ──────
+
+    /** Per-flow state the request leg creates and the response leg of the same flow reads back. */
+    internal class FlowContext(
+        /** S4 task 32: one id per flow for script audit/console records. */
+        val flowId: String = java.util.UUID.randomUUID().toString(),
+        /** S4 task 32: `context.shared` written by `onRequest`, read back by `onResponse` of the same flow. */
+        val scriptShared: MutableMap<String, String> = LinkedHashMap(),
+    )
+
+    /** What the request leg decided, independent of how the message is framed on the wire. */
+    internal sealed class RequestStages {
+        /**
+         * Forward to the origin. [modified] means the message must be re-serialized; the
+         * persist-only badges (script errors, breakpoint stamp) are applied by [stampPersistOnly]
+         * AFTER serialization so they reach the captured row but never the origin.
+         */
+        class Forward(val modified: Boolean, private val stamps: List<(ParsedHttpMessage) -> Unit>) : RequestStages() {
+            fun stampPersistOnly(request: ParsedHttpMessage) = stamps.forEach { it(request) }
+        }
+
+        /** Answer [response] ourselves; the origin is never dialed. [persist] false = legacy BLOCK parity. */
+        class Respond(val response: ParsedHttpMessage, val logLine: String, val persist: Boolean = true) : RequestStages()
+    }
+
+    /** What the response leg decided; [chaosDelayMs] is served by the caller before writing. */
+    internal class ResponseStages(val responseToEmit: ParsedHttpMessage, val modified: Boolean, val chaosDelayMs: Long)
+
+    /**
+     * S4 task 33 (D3): evaluate the snapshot for [request] and run the safety gate before any
+     * stage -- a refused flow keeps only its gateway/throttle/observe slots and carries a
+     * REFUSED_SAFETY record per mutating rule. The decision is recorded on [trail].
+     */
+    internal fun evaluateRequestDecision(request: ParsedHttpMessage, host: String, port: Int, trail: FlowAuditTrail, clientUid: Int?): RuleDecision {
+        val phase = FlowAuditTrail.Phase.REQUEST
+        val decision = safetyGate.screen(
+            RulePipeline.evaluate(ruleSnapshot(), flowKeyFor(request, host, port)),
+            phase, trail, clientUid = clientUid,
+        )
+        trail.recordDecision(decision, phase)
+        return decision
     }
 
     /**
+     * S4 task 26/35: the request-leg pipeline over ONE [RuleDecision]:
+     * gateway BLOCK → mirror host header → rewrite (redirect → replacement → modifications) →
+     * breakpoint → scripts → mock → body crypto → chaos fail die → forward. Every step records
+     * what it did on [trail]. Identical for HTTP/1.x and translated h2 -- only framing differs.
+     */
+    internal fun runRequestStages(
+        request: ParsedHttpMessage,
+        decision: RuleDecision,
+        trail: FlowAuditTrail,
+        mirror: MirrorStage.Plan?,
+        flow: FlowContext,
+        connectionKey: String,
+        host: String,
+        port: Int,
+    ): RequestStages {
+        val phase = FlowAuditTrail.Phase.REQUEST
+        val what = "${request.method?.name} ${request.url.take(80)}"
+
+        // 1. Gateway: an HTTP-level BLOCK (or the implied block of an ALLOW_ONLY set that
+        //    nothing matched) answers 403 and never dials upstream. Legacy BLOCK parity: the
+        //    exchange is not persisted unless the rule opts in via showBlockedInList.
+        val gateway = decision.gateway
+        if (gateway.blocks) {
+            var showInList = false
+            when (gateway) {
+                is GatewayOutcome.Apply -> {
+                    trail.applied(gateway.rule, phase, "blocked")
+                    showInList = gateway.config.showBlockedInList
+                }
+                is GatewayOutcome.ImpliedBlock ->
+                    gateway.allowOnlyRules.forEach { trail.applied(it, phase, "implied block: not in allow-list") }
+                GatewayOutcome.Pass -> Unit
+            }
+            Log.i(TAG, "BLOCKED (decrypted): $what")
+            val blocked = ParsedHttpMessage(
+                isRequest = false, method = null, url = request.url, path = request.path, host = request.host, port = port,
+                version = "HTTP/1.1", statusCode = 403, statusMessage = "Blocked by requestr",
+                headers = mapOf("Content-Length" to "0"), body = "",
+            )
+            return RequestStages.Respond(blocked, "BLOCKED", persist = showInList)
+        }
+
+        var modified = false
+        // S4 task 28: MIRROR hostPolicy -- present the mirror's (or the CONNECT) authority in
+        // `Host:` before any rewrite, so a rewrite that sets Host explicitly still wins.
+        if (mirror != null && MirrorStage.applyHostHeader(request, mirror, trail)) {
+            modified = true
+        }
+        // 2. Rewrite: redirection → whole-message replacement → modifications, in rule order.
+        if (decision.rewrite.hasRequestWork) {
+            RewriteStage.applyRequest(request, decision.rewrite, trail)
+            Log.i(TAG, "REWRITE request (decrypted): $what")
+            modified = true
+        }
+        // 2b. Breakpoint (S4 task 31): park THIS flow on its own relay thread until the operator
+        //     resumes / edits / aborts it, or the rule's timeout auto-resumes it. Fail-open when
+        //     the 8-slot queue is full.
+        var breakpointStamp: Pair<RuleRef, String>? = null
+        decision.breakpoint?.takeIf { breakpointsEnabled && BreakpointStage.applies(it.config, phase) }?.let { bp ->
+            when (val outcome = BreakpointStage.pause(breakpoints, bp.rule, bp.config, phase, request, host, trail, connectionKey = connectionKey)) {
+                is BreakpointStage.Outcome.Forward -> {
+                    if (outcome.changed) modified = true
+                    breakpointStamp = bp.rule to outcome.actionName // persisted row only, stamped after serialization
+                }
+                is BreakpointStage.Outcome.Aborted ->
+                    return RequestStages.Respond(BreakpointStage.abortResponse(bp.rule, outcome.reason, request.version), "ABORTED at breakpoint")
+                is BreakpointStage.Outcome.Skipped -> Unit
+            }
+        }
+        // 3. Scripts: pm.request.* mutations. The error header (if any) is stamped AFTER
+        //    serialization so it reaches the captured row but never the origin server.
+        val scripts = ScriptStage.apply(request, decision.scripts, phase, trail, stampErrorHeader = false, flowId = flow.flowId, shared = flow.scriptShared)
+        if (scripts.changed) modified = true
+        fun stampScriptErrors() = scripts.errors.forEach { (error, ruleName) -> ScriptStage.stampError(request, error, ruleName) }
+        scripts.abortedBy?.let { ruleName ->
+            return RequestStages.Respond(ScriptStage.abortResponse(ruleName, request.version), "ABORTED by script")
+        }
+        // 4. Mock: short-circuit with a synthesized response; upstream is never dialed.
+        decision.mock?.let { mock ->
+            val mockResponse = MockStage.build(mock.config, request.url, request.method?.name, request.headers)
+            trail.applied(mock.rule, phase, "mock ${mockResponse.statusCode}")
+            stampScriptErrors()
+            return RequestStages.Respond(mockResponse, "MOCKED ${mockResponse.statusCode}")
+        }
+        // 5. Body crypto: fail closed -- a rule that cannot transform the body answers 502
+        //    itself rather than forwarding plaintext the rule was supposed to protect.
+        decision.bodyCrypto?.let { crypto ->
+            when (val result = BodyCryptoStage.apply(request, crypto.config, crypto.rule.name)) {
+                BodyCryptoStage.Result.Applied -> {
+                    trail.applied(crypto.rule, phase, crypto.config.direction.name.lowercase())
+                    modified = true
+                }
+                is BodyCryptoStage.Result.Failed -> {
+                    trail.failed(crypto.rule, phase, result.reason)
+                    stampScriptErrors()
+                    return RequestStages.Respond(
+                        BodyCryptoStage.failureResponse(crypto.rule.name, crypto.config.direction, result.reason),
+                        "BLOCKED (${crypto.config.direction.name.lowercase()} failed: ${result.reason})",
+                    )
+                }
+                BodyCryptoStage.Result.NotApplicable -> Unit
+            }
+        }
+        // 6. Chaos: the fail die is rolled before dialing, so a failed exchange never reaches
+        //    the origin (delay / corrupt-body are response-leg outcomes).
+        decision.chaos?.let { chaos ->
+            val roll = ChaosStage.applyToRequest(chaos.config, chaos.rule.name, chaosRandom)
+            if (roll is ChaosStage.Result.Fail) {
+                trail.applied(chaos.rule, phase, "fail ${roll.failureResponse.statusCode}")
+                stampScriptErrors()
+                return RequestStages.Respond(roll.failureResponse, "CHAOS fail ${roll.failureResponse.statusCode}")
+            }
+        }
+
+        // S4 task 30: the connection-level shaper (built at CONNECT from the same decision) paces
+        // this exchange's bytes; attribute it on the persisted row too, not only the connect trail.
+        decision.throttle?.let { throttle ->
+            val shape = ThrottleStage.resolve(throttle.config)
+            if (!shape.isNoop) trail.applied(throttle.rule, phase, "throttle ${shape.describe()}")
+        }
+        val stamps = ArrayList<(ParsedHttpMessage) -> Unit>(scripts.errors.size + 1)
+        scripts.errors.forEach { (error, ruleName) -> stamps += { m -> ScriptStage.stampError(m, error, ruleName) } }
+        breakpointStamp?.let { (rule, action) -> stamps += { m -> BreakpointStage.stamp(m, rule, action) } }
+        if (!modified && decision.isEmpty) Log.d(TAG, "FORWARD (decrypted): $what")
+        return RequestStages.Forward(modified, stamps)
+    }
+
+    /**
+     * S4 task 26/35: the response leg applies the SAME decision the request leg evaluated
+     * (mirror attribution → rewrite → breakpoint → scripts → body crypto → chaos) and appends to
+     * the same audit trail. [responseTimeMs] feeds `pm.response.responseTime`.
+     */
+    internal fun runResponseStages(
+        response: ParsedHttpMessage,
+        request: ParsedHttpMessage,
+        decision: RuleDecision,
+        trail: FlowAuditTrail,
+        mirror: MirrorStage.Plan?,
+        flow: FlowContext,
+        responseTimeMs: Long,
+        connectionKey: String,
+        host: String,
+    ): ResponseStages {
+        val phase = FlowAuditTrail.Phase.RESPONSE
+        val what = "${request.method?.name} ${request.url.take(80)}"
+        var modified = false
+        var cryptoFailed = false
+        var chaosDelayMs = 0L
+        // Security audit fix (fail-open AES crypto): what actually gets persisted/shown in the
+        // UI for this transaction. Defaults to the real [response]; overridden below to a
+        // synthetic failure response when a body-crypto rule fails, so the client and the
+        // captured-traffic list both see a visibly-failed transaction rather than the
+        // untransformed body forwarded as if it had succeeded.
+        var responseToEmit = response
+        // S4 task 28: attribute a mirrored exchange (persisted row + client see the target).
+        mirror?.let { plan ->
+            MirrorStage.stampAttribution(response, plan)
+            trail.applied(plan.rule, phase, "mirrored from ${plan.target}")
+            modified = true
+        }
+        if (decision.rewrite.hasResponseWork) {
+            RewriteStage.applyResponse(response, decision.rewrite, trail)
+            Log.i(TAG, "REWRITE response (decrypted): $what")
+            modified = true
+        }
+        // S4 task 31: response-side pause point (after rewrite, before scripts). An abort
+        // here answers the client with the synthetic 499 instead of the origin's response.
+        var aborted = false
+        decision.breakpoint?.takeIf { breakpointsEnabled && BreakpointStage.applies(it.config, phase) }?.let { bp ->
+            when (val outcome = BreakpointStage.pause(breakpoints, bp.rule, bp.config, phase, response, host, trail, connectionKey = connectionKey)) {
+                is BreakpointStage.Outcome.Forward -> {
+                    BreakpointStage.stamp(response, bp.rule, outcome.actionName)
+                    modified = true
+                }
+                is BreakpointStage.Outcome.Aborted -> {
+                    Log.i(TAG, "ABORTED at breakpoint (decrypted): $what")
+                    responseToEmit = BreakpointStage.abortResponse(bp.rule, outcome.reason, response.version)
+                    modified = true
+                    aborted = true
+                }
+                is BreakpointStage.Outcome.Skipped -> Unit
+            }
+        }
+        // On the wire AND persisted: the client under test can see the rewrite did not
+        // happen, and the traffic list badges the row instead of logcat-only.
+        val scripts = if (aborted) ScriptStage.Result.NONE
+        else ScriptStage.apply(response, decision.scripts, phase, trail, responseTimeMs, flowId = flow.flowId, shared = flow.scriptShared)
+        if (scripts.changed) modified = true
+        scripts.abortedBy?.let { ruleName ->
+            responseToEmit = ScriptStage.abortResponse(ruleName, response.version)
+            modified = true
+            aborted = true
+        }
+        if (aborted) cryptoFailed = true // skip crypto + chaos below: nothing of the origin's body is forwarded
+        decision.bodyCrypto?.takeIf { !aborted }?.let { crypto ->
+            when (val result = BodyCryptoStage.apply(response, crypto.config, crypto.rule.name)) {
+                BodyCryptoStage.Result.Applied -> {
+                    trail.applied(crypto.rule, phase, crypto.config.direction.name.lowercase())
+                    modified = true
+                }
+                is BodyCryptoStage.Result.Failed -> {
+                    // The real request already went out and a real response came back -- that
+                    // round trip cannot be undone. What can still be stopped is forwarding the
+                    // untransformed response body to the client: for DECRYPT that would be the
+                    // raw ciphertext the rule was supposed to decrypt, silently passed through
+                    // looking like a normal successful response.
+                    trail.failed(crypto.rule, phase, result.reason)
+                    responseToEmit = BodyCryptoStage.failureResponse(crypto.rule.name, crypto.config.direction, result.reason)
+                    modified = true
+                    cryptoFailed = true
+                }
+                BodyCryptoStage.Result.NotApplicable -> Unit
+            }
+        }
+        if (!cryptoFailed) {
+            decision.chaos?.let { chaos ->
+                when (val roll = ChaosStage.applyToResponse(response, chaos.config, chaos.rule.name, chaosRandom)) {
+                    ChaosStage.Result.Applied -> {
+                        Log.i(TAG, "CHAOS corrupt-body (decrypted): $what")
+                        trail.applied(chaos.rule, phase, "corrupt-body")
+                        modified = true
+                    }
+                    is ChaosStage.Result.Delay -> {
+                        Log.i(TAG, "CHAOS delay ${roll.millis}ms (decrypted): $what")
+                        trail.applied(chaos.rule, phase, "delay ${roll.millis}ms")
+                        chaosDelayMs = roll.millis
+                        modified = true // carries the x-requestr-chaos header
+                    }
+                    // Fail is only ever produced on the request leg; PassThrough forwards raw.
+                    is ChaosStage.Result.Fail, ChaosStage.Result.PassThrough -> Unit
+                }
+            }
+        }
+        return ResponseStages(responseToEmit, modified, chaosDelayMs)
+    }
+
+    /** Serves a CHAOS delay on the calling thread (test seam: see the `chaosSleep` constructor param). */
+    internal fun serveChaosDelay(millis: Long) { if (millis > 0L) chaosSleep(millis) }
+
+    /**
      * `internal` (not `private`), same rationale as [handleParsedRequest]/[emitTransaction]:
-     * asserting the BODY_ENCRYPT_AES/BODY_DECRYPT_AES fail-closed contract (security audit fix)
-     * needs direct access to drive a synthesized response through this function with fake
-     * streams, without standing up a real TLS/socket pair end-to-end.
+     * asserting the body-crypto fail-closed contract (security audit fix) needs direct access
+     * to drive a synthesized response through this function with fake streams, without
+     * standing up a real TLS/socket pair end-to-end.
+     *
+     * S4 task 26: the response leg applies the SAME decision the request leg evaluated
+     * (rewrite → scripts → body crypto → chaos) and appends to the same audit trail.
      */
     internal fun handleParsedResponse(
         db: RequestrDatabase,
@@ -1276,7 +1689,7 @@ class MitmProxyEngine(
         raw: ByteArray,
         clientOut: OutputStream,
         clientWriteLock: Any,
-        pending: ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>,
+        pending: ConcurrentLinkedQueue<PendingExchange>,
         host: String,
         port: Int,
         logRequests: Boolean,
@@ -1294,81 +1707,55 @@ class MitmProxyEngine(
             }
             return
         }
-        val pair = pending.poll()
-        val request = pair?.first
+        val exchange = pending.poll()
+        val request = exchange?.request
         // S2 task 18: the response is complete at this instant -- before any CHAOS delay below,
         // which is requestr's own doing and belongs in latencyMs, not in the measured phases.
         val measured = if (request != null) timing?.completeResponse(request) else null
         var out = raw
         // Security audit fix (fail-open AES crypto): what actually gets persisted/shown in the
         // UI for this transaction. Defaults to the real [response]; overridden below to a
-        // synthetic failure response when a BODY_ENCRYPT_AES/BODY_DECRYPT_AES rule fails, so the
-        // client and the captured-traffic list both see a visibly-failed transaction rather than
-        // the untransformed body forwarded as if it had succeeded.
+        // synthetic failure response when a body-crypto rule fails, so the client and the
+        // captured-traffic list both see a visibly-failed transaction rather than the
+        // untransformed body forwarded as if it had succeeded.
         var responseToEmit = response
         // Master plan §3 LOW-ADD (CHAOS delay): served AFTER the rule block and BEFORE taking
         // clientWriteLock, so only this connection's server→client relay thread stalls and the
         // client-observed latency persisted below honestly includes the injected delay.
         var chaosDelayMs = 0L
-        if (request != null) {
-            val rule = RuleEnforcer.getMatchingRule(db, request.url, request.host)
-            if (rule?.action == RuleAction.CHAOS) {
-                when (val chaos = RuleEnforcer.applyChaosToResponse(response, rule, chaosRandom)) {
-                    is RuleEnforcer.ChaosApplyResult.Applied -> {
-                        Log.i(TAG, "CHAOS corrupt-body (decrypted): ${request.method?.name} ${request.url.take(80)}")
-                        out = serializeResponse(response)
-                    }
-                    is RuleEnforcer.ChaosApplyResult.Delay -> {
-                        Log.i(TAG, "CHAOS delay ${chaos.millis}ms (decrypted): ${request.method?.name} ${request.url.take(80)}")
-                        chaosDelayMs = chaos.millis
-                        out = serializeResponse(response) // carries the x-requestr-chaos header
-                    }
-                    // Fail is only ever produced on the request leg; PassThrough forwards raw.
-                    is RuleEnforcer.ChaosApplyResult.Fail, RuleEnforcer.ChaosApplyResult.PassThrough -> Unit
+        if (exchange != null && request != null) {
+            val decision = exchange.decision
+                ?: safetyGate.screen(
+                    RulePipeline.evaluate(ruleSnapshot(), flowKeyFor(request, host, port)),
+                    FlowAuditTrail.Phase.REQUEST, exchange.trail,
+                ).also {
+                    exchange.decision = it
+                    exchange.trail.recordDecision(it, FlowAuditTrail.Phase.REQUEST)
                 }
-            } else if (rule?.action == RuleAction.MODIFY_RESPONSE) {
-                rule.replacementValue?.let { RuleEnforcer.applyResponseModification(response, it) }
-                out = serializeResponse(response)
-            } else if (rule?.action == RuleAction.SCRIPT_REWRITE) {
-                val scriptError = RuleEnforcer.applyScriptRewrite(response, rule.replacementValue)
-                if (scriptError != null) {
-                    // On the wire AND persisted: the client under test can see the rewrite did
-                    // not happen, and the traffic list badges the row instead of logcat-only.
-                    response.headers = response.headers +
-                        (RuleEnforcer.SCRIPT_ERROR_HEADER to RuleEnforcer.scriptErrorHeaderValue(scriptError, rule.name))
-                }
-                out = serializeResponse(response)
-            } else if (rule?.action == RuleAction.BODY_ENCRYPT_AES || rule?.action == RuleAction.BODY_DECRYPT_AES) {
-                val cryptoResult = RuleEnforcer.applyBodyCrypto(response, rule, encrypt = rule.action == RuleAction.BODY_ENCRYPT_AES)
-                if (cryptoResult is RuleEnforcer.CryptoApplyResult.Failed) {
-                    // The real request already went out and a real response came back -- that
-                    // round trip cannot be undone. What can still be stopped is forwarding the
-                    // untransformed response body to the client: for BODY_DECRYPT_AES that would
-                    // be the raw ciphertext the rule was supposed to decrypt, silently passed
-                    // through looking like a normal successful response.
-                    responseToEmit = RuleEnforcer.buildCryptoFailureResponse(
-                        ruleName = rule.name,
-                        encrypt = rule.action == RuleAction.BODY_ENCRYPT_AES,
-                        reason = cryptoResult.reason,
-                    )
-                    out = serializeResponse(responseToEmit)
-                } else {
-                    out = serializeResponse(response)
-                }
-            }
+            // Task 32 wiring: pm.response.responseTime is the measured wait+receive when the
+            // timing tracker observed it, else wall-clock since the request was sent.
+            val responseTimeMs = measured?.totalMs ?: (System.currentTimeMillis() - exchange.sentAt)
+            val stages = runResponseStages(
+                response, request, decision, exchange.trail, exchange.mirror,
+                FlowContext(exchange.flowId, exchange.scriptShared), responseTimeMs, connectionKeyOf(pending), host,
+            )
+            responseToEmit = stages.responseToEmit
+            chaosDelayMs = stages.chaosDelayMs
+            if (stages.modified) out = serializeResponse(responseToEmit)
         }
         if (chaosDelayMs > 0L) chaosSleep(chaosDelayMs)
         synchronized(clientWriteLock) {
             clientOut.write(out)
             clientOut.flush()
         }
-        if (request != null) {
-            val latencyMs = System.currentTimeMillis() - pair!!.second
+        if (exchange != null && request != null) {
+            val latencyMs = System.currentTimeMillis() - exchange.sentAt
             val handle = emitTransaction(
                 request, responseToEmit, latencyMs, "$host:$port", logRequests, logResponses, timings = measured,
                 headers = ProtocolRows.headerRows(
-                    request, responseToEmit, logRequests, logResponses, metadataKeys = RuleEnforcer.METADATA_HEADER_KEYS,
+                    request, responseToEmit, logRequests, logResponses, metadataKeys = RuleMetadataHeaders.KEYS,
                 ),
+                appliedRules = exchange.trail,
             )
             // S3 task 20: a text/event-stream response's events become `sse_events` children of
             // this row. The HTTP/1.x relay hands over the response once its framing completes,
@@ -1416,6 +1803,8 @@ class MitmProxyEngine(
         timings: TransactionTimingEntity? = null,
         /** S3 task 20: wire-ordered `transaction_headers` rows; empty when the caller has none. */
         headers: List<TransactionHeaderEntity> = emptyList(),
+        /** S4 task 26: the flow's rule provenance; persisted as `applied_rules` rows under this row. */
+        appliedRules: FlowAuditTrail? = null,
     ): RowHandle? {
         // Binary-body persistence (image gallery / hex viewer support): [HttpBodyDecoder.forStorage]
         // is the single source of truth for what to write to the *BodyBytes/isXBodyBinary/
@@ -1433,13 +1822,19 @@ class MitmProxyEngine(
             // requestr's own metadata about what IT did to this exchange is kept even when header
             // logging is off, so the CHAOS / SCRIPT ERROR / crypto-failed badges never silently
             // disappear with that toggle. Matched against the closed
-            // RuleEnforcer.METADATA_HEADER_KEYS allow-list rather than an `x-requestr-` prefix: a
+            // RuleMetadataHeaders.KEYS allow-list rather than an `x-requestr-` prefix: a
             // prefix match would also retain a header the client app under test happened to send
             // with that prefix, and client content is precisely what the toggle suppresses.
             requestHeaders = if (logRequests) request.headers
-            else request.headers.filterKeys { it in RuleEnforcer.METADATA_HEADER_KEYS },
-            responseHeaders = if (logResponses) response.headers
-            else response.headers.filterKeys { it in RuleEnforcer.METADATA_HEADER_KEYS },
+            else request.headers.filterKeys { it in RuleMetadataHeaders.KEYS },
+            // S4 task 26: the `x-requestr-rules` badge (stage:ruleId per applied rule) is
+            // persist-only metadata -- never on the wire -- so the traffic list can badge the
+            // row without joining `applied_rules`.
+            responseHeaders = RuleMetadataHeaders.withRulesBadge(
+                if (logResponses) response.headers
+                else response.headers.filterKeys { it in RuleMetadataHeaders.KEYS },
+                appliedRules,
+            ),
             // storage.text (not message.body): for a bodyReplaced message the text column must
             // hold what was actually sent -- see HttpBodyDecoder.BinaryBodyStorage's contract.
             requestBody = if (logRequests) reqStorage.text.ifEmpty { null } else null,
@@ -1466,7 +1861,7 @@ class MitmProxyEngine(
             // MITM_PROXY-tier.
             captureMethod = CaptureRowMethod.MITM_PROXY,
         )
-        return deliverEntity(entity, timings, headers)
+        return deliverEntity(entity, timings, headers, appliedRules)
     }
 
     /**
@@ -1570,16 +1965,16 @@ class MitmProxyEngine(
         val entity = ProtocolRows.grpcParent(
             call, sessionId.get(), host, "$host:$port", CaptureRowMethod.MITM_PROXY,
             wasDecrypted = true, logRequests = logRequests, now = start.startedAt,
-            metadataKeys = RuleEnforcer.METADATA_HEADER_KEYS,
+            metadataKeys = RuleMetadataHeaders.KEYS,
         )
         check(!ProtocolRows.hasSyntheticGrpcHeader(entity)) { "gRPC parent must not carry synthetic x-grpc-* headers" }
         val headers = ProtocolRows.headerRows(
             request = null, response = null, logRequests = logRequests, logResponses = false,
-            h2Request = start.requestHeaders, metadataKeys = RuleEnforcer.METADATA_HEADER_KEYS,
+            h2Request = start.requestHeaders, metadataKeys = RuleMetadataHeaders.KEYS,
         ) + ProtocolRows.headerRows(
             request = ParsedHttpMessage(isRequest = true, method = null, headerLines = start.requestHeaders.regularEntries),
             response = null, logRequests = logRequests, logResponses = false,
-            metadataKeys = RuleEnforcer.METADATA_HEADER_KEYS,
+            metadataKeys = RuleMetadataHeaders.KEYS,
         )
         runCatching {
             val handle = target.transaction(entity, headers)
@@ -1671,6 +2066,8 @@ class MitmProxyEngine(
         logRequests: Boolean,
         logResponses: Boolean,
         table: GrpcCallTable,
+        /** S4 task 35: the stream's rule provenance, when a rule matched the call. */
+        appliedRules: FlowAuditTrail? = null,
     ) {
         val target = sink ?: return
         val entry = table.byStream.remove(end.streamId) ?: return
@@ -1686,11 +2083,12 @@ class MitmProxyEngine(
             logRequests = logRequests, logResponses = logResponses,
             h2Request = end.requestHeaders, h2Response = end.responseHeaders,
             h2RequestTrailers = end.requestTrailers, h2ResponseTrailers = end.responseTrailers,
-            metadataKeys = RuleEnforcer.METADATA_HEADER_KEYS,
+            metadataKeys = RuleMetadataHeaders.KEYS,
         )
         runCatching {
             target.patchExchange(entry.parent, patch, headers)
             target.grpcCall(entry.parent, ProtocolRows.grpcCall(end.call, end.streamId, end.grpcStatus, end.grpcMessage))
+            if (appliedRules != null && !appliedRules.isEmpty) target.appliedRules(entry.parent, appliedRules.toEntities())
             if (end.frameEvents.isNotEmpty()) {
                 target.http2StreamEvents(entry.parent, ProtocolRows.http2StreamEvents(end.frameEvents, "$host:$port"))
             }
@@ -1711,15 +2109,22 @@ class MitmProxyEngine(
         entity: CapturedTrafficEntity,
         timings: TransactionTimingEntity? = null,
         headers: List<TransactionHeaderEntity> = emptyList(),
+        appliedRules: FlowAuditTrail? = null,
     ): RowHandle? {
         val target = sink
         if (target != null) {
             // S3 task 20: the queue path -- parent row + wire-ordered headers in one op; the
             // returned handle is what protocol children hang off.
-            return runCatching { target.transaction(entity, headers, timings) }
+            val handle = runCatching { target.transaction(entity, headers, timings) }
                 .onSuccess { bumpCounters() }
                 .onFailure { Log.w(TAG, "sink.transaction failed: ${it.message}") }
                 .getOrNull()
+            // S4 task 26: rule provenance rides behind the parent row on the same queue.
+            if (handle != null && appliedRules != null && !appliedRules.isEmpty) {
+                runCatching { target.appliedRules(handle, appliedRules.toEntities()) }
+                    .onFailure { Log.w(TAG, "sink.appliedRules failed: ${it.message}") }
+            }
+            return handle
         }
         val timed = onDecryptedTransactionTimed
         val callback = onDecryptedTransaction
@@ -1774,6 +2179,14 @@ class MitmProxyEngine(
         sb.append("\r\n")
         return sb.toString().toByteArray(Charsets.ISO_8859_1) + bodyBytes
     }
+
+    /**
+     * S4 task 31: identity of one decrypted HTTP/1.x connection for [BreakpointRegistry]
+     * bookkeeping -- the per-connection `pending` queue is the one object both legs and the
+     * teardown path already share, so its identity is the key.
+     */
+    internal fun connectionKeyOf(pending: ConcurrentLinkedQueue<PendingExchange>): String =
+        "conn-" + Integer.toHexString(System.identityHashCode(pending))
 
     /** See [serializeRequest]'s KDoc for why this is `internal` and how body bytes are chosen. */
     internal fun serializeResponse(response: ParsedHttpMessage): ByteArray {

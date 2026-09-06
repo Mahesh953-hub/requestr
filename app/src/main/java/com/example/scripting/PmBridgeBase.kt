@@ -18,6 +18,45 @@ package com.example.scripting
 abstract class PmBridgeBase(initialEnvVars: Map<String, String>) {
 
     private val envVars = LinkedHashMap(initialEnvVars)
+    /**
+     * S4 task 32: `context.shared` -- the per-flow scratch object that survives from a script's
+     * `onRequest` into the same flow's `onResponse`. Seeded by the caller (from the request-leg
+     * result, or the envelope in the remote host) and read back after the run via [sharedContext].
+     * Values are strings on the Kotlin side; JS sees a plain object (non-strings are stringified).
+     */
+    private val shared = LinkedHashMap<String, String>()
+
+    /** S4 task 32: `"onRequest"` / `"onResponse"` (or blank for ApiTestr scripts) -- read by the prelude as `__phase`. */
+    var phase: String = ""
+    fun phaseName(): String = phase
+
+    /** The shared context as it stood at the end of the run. */
+    val sharedContext: Map<String, String> get() = shared.toMap()
+
+    fun seedShared(values: Map<String, String>) { shared.clear(); shared.putAll(values) }
+
+    /** JSON object the prelude parses into `context.shared`. */
+    fun sharedJson(): String = com.squareup.moshi.Moshi.Builder().build()
+        .adapter<Map<String, String>>(com.squareup.moshi.Types.newParameterizedType(Map::class.java, String::class.java, String::class.java))
+        .toJson(shared)
+
+    /** Written back by the prelude epilogue: `JSON.stringify(context.shared)`. */
+    fun sharedPut(json: String) {
+        val parsed = runCatching {
+            com.squareup.moshi.Moshi.Builder().build()
+                .adapter<Map<String, Any?>>(com.squareup.moshi.Types.newParameterizedType(Map::class.java, String::class.java, Any::class.java))
+                .fromJson(json)
+        }.getOrNull() ?: return
+        shared.clear()
+        for ((k, v) in parsed) {
+            if (v == null) continue
+            shared[k] = when (v) {
+                is String -> v
+                is Double -> if (v == Math.floor(v) && !v.isInfinite() && Math.abs(v) < 1e15) v.toLong().toString() else v.toString()
+                else -> v.toString()
+            }
+        }
+    }
     private val testResults = mutableListOf<PmTestResult>()
     private val consoleLines = mutableListOf<String>()
 

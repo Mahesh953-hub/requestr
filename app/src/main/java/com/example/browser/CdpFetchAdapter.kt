@@ -1,10 +1,15 @@
 package com.example.browser
 
 import android.util.Log
-import com.example.data.local.RequestrDatabase
-import com.example.data.local.RuleAction
-import com.example.interception.RuleEnforcer
+import com.example.data.models.HttpMethod
 import com.example.interception.http.ParsedHttpMessage
+import com.example.interception.rules.FlowKey
+import com.example.interception.rules.GatewayOutcome
+import com.example.interception.rules.RulePipeline
+import com.example.interception.rules.RuleSnapshot
+import com.example.interception.rules.RuleSnapshotStore
+import com.example.interception.rules.stages.MockStage
+import com.example.interception.rules.stages.RewriteStage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -28,7 +33,7 @@ import java.util.Base64
  *
  * Response-stage handling (W9, new): for a `MODIFY_RESPONSE` rule, calls `Fetch.getResponseBody`
  * (only valid while paused in the response stage) to fetch the real body, applies the rule via
- * [com.example.interception.RuleEnforcer.applyResponseModification] -- the exact same rule
+ * [RewriteStage.applyResponse] -- the exact same rule
  * semantics [com.example.interception.MitmProxyEngine] already uses for MITM/VPN traffic, so
  * there is no separate browser-only modification format -- and issues `Fetch.fulfillRequest`
  * with the mutated status/headers/body. Every other response-stage pause (`LOG_ONLY`, no rule,
@@ -37,8 +42,8 @@ import java.util.Base64
  * entirely -- CDP returns no body for them and asking anyway would just fail the call for every
  * redirect on the page.
  *
- * Reuses requestr's existing shared rule engine, [RuleEnforcer], and the same
- * `intercept_rules` Room table the MITM/VPN paths already read from. This means a rule the
+ * S4 task 26: reuses requestr's shared rule pipeline ([RulePipeline] over the immutable
+ * [RuleSnapshot] the MITM/VPN paths already read from; zero DAO calls). This means a rule the
  * user creates once in Settings/Capture-Setup ("Rules \u0026 Modifiers") applies uniformly whether
  * the traffic was captured via VPN/MITM *or* via a live Chrome CDP session.
  *
@@ -51,6 +56,8 @@ class CdpFetchAdapter(
     private val context: android.content.Context,
     /** W8: the target's flattened-session id, or null for a single-target/legacy connection. */
     private val sessionId: String? = null,
+    /** S4 task 26: the immutable rule snapshot every decision reads; a test seam over [RuleSnapshotStore]. */
+    private val ruleSnapshot: () -> RuleSnapshot = { RuleSnapshotStore.current },
 ) {
     companion object {
         private const val TAG = "CdpFetchAdapter"
@@ -139,6 +146,39 @@ class CdpFetchAdapter(
         }
     }
 
+    /** S4 task 26: the matcher input for a CDP-observed request. */
+    private fun flowKeyFor(url: String, host: String, request: JSONObject): FlowKey {
+        val headersJson = request.optJSONObject("headers")
+        val headers = mutableMapOf<String, String>()
+        headersJson?.keys()?.forEach { key -> headers[key.lowercase()] = headersJson.optString(key, "") }
+        val port = runCatching { java.net.URI(url) }.getOrNull()?.let { uri ->
+            if (uri.port > 0) uri.port else if (uri.scheme.equals("http", ignoreCase = true)) 80 else 443
+        } ?: 443
+        return FlowKey(
+            host = host, port = port, url = url,
+            method = request.optString("method", "").ifEmpty { null },
+            headers = headers,
+        )
+    }
+
+    /** A [ParsedHttpMessage] view of the paused CDP request so the rewrite stage can act on it. */
+    private fun parsedRequest(url: String, host: String, request: JSONObject): ParsedHttpMessage {
+        val headersJson = request.optJSONObject("headers")
+        val headers = linkedMapOf<String, String>()
+        headersJson?.keys()?.forEach { key -> headers[key] = headersJson.optString(key, "") }
+        val uri = runCatching { java.net.URI(url) }.getOrNull()
+        return ParsedHttpMessage(
+            isRequest = true,
+            method = HttpMethod.entries.firstOrNull { it.name == request.optString("method", "GET").uppercase() },
+            url = url,
+            path = uri?.rawPath?.ifEmpty { "/" } ?: "/",
+            host = host,
+            port = uri?.port?.takeIf { it > 0 } ?: 443,
+            headers = headers,
+            body = request.optString("postData", ""),
+        )
+    }
+
     private fun handleRequestStagePaused(event: JSONObject) {
         val fetchRequestId = event.optString("requestId")
         if (fetchRequestId.isEmpty()) return
@@ -148,10 +188,11 @@ class CdpFetchAdapter(
 
         scope.launch {
             try {
-                val db = RequestrDatabase.get(context)
-                val rule = RuleEnforcer.getMatchingRule(db, url, host)
-                when (rule?.action ?: RuleAction.LOG_ONLY) {
-                    RuleAction.BLOCK -> {
+                // S4 task 26: one immutable-snapshot decision per paused request (no DAO).
+                val decision = RulePipeline.evaluate(ruleSnapshot(), flowKeyFor(url, host, request))
+                val gateway = decision.gateway
+                when {
+                    gateway.blocks -> {
                         blockedCount++
                         notifyCountersChanged()
                         client.send(
@@ -162,38 +203,18 @@ class CdpFetchAdapter(
                             },
                             sessionId = sessionId,
                         )
-                        Log.i(TAG, "BLOCK $url (rule=${rule?.name})")
+                        Log.i(TAG, "BLOCK $url (rule=${(gateway as? GatewayOutcome.Apply)?.rule?.name})")
                     }
-                    RuleAction.REDIRECT -> {
-                        redirectedCount++
-                        notifyCountersChanged()
-                        val target = rule?.replacementValue?.takeIf { it.isNotBlank() } ?: url
-                        client.send(
-                            "Fetch.continueRequest",
-                            JSONObject().apply {
-                                put("requestId", fetchRequestId)
-                                put("url", target)
-                            },
-                            sessionId = sessionId,
-                        )
-                        Log.i(TAG, "REDIRECT $url -> $target")
-                    }
-                    RuleAction.MODIFY_REQUEST -> {
-                        modifiedCount++
-                        notifyCountersChanged()
-                        val continueParams = buildModifiedContinueParams(fetchRequestId, request, rule?.replacementValue)
-                        client.send("Fetch.continueRequest", continueParams, sessionId = sessionId)
-                        Log.i(TAG, "MODIFY_REQUEST $url")
-                    }
-                    RuleAction.MOCK_RESPONSE -> {
+                    decision.mock != null -> {
                         // Master plan §1.5. CDP has a first-class primitive for this:
                         // Fetch.fulfillRequest answers the paused request from the debugger
                         // without the browser ever opening an upstream connection, which is
                         // exactly the "skip the real call, synthesize a response instead"
-                        // semantic Gap #11 describes. Contrast MODIFY_RESPONSE, handled in
-                        // handleResponseStagePaused, which necessarily runs after the real
+                        // semantic Gap #11 describes. Contrast response rewrites, handled in
+                        // handleResponseStagePaused, which necessarily run after the real
                         // response has already arrived.
-                        val mock = RuleEnforcer.buildMockResponse(rule?.replacementValue, url)
+                        val mockRule = decision.mock!!
+                        val mock = MockStage.build(mockRule.config, url, request.optString("method", "").ifEmpty { null })
                         client.send(
                             "Fetch.fulfillRequest",
                             JSONObject().apply {
@@ -211,33 +232,51 @@ class CdpFetchAdapter(
                                 put(
                                     "body",
                                     Base64.getEncoder()
-                                        .encodeToString(mock.body.toByteArray(Charsets.UTF_8)),
+                                        .encodeToString(mock.replacedBodyBytes ?: mock.body.toByteArray(Charsets.UTF_8)),
                                 )
                             },
                             sessionId = sessionId,
                         )
-                        Log.i(TAG, "MOCK_RESPONSE $url -> ${mock.statusCode} (rule=${rule?.name})")
+                        Log.i(TAG, "MOCK $url -> ${mock.statusCode} (rule=${mockRule.rule.name})")
                     }
-                    // MODIFY_RESPONSE is applied at the response-stage pause of this same
+                    decision.rewrite.redirection != null && decision.rewrite.rules.none { it.config.requestModifications.isNotEmpty() || it.config.replaceRequest != null } -> {
+                        redirectedCount++
+                        notifyCountersChanged()
+                        val parsed = parsedRequest(url, host, request)
+                        RewriteStage.applyRequest(parsed, decision.rewrite)
+                        val target = parsed.url.takeIf { it.isNotBlank() } ?: url
+                        client.send(
+                            "Fetch.continueRequest",
+                            JSONObject().apply {
+                                put("requestId", fetchRequestId)
+                                put("url", target)
+                            },
+                            sessionId = sessionId,
+                        )
+                        Log.i(TAG, "REDIRECT $url -> $target")
+                    }
+                    decision.rewrite.hasRequestWork -> {
+                        modifiedCount++
+                        notifyCountersChanged()
+                        val parsed = parsedRequest(url, host, request)
+                        val hadBody = request.has("postData")
+                        RewriteStage.applyRequest(parsed, decision.rewrite)
+                        client.send(
+                            "Fetch.continueRequest",
+                            buildContinueParams(fetchRequestId, parsed, includeUrl = parsed.url != url, includeBody = hadBody || parsed.body.isNotEmpty()),
+                            sessionId = sessionId,
+                        )
+                        Log.i(TAG, "REWRITE request $url")
+                    }
+                    // Response rewrites are applied at the response-stage pause of this same
                     // request (handleResponseStagePaused), not here -- the request stage has
                     // no response body/headers to modify yet.
-                    // FORCE_MITM is a CONNECT-level disposition (see ConnectControl) with no
-                    // meaning at the Fetch.requestPaused stage -- CDP already observes decrypted
-                    // browser traffic, so there's nothing further to MITM here. Treat it the same
-                    // as LOG_ONLY: allow the request through unmodified.
-                    // SCRIPT_REWRITE (master plan §1.11) is only wired into the TLS-MITM path
-                    // (see RuleEnforcer.applyScriptRewrite / MitmProxyEngine) -- the CDP/browser
-                    // capture path does not yet run it, so it falls through to plain allow here.
-                    // CHAOS (fault injection) is only wired into the TLS-MITM path (see
-                    // ChaosInjector / MitmProxyEngine) -- the CDP/browser capture path does not
-                    // yet run it, so it falls through to plain allow here, same as SCRIPT_REWRITE.
-                    // §2.14(b) BODY_ENCRYPT_AES/BODY_DECRYPT_AES are only wired into the TLS-MITM
-                    // path (see RuleEnforcer/RequestCryptoManager / MitmProxyEngine) -- the
-                    // CDP/browser capture path does not yet run them, so they fall through to
-                    // plain allow here, same as SCRIPT_REWRITE/CHAOS above.
-                    RuleAction.MODIFY_RESPONSE, RuleAction.LOG_ONLY, RuleAction.FORCE_MITM, RuleAction.SCRIPT_REWRITE, RuleAction.CHAOS,
-                    RuleAction.BODY_ENCRYPT_AES, RuleAction.BODY_DECRYPT_AES,
-                    -> {
+                    // GATEWAY FORCE_DECRYPT/BYPASS/SUSPEND are CONNECT-level dispositions (see
+                    // ConnectControl) with no meaning at the Fetch.requestPaused stage -- CDP
+                    // already observes decrypted browser traffic. Scripts, chaos, body crypto,
+                    // breakpoints and throttling are only wired into the TLS-MITM path, so they
+                    // fall through to plain allow here.
+                    else -> {
                         allowedCount++
                         notifyCountersChanged()
                         client.send(
@@ -271,9 +310,8 @@ class CdpFetchAdapter(
 
         scope.launch {
             try {
-                val db = RequestrDatabase.get(context)
-                val rule = RuleEnforcer.getMatchingRule(db, url, host)
-                if (rule?.action != RuleAction.MODIFY_RESPONSE) {
+                val decision = RulePipeline.evaluate(ruleSnapshot(), flowKeyFor(url, host, request))
+                if (!decision.rewrite.hasResponseWork) {
                     client.send(
                         "Fetch.continueResponse",
                         JSONObject().apply { put("requestId", fetchRequestId) },
@@ -321,12 +359,12 @@ class CdpFetchAdapter(
                     headers = headers,
                     body = decodedBody,
                 )
-                RuleEnforcer.applyResponseModification(parsed, rule.replacementValue ?: "")
+                RewriteStage.applyResponse(parsed, decision.rewrite)
                 responseModifiedCount++
                 notifyCountersChanged()
 
                 client.send("Fetch.fulfillRequest", buildFulfillParams(fetchRequestId, parsed), sessionId = sessionId)
-                Log.i(TAG, "MODIFY_RESPONSE $url (rule=${rule.name})")
+                Log.i(TAG, "REWRITE response $url (rules=${decision.rewrite.rules.joinToString { it.rule.name }})")
             } catch (e: Exception) {
                 Log.w(TAG, "requestPaused (response stage) handling failed: ${e.message}")
                 // Fail open: never leave a paused response stuck, always resume it plainly.
@@ -373,42 +411,20 @@ class CdpFetchAdapter(
     }
 
     /**
-     * Builds `Fetch.continueRequest` params applying a MODIFY_REQUEST rule's
-     * `{"addHeaders":{...},"removeHeaders":[...],"bodyReplace":"..."}` config -- the same JSON
-     * shape [RuleEnforcer.applyRequestModification] uses for MITM traffic, reused here so rule
-     * authors don't need to learn a second config format for CDP-observed requests.
+     * Builds `Fetch.continueRequest` params from a rewritten request: the (possibly rewritten)
+     * header set, the new URL when a redirection changed it, and the body when the rule
+     * replaced it or the original carried one. Header names keep the browser's casing.
      */
-    private fun buildModifiedContinueParams(fetchRequestId: String, request: JSONObject, config: String?): JSONObject {
-        val headersJson = request.optJSONObject("headers")
-        val headers = mutableMapOf<String, String>()
-        headersJson?.keys()?.forEach { key -> headers[key] = headersJson.optString(key, "") }
-        var body: String? = request.optString("postData", "").ifEmpty { null }
-
-        if (!config.isNullOrBlank()) {
-            runCatching {
-                val cfg = JSONObject(config)
-                if (cfg.has("addHeaders")) {
-                    val add = cfg.getJSONObject("addHeaders")
-                    add.keys().forEach { key -> headers[key] = add.optString(key, "") }
-                }
-                if (cfg.has("removeHeaders")) {
-                    val remove = cfg.getJSONArray("removeHeaders")
-                    for (i in 0 until remove.length()) headers.remove(remove.getString(i))
-                }
-                if (cfg.has("bodyReplace")) {
-                    body = cfg.getString("bodyReplace")
-                }
-            }.onFailure { Log.w(TAG, "Failed to apply MODIFY_REQUEST config: ${it.message}") }
-        }
-
+    private fun buildContinueParams(fetchRequestId: String, request: ParsedHttpMessage, includeUrl: Boolean, includeBody: Boolean): JSONObject {
         val headerArray = org.json.JSONArray()
-        headers.forEach { (k, v) -> headerArray.put(JSONObject().apply { put("name", k); put("value", v) }) }
-
+        request.headers.forEach { (k, v) -> headerArray.put(JSONObject().apply { put("name", k); put("value", v) }) }
         return JSONObject().apply {
             put("requestId", fetchRequestId)
+            if (includeUrl) put("url", request.url)
             put("headers", headerArray)
-            if (body != null) {
-                put("postData", Base64.getEncoder().encodeToString(body!!.toByteArray(Charsets.UTF_8)))
+            if (includeBody) {
+                val bytes = request.replacedBodyBytes ?: request.body.toByteArray(Charsets.UTF_8)
+                put("postData", Base64.getEncoder().encodeToString(bytes))
             }
         }
     }

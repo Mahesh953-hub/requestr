@@ -91,6 +91,12 @@ class SettingsDataStore(private val context: Context) {
     val remoteCertMirrorEnabled: Flow<Boolean> =
         prefs.map { it[AppSettingsKeys.REMOTE_CERT_MIRROR_ENABLED] ?: false }
 
+    /** S4 task 33 (D3): the one-time developer-mode acknowledgement gating every mutating stage. OFF by default. */
+    val mutatingRulesAcknowledged: Flow<Boolean> = prefs.map { it[AppSettingsKeys.MUTATING_RULES_ACKNOWLEDGED] ?: false }
+
+    /** S4 task 33 (D3): true while at least one mutating rule is enabled (drives the safety notification). */
+    val mutatingRulesActive: Flow<Boolean> = prefs.map { it[AppSettingsKeys.MUTATING_RULES_ACTIVE] ?: false }
+
     /** S1 task 9 (D6): Observe-QUIC override -- in-scope UDP/443 is teed then passed instead of dropped. */
     val quicObserveOverride: Flow<Boolean> = prefs.map { it[AppSettingsKeys.QUIC_OBSERVE_OVERRIDE] ?: false }
 
@@ -196,6 +202,14 @@ class SettingsDataStore(private val context: Context) {
 
     suspend fun setRemoteCertMirrorEnabled(value: Boolean) {
         store.edit { it[AppSettingsKeys.REMOTE_CERT_MIRROR_ENABLED] = value }
+    }
+
+    suspend fun setMutatingRulesAcknowledged(value: Boolean) {
+        store.edit { it[AppSettingsKeys.MUTATING_RULES_ACKNOWLEDGED] = value }
+    }
+
+    suspend fun setMutatingRulesActive(value: Boolean) {
+        store.edit { it[AppSettingsKeys.MUTATING_RULES_ACTIVE] = value }
     }
 
     suspend fun setQuicObserveOverride(value: Boolean) {

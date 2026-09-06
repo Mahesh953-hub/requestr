@@ -1,7 +1,7 @@
 package com.example.interception
 
-import com.example.data.local.InterceptRuleEntity
-import com.example.data.local.RuleAction
+import com.example.interception.rules.LegacyInterceptRule
+import com.example.interception.rules.LegacyRuleAction
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -101,9 +101,15 @@ class ChaosConfigBoundsTest {
                 RuleEnforcer.SCRIPT_ERROR_HEADER,
                 "x-requestr-crypto-failed",
                 "x-requestr-json-prettified",
+                // S4 (task 26+): stage attribution headers stamped by the typed rule engine.
+                "x-requestr-breakpoint",
+                "x-requestr-replay-id",
+                "x-requestr-mirror",
+                "x-requestr-rules",
             ),
             RuleEnforcer.METADATA_HEADER_KEYS
         )
+        assertEquals(RuleEnforcer.METADATA_HEADER_KEYS, com.example.interception.rules.RuleMetadataHeaders.KEYS)
     }
 
     @Test
@@ -126,10 +132,10 @@ class ChaosConfigBoundsTest {
 
     @Test
     fun `a rule persisted by an earlier build is clamped on read rather than on write`() {
-        val rule = InterceptRuleEntity(
+        val rule = LegacyInterceptRule(
             domain = "example.com",
             pattern = "",
-            action = RuleAction.CHAOS,
+            action = LegacyRuleAction.CHAOS,
             replacementValue = """{"delayMs":[3600000,3600000]}""",
             enabled = true,
         )

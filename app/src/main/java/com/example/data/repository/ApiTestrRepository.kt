@@ -427,7 +427,7 @@ object ApiTestrRepository {
      * on this path), so a screen can be driven with no live backend. The response is tagged with
      * [ApiResponseData.isMocked] so the UI can badge it without inspecting any magic value.
      * Distinct from the live-MITM
-     * [com.example.data.local.RuleAction.MOCK_RESPONSE] action another workstream owns.
+     * MOCK-stage rule (`MockConfig`) another workstream owns.
      */
     private suspend fun buildMockResponse(requestItem: ApiRequestItem): ApiResponseData {
         if (requestItem.mockDelayMs > 0) delay(requestItem.mockDelayMs)

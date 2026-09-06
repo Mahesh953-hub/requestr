@@ -7,6 +7,7 @@ import com.example.interception.net.SocketProtector
 import com.example.interception.relay.ConnectionStateMachine
 import com.example.interception.relay.RelayPool
 import com.example.interception.relay.StructuredRelay
+import com.example.interception.rules.stages.ThrottleStage
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
@@ -129,21 +130,39 @@ internal object HttpProxyShared {
         socketConnector: (Socket, InetSocketAddress) -> Unit = { socket, address -> socket.connect(address) },
         replies: ConnectReplies = ConnectReplies.http(output),
         relayPool: RelayPool = RelayPool.shared(),
+        throttle: ThrottleStage.Shaper? = null,
         onBytesTransferred: suspend (clientToUpstream: Long, upstreamToClient: Long) -> Unit = { _, _ -> },
     ) {
+        // S4 task 30: a THROTTLE rule's latency/loss replace the global setting for this flow;
+        // its bandwidth caps wrap the two copy loops inside relay().
+        val dialCondition = throttle?.networkCondition(networkCondition) ?: networkCondition
         when (disposition) {
             is ConnectControl.Disposition.Block -> replies.blocked()
             is ConnectControl.Disposition.AllowOpaque -> {
                 val (host, port) = parseHostPort(target, 443)
-                NetworkConditionInjector.apply(networkCondition, random, sleep)
+                NetworkConditionInjector.apply(dialCondition, random, sleep)
                 replies.established()
-                relay(client, host, port, onBytesTransferred, socketFactory, socketConnector, relayPool)
+                relay(client, host, port, onBytesTransferred, socketFactory, socketConnector, relayPool, throttle)
             }
             is ConnectControl.Disposition.Redirect -> {
                 val (host, port) = parseHostPort(disposition.target, 443)
-                NetworkConditionInjector.apply(networkCondition, random, sleep)
+                NetworkConditionInjector.apply(dialCondition, random, sleep)
                 replies.established()
-                relay(client, host, port, onBytesTransferred, socketFactory, socketConnector, relayPool)
+                relay(client, host, port, onBytesTransferred, socketFactory, socketConnector, relayPool, throttle)
+            }
+            is ConnectControl.Disposition.Mirror -> {
+                // S4 task 28: an opaque tunnel cannot rewrite SNI/Host, so a MIRROR here is a
+                // plain re-point of the tunnel at the mirror address (same as Redirect). Only the
+                // MITM path can honour the name policies.
+                NetworkConditionInjector.apply(dialCondition, random, sleep)
+                replies.established()
+                relay(client, disposition.targetHost, disposition.targetPort, onBytesTransferred, socketFactory, socketConnector, relayPool, throttle)
+            }
+            is ConnectControl.Disposition.Suspend -> {
+                // S4 task 27: park this flow only -- no reply, no relay permit, no upstream dial.
+                // The client sees a CONNECT that never completes; after the rule's timeout the
+                // socket is closed so the client's own timeout/retry logic takes over.
+                suspendFlow(client, disposition.timeoutMs, sleep)
             }
             is ConnectControl.Disposition.ForceMitm -> {
                 // A plain Socket relay can never terminate TLS -- only MitmProxyEngine can
@@ -151,6 +170,19 @@ internal object HttpProxyShared {
                 // must report this honestly rather than silently tunneling opaquely.
                 replies.mitmUnavailable()
             }
+        }
+    }
+
+    /**
+     * S4 task 27: holds [client] open without reading or writing for [timeoutMs], then closes it.
+     * Runs on the caller's thread (each CONNECT already has its own), so no shared relay permit
+     * is consumed and other flows are unaffected. Injectable [sleep] keeps tests instant.
+     */
+    fun suspendFlow(client: Socket, timeoutMs: Long, sleep: (Long) -> Unit = Thread::sleep) {
+        try {
+            if (timeoutMs > 0) sleep(timeoutMs)
+        } finally {
+            runCatching { client.close() }
         }
     }
 
@@ -206,6 +238,7 @@ internal object HttpProxyShared {
         socketFactory: () -> Socket,
         socketConnector: (Socket, InetSocketAddress) -> Unit,
         relayPool: RelayPool,
+        throttle: ThrottleStage.Shaper? = null,
     ) {
         val machine = ConnectionStateMachine()
         machine.transition(ConnectionStateMachine.State.DETECTED)
@@ -236,10 +269,12 @@ internal object HttpProxyShared {
                     runCatching { upstream.close() }
                 },
                 clientToUpstream = {
-                    StructuredRelay.copy(client.getInputStream(), upstream.getOutputStream(), sent, relayPool.buffers) { machine.touch() }
+                    val out = throttle?.toUpstream(upstream.getOutputStream()) ?: upstream.getOutputStream()
+                    StructuredRelay.copy(client.getInputStream(), out, sent, relayPool.buffers) { machine.touch() }
                 },
                 upstreamToClient = {
-                    StructuredRelay.copy(upstream.getInputStream(), client.getOutputStream(), received, relayPool.buffers) { machine.touch() }
+                    val out = throttle?.toClient(client.getOutputStream()) ?: client.getOutputStream()
+                    StructuredRelay.copy(upstream.getInputStream(), out, received, relayPool.buffers) { machine.touch() }
                 },
             )
             metrics.addBytesToUpstream(sent.get())

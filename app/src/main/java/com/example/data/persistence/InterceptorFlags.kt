@@ -70,6 +70,19 @@ class InterceptorFlags private constructor(private val prefs: SharedPreferences)
      */
     val h2Terminate: Boolean get() = prefs.getBoolean(KEY_H2_TERMINATE, true)
 
+    /**
+     * S4 task 31: BREAKPOINT rules pause matching flows in [com.example.interception.breakpoint.BreakpointRegistry]
+     * (max 8, mandatory auto-resume). `false` makes the stage a no-op (rules still evaluate and
+     * audit as skipped) -- the kill switch for a misbehaving pause queue.
+     */
+    val breakpoints: Boolean get() = prefs.getBoolean(KEY_BREAKPOINTS, true)
+
+    /**
+     * S4 task 32: SCRIPT rules run in the out-of-process `:scripthost` service instead of the
+     * in-process Rhino runner. `false` keeps the legacy in-process path.
+     */
+    val scriptHost: Boolean get() = prefs.getBoolean(KEY_SCRIPT_HOST, true)
+
     fun setRelayPoolBounded(enabled: Boolean) = prefs.edit().putBoolean(KEY_RELAY_POOL_BOUNDED, enabled).apply()
     fun setQuicTeePolicy(enabled: Boolean) = prefs.edit().putBoolean(KEY_QUIC_TEE_POLICY, enabled).apply()
     fun setPcapng(enabled: Boolean) = prefs.edit().putBoolean(KEY_PCAPNG, enabled).apply()
@@ -77,6 +90,8 @@ class InterceptorFlags private constructor(private val prefs: SharedPreferences)
     fun setProtocolChildren(enabled: Boolean) = prefs.edit().putBoolean(KEY_PROTOCOL_CHILDREN, enabled).apply()
     fun setFtsSearch(enabled: Boolean) = prefs.edit().putBoolean(KEY_FTS_SEARCH, enabled).apply()
     fun setH2Terminate(enabled: Boolean) = prefs.edit().putBoolean(KEY_H2_TERMINATE, enabled).apply()
+    fun setBreakpoints(enabled: Boolean) = prefs.edit().putBoolean(KEY_BREAKPOINTS, enabled).apply()
+    fun setScriptHost(enabled: Boolean) = prefs.edit().putBoolean(KEY_SCRIPT_HOST, enabled).apply()
 
     companion object {
         private const val PREFS_NAME = "requestr_interceptor_flags"
@@ -87,6 +102,8 @@ class InterceptorFlags private constructor(private val prefs: SharedPreferences)
         internal const val KEY_PROTOCOL_CHILDREN = "protocol_children"
         internal const val KEY_FTS_SEARCH = "fts_search"
         internal const val KEY_H2_TERMINATE = "h2_terminate"
+        internal const val KEY_BREAKPOINTS = "breakpoints"
+        internal const val KEY_SCRIPT_HOST = "script_host"
 
         @Volatile
         private var INSTANCE: InterceptorFlags? = null

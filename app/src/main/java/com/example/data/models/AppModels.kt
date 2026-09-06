@@ -82,7 +82,7 @@ data class ApiRequestItem(
      * [com.example.data.repository.ApiTestrRepository.executeRequest] returns [mockStatusCode] /
      * [mockHeaders] / [mockBody] instead of dialing the network at all, so a screen can be
      * driven without a live backend. Deliberately distinct from the live-MITM
-     * [com.example.data.local.RuleAction.MOCK_RESPONSE] action (§1.5), which short-circuits
+     * MOCK-stage rule (`MockConfig`, §1.5), which short-circuits
      * intercepted third-party traffic — this one is scoped to API Testr's own manual sends.
      */
     val mockEnabled: Boolean = false,
@@ -385,28 +385,6 @@ data class CapturedTrafficItem(
      * [com.example.data.interception.CaptureLogRepository.toUiModel].
      */
     val hasKnownStatus: Boolean = true,
-)
-
-enum class RuleAction(val label: String, val colorHex: Long) {
-    LOG_ONLY("Log Only", 0xFF64748B),
-    BLOCK("Block Request", 0xFFEF4444),
-    MODIFY_REQUEST("Modify Request", 0xFF3B82F6),
-    MODIFY_RESPONSE("Modify Response", 0xFF8B5CF6),
-    BREAKPOINT("Breakpoint (Pause)", 0xFFF59E0B),
-    MOCK_RESPONSE("Mock Response", 0xFF10B981)
-}
-
-data class TrafficRuleItem(
-    val id: String = UUID.randomUUID().toString(),
-    val name: String = "Mock Auth API",
-    val isEnabled: Boolean = true,
-    val urlPattern: String = ".*auth/login.*",
-    val method: HttpMethod? = HttpMethod.POST,
-    val action: RuleAction = RuleAction.MOCK_RESPONSE,
-    val mockStatusCode: Int = 200,
-    val mockResponseBody: String = "{\"status\":\"success\",\"token\":\"mock_jwt_requestr_eyJhbGciOi...\"}",
-    val mockHeaders: Map<String, String> = mapOf("content-type" to "application/json"),
-    val priority: Int = 1
 )
 
 data class CertificateDetails(

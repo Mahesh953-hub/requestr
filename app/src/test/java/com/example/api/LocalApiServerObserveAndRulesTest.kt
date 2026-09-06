@@ -1,10 +1,11 @@
 package com.example.api
 
+import com.example.interception.rules.legacyRuleDao
 import android.os.Build
 import androidx.test.core.app.ApplicationProvider
-import com.example.data.local.InterceptRuleEntity
+import com.example.interception.rules.LegacyInterceptRule
 import com.example.data.local.RequestrDatabase
-import com.example.data.local.RuleAction
+import com.example.interception.rules.LegacyRuleAction
 import com.example.data.prefs.SettingsDataStore
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -273,22 +274,22 @@ class LocalApiServerObserveAndRulesTest {
         val token = startServerAndGetToken(port)
 
         runBlocking {
-            RequestrDatabase.get(context).interceptRuleDao().insert(
-                InterceptRuleEntity(
+            RequestrDatabase.get(context).legacyRuleDao().insert(
+                LegacyInterceptRule(
                     name = "block tracker",
                     pattern = "",
                     domain = "tracker.example.com",
-                    action = RuleAction.BLOCK,
+                    action = LegacyRuleAction.BLOCK,
                     enabled = true,
                     replacementValue = null,
                 )
             )
-            RequestrDatabase.get(context).interceptRuleDao().insert(
-                InterceptRuleEntity(
+            RequestrDatabase.get(context).legacyRuleDao().insert(
+                LegacyInterceptRule(
                     name = "rewrite response",
                     pattern = ".*/api/.*",
                     domain = "",
-                    action = RuleAction.MODIFY_RESPONSE,
+                    action = LegacyRuleAction.MODIFY_RESPONSE,
                     enabled = true,
                     replacementValue = """{"statusCode":200,"bodyReplace":"{\"patched\":true}"}""",
                 )
@@ -301,15 +302,86 @@ class LocalApiServerObserveAndRulesTest {
         // Room's on-disk DB (see RequestrDatabase.get()'s singleton) is shared across test
         // methods that run in the same Robolectric sandbox, so assert on the two rows this test
         // itself inserted rather than an exact total count.
-        val arr = org.json.JSONArray(body)
+        // S4 task 34: the response is the typed `schemaVersion: 2` envelope; each rule carries
+        // its typed fields AND the v1 projection (domain/pattern/action/replacementValue) the
+        // browser extension still reads.
+        val envelope = org.json.JSONObject(body)
+        assertEquals(2, envelope.getInt("schemaVersion"))
+        assertTrue(envelope.has("folders"))
+        val arr = envelope.getJSONArray("rules")
 
         val domainRule = (0 until arr.length()).map { arr.getJSONObject(it) }.first { it.getString("domain") == "tracker.example.com" }
         assertEquals("BLOCK", domainRule.getString("action"))
         assertTrue(domainRule.isNull("replacementValue"))
+        assertEquals("GATEWAY", domainRule.getString("stage"))
+        assertEquals("BLOCK", domainRule.getJSONObject("config").getString("mode"))
+        assertEquals("*tracker.example.com*", domainRule.getJSONObject("matcher").getJSONArray("hostGlobs").getString(0))
 
         val modifyRule = (0 until arr.length()).map { arr.getJSONObject(it) }.first { it.getString("name") == "rewrite response" }
         assertEquals(".*/api/.*", modifyRule.getString("pattern"))
         assertTrue(modifyRule.getString("replacementValue").contains("patched"))
+        assertEquals("REWRITE", modifyRule.getString("stage"))
+    }
+
+    @Test
+    fun `POST api-rules accepts a v1 flat body and a v2 typed body and both come back typed`() {
+        val port = freePort()
+        val token = startServerAndGetToken(port)
+
+        val (v1Status, v1Body) = sendHttpRequest(
+            port, "POST", "/api/rules", authHeader = "Bearer $token",
+            body = """{"name":"v1 block","domain":"legacy.example.com","pattern":"","action":"BLOCK","enabled":true}""",
+        )
+        assertEquals(200, v1Status)
+        val v1 = org.json.JSONObject(v1Body)
+        assertEquals(2, v1.getInt("schemaVersion"))
+        assertEquals("GATEWAY", v1.getString("stage"))
+        assertEquals("BLOCK", v1.getString("action"))
+        assertEquals("legacy.example.com", v1.getString("domain"))
+        assertTrue(v1.getLong("id") > 0)
+
+        val (v2Status, v2Body) = sendHttpRequest(
+            port, "POST", "/api/rules", authHeader = "Bearer $token",
+            body = """{"schemaVersion":2,"name":"typed mock","stage":"MOCK","enabled":true,""" +
+                """"matcher":{"hostGlobs":["*typed.example.com*"],"combine":"ANY"},""" +
+                """"config":{"stage":"MOCK","statusCode":201,"body":{"kind":"TEXT","value":"hi"}}}""",
+        )
+        assertEquals(200, v2Status)
+        val v2 = org.json.JSONObject(v2Body)
+        assertEquals("MOCK", v2.getString("stage"))
+        assertEquals(201, v2.getJSONObject("config").getInt("statusCode"))
+        assertEquals("MOCK_RESPONSE", v2.getString("action"))
+        assertEquals("typed.example.com", v2.getString("domain"))
+
+        val stored = runBlocking { RequestrDatabase.get(context).interceptorRuleDao().getById(v2.getLong("id")) }
+        assertEquals("MOCK", stored?.stage?.name)
+        assertTrue(stored!!.sortOrder > v1.getInt("sortOrder"))
+    }
+
+    @Test
+    fun `PUT api-rules with a partial body toggles enabled and DELETE removes the typed row`() {
+        val port = freePort()
+        val token = startServerAndGetToken(port)
+        val id = runBlocking {
+            RequestrDatabase.get(context).legacyRuleDao().insert(
+                LegacyInterceptRule(name = "toggle me", domain = "toggle.example.com", action = LegacyRuleAction.BLOCK)
+            )
+        }
+
+        val (putStatus, putBody) = sendHttpRequest(port, "PUT", "/api/rules/$id", authHeader = "Bearer $token", body = """{"enabled":false}""")
+        assertEquals(200, putStatus)
+        val updated = org.json.JSONObject(putBody)
+        assertEquals(false, updated.getBoolean("enabled"))
+        assertEquals("toggle me", updated.getString("name"))
+        assertEquals("GATEWAY", updated.getString("stage"))
+        assertEquals(false, runBlocking { RequestrDatabase.get(context).interceptorRuleDao().getById(id)!!.enabled })
+
+        val (delStatus, _) = sendHttpRequest(port, "DELETE", "/api/rules/$id", authHeader = "Bearer $token")
+        assertEquals(200, delStatus)
+        assertEquals(null, runBlocking { RequestrDatabase.get(context).interceptorRuleDao().getById(id) })
+
+        val (missingStatus, _) = sendHttpRequest(port, "PUT", "/api/rules/$id", authHeader = "Bearer $token", body = """{"enabled":true}""")
+        assertEquals(404, missingStatus)
     }
 
     @Test
@@ -318,12 +390,12 @@ class LocalApiServerObserveAndRulesTest {
         val token = startServerAndGetToken(port)
 
         runBlocking {
-            RequestrDatabase.get(context).interceptRuleDao().insert(
-                InterceptRuleEntity(
+            RequestrDatabase.get(context).legacyRuleDao().insert(
+                LegacyInterceptRule(
                     name = "domain-only block",
                     pattern = "",
                     domain = "ads.example.com",
-                    action = RuleAction.BLOCK,
+                    action = LegacyRuleAction.BLOCK,
                     enabled = true,
                     replacementValue = null,
                 )
@@ -336,8 +408,9 @@ class LocalApiServerObserveAndRulesTest {
         // enforcer.mjs's checkRules() contract: domain substring match against the request URL's
         // host, case-insensitive, first enabled match wins. Simulate that matching logic here
         // against the exact JSON this server just returned, proving the shape is consumable.
-        val arr = org.json.JSONArray(body)
-        val rule = arr.getJSONObject(0)
+        // channel.mjs unwraps `json.rules` when the response is an object (v2 envelope).
+        val arr = org.json.JSONObject(body).getJSONArray("rules")
+        val rule = (0 until arr.length()).map { arr.getJSONObject(it) }.first { it.getString("name") == "domain-only block" }
         val host = "sub.ads.example.com"
         val domainMatches = rule.getString("domain").isNotEmpty() &&
             host.lowercase().contains(rule.getString("domain").lowercase())

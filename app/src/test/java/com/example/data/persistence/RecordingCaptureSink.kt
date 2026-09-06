@@ -1,5 +1,6 @@
 package com.example.data.persistence
 
+import com.example.data.local.AppliedRuleEntity
 import com.example.data.local.CapturedTrafficEntity
 import com.example.data.local.GrpcCallEntity
 import com.example.data.local.GrpcMessageEntity
@@ -33,6 +34,8 @@ class RecordingCaptureSink : CaptureSink {
     val grpcCalls = CopyOnWriteArrayList<GrpcCallEntity>()
     val grpcMessages = CopyOnWriteArrayList<GrpcMessageEntity>()
     val http2StreamEvents = CopyOnWriteArrayList<Http2StreamEventEntity>()
+    /** S4 task 26: rule provenance rows, stamped with their parent's id. */
+    val appliedRules = CopyOnWriteArrayList<AppliedRuleEntity>()
     val droppedChildren = AtomicLong(0)
 
     override fun transaction(entity: CapturedTrafficEntity, headers: List<TransactionHeaderEntity>, timings: TransactionTimingEntity?): RowHandle {
@@ -49,6 +52,12 @@ class RecordingCaptureSink : CaptureSink {
     override fun webSocketMessage(parent: RowHandle, message: WebSocketMessageEntity) {
         val id = alive(parent) ?: return
         webSocketMessages += message.copy(trafficId = id)
+    }
+
+    override fun appliedRules(parent: RowHandle, rules: List<AppliedRuleEntity>) {
+        if (rules.isEmpty()) return
+        val id = alive(parent) ?: return
+        appliedRules += rules.map { it.copy(trafficId = id) }
     }
 
     override fun sseEvents(parent: RowHandle, events: List<SseEventEntity>) {

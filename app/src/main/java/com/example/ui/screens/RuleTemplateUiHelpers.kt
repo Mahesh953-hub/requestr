@@ -1,6 +1,6 @@
 package com.example.ui.screens
 
-import com.example.data.local.RuleAction
+import com.example.interception.rules.LegacyRuleAction
 import com.example.interception.RuleTemplateExpander
 import com.example.scripting.DynamicVariables
 import org.json.JSONObject
@@ -25,8 +25,8 @@ import org.json.JSONObject
  * ([com.example.scripting.PmBridgeBase.templateString]) -- so the same editor genuinely applies
  * to it too, even though the expansion mechanism differs slightly under the hood.
  */
-fun ruleActionUsesTemplating(action: RuleAction): Boolean = when (action) {
-    RuleAction.MODIFY_REQUEST, RuleAction.MODIFY_RESPONSE, RuleAction.MOCK_RESPONSE, RuleAction.SCRIPT_REWRITE -> true
+fun ruleActionUsesTemplating(action: LegacyRuleAction): Boolean = when (action) {
+    LegacyRuleAction.MODIFY_REQUEST, LegacyRuleAction.MODIFY_RESPONSE, LegacyRuleAction.MOCK_RESPONSE, LegacyRuleAction.SCRIPT_REWRITE -> true
     else -> false
 }
 
@@ -107,7 +107,7 @@ private fun parseConfigJsonOrEmpty(baseConfigJson: String?): JSONObject =
 
 /**
  * Sets/replaces the `"variables"` key of a rule's `config` JSON text (the same string persisted
- * as `InterceptRuleEntity.replacementValue` for every templatable action -- see
+ * as `LegacyInterceptRule.replacementValue` for every templatable action -- see
  * [com.example.interception.RuleEnforcer]'s KDoc) with [variables], preserving every *other* key
  * already present in [baseConfigJson] untouched (`addHeaders`, `removeHeaders`, `bodyReplace`,
  * `statusCode`, `script`, ...). An empty [variables] map removes the `"variables"` key entirely
@@ -135,7 +135,7 @@ fun mergeVariablesIntoConfigJson(baseConfigJson: String?, variables: Map<String,
 }
 
 /**
- * Sets/replaces the `"script"` key of a rule's `config` JSON text -- [RuleAction.SCRIPT_REWRITE]'s
+ * Sets/replaces the `"script"` key of a rule's `config` JSON text -- [LegacyRuleAction.SCRIPT_REWRITE]'s
  * own config schema (`{"script": "<js source>", "variables": {...}}`, see
  * [com.example.interception.RuleEnforcer.applyScriptRewrite]'s KDoc) -- preserving every other
  * key already present in [baseConfigJson]. A blank [script] removes the key entirely rather than

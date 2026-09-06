@@ -1537,6 +1537,86 @@ fun SettingsScreen(
                 }
             }
 
+            // Section 6b-ii (S4 task 33, D3): the one-time developer-mode acknowledgement without
+            // which no mutating rule (rewrite, breakpoint, script, mock, body crypto, chaos) can be
+            // enabled or act. A permanent safety gate, not a rollout flag. The kill switch here
+            // mirrors the notification action.
+            item {
+                SettingsSectionHeader("TRAFFIC MODIFICATION (DEVELOPER MODE)")
+                GlassCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    backgroundColor = MaterialTheme.colorScheme.surface
+                ) {
+                    val mutatingAcknowledged by interceptionDataStore.mutatingRulesAcknowledged.collectAsState(initial = false)
+                    val mutatingActive by interceptionDataStore.mutatingRulesActive.collectAsState(initial = false)
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "I understand rules can modify live traffic",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    if (mutatingAcknowledged) "Acknowledged" else "Not acknowledged (default)",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (mutatingAcknowledged) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = mutatingAcknowledged,
+                                onCheckedChange = { checked ->
+                                    settingsScope.launch { interceptionDataStore.setMutatingRulesAcknowledged(checked) }
+                                }
+                            )
+                        }
+                        Text(
+                            "Rewrite, breakpoint, script, mock, body-crypto and chaos rules change what apps " +
+                                "send and receive. Until this is acknowledged none of them can be enabled, and " +
+                                "none acts on a flow. When capture is limited to selected apps, only those apps " +
+                                "are ever modified; other traffic is observed and each refusal is recorded.",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (mutatingActive) {
+                            Text(
+                                "At least one mutating rule is enabled right now.",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                            Button(
+                                onClick = {
+                                    settingsScope.launch {
+                                        runCatching {
+                                            com.example.interception.rules.InterceptorSafetyGate.shared.disableAllMutatingRules(
+                                                dao = com.example.data.local.RequestrDatabase.get(settingsContext).interceptorRuleDao(),
+                                                scriptHost = com.example.scripting.host.ScriptHostClient.get(settingsContext),
+                                            )
+                                            interceptionDataStore.setMutatingRulesActive(false)
+                                        }
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("Disable all mutating rules and resume paused flows", fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+            }
+
             // Section 6c (§3 C2): weak-network simulation -- master enable switch, three clamped
             // numeric inputs, and one-tap presets. Off by default; see NetworkConditionUiHelpers.kt
             // for why the clamp maxima and preset numbers are what they are.

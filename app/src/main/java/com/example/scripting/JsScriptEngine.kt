@@ -56,8 +56,12 @@ object JsScriptEngine {
     /** Thrown from inside the interpreter loop when a script exceeds its instruction budget. */
     class ScriptInstructionLimitException(message: String) : RuntimeException(message)
 
-    /** Outcome of one [eval] call. [error] is a human-readable message; null means success. */
-    data class EvalResult(val ok: Boolean, val error: String?)
+    /**
+     * Outcome of one [eval] call. [error] is a human-readable message; null means success.
+     * [value] is the JS result of the optional epilogue expression (S4 task 32: the script host's
+     * lifecycle dispatcher returns `"ABORT"`/`"OK"` through it), stringified; null when no epilogue ran.
+     */
+    data class EvalResult(val ok: Boolean, val error: String?, val value: String? = null)
 
     private class LimitedContext(factory: ContextFactory) : Context(factory) {
         var deadlineMs: Long = Long.MAX_VALUE
@@ -95,6 +99,12 @@ object JsScriptEngine {
         bridge: Any,
         timeoutMs: Long = DEFAULT_TIMEOUT_MS,
         maxInstructions: Long = DEFAULT_MAX_INSTRUCTIONS,
+        /**
+         * S4 task 32: JS evaluated in the same scope AFTER the user script, under the same budget
+         * (e.g. the `onRequest`/`onResponse` lifecycle dispatcher). Its result lands in
+         * [EvalResult.value] via `Context.toString`.
+         */
+        epilogue: String? = null,
     ): EvalResult {
         val factory = LimitedContextFactory()
         val cx = factory.enterContext() as LimitedContext
@@ -116,7 +126,8 @@ object JsScriptEngine {
             ScriptableObject.putProperty(scope, "__bridge", Context.javaToJS(bridge, scope))
             cx.evaluateString(scope, prelude, "pm-prelude.js", 1, null)
             cx.evaluateString(scope, script, "user-script.js", 1, null)
-            EvalResult(ok = true, error = null)
+            val value = epilogue?.let { cx.evaluateString(scope, it, "pm-epilogue.js", 1, null) }
+            EvalResult(ok = true, error = null, value = value?.let { v -> if (v is org.mozilla.javascript.Undefined) null else Context.toString(v) })
         } catch (e: ScriptTimeoutException) {
             EvalResult(ok = false, error = e.message)
         } catch (e: ScriptInstructionLimitException) {

@@ -1,11 +1,22 @@
 package com.example.data.export
 
+import com.example.interception.rules.legacyRuleDao
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.FlowConnectionEntity
 import com.example.data.local.FlowNodeEntity
-import com.example.data.local.InterceptRuleEntity
+import com.example.interception.rules.LegacyInterceptRule
 import com.example.data.local.RequestrDatabase
-import com.example.data.local.RuleAction
+import com.example.data.local.RuleFolderEntity
+import com.example.interception.rules.BodyCryptoConfig
+import com.example.interception.rules.CryptoDirection
+import com.example.interception.rules.CryptoScope
+import com.example.interception.rules.GatewayConfig
+import com.example.interception.rules.GatewayMode
+import com.example.interception.rules.LegacyRuleConverter
+import com.example.interception.rules.MockConfig
+import com.example.interception.rules.RuleConfigJson
+import com.example.interception.rules.RuleStage
+import com.example.interception.rules.LegacyRuleAction
 import com.example.data.local.SavedApiRequestEntity
 import com.example.data.local.toApiRequestItem
 import com.example.data.local.toEntity
@@ -51,7 +62,8 @@ class WorkspaceExporterTest {
         // alone would leave those rows behind for the next test in this class (Robolectric
         // doesn't reset RequestrDatabase's singleton between test methods -- see this class's
         // own KDoc), so this clears every rule, not just the enabled ones.
-        db.interceptRuleDao().observeAll().first().forEach { db.interceptRuleDao().delete(it) }
+        db.legacyRuleDao().observeAll().first().forEach { db.legacyRuleDao().delete(it) }
+        db.ruleFolderDao().getAll().forEach { db.ruleFolderDao().deleteById(it.id) }
         db.savedApiRequestDao().clearAll()
         db.flowNodeDao().getAllAcrossFlows().forEach { db.flowNodeDao().deleteById(it.id) }
         db.flowConnectionDao().getAllAcrossFlows().forEach { db.flowConnectionDao().deleteById(it.id) }
@@ -61,8 +73,8 @@ class WorkspaceExporterTest {
     @Test
     fun `export JSON contains the documented top-level keys and real app version`() = runBlocking {
         val db = RequestrDatabase.get(context)
-        db.interceptRuleDao().insert(
-            InterceptRuleEntity(name = "block-ads", pattern = "ads", domain = "*", action = RuleAction.BLOCK, enabled = true)
+        db.legacyRuleDao().insert(
+            LegacyInterceptRule(name = "block-ads", pattern = "ads", domain = "*", action = LegacyRuleAction.BLOCK, enabled = true)
         )
         db.savedApiRequestDao().upsert(
             SavedApiRequestEntity(id = "req-1", name = "Get Users", method = "GET", url = "https://example.com/users")
@@ -74,12 +86,21 @@ class WorkspaceExporterTest {
         assertTrue(root.has("version"))
         assertTrue(root.has("exportedAt"))
         assertTrue(root.has("appVersion"))
-        assertTrue(root.has("interceptRules"))
+        // S4 task 34: typed rules (+ folders) under `interceptorRules`/`ruleFolders`, tagged
+        // `schemaVersion: 2`; the flat v1 `interceptRules` array is no longer written.
+        assertEquals(2, root.getInt("schemaVersion"))
+        assertTrue(root.has("interceptorRules"))
+        assertTrue(root.has("ruleFolders"))
+        assertFalse(root.has("interceptRules"))
         assertTrue(root.has("savedRequests"))
         assertTrue(root.has("flowNodes"))
         assertTrue(root.has("flowConnections"))
         assertEquals(com.example.BuildConfig.VERSION_NAME, root.getString("appVersion"))
-        assertEquals(1, root.getJSONArray("interceptRules").length())
+        assertEquals(1, root.getJSONArray("interceptorRules").length())
+        val exportedRule = root.getJSONArray("interceptorRules").getJSONObject(0)
+        assertEquals("GATEWAY", exportedRule.getString("stage"))
+        assertEquals("BLOCK", exportedRule.getJSONObject("config").getString("mode"))
+        assertEquals("BLOCK", exportedRule.getString("action")) // v1 projection kept for old readers
         assertEquals(1, root.getJSONArray("savedRequests").length())
     }
 
@@ -89,15 +110,15 @@ class WorkspaceExporterTest {
         db.savedApiRequestDao().upsert(
             SavedApiRequestEntity(id = "req-1", name = "Get Users", method = "GET", url = "https://example.com/users")
         )
-        db.interceptRuleDao().insert(
-            InterceptRuleEntity(name = "block-ads", pattern = "ads", domain = "*", action = RuleAction.BLOCK, enabled = true)
+        db.legacyRuleDao().insert(
+            LegacyInterceptRule(name = "block-ads", pattern = "ads", domain = "*", action = LegacyRuleAction.BLOCK, enabled = true)
         )
         val json = WorkspaceExporter.exportWorkspace(context)
 
         // Clear again so the import is exercising a real insert, not just re-upserting the
         // same rows that already exist.
         db.savedApiRequestDao().clearAll()
-        db.interceptRuleDao().getEnabledRules().forEach { db.interceptRuleDao().delete(it) }
+        db.legacyRuleDao().getEnabledRules().forEach { db.legacyRuleDao().delete(it) }
 
         val result = WorkspaceExporter.importWorkspace(context, json)
 
@@ -263,48 +284,109 @@ class WorkspaceExporterTest {
     // ── MUST-FIX regression coverage: crypto-rule fields + the import-time safety gate ────────
 
     /**
-     * Generic field-drift regression: rather than hardcoding assertions for just the four
-     * crypto fields this fix addresses, this builds an [InterceptRuleEntity] with every
-     * non-`id` field set to a distinctive, non-default value and asserts the round-tripped row
-     * is `equals()` to the original (minus `id`, Room's autogenerated primary key, which is
-     * never round-tripped -- import always inserts a fresh row). Because [InterceptRuleEntity]
-     * is a `data class`, `equals()` covers every declared property automatically, so a FUTURE
-     * field added to the entity and forgotten in [WorkspaceExporter]'s export/import mapping
-     * fails this test too, not just the fields known to be missing today.
+     * S4 task 34: the entire typed rule (name, stage, enabled, matcher, config, createdAt --
+     * everything but Room's autogenerated `id`, the device-local `sortOrder`, and `updatedAt`
+     * which import stamps with the import time) must survive an export → import round trip.
+     * [com.example.interception.rules.InterceptorRule] is a `data class`, so `equals()` covers
+     * every declared property automatically and a FUTURE field forgotten in the export/import
+     * mapping fails this test too.
      *
-     * Uses [RuleAction.MODIFY_REQUEST] (not a crypto action) and `enabled = true` so this stays
-     * independent of the crypto-rule import gate exercised separately below, and so the rule is
-     * actually included in the export ([RequestrDatabase]'s `interceptRuleDao().getEnabledRules()`
-     * only exports enabled rules).
+     * Uses a MODIFY_REQUEST-derived REWRITE rule (not a crypto stage) so this stays independent
+     * of the crypto-rule import gate exercised separately below.
      */
     @Test
-    fun `every InterceptRuleEntity field survives an export-import round trip except id (generic field-drift regression)`() = runBlocking {
+    fun `every typed rule field survives an export-import round trip except id, sortOrder and updatedAt (generic field-drift regression)`() = runBlocking {
         val db = RequestrDatabase.get(context)
-        val fixture = InterceptRuleEntity(
-            name = "distinctive-name",
-            pattern = "distinctive-pattern",
-            domain = "distinctive.example",
-            action = RuleAction.MODIFY_REQUEST,
-            enabled = true,
-            replacementValue = """{"addHeaders":{"X-Test":"1"}}""",
-            createdAt = 1_600_000_000_000L,
-            cryptoKeyAlias = "distinctive-alias",
-            cryptoAlgorithm = "distinctive-algorithm",
-            cryptoDirection = "DECRYPT",
-            cryptoScope = "REQUEST",
+        db.legacyRuleDao().insert(
+            LegacyInterceptRule(
+                name = "distinctive-name",
+                pattern = "distinctive-pattern",
+                domain = "distinctive.example",
+                action = LegacyRuleAction.MODIFY_REQUEST,
+                enabled = true,
+                replacementValue = """{"addHeaders":{"X-Test":"1"}}""",
+                createdAt = 1_600_000_000_000L,
+            )
         )
-        db.interceptRuleDao().insert(fixture)
+        val original = db.legacyRuleDao().getAll().single().toDomain()
+        assertEquals(RuleStage.REWRITE, original.stage)
 
         val json = WorkspaceExporter.exportWorkspace(context)
-        db.interceptRuleDao().observeAll().first().forEach { db.interceptRuleDao().delete(it) }
+        db.legacyRuleDao().observeAll().first().forEach { db.legacyRuleDao().delete(it) }
         val result = WorkspaceExporter.importWorkspace(context, json)
 
         assertEquals(1, result.rulesImported)
         assertTrue(result.errors.isEmpty())
-        assertTrue("expected no crypto-rule warnings for a non-crypto action", result.warnings.isEmpty())
+        assertTrue("expected no crypto-rule warnings for a non-crypto stage", result.warnings.isEmpty())
 
-        val imported = db.interceptRuleDao().observeAll().first().single()
-        assertEquals(fixture.copy(id = imported.id), imported)
+        val imported = db.legacyRuleDao().observeAll().first().single().toDomain()
+        assertEquals(
+            original.copy(id = 0, sortOrder = 0, updatedAt = 0),
+            imported.copy(id = 0, sortOrder = 0, updatedAt = 0),
+        )
+        assertEquals(1_600_000_000_000L, imported.createdAt)
+    }
+
+    /**
+     * S4 task 34: a workspace file written by the previous release (no `schemaVersion`, flat
+     * `interceptRules`) must still import, and must produce exactly the typed rule the v23
+     * migration would have produced for the same row -- both go through LegacyRuleConverter.
+     */
+    @Test
+    fun `a v1 workspace file with flat interceptRules imports identically to the v23 migration of the same rule`() = runBlocking {
+        val legacy = LegacyInterceptRule(
+            name = "v1-mock",
+            pattern = ".*/v1/.*",
+            domain = "v1.example",
+            action = LegacyRuleAction.MOCK_RESPONSE,
+            enabled = true,
+            replacementValue = """{"statusCode":418,"bodyReplace":"teapot"}""",
+            createdAt = 1_500_000_000_000L,
+        )
+        val json = JSONObject().put("version", "1.0").put("interceptRules", org.json.JSONArray().put(legacy.toJson())).toString()
+
+        val result = WorkspaceExporter.importWorkspace(context, json)
+        assertEquals(1, result.rulesImported)
+        assertTrue(result.errors.isEmpty())
+
+        val db = RequestrDatabase.get(context)
+        val imported = db.legacyRuleDao().observeAll().first().single().toDomain()
+        val expected = (LegacyRuleConverter.convert(legacy, sortOrder = imported.sortOrder) as LegacyRuleConverter.ConversionResult.Converted).rule
+        assertEquals(
+            expected.copy(id = 0, updatedAt = 0, legacyRuleId = null),
+            imported.copy(id = 0, updatedAt = 0),
+        )
+        assertEquals(RuleStage.MOCK, imported.stage)
+        assertEquals(418, (imported.config as MockConfig).statusCode)
+    }
+
+    /** S4 task 34: folders export with the rules and `folderId`s are remapped onto the ids this device assigns. */
+    @Test
+    fun `rule folders round-trip and imported rules are re-filed into the re-created folders`() = runBlocking {
+        val db = RequestrDatabase.get(context)
+        val folderId = db.ruleFolderDao().insert(RuleFolderEntity(name = "Staging", sortOrder = 3, enabled = false, collapsed = true, createdAt = 1_700_000_000_000L))
+        val ruleId = db.legacyRuleDao().insert(LegacyInterceptRule(name = "filed", domain = "filed.example", action = LegacyRuleAction.BLOCK))
+        db.legacyRuleDao().update(db.legacyRuleDao().getById(ruleId)!!.copy(folderId = folderId))
+
+        val json = WorkspaceExporter.exportWorkspace(context)
+        assertEquals(1, JSONObject(json).getJSONArray("ruleFolders").length())
+
+        db.legacyRuleDao().deleteAll()
+        db.ruleFolderDao().deleteById(folderId)
+        val result = WorkspaceExporter.importWorkspace(context, json)
+
+        assertEquals(1, result.rulesImported)
+        assertEquals(1, result.foldersImported)
+        assertTrue(result.errors.isEmpty())
+        assertTrue(result.summary.contains("in 1 folders"))
+
+        val folder = db.ruleFolderDao().getAll().single()
+        assertEquals("Staging", folder.name)
+        assertEquals(3, folder.sortOrder)
+        assertFalse(folder.enabled)
+        assertTrue(folder.collapsed)
+        val imported = db.legacyRuleDao().getAll().single()
+        assertEquals(folder.id, imported.folderId)
     }
 
     /**
@@ -321,12 +403,12 @@ class WorkspaceExporterTest {
     @Test
     fun `a crypto rule whose alias exists on this device round-trips enabled with all four crypto fields intact`() = runBlocking {
         val db = RequestrDatabase.get(context)
-        db.interceptRuleDao().insert(
-            InterceptRuleEntity(
+        db.legacyRuleDao().insert(
+            LegacyInterceptRule(
                 name = "encrypt-auth-body",
                 pattern = ".*",
                 domain = "api.example.com",
-                action = RuleAction.BODY_ENCRYPT_AES,
+                action = LegacyRuleAction.BODY_ENCRYPT_AES,
                 enabled = true,
                 cryptoKeyAlias = "my-real-alias",
                 cryptoAlgorithm = "AES/GCM/NoPadding",
@@ -336,18 +418,20 @@ class WorkspaceExporterTest {
         )
 
         val json = WorkspaceExporter.exportWorkspace(context)
-        db.interceptRuleDao().observeAll().first().forEach { db.interceptRuleDao().delete(it) }
+        db.legacyRuleDao().observeAll().first().forEach { db.legacyRuleDao().delete(it) }
         val result = WorkspaceExporter.importWorkspace(context, json, hasKeyAlias = { alias -> alias == "my-real-alias" })
 
         assertEquals(1, result.rulesImported)
         assertTrue(result.warnings.isEmpty())
 
-        val imported = db.interceptRuleDao().observeAll().first().single()
+        val imported = db.legacyRuleDao().observeAll().first().single()
         assertTrue("a crypto rule with a real, present alias must stay enabled", imported.enabled)
-        assertEquals("my-real-alias", imported.cryptoKeyAlias)
-        assertEquals("AES/GCM/NoPadding", imported.cryptoAlgorithm)
-        assertEquals("ENCRYPT", imported.cryptoDirection)
-        assertEquals("REQUEST", imported.cryptoScope)
+        assertEquals(RuleStage.BODY_CRYPTO, imported.stage)
+        val config = RuleConfigJson.decodeConfig(imported.configJson) as BodyCryptoConfig
+        assertEquals("my-real-alias", config.keyAlias)
+        assertEquals("AES/GCM/NoPadding", config.algorithm)
+        assertEquals(CryptoDirection.ENCRYPT, config.direction)
+        assertEquals(CryptoScope.REQUEST, config.scope)
     }
 
     /**
@@ -376,7 +460,7 @@ class WorkspaceExporterTest {
         assertTrue(result.summary.contains("warning"))
 
         val db = RequestrDatabase.get(context)
-        val imported = db.interceptRuleDao().observeAll().first().single()
+        val imported = db.legacyRuleDao().observeAll().first().single()
         assertFalse("a blank-alias crypto rule must never import enabled", imported.enabled)
     }
 
@@ -404,10 +488,10 @@ class WorkspaceExporterTest {
         assertTrue(result.warnings.single().contains("alias-from-another-device"))
 
         val db = RequestrDatabase.get(context)
-        val imported = db.interceptRuleDao().observeAll().first().single()
+        val imported = db.legacyRuleDao().observeAll().first().single()
         assertFalse(imported.enabled)
         // The alias itself is preserved (not blanked out) so the user can see what to fix.
-        assertEquals("alias-from-another-device", imported.cryptoKeyAlias)
+        assertEquals("alias-from-another-device", (RuleConfigJson.decodeConfig(imported.configJson) as BodyCryptoConfig).keyAlias)
     }
 
     /**
@@ -430,7 +514,7 @@ class WorkspaceExporterTest {
         assertEquals(1, result.rulesImported)
         assertTrue(result.warnings.isEmpty())
         val db = RequestrDatabase.get(context)
-        assertFalse(db.interceptRuleDao().observeAll().first().single().enabled)
+        assertFalse(db.legacyRuleDao().observeAll().first().single().enabled)
     }
 
     /**
@@ -454,17 +538,16 @@ class WorkspaceExporterTest {
         assertTrue(result.warnings.isEmpty())
 
         val db = RequestrDatabase.get(context)
-        val imported = db.interceptRuleDao().observeAll().first().single()
+        val imported = db.legacyRuleDao().observeAll().first().single()
         assertTrue(imported.enabled)
-        assertEquals("", imported.cryptoKeyAlias)
-        assertEquals("AES/GCM/NoPadding", imported.cryptoAlgorithm)
-        assertEquals("ENCRYPT", imported.cryptoDirection)
-        assertEquals("BOTH", imported.cryptoScope)
+        assertEquals(RuleStage.GATEWAY, imported.stage)
+        assertEquals(GatewayMode.BLOCK, (RuleConfigJson.decodeConfig(imported.configJson) as GatewayConfig).mode)
+        assertEquals("ads", RuleConfigJson.decodeMatcher(imported.matcherJson).urlRegex)
     }
 
     // ── Follow-up: same generic field-drift coverage for every other exported entity ──────────
     //
-    // The InterceptRuleEntity test above (`every InterceptRuleEntity field survives...`) is a
+    // The typed-rule test above (`every typed rule field survives...`) is a
     // reflection-free "did any field get forgotten" check: because these entities are Kotlin
     // `data class`es, `equals()` compares every declared property automatically, so a future
     // field added to the entity and forgotten in WorkspaceExporter's export/import mapping fails
@@ -555,7 +638,7 @@ class WorkspaceExporterTest {
      * complements the existing manual field-by-field test above (`a fully populated saved
      * request round-trips losslessly...`), which asserts field-by-field and therefore would not
      * fail on a brand-new field forgotten by both the entity fixture *and* the export/import
-     * mapping. Unlike [InterceptRuleEntity]'s `id` (Room-autogenerated, never round-tripped),
+     * mapping. Unlike [LegacyInterceptRule]'s `id` (Room-autogenerated, never round-tripped),
      * [SavedApiRequestEntity.id] is a client-generated, non-autogenerate `@PrimaryKey`, so it
      * round-trips exactly and needs no `.copy(id = ...)` before the equality check.
      *

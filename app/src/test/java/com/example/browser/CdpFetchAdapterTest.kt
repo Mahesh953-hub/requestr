@@ -1,10 +1,11 @@
 package com.example.browser
 
+import com.example.interception.rules.legacyRuleDao
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
-import com.example.data.local.InterceptRuleEntity
+import com.example.interception.rules.LegacyInterceptRule
 import com.example.data.local.RequestrDatabase
-import com.example.data.local.RuleAction
+import com.example.interception.rules.LegacyRuleAction
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.After
@@ -24,7 +25,7 @@ import java.util.concurrent.TimeUnit
  * for work item 9 (response-stage Fetch with real bodies and enforced MODIFY_RESPONSE).
  *
  * Drives real `Fetch.requestPaused` JSON through [CdpFetchAdapter.handleRequestPaused] against a
- * real (Robolectric in-memory-backed) [RequestrDatabase] with a genuine [InterceptRuleEntity], and
+ * real (Robolectric in-memory-backed) [RequestrDatabase] with a genuine [LegacyInterceptRule], and
  * observes the exact CDP commands [CdpClient] would have sent via [CdpClient.sendHookForTest] --
  * the same "no real socket" seam [CdpClientRoutingTest] uses on the receive side.
  */
@@ -35,8 +36,9 @@ class CdpFetchAdapterTest {
 
     @After
     fun tearDown() {
+        com.example.interception.rules.LegacyRuleTestSupport.clear()
         runBlocking {
-            val dao = RequestrDatabase.get(context).interceptRuleDao()
+            val dao = RequestrDatabase.get(context).legacyRuleDao()
             dao.getEnabledRules().forEach { dao.deleteById(it.id) }
         }
     }
@@ -75,10 +77,11 @@ class CdpFetchAdapterTest {
             synchronized(sentCommands) { sentCommands.any { it.first == method } }
     }
 
-    private fun insertRule(domain: String, action: RuleAction, replacementValue: String? = null) = runBlocking {
-        RequestrDatabase.get(context).interceptRuleDao().insert(
-            InterceptRuleEntity(name = "test-rule", domain = domain, action = action, replacementValue = replacementValue),
+    private fun insertRule(domain: String, action: LegacyRuleAction, replacementValue: String? = null) = runBlocking {
+        RequestrDatabase.get(context).legacyRuleDao().insert(
+            LegacyInterceptRule(name = "test-rule", domain = domain, action = action, replacementValue = replacementValue),
         )
+        com.example.interception.rules.LegacyRuleTestSupport.syncSnapshotFromLegacy(RequestrDatabase.get(context))
     }
 
     private fun requestPausedEvent(
@@ -133,7 +136,7 @@ class CdpFetchAdapterTest {
 
     @Test
     fun `MODIFY_RESPONSE rule at response stage produces fulfillRequest with modified body`() {
-        insertRule("example.com", RuleAction.MODIFY_RESPONSE, """{"statusCode":201,"addHeaders":{"X-Mock":"true"},"bodyReplace":"{\"mocked\":true}"}""")
+        insertRule("example.com", LegacyRuleAction.MODIFY_RESPONSE, """{"statusCode":201,"addHeaders":{"X-Mock":"true"},"bodyReplace":"{\"mocked\":true}"}""")
         val recorder = RecordingClient(context)
         recorder.cannedResults["Fetch.getResponseBody"] = JSONObject().apply {
             put("body", "{\"real\":true}")
@@ -155,7 +158,7 @@ class CdpFetchAdapterTest {
 
     @Test
     fun `LOG_ONLY rule at response stage produces continueResponse not fulfillRequest`() {
-        insertRule("example.com", RuleAction.LOG_ONLY)
+        insertRule("example.com", LegacyRuleAction.LOG_ONLY)
         val recorder = RecordingClient(context)
         val adapter = CdpFetchAdapter(recorder.cdpClient, context)
 
@@ -179,7 +182,7 @@ class CdpFetchAdapterTest {
 
     @Test
     fun `a 302 response skips getResponseBody`() {
-        insertRule("example.com", RuleAction.MODIFY_RESPONSE, """{"statusCode":301}""")
+        insertRule("example.com", LegacyRuleAction.MODIFY_RESPONSE, """{"statusCode":301}""")
         val recorder = RecordingClient(context)
         val adapter = CdpFetchAdapter(recorder.cdpClient, context)
 
@@ -192,7 +195,9 @@ class CdpFetchAdapterTest {
 
     @Test
     fun `base64-encoded body decoding round-trips`() {
-        insertRule("example.com", RuleAction.MODIFY_RESPONSE, """{}""")
+        // S4 task 26: a header-only rewrite still fulfils the response from the fetched body; an
+        // empty `{}` config is now a no-op rule and resumes the response untouched instead.
+        insertRule("example.com", LegacyRuleAction.MODIFY_RESPONSE, """{"addHeaders":{"x-seen":"1"}}""")
         val recorder = RecordingClient(context)
         val originalBody = "{\"hello\":\"world\"}"
         recorder.cannedResults["Fetch.getResponseBody"] = JSONObject().apply {
@@ -206,7 +211,7 @@ class CdpFetchAdapterTest {
 
         val fulfillParams = recorder.paramsFor("Fetch.fulfillRequest")!!
         val decodedBody = String(Base64.getDecoder().decode(fulfillParams.getString("body")))
-        // An empty {} config leaves the real captured body untouched -- round-trip check.
+        // A header-only config leaves the real captured body untouched -- round-trip check.
         assertEquals(originalBody, decodedBody)
     }
 
@@ -214,7 +219,7 @@ class CdpFetchAdapterTest {
 
     @Test
     fun `BLOCK rule at request stage sends failRequest not continueRequest`() {
-        insertRule("blocked.example", RuleAction.BLOCK)
+        insertRule("blocked.example", LegacyRuleAction.BLOCK)
         val recorder = RecordingClient(context)
         val adapter = CdpFetchAdapter(recorder.cdpClient, context)
 
@@ -225,7 +230,7 @@ class CdpFetchAdapterTest {
 
     @Test
     fun `MODIFY_RESPONSE rule at request stage still just continues the request unmodified`() {
-        insertRule("example.com", RuleAction.MODIFY_RESPONSE, """{"bodyReplace":"ignored-at-request-stage"}""")
+        insertRule("example.com", LegacyRuleAction.MODIFY_RESPONSE, """{"bodyReplace":"ignored-at-request-stage"}""")
         val recorder = RecordingClient(context)
         val adapter = CdpFetchAdapter(recorder.cdpClient, context)
 

@@ -10,7 +10,7 @@ import kotlin.random.Random
  * Same "pure decision function, caller applies the effect" shape as [ChaosInjector] (its sibling
  * in this package), deliberately not doing any [Thread.sleep]/socket I/O itself so it stays a fully
  * deterministic, injectable-clock/RNG unit under test. The two differ in scope, not in wiring:
- * [ChaosInjector] is per-rule ([com.example.data.local.RuleAction.CHAOS], dispatched by
+ * [ChaosInjector] is per-rule ([com.example.interception.rules.LegacyRuleAction.CHAOS], dispatched by
  * [MitmProxyEngine] via [RuleEnforcer.applyChaosToRequest]/[RuleEnforcer.applyChaosToResponse]),
  * whereas this one is a global setting wired into
  * [HttpProxyShared.forwardRequest]/[HttpProxyShared.handleConnectAttempt] via
@@ -36,11 +36,20 @@ object NetworkConditionInjector {
         val latencyMs: Int = 0,
         val jitterMs: Int = 0,
         val packetLossPercent: Int = 0,
+        /**
+         * S4 task 30: bandwidth caps in **bits per second**, `0` = unlimited. Enforced by
+         * [com.example.interception.rules.stages.ThrottleStage] on the relay copy loops; the
+         * delay/loss helpers below ignore them.
+         */
+        val downlinkBps: Long = 0L,
+        val uplinkBps: Long = 0L,
     ) {
         init {
             require(latencyMs >= 0) { "latencyMs must not be negative" }
             require(jitterMs >= 0) { "jitterMs must not be negative" }
             require(packetLossPercent in 0..100) { "packetLossPercent must be within [0, 100]" }
+            require(downlinkBps >= 0) { "downlinkBps must not be negative" }
+            require(uplinkBps >= 0) { "uplinkBps must not be negative" }
         }
 
         companion object {

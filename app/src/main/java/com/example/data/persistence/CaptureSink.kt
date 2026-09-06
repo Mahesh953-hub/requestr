@@ -1,5 +1,6 @@
 package com.example.data.persistence
 
+import com.example.data.local.AppliedRuleEntity
 import com.example.data.local.CapturedTrafficEntity
 import com.example.data.local.GrpcCallEntity
 import com.example.data.local.GrpcMessageEntity
@@ -29,6 +30,13 @@ interface CaptureSink {
         headers: List<TransactionHeaderEntity> = emptyList(),
         timings: TransactionTimingEntity? = null,
     ): RowHandle
+
+    /**
+     * S4 task 26: rule provenance for [parent] -- one `applied_rules` row per rule the pipeline
+     * matched, applied, skipped for precedence, refused or failed on this exchange. Ordered
+     * behind the parent on the same queue so the FK target exists by the time it runs.
+     */
+    fun appliedRules(parent: RowHandle, rules: List<AppliedRuleEntity>)
 
     /**
      * Phase 2: a later revision of the exchange (response of a streamed request, gRPC trailers).

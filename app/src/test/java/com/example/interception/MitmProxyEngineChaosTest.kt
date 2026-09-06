@@ -1,12 +1,13 @@
 package com.example.interception
 
+import com.example.interception.rules.legacyRuleDao
 import android.os.Build
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.CapturedTrafficEntity
-import com.example.data.local.InterceptRuleEntity
+import com.example.interception.rules.LegacyInterceptRule
 import com.example.data.local.RequestrDatabase
-import com.example.data.local.RuleAction
+import com.example.interception.rules.LegacyRuleAction
 import com.example.data.models.HttpMethod
 import com.example.interception.http.HttpBodyDecoder
 import com.example.interception.http.ParsedHttpMessage
@@ -57,18 +58,20 @@ class MitmProxyEngineChaosTest {
 
     @After
     fun tearDown() {
+        com.example.interception.rules.LegacyRuleTestSupport.clear()
         db.close()
     }
 
     private fun insertChaosRule(config: String, name: String = "flaky-api") = runBlocking {
-        db.interceptRuleDao().insert(
-            InterceptRuleEntity(
+        db.legacyRuleDao().insert(
+            LegacyInterceptRule(
                 name = name,
                 domain = "chaos.example",
-                action = RuleAction.CHAOS,
+                action = LegacyRuleAction.CHAOS,
                 replacementValue = config,
             )
         )
+        com.example.interception.rules.LegacyRuleTestSupport.syncSnapshotFromLegacy(db)
     }
 
     private fun request() = ParsedHttpMessage(
@@ -120,7 +123,7 @@ class MitmProxyEngineChaosTest {
         val engine = MitmProxyEngine(onDecryptedTransaction = { captured = it }, chaosRandom = fixedRandom(0.0))
         val clientOut = ByteArrayOutputStream()
         val upstream = neverConnectUpstream()
-        val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>()
+        val pending = ConcurrentLinkedQueue<MitmProxyEngine.PendingExchange>()
 
         engine.handleParsedRequest(db, request(), ByteArray(0), upstream, clientOut, Any(), pending, "chaos.example", 443, true, true)
 
@@ -154,7 +157,7 @@ class MitmProxyEngineChaosTest {
     fun `failRate 0 lets the request go upstream untouched`() {
         insertChaosRule("""{"failRate":0.0,"corruptBodyRate":1.0}""")
         val engine = MitmProxyEngine(chaosRandom = fixedRandom(0.0))
-        val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>()
+        val pending = ConcurrentLinkedQueue<MitmProxyEngine.PendingExchange>()
         val clientOut = ByteArrayOutputStream()
 
         try {
@@ -191,7 +194,7 @@ class MitmProxyEngineChaosTest {
         val engine = MitmProxyEngine(onDecryptedTransaction = { captured = it }, chaosRandom = fixedRandom(0.0))
         val clientOut = ByteArrayOutputStream()
         val original = """{"ok":true,"payload":"0123456789abcdef0123456789abcdef"}"""
-        val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>().apply { add(request() to System.currentTimeMillis()) }
+        val pending = ConcurrentLinkedQueue<MitmProxyEngine.PendingExchange>().apply { add(MitmProxyEngine.PendingExchange(request(), System.currentTimeMillis())) }
 
         engine.handleParsedResponse(db, response(original), ByteArray(0), clientOut, Any(), pending, "chaos.example", 443, true, true, wsState())
 
@@ -220,7 +223,7 @@ class MitmProxyEngineChaosTest {
             body = HttpBodyDecoder.BINARY_BODY_PLACEHOLDER, isBodyBinary = true,
             rawBodyBytes = original, decodedBodyBytes = original,
         )
-        val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>().apply { add(request() to System.currentTimeMillis()) }
+        val pending = ConcurrentLinkedQueue<MitmProxyEngine.PendingExchange>().apply { add(MitmProxyEngine.PendingExchange(request(), System.currentTimeMillis())) }
 
         engine.handleParsedResponse(db, binaryResponse, original, clientOut, Any(), pending, "chaos.example", 443, true, true, wsState())
 
@@ -255,7 +258,7 @@ class MitmProxyEngineChaosTest {
             },
         )
         val clientOut = ByteArrayOutputStream()
-        val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>().apply { add(request() to System.currentTimeMillis()) }
+        val pending = ConcurrentLinkedQueue<MitmProxyEngine.PendingExchange>().apply { add(MitmProxyEngine.PendingExchange(request(), System.currentTimeMillis())) }
 
         engine.handleParsedResponse(db, response(), ByteArray(0), clientOut, lock, pending, "chaos.example", 443, true, true, wsState())
 
@@ -276,7 +279,7 @@ class MitmProxyEngineChaosTest {
         val engine = MitmProxyEngine(chaosRandom = Random(42), chaosSleep = { slept += it })
 
         repeat(50) {
-            val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>().apply { add(request() to System.currentTimeMillis()) }
+            val pending = ConcurrentLinkedQueue<MitmProxyEngine.PendingExchange>().apply { add(MitmProxyEngine.PendingExchange(request(), System.currentTimeMillis())) }
             engine.handleParsedResponse(db, response(), ByteArray(0), ByteArrayOutputStream(), Any(), pending, "chaos.example", 443, true, true, wsState())
         }
 
@@ -291,7 +294,7 @@ class MitmProxyEngineChaosTest {
         val engine = MitmProxyEngine(onDecryptedTransaction = { captured = it }, chaosRandom = fixedRandom(0.99))
         val clientOut = ByteArrayOutputStream()
         val raw = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"ok\":true}".toByteArray()
-        val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>().apply { add(request() to System.currentTimeMillis()) }
+        val pending = ConcurrentLinkedQueue<MitmProxyEngine.PendingExchange>().apply { add(MitmProxyEngine.PendingExchange(request(), System.currentTimeMillis())) }
 
         engine.handleParsedResponse(db, response(), raw, clientOut, Any(), pending, "chaos.example", 443, true, true, wsState())
 
@@ -304,7 +307,7 @@ class MitmProxyEngineChaosTest {
         insertChaosRule("""{"corruptBodyRate":1.0}""")
         var captured: CapturedTrafficEntity? = null
         val engine = MitmProxyEngine(onDecryptedTransaction = { captured = it }, chaosRandom = fixedRandom(0.0))
-        val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>().apply { add(request() to System.currentTimeMillis()) }
+        val pending = ConcurrentLinkedQueue<MitmProxyEngine.PendingExchange>().apply { add(MitmProxyEngine.PendingExchange(request(), System.currentTimeMillis())) }
 
         engine.handleParsedResponse(db, response(), ByteArray(0), ByteArrayOutputStream(), Any(), pending, "chaos.example", 443, logRequests = true, logResponses = false, wsState = wsState())
 
@@ -329,14 +332,15 @@ class MitmProxyEngineChaosTest {
     // ── SCRIPT_REWRITE error visibility (same attribution mechanism) ─────
 
     private fun insertScriptRule(script: String) = runBlocking {
-        db.interceptRuleDao().insert(
-            InterceptRuleEntity(
+        db.legacyRuleDao().insert(
+            LegacyInterceptRule(
                 name = "js-rule",
                 domain = "chaos.example",
-                action = RuleAction.SCRIPT_REWRITE,
+                action = LegacyRuleAction.SCRIPT_REWRITE,
                 replacementValue = org.json.JSONObject().put("script", script).toString(),
             )
         )
+        com.example.interception.rules.LegacyRuleTestSupport.syncSnapshotFromLegacy(db)
     }
 
     @Test
@@ -345,7 +349,7 @@ class MitmProxyEngineChaosTest {
         var captured: CapturedTrafficEntity? = null
         val engine = MitmProxyEngine(onDecryptedTransaction = { captured = it })
         val clientOut = ByteArrayOutputStream()
-        val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>().apply { add(request() to System.currentTimeMillis()) }
+        val pending = ConcurrentLinkedQueue<MitmProxyEngine.PendingExchange>().apply { add(MitmProxyEngine.PendingExchange(request(), System.currentTimeMillis())) }
 
         engine.handleParsedResponse(db, response(), ByteArray(0), clientOut, Any(), pending, "chaos.example", 443, true, false, wsState())
 
@@ -363,7 +367,7 @@ class MitmProxyEngineChaosTest {
         insertScriptRule("throw new Error('kaboom');")
         val engine = MitmProxyEngine()
         val req = request()
-        val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>()
+        val pending = ConcurrentLinkedQueue<MitmProxyEngine.PendingExchange>()
 
         try {
             engine.handleParsedRequest(db, req, ByteArray(0), recordingUpstream(), ByteArrayOutputStream(), Any(), pending, "chaos.example", 443, true, true)
@@ -383,7 +387,7 @@ class MitmProxyEngineChaosTest {
         insertScriptRule("pm.response.headers.set('X-Rewritten', 'yes');")
         var captured: CapturedTrafficEntity? = null
         val engine = MitmProxyEngine(onDecryptedTransaction = { captured = it })
-        val pending = ConcurrentLinkedQueue<Pair<ParsedHttpMessage, Long>>().apply { add(request() to System.currentTimeMillis()) }
+        val pending = ConcurrentLinkedQueue<MitmProxyEngine.PendingExchange>().apply { add(MitmProxyEngine.PendingExchange(request(), System.currentTimeMillis())) }
 
         engine.handleParsedResponse(db, response(), ByteArray(0), ByteArrayOutputStream(), Any(), pending, "chaos.example", 443, true, true, wsState())
 
