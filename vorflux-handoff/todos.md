@@ -635,3 +635,20 @@ Exported from the platform todo list at handoff time.
       post-rule, safety-gate refusal leaves the flow untouched with `REFUSED_SAFETY`, unmatched → passthrough);
       shared fixtures in `http/Http2TestOrigins.kt` (`H2ClientRecorder`, `FakeH1Origin`, `FakeH2Origin`,
       `H2ProxyHarness`). No observe-only h2 forwarding remains: every terminated h2 stream goes through `plan()`.
+
+## Program status — 2026-09-06
+
+  - **S0-S4 COMPLETE on `main`.** S4 (tasks 24-35) merged as
+    [PR #23](https://github.com/Mahesh953-hub/requestr/pull/23) (branch `vorflux/interceptor-s4-rules`,
+    merge commit `c47241c`). Earlier slices: S0 PR #18, S1 PRs #19/#20, S2 PR #21, S3 PR #22.
+  - **Next: S5** (tasks 36-41 + 58-62 — HAR, snippets, PCAP/PCAPng export, replay queue + diff,
+    Report Server + envelope v2 remainder, API-Testr protocol preference + Cronet H3 + cURL
+    serialization + one-click repeat). Read **`vorflux-handoff/START-HERE-s5.md`** first; branch
+    from `main` as `vorflux/interceptor-s5-export-replay`.
+  - Note for task 41: the typed **v2 rule envelope** half already shipped in S4 task 34
+    (`RuleApiJson` v2 with v1 projection on `LocalApiServer`, `LanDashboardServer`,
+    `WorkspaceExporter`); only the Report Server and remaining non-rule envelope fields are left.
+  - Note for task 31 (done): implemented as `BreakpointRegistry`/`BreakpointStage`/
+    `BreakpointPersistence` under `interception/breakpoint/`, not a `BreakpointEngine.kt`.
+  - Test baseline after PR #23: 2,644 unit tests; only known flake is `ToolsRepositoryRoomTest`
+    (3 s timing, passes in isolation).

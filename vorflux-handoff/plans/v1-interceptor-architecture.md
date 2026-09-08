@@ -214,6 +214,15 @@ New code lands in new files and packages so parallel tasks never share a writabl
 
 ### S4 — Rule engine
 
+> **STATUS (2026-09-06): COMPLETE — tasks 24-35 shipped on `main`.** Implemented on
+> branch `vorflux/interceptor-s4-rules`, merged in PR #23
+> (<https://github.com/Mahesh953-hub/requestr/pull/23>, merge `c47241c`). Per-task evidence and
+> gate results (G6 p95 0.038 ms, G7, G16, G20, G21, D3) are the "S4 task N — done" blocks in
+> `vorflux-handoff/todos.md`. One deviation from the task list below: task 31 was implemented as
+> `interception/breakpoint/{BreakpointRegistry,BreakpointStage,BreakpointPersistence}.kt`
+> (`BreakpointStage` parking pool) instead of a `BreakpointEngine.kt`, and task 41's "envelope v2"
+> half already shipped in task 34 (see `START-HERE-s5.md`).
+
 24. **[after 14] Typed rule schema and converter (v23).** Add `Migration22To23.kt` creating `interceptor_rules`, `rule_folders`, `breakpoint_paused_flows`, `replay_jobs`, `replay_results`, and `interception/rules/LegacyRuleConverter.kt` decoding every `replacementValue` shape into typed Moshi-codegen config. All eleven legacy `RuleAction` values map onto exactly one stage: `BLOCK`/`FORCE_MITM` → Gateway, `LOG_ONLY` → Observe, `REDIRECT`/`MODIFY_*` → Rewrite, `MOCK_RESPONSE` → Mock, `SCRIPT_REWRITE` → Script, `CHAOS` → Chaos, `BODY_*_AES` → BodyCrypto. `intercept_rules` stays read-only.
 25. **[after 24] Snapshot store.** Add `interception/rules/RuleSnapshotStore.kt` compiling the ordered rule list once per revision (pre-compiled regex, parsed CIDR, typed config) so no relay path ever reads the DB or recompiles a pattern — removing both `runBlocking { dao.getEnabledRules() }` calls per flow (`MitmProxyEngine.kt:916` and `:1079`) and the same pattern in `CaptureEngine`.
 26. **[after 25] Staged pipeline and provenance.** Add `RulePipeline.kt` evaluating a flow **once** at request time into an immutable `RuleDecision` reused on the response side, with the eight slots in fixed order — Gateway → Mirror → Rewrite → Breakpoint → Script → Mock → BodyCrypto → Shaping (throttle then chaos) — plus `Observe`. Add `FlowAuditTrail.kt` writing every stage outcome into the v19 `applied_rules` table through `PersistenceQueue`, and render rule badges on capture rows and a provenance list in the inspector.
